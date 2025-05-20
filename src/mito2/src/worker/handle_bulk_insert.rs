@@ -43,8 +43,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let batch = request.payload;
         let num_rows = batch.num_rows();
 
-        let Some(ts) =
-            batch.column_by_name(&region_metadata.time_index_column().column_schema.name)
+        let Some((ts_index, ts)) = batch
+            .schema()
+            .column_with_name(&region_metadata.time_index_column().column_schema.name)
+            .map(|(index, _)| (index, batch.column(index)))
         else {
             sender.send(
                 error::InvalidRequestSnafu {
@@ -115,6 +117,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             max_ts,
             min_ts,
             sequence: 0,
+            timestamp_index: ts_index,
         };
         pending_bulk_request.push(SenderBulkRequest {
             sender,

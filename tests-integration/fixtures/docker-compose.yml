@@ -8,13 +8,12 @@ services:
       - ALLOW_ANONYMOUS_LOGIN=yes
 
   kafka:
-    image: docker.io/bitnami/kafka:3.6.0
+    image: docker.io/bitnami/kafka:3.9.0
     container_name: kafka
     ports:
       - 9092:9092
       - 9093:9093
     environment:
-      # KRaft settings
       KAFKA_CFG_NODE_ID: "1"
       KAFKA_CFG_PROCESS_ROLES: broker,controller
       KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:2181
@@ -27,6 +26,7 @@ services:
       KAFKA_BROKER_ID: "1"
       KAFKA_CLIENT_USERS: "user_kafka"
       KAFKA_CLIENT_PASSWORDS: "secret"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
     depends_on:
       zookeeper:
         condition: service_started

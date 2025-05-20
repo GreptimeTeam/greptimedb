@@ -26,6 +26,7 @@ use tonic::codegen::http;
 
 use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
+use crate::service::mailbox::Channel;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -591,6 +592,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mailbox channel closed: {channel}"))]
+    MailboxChannelClosed {
+        channel: Channel,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Missing request header"))]
     MissingRequestHeader {
         #[snafu(implicit)]
@@ -894,6 +902,7 @@ impl ErrorExt for Error {
             | Error::MailboxClosed { .. }
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
+            | Error::MailboxChannelClosed { .. }
             | Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }

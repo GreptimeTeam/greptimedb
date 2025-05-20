@@ -29,6 +29,11 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
+use promql::functions::{
+    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta,
+    Increase, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, Round,
+    StddevOverTime, StdvarOverTime, SumOverTime,
+};
 use prost::Message;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -133,6 +138,28 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             let _ = session_state.register_udaf(Arc::new(HllState::state_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(HllState::merge_udf_impl()));
             let _ = session_state.register_udaf(Arc::new(GeoPathAccumulator::udf_impl()));
+            let _ = session_state.register_udaf(quantile_udaf());
+
+            let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
+            let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
+            // TODO(ruihang): add quantile_over_time, predict_linear, holt_winters, round
         }
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)

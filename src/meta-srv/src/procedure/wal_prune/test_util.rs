@@ -78,7 +78,7 @@ impl TestEnv {
             kafka_topic,
             ..Default::default()
         };
-        Arc::new(build_kafka_client(&config).await.unwrap())
+        Arc::new(build_kafka_client(&config.connection).await.unwrap())
     }
 
     pub async fn build_wal_prune_context(&self, broker_endpoints: Vec<String>) -> WalPruneContext {
@@ -90,5 +90,13 @@ impl TestEnv {
             server_addr: self.server_addr.to_string(),
             mailbox: self.mailbox.mailbox().clone(),
         }
+    }
+
+    pub async fn prepare_topic(client: &Arc<Client>, topic_name: &str) {
+        let controller_client = client.controller_client().unwrap();
+        controller_client
+            .create_topic(topic_name.to_string(), 1, 1, 5000)
+            .await
+            .unwrap();
     }
 }

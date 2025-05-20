@@ -41,11 +41,12 @@ pub trait PartitionRule: Sync + Send {
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber>;
 
     /// Split the record batch into multiple regions by the partition values.
-    /// The result is a map from region number to a boolean array, where the boolean array is true for the rows that match the partition values.
+    /// The result is a map from region mask in which the array is true for the rows that match the partition values.
+    /// Region with now rows selected may not appear in result map.
     fn split_record_batch(
         &self,
         record_batch: &RecordBatch,
-    ) -> Result<HashMap<RegionNumber, BooleanArray>>;
+    ) -> Result<HashMap<RegionNumber, RegionMask>>;
 }
 
 /// The right bound(exclusive) of partition range.
@@ -174,6 +175,48 @@ impl PartitionExpr {
 
     pub fn value(&self) -> &Value {
         &self.value
+    }
+}
+
+pub struct RegionMask {
+    array: BooleanArray,
+    selected_rows: usize,
+}
+
+impl From<BooleanArray> for RegionMask {
+    fn from(array: BooleanArray) -> Self {
+        let selected_rows = array.true_count();
+        Self {
+            array,
+            selected_rows,
+        }
+    }
+}
+
+impl RegionMask {
+    pub fn new(array: BooleanArray, selected_rows: usize) -> Self {
+        Self {
+            array,
+            selected_rows,
+        }
+    }
+
+    pub fn array(&self) -> &BooleanArray {
+        &self.array
+    }
+
+    /// All rows are selected.
+    pub fn select_all(&self) -> bool {
+        self.selected_rows == self.array.len()
+    }
+
+    /// No row is selected.
+    pub fn select_none(&self) -> bool {
+        self.selected_rows == 0
+    }
+
+    pub fn selected_rows(&self) -> usize {
+        self.selected_rows
     }
 }
 

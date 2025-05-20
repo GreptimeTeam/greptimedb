@@ -47,6 +47,7 @@ use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
+use crate::read::series_scan::SeriesScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -67,6 +68,8 @@ pub(crate) enum Scanner {
     Seq(SeqScan),
     /// Unordered scan.
     Unordered(UnorderedScan),
+    /// Per-series scan.
+    Series(SeriesScan),
 }
 
 impl Scanner {
@@ -76,6 +79,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
+            Scanner::Series(series_scan) => series_scan.build_stream().await,
         }
     }
 }
@@ -87,6 +91,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_files(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_files(),
+            Scanner::Series(series_scan) => series_scan.input().num_files(),
         }
     }
 
@@ -95,6 +100,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_memtables(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_memtables(),
+            Scanner::Series(series_scan) => series_scan.input().num_memtables(),
         }
     }
 
@@ -103,6 +109,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+            Scanner::Series(series_scan) => series_scan.input().file_ids(),
         }
     }
 
@@ -114,6 +121,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
             Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
+            Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
         }
     }
 }
@@ -249,7 +257,9 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.use_unordered_scan() {
+        if self.use_series_scan() {
+            self.series_scan().map(Scanner::Series)
+        } else if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
@@ -261,7 +271,9 @@ impl ScanRegion {
     /// Returns a [RegionScanner] to scan the region.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
-        if self.use_unordered_scan() {
+        if self.use_series_scan() {
+            self.series_scan().map(|scanner| Box::new(scanner) as _)
+        } else if self.use_unordered_scan() {
             self.unordered_scan().map(|scanner| Box::new(scanner) as _)
         } else {
             self.seq_scan().map(|scanner| Box::new(scanner) as _)
@@ -278,6 +290,12 @@ impl ScanRegion {
     pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input(true)?;
         Ok(UnorderedScan::new(input))
+    }
+
+    /// Scans by series.
+    pub(crate) fn series_scan(self) -> Result<SeriesScan> {
+        let input = self.scan_input(true)?;
+        Ok(SeriesScan::new(input))
     }
 
     #[cfg(test)]
@@ -298,6 +316,11 @@ impl ScanRegion {
             && self.request.series_row_selector.is_none()
             && (self.request.distribution.is_none()
                 || self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed))
+    }
+
+    /// Returns true if the region can use series scan for current request.
+    fn use_series_scan(&self) -> bool {
+        self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
     }
 
     /// Creates a scan input.

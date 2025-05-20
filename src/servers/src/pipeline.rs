@@ -23,7 +23,7 @@ use pipeline::{
     DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
     PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
@@ -84,10 +84,14 @@ async fn run_identity_pipeline(
         table: table_name,
         values: data_array,
     } = pipeline_req;
-    let table = handler
-        .get_table(&table_name, query_ctx)
-        .await
-        .context(CatalogSnafu)?;
+    let table = if pipeline_ctx.channel == Channel::Prometheus {
+        None
+    } else {
+        handler
+            .get_table(&table_name, query_ctx)
+            .await
+            .context(CatalogSnafu)?
+    };
     pipeline::identity_pipeline(data_array, table, pipeline_ctx)
         .map(|rows| {
             vec![RowInsertRequest {
@@ -187,7 +191,8 @@ async fn run_custom_pipeline(
 
             let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
             let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
-            let next_pipeline_ctx = PipelineContext::new(&new_def, pipeline_ctx.pipeline_param);
+            let next_pipeline_ctx =
+                PipelineContext::new(&new_def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
 
             let reqs = run_identity_pipeline(
                 handler,
@@ -218,8 +223,11 @@ async fn run_custom_pipeline(
         // run pipeline recursively.
         let next_pipeline_def =
             PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?;
-        let next_pipeline_ctx =
-            PipelineContext::new(&next_pipeline_def, pipeline_ctx.pipeline_param);
+        let next_pipeline_ctx = PipelineContext::new(
+            &next_pipeline_def,
+            pipeline_ctx.pipeline_param,
+            pipeline_ctx.channel,
+        );
         let requests = Box::pin(run_pipeline(
             handler,
             &next_pipeline_ctx,

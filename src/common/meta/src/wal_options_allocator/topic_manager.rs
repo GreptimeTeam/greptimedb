@@ -40,24 +40,21 @@ impl KafkaTopicManager {
         Ok(topics)
     }
 
-    /// Restores topics from the key-value backend. and returns the topics that are not stored in kvbackend.
-    pub async fn get_topics_to_create<'a>(
-        &self,
-        all_topics: &'a [String],
-    ) -> Result<Vec<&'a String>> {
+    /// Returns the topics that are not prepared.
+    pub async fn unprepare_topics(&self, all_topics: &[String]) -> Result<Vec<String>> {
         let existing_topics = self.restore_topics().await?;
         let existing_topic_set = existing_topics.iter().collect::<HashSet<_>>();
         let mut topics_to_create = Vec::with_capacity(all_topics.len());
         for topic in all_topics {
             if !existing_topic_set.contains(topic) {
-                topics_to_create.push(topic);
+                topics_to_create.push(topic.to_string());
             }
         }
         Ok(topics_to_create)
     }
 
-    /// Persists topics into the key-value backend.
-    pub async fn persist_topics(&self, topics: &[String]) -> Result<()> {
+    /// Persists prepared topics into the key-value backend.
+    pub async fn persist_prepared_topics(&self, topics: &[String]) -> Result<()> {
         self.topic_name_manager
             .batch_put(
                 topics
@@ -67,6 +64,14 @@ impl KafkaTopicManager {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl KafkaTopicManager {
+    /// Lists all topics in the key-value backend.
+    pub async fn list_topics(&self) -> Result<Vec<String>> {
+        self.topic_name_manager.range().await
     }
 }
 
@@ -90,11 +95,11 @@ mod tests {
 
         // No legacy topics.
         let mut topics_to_be_created = topic_kvbackend_manager
-            .get_topics_to_create(&all_topics)
+            .unprepare_topics(&all_topics)
             .await
             .unwrap();
         topics_to_be_created.sort();
-        let mut expected = all_topics.iter().collect::<Vec<_>>();
+        let mut expected = all_topics.clone();
         expected.sort();
         assert_eq!(expected, topics_to_be_created);
 
@@ -109,7 +114,7 @@ mod tests {
         assert!(res.prev_kv.is_none());
 
         let topics_to_be_created = topic_kvbackend_manager
-            .get_topics_to_create(&all_topics)
+            .unprepare_topics(&all_topics)
             .await
             .unwrap();
         assert!(topics_to_be_created.is_empty());
@@ -144,21 +149,21 @@ mod tests {
         let topic_kvbackend_manager = KafkaTopicManager::new(kv_backend);
 
         let mut topics_to_be_created = topic_kvbackend_manager
-            .get_topics_to_create(&all_topics)
+            .unprepare_topics(&all_topics)
             .await
             .unwrap();
         topics_to_be_created.sort();
-        let mut expected = all_topics.iter().collect::<Vec<_>>();
+        let mut expected = all_topics.clone();
         expected.sort();
         assert_eq!(expected, topics_to_be_created);
 
         // Persists topics to kv backend.
         topic_kvbackend_manager
-            .persist_topics(&all_topics)
+            .persist_prepared_topics(&all_topics)
             .await
             .unwrap();
         let topics_to_be_created = topic_kvbackend_manager
-            .get_topics_to_create(&all_topics)
+            .unprepare_topics(&all_topics)
             .await
             .unwrap();
         assert!(topics_to_be_created.is_empty());

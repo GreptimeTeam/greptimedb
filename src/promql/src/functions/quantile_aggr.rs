@@ -27,7 +27,7 @@ use datatypes::arrow::datatypes::{DataType, Field, Float64Type};
 
 use crate::functions::quantile::quantile_impl;
 
-const QUANTILE_NAME: &str = "quantile";
+pub const QUANTILE_NAME: &str = "quantile";
 
 const VALUES_FIELD_NAME: &str = "values";
 const DEFAULT_LIST_FIELD_NAME: &str = "item";

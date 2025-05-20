@@ -98,7 +98,6 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[a@0 as a], aggr=[] REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|

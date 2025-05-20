@@ -167,7 +167,7 @@ mod test {
         let decoder = &mut FlightDecoder::default();
         let mut flight_messages = raw_data
             .into_iter()
-            .map(|x| decoder.try_decode(x).unwrap())
+            .map(|x| decoder.try_decode(&x).unwrap())
             .collect::<Vec<FlightMessage>>();
         assert_eq!(flight_messages.len(), 2);
 

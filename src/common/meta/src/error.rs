@@ -514,11 +514,25 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        "Failed to get a Kafka partition client, topic: {}, partition: {}",
         topic,
         partition
     ))]
-    BuildKafkaPartitionClient {
+    KafkaPartitionClient {
+        topic: String,
+        partition: i32,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to get offset from Kafka, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    KafkaGetOffset {
         topic: String,
         partition: i32,
         #[snafu(implicit)]
@@ -843,7 +857,7 @@ impl ErrorExt for Error {
             | EncodeWalOptions { .. }
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
-            | BuildKafkaPartitionClient { .. }
+            | KafkaPartitionClient { .. }
             | ResolveKafkaEndpoint { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
@@ -852,7 +866,8 @@ impl ErrorExt for Error {
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
-            | ParseWalOptions { .. } => StatusCode::Unexpected,
+            | ParseWalOptions { .. }
+            | KafkaGetOffset { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 

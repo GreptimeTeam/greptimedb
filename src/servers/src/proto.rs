@@ -12,18 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
+use session::context::QueryContextRef;
+use snafu::OptionExt;
 
+use crate::error::InternalSnafu;
+use crate::http::event::PipelineIngestRequest;
+use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
 impl Clear for Sample {
@@ -222,8 +232,6 @@ impl PromTimeSeries {
             self.samples.as_slice(),
             is_strict_mode,
         )?;
-        self.labels.clear();
-        self.samples.clear();
 
         Ok(())
     }
@@ -247,7 +255,12 @@ impl PromWriteRequest {
     }
 
     // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(&mut self, mut buf: Bytes, is_strict_mode: bool) -> Result<(), DecodeError> {
+    pub fn merge(
+        &mut self,
+        mut buf: Bytes,
+        is_strict_mode: bool,
+        processor: &mut PromSeriesProcessor,
+    ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
@@ -273,8 +286,17 @@ impl PromWriteRequest {
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
-                    self.series
-                        .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+
+                    if processor.use_pipeline {
+                        processor.consume_series_to_pipeline_map(&mut self.series)?;
+                    } else {
+                        self.series
+                            .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+                    }
+
+                    // clear state
+                    self.series.labels.clear();
+                    self.series.samples.clear();
                 }
                 3u32 => {
                     // todo(hl): metadata are skipped.
@@ -283,7 +305,130 @@ impl PromWriteRequest {
                 _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
             }
         }
+
         Ok(())
+    }
+}
+
+/// A hook to be injected into the PromWriteRequest decoding process.
+/// It was originally designed with two usage:
+/// 1. consume one series to desired type, in this case, the pipeline map
+/// 2. convert itself to RowInsertRequests
+///
+/// Since the origin conversion is coupled with PromWriteRequest,
+/// let's keep it that way for now.
+pub struct PromSeriesProcessor {
+    pub(crate) use_pipeline: bool,
+    pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
+
+    // optional fields for pipeline
+    pub(crate) pipeline_handler: Option<PipelineHandlerRef>,
+    pub(crate) query_ctx: Option<QueryContextRef>,
+    pub(crate) pipeline_def: Option<PipelineDefinition>,
+}
+
+impl PromSeriesProcessor {
+    pub fn default_processor() -> Self {
+        Self {
+            use_pipeline: false,
+            table_values: BTreeMap::new(),
+            pipeline_handler: None,
+            query_ctx: None,
+            pipeline_def: None,
+        }
+    }
+
+    pub fn set_pipeline(
+        &mut self,
+        handler: PipelineHandlerRef,
+        query_ctx: QueryContextRef,
+        pipeline_def: PipelineDefinition,
+    ) {
+        self.use_pipeline = true;
+        self.pipeline_handler = Some(handler);
+        self.query_ctx = Some(query_ctx);
+        self.pipeline_def = Some(pipeline_def);
+    }
+
+    // convert one series to pipeline map
+    pub(crate) fn consume_series_to_pipeline_map(
+        &mut self,
+        series: &mut PromTimeSeries,
+    ) -> Result<(), DecodeError> {
+        let mut vec_pipeline_map: Vec<PipelineMap> = Vec::new();
+        let mut pipeline_map = PipelineMap::new();
+        for l in series.labels.iter() {
+            let name = String::from_utf8(l.name.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            let value = String::from_utf8(l.value.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            pipeline_map.insert(name, Value::String(value));
+        }
+
+        let one_sample = series.samples.len() == 1;
+
+        for s in series.samples.iter() {
+            let timestamp = s.timestamp;
+            pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
+            pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
+            if one_sample {
+                vec_pipeline_map.push(pipeline_map);
+                break;
+            } else {
+                vec_pipeline_map.push(pipeline_map.clone());
+            }
+        }
+
+        let table_name = std::mem::take(&mut series.table_name);
+        match self.table_values.entry(table_name) {
+            Entry::Occupied(mut occupied_entry) => {
+                occupied_entry.get_mut().append(&mut vec_pipeline_map);
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(vec_pipeline_map);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn exec_pipeline(
+        &mut self,
+    ) -> crate::error::Result<(RowInsertRequests, usize)> {
+        // prepare params
+        let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
+            err_msg: "pipeline handler is not set",
+        })?;
+        let pipeline_def = self.pipeline_def.as_ref().context(InternalSnafu {
+            err_msg: "pipeline definition is not set",
+        })?;
+        let pipeline_param = GreptimePipelineParams::default();
+        let query_ctx = self.query_ctx.as_ref().context(InternalSnafu {
+            err_msg: "query context is not set",
+        })?;
+
+        let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param, query_ctx.channel());
+        let mut size = 0;
+
+        // run pipeline
+        let mut inserts = Vec::with_capacity(self.table_values.len());
+        for (table_name, pipeline_maps) in self.table_values.iter_mut() {
+            let pipeline_req = PipelineIngestRequest {
+                table: table_name.clone(),
+                values: pipeline_maps.clone(),
+            };
+            let row_req =
+                run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;
+            size += row_req
+                .iter()
+                .map(|rq| rq.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
+                .sum::<usize>();
+            inserts.extend(row_req);
+        }
+
+        let row_insert_requests = RowInsertRequests { inserts };
+
+        Ok((row_insert_requests, size))
     }
 }
 
@@ -297,7 +442,7 @@ mod tests {
     use prost::Message;
 
     use crate::prom_store::to_grpc_row_insert_requests;
-    use crate::proto::PromWriteRequest;
+    use crate::proto::{PromSeriesProcessor, PromWriteRequest};
     use crate::repeated_field::Clear;
 
     fn sort_rows(rows: Rows) -> Rows {
@@ -321,8 +466,11 @@ mod tests {
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {
+        let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
-        prom_write_request.merge(data.clone(), true).unwrap();
+        prom_write_request
+            .merge(data.clone(), true, &mut p)
+            .unwrap();
         let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 
         assert_eq!(expected_samples, samples);

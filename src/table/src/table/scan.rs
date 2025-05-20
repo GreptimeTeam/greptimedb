@@ -82,11 +82,17 @@ impl RegionScanExec {
         if scanner.properties().is_logical_region() {
             pk_names.sort_unstable();
         }
-        let mut pk_columns: Vec<PhysicalSortExpr> = pk_names
-            .into_iter()
+        let pk_columns = pk_names
+            .iter()
+            .filter_map(
+                |col| Some(Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _),
+            )
+            .collect::<Vec<_>>();
+        let mut pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
+            .iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
-                    Arc::new(Column::new_with_schema(&col, &arrow_schema).ok()?) as _,
+                    Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _,
                     SortOptions {
                         descending: false,
                         nulls_first: true,
@@ -113,28 +119,37 @@ impl RegionScanExec {
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
                 if let Some(ts) = ts_col {
-                    pk_columns.push(ts);
+                    pk_sort_columns.push(ts);
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_columns)],
+                    &[LexOrdering::new(pk_sort_columns)],
                 )
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
                 if let Some(ts_col) = ts_col {
-                    pk_columns.insert(0, ts_col);
+                    pk_sort_columns.insert(0, ts_col);
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_columns)],
+                    &[LexOrdering::new(pk_sort_columns)],
                 )
             }
             None => EquivalenceProperties::new(arrow_schema.clone()),
         };
 
+        let partitioning = match request.distribution {
+            Some(TimeSeriesDistribution::PerSeries) => {
+                Partitioning::Hash(pk_columns.clone(), num_output_partition)
+            }
+            Some(TimeSeriesDistribution::TimeWindowed) | None => {
+                Partitioning::UnknownPartitioning(num_output_partition)
+            }
+        };
+
         let properties = PlanProperties::new(
             eq_props,
-            Partitioning::UnknownPartitioning(num_output_partition),
+            partitioning,
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
@@ -188,9 +203,14 @@ impl RegionScanExec {
             warn!("Setting partition ranges more than once for RegionScanExec");
         }
 
-        let num_partitions = partitions.len();
         let mut properties = self.properties.clone();
-        properties.partitioning = Partitioning::UnknownPartitioning(num_partitions);
+        let new_partitioning = match properties.partitioning {
+            Partitioning::Hash(ref columns, _) => {
+                Partitioning::Hash(columns.clone(), target_partitions)
+            }
+            _ => Partitioning::UnknownPartitioning(target_partitions),
+        };
+        properties.partitioning = new_partitioning;
 
         {
             let mut scanner = self.scanner.lock().unwrap();
@@ -480,12 +500,6 @@ mod test {
         assert_eq!(batch2.df_record_batch(), &recordbatches[1]);
 
         let result = plan.execute(0, ctx.task_ctx());
-        assert!(result.is_err());
-        match result {
-            Err(e) => assert!(e
-                .to_string()
-                .contains("Not expected to run ExecutionPlan more than once")),
-            _ => unreachable!(),
-        }
+        assert!(result.is_ok());
     }
 }

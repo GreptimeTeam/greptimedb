@@ -110,10 +110,25 @@ pub struct ExportCommand {
     #[clap(long)]
     s3: bool,
 
+    /// if both `s3_ddl_local_dir` and `s3` are set, `s3_ddl_local_dir` will be only used for
+    /// exported SQL files, and the data will be exported to s3.
+    ///
+    /// Note that `s3_ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
+    /// direct access to s3.
+    ///
+    /// if `s3` is set but `s3_ddl_local_dir` is not set, both SQL&data will be exported to s3.
+    #[clap(long)]
+    s3_ddl_local_dir: Option<String>,
+
     /// The s3 bucket name
     /// if s3 is set, this is required
     #[clap(long)]
     s3_bucket: Option<String>,
+
+    // The s3 root path
+    /// if s3 is set, this is required
+    #[clap(long)]
+    s3_root: Option<String>,
 
     /// The s3 endpoint
     /// if s3 is set, this is required
@@ -172,7 +187,9 @@ impl ExportCommand {
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
             s3: self.s3,
+            s3_ddl_local_dir: self.s3_ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
+            s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
             s3_access_key: self.s3_access_key.clone(),
             s3_secret_key: self.s3_secret_key.clone(),
@@ -192,7 +209,9 @@ pub struct Export {
     start_time: Option<String>,
     end_time: Option<String>,
     s3: bool,
+    s3_ddl_local_dir: Option<String>,
     s3_bucket: Option<String>,
+    s3_root: Option<String>,
     s3_endpoint: Option<String>,
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
@@ -364,7 +383,7 @@ impl Export {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = self.build_operator().await?;
+        let operator = self.build_prefer_fs_operator().await?;
 
         for schema in db_names {
             let create_database = self
@@ -394,7 +413,7 @@ impl Export {
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
         let db_names = self.get_db_names().await?;
         let db_count = db_names.len();
-        let operator = Arc::new(self.build_operator().await?);
+        let operator = Arc::new(self.build_prefer_fs_operator().await?);
         let mut tasks = Vec::with_capacity(db_names.len());
 
         for schema in db_names {
@@ -459,12 +478,33 @@ impl Export {
         }
     }
 
+    /// build operator with preference for file system
+    async fn build_prefer_fs_operator(&self) -> Result<Operator> {
+        // is under s3 mode and s3_ddl_dir is set, use it as root
+        if self.s3 && self.s3_ddl_local_dir.is_some() {
+            let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
+            let op = Operator::new(services::Fs::default().root(&root))
+                .context(OpenDalSnafu)?
+                .layer(LoggingLayer::default())
+                .finish();
+            Ok(op)
+        } else if self.s3 {
+            self.build_s3_operator().await
+        } else {
+            self.build_fs_operator().await
+        }
+    }
+
     async fn build_s3_operator(&self) -> Result<Operator> {
-        let mut builder = services::S3::default().root("").bucket(
+        let mut builder = services::S3::default().bucket(
             self.s3_bucket
                 .as_ref()
                 .expect("s3_bucket must be provided when s3 is enabled"),
         );
+
+        if let Some(root) = self.s3_root.as_ref() {
+            builder = builder.root(root);
+        }
 
         if let Some(endpoint) = self.s3_endpoint.as_ref() {
             builder = builder.endpoint(endpoint);
@@ -509,6 +549,7 @@ impl Export {
         let db_count = db_names.len();
         let mut tasks = Vec::with_capacity(db_count);
         let operator = Arc::new(self.build_operator().await?);
+        let fs_first_operator = Arc::new(self.build_prefer_fs_operator().await?);
         let with_options = build_with_options(&self.start_time, &self.end_time);
 
         for schema in db_names {
@@ -516,6 +557,7 @@ impl Export {
             let export_self = self.clone();
             let with_options_clone = with_options.clone();
             let operator = operator.clone();
+            let fs_first_operator = fs_first_operator.clone();
 
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
@@ -549,7 +591,7 @@ impl Export {
                 let copy_from_path = export_self.get_file_path(&schema, "copy_from.sql");
                 export_self
                     .write_to_storage(
-                        &operator,
+                        &fs_first_operator,
                         &copy_from_path,
                         copy_database_from_sql.into_bytes(),
                     )
@@ -580,8 +622,13 @@ impl Export {
     fn format_output_path(&self, file_path: &str) -> String {
         if self.s3 {
             format!(
-                "s3://{}/{}",
+                "s3://{}{}/{}",
                 self.s3_bucket.as_ref().unwrap_or(&String::new()),
+                if let Some(root) = &self.s3_root {
+                    format!("/{}", root)
+                } else {
+                    String::new()
+                },
                 file_path
             )
         } else {
@@ -605,9 +652,14 @@ impl Export {
     fn get_storage_params(&self, schema: &str) -> (String, String) {
         if self.s3 {
             let s3_path = format!(
-                "s3://{}/{}/{}/",
+                "s3://{}{}/{}/{}/",
                 // Safety: s3_bucket is required when s3 is enabled
                 self.s3_bucket.as_ref().unwrap(),
+                if let Some(root) = &self.s3_root {
+                    format!("/{}", root)
+                } else {
+                    String::new()
+                },
                 self.catalog,
                 schema
             );

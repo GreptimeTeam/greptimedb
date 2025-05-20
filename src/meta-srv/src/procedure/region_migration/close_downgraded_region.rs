@@ -113,7 +113,7 @@ impl CloseDowngradedRegion {
             .send(&ch, msg, CLOSE_DOWNGRADED_REGION_TIMEOUT)
             .await?;
 
-        match receiver.await? {
+        match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(

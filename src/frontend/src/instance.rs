@@ -55,7 +55,6 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -80,6 +79,7 @@ use crate::error::{
     TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
+use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -94,7 +94,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    stats: StatementStatistics,
+    slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
 }
 
@@ -166,9 +166,11 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = self
-            .stats
-            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -212,6 +214,7 @@ impl Instance {
                 self.statement_executor.execute_sql(stmt, query_ctx).await
             }
         };
+
         output.context(TableOperationSnafu)
     }
 }
@@ -374,7 +377,11 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(stmt.clone(), query_ctx.clone())
+        } else {
+            None
+        };
 
         let plan = self
             .statement_executor

@@ -155,6 +155,182 @@ fn clamp_impl<T: LogicalPrimitiveType, const CLAMP_MIN: bool, const CLAMP_MAX: b
     Ok(Arc::new(PrimitiveVector::<T>::from(result)))
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ClampMinFunction;
+
+const CLAMP_MIN_NAME: &str = "clamp_min";
+
+impl Function for ClampMinFunction {
+    fn name(&self) -> &str {
+        CLAMP_MIN_NAME
+    }
+
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(input_types[0].clone())
+    }
+
+    fn signature(&self) -> Signature {
+        // input, min
+        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+    }
+
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect exactly 2, have: {}",
+                    columns.len()
+                ),
+            }
+        );
+        ensure!(
+            columns[0].data_type().is_numeric(),
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The first arg's type is not numeric, have: {}",
+                    columns[0].data_type()
+                ),
+            }
+        );
+        ensure!(
+            columns[0].data_type() == columns[1].data_type(),
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "Arguments don't have identical types: {}, {}",
+                    columns[0].data_type(),
+                    columns[1].data_type()
+                ),
+            }
+        );
+        ensure!(
+            columns[1].len() == 1,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The second arg (min) should be scalar, have: {:?}",
+                    columns[1]
+                ),
+            }
+        );
+
+        with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
+            let input_array = columns[0].to_arrow_array();
+            let input = input_array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<<$S as LogicalPrimitiveType>::ArrowPrimitive>>()
+                .unwrap();
+
+            let min = TryAsPrimitive::<$S>::try_as_primitive(&columns[1].get(0))
+                .with_context(|| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: "The second arg (min) should not be none",
+                    }
+                })?;
+            // For clamp_min, max is effectively infinity, so we don't use it in the clamp_impl logic.
+            // We pass a default/dummy value for max.
+            let max_dummy = <$S as LogicalPrimitiveType>::Native::default();
+
+            clamp_impl::<$S, true, false>(input, min, max_dummy)
+        },{
+            unreachable!()
+        })
+    }
+}
+
+impl Display for ClampMinFunction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", CLAMP_MIN_NAME.to_ascii_uppercase())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ClampMaxFunction;
+
+const CLAMP_MAX_NAME: &str = "clamp_max";
+
+impl Function for ClampMaxFunction {
+    fn name(&self) -> &str {
+        CLAMP_MAX_NAME
+    }
+
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        Ok(input_types[0].clone())
+    }
+
+    fn signature(&self) -> Signature {
+        // input, max
+        Signature::uniform(2, ConcreteDataType::numerics(), Volatility::Immutable)
+    }
+
+    fn eval(&self, _func_ctx: &FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
+        ensure!(
+            columns.len() == 2,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not correct, expect exactly 2, have: {}",
+                    columns.len()
+                ),
+            }
+        );
+        ensure!(
+            columns[0].data_type().is_numeric(),
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The first arg's type is not numeric, have: {}",
+                    columns[0].data_type()
+                ),
+            }
+        );
+        ensure!(
+            columns[0].data_type() == columns[1].data_type(),
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "Arguments don't have identical types: {}, {}",
+                    columns[0].data_type(),
+                    columns[1].data_type()
+                ),
+            }
+        );
+        ensure!(
+            columns[1].len() == 1,
+            InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The second arg (max) should be scalar, have: {:?}",
+                    columns[1]
+                ),
+            }
+        );
+
+        with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
+            let input_array = columns[0].to_arrow_array();
+            let input = input_array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<<$S as LogicalPrimitiveType>::ArrowPrimitive>>()
+                .unwrap();
+
+            let max = TryAsPrimitive::<$S>::try_as_primitive(&columns[1].get(0))
+                .with_context(|| {
+                    InvalidFuncArgsSnafu {
+                        err_msg: "The second arg (max) should not be none",
+                    }
+                })?;
+            // For clamp_max, min is effectively -infinity, so we don't use it in the clamp_impl logic.
+            // We pass a default/dummy value for min.
+            let min_dummy = <$S as LogicalPrimitiveType>::Native::default();
+
+            clamp_impl::<$S, false, true>(input, min_dummy, max)
+        },{
+            unreachable!()
+        })
+    }
+}
+
+impl Display for ClampMaxFunction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", CLAMP_MAX_NAME.to_ascii_uppercase())
+    }
+}
+
 #[cfg(test)]
 mod test {
 
@@ -390,6 +566,136 @@ mod test {
             Arc::new(StringVector::from(input)) as _,
             Arc::new(StringVector::from_vec(vec!["bar"])) as _,
             Arc::new(StringVector::from_vec(vec!["baz"])) as _,
+        ];
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_min_i64() {
+        let inputs = [
+            (
+                vec![Some(-3), Some(-2), Some(-1), Some(0), Some(1), Some(2)],
+                -1,
+                vec![Some(-1), Some(-1), Some(-1), Some(0), Some(1), Some(2)],
+            ),
+            (
+                vec![Some(-3), None, Some(-1), None, None, Some(2)],
+                -2,
+                vec![Some(-2), None, Some(-1), None, None, Some(2)],
+            ),
+        ];
+
+        let func = ClampMinFunction;
+        for (in_data, min, expected) in inputs {
+            let args = [
+                Arc::new(Int64Vector::from(in_data)) as _,
+                Arc::new(Int64Vector::from_vec(vec![min])) as _,
+            ];
+            let result = func
+                .eval(&FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Int64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_max_i64() {
+        let inputs = [
+            (
+                vec![Some(-3), Some(-2), Some(-1), Some(0), Some(1), Some(2)],
+                1,
+                vec![Some(-3), Some(-2), Some(-1), Some(0), Some(1), Some(1)],
+            ),
+            (
+                vec![Some(-3), None, Some(-1), None, None, Some(2)],
+                0,
+                vec![Some(-3), None, Some(-1), None, None, Some(0)],
+            ),
+        ];
+
+        let func = ClampMaxFunction;
+        for (in_data, max, expected) in inputs {
+            let args = [
+                Arc::new(Int64Vector::from(in_data)) as _,
+                Arc::new(Int64Vector::from_vec(vec![max])) as _,
+            ];
+            let result = func
+                .eval(&FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Int64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_min_f64() {
+        let inputs = [(
+            vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)],
+            -1.0,
+            vec![Some(-1.0), Some(-1.0), Some(-1.0), Some(0.0), Some(1.0)],
+        )];
+
+        let func = ClampMinFunction;
+        for (in_data, min, expected) in inputs {
+            let args = [
+                Arc::new(Float64Vector::from(in_data)) as _,
+                Arc::new(Float64Vector::from_vec(vec![min])) as _,
+            ];
+            let result = func
+                .eval(&FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Float64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_max_f64() {
+        let inputs = [(
+            vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)],
+            0.0,
+            vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(0.0)],
+        )];
+
+        let func = ClampMaxFunction;
+        for (in_data, max, expected) in inputs {
+            let args = [
+                Arc::new(Float64Vector::from(in_data)) as _,
+                Arc::new(Float64Vector::from_vec(vec![max])) as _,
+            ];
+            let result = func
+                .eval(&FunctionContext::default(), args.as_slice())
+                .unwrap();
+            let expected: VectorRef = Arc::new(Float64Vector::from(expected));
+            assert_eq!(expected, result);
+        }
+    }
+
+    #[test]
+    fn clamp_min_type_not_match() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let min = -1;
+
+        let func = ClampMinFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Int64Vector::from_vec(vec![min])) as _,
+        ];
+        let result = func.eval(&FunctionContext::default(), args.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn clamp_max_type_not_match() {
+        let input = vec![Some(-3.0), Some(-2.0), Some(-1.0), Some(0.0), Some(1.0)];
+        let max = 1;
+
+        let func = ClampMaxFunction;
+        let args = [
+            Arc::new(Float64Vector::from(input)) as _,
+            Arc::new(Int64Vector::from_vec(vec![max])) as _,
         ];
         let result = func.eval(&FunctionContext::default(), args.as_slice());
         assert!(result.is_err());
