@@ -1542,7 +1542,52 @@ transform:
     )
     .await;
 
-    // 4. remove pipeline
+    // 4. cross-ref pipeline
+    // create database test_db
+    let res = client
+        .post("/v1/sql?sql=create database test_db")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // check test_db created
+    validate_data(
+        "pipeline_db_schema",
+        &client,
+        "show databases",
+        "[[\"greptime_private\"],[\"information_schema\"],[\"public\"],[\"test_db\"]]",
+    )
+    .await;
+
+    // should be failed if not specify db
+    let res = client
+        .post("/v1/ingest?db=test_db&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // cross ref using public's pipeline
+    let res = client
+        .post("/v1/ingest?db=test_db&table=logs1&pipeline_name=public.test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // check write success
+    validate_data(
+        "pipeline_db_schema",
+        &client,
+        "select * from test_db.logs1",
+        "[[2436,2528,\"INTERACT.MANAGER\",\"I\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",1716668197217000000]]",
+    )
+    .await;
+
+    // 5. remove pipeline
     let encoded_ver_str: String =
         url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
     let res = client
@@ -1562,7 +1607,7 @@ transform:
         format!(r#"[{{"name":"test","version":"{}"}}]"#, version_str).as_str()
     );
 
-    // 5. write data failed
+    // 6. write data failed
     let res = client
         .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
