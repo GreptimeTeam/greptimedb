@@ -39,7 +39,8 @@ use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
+    UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
@@ -349,7 +350,8 @@ impl BatchingEngine {
 
     pub async fn remove_flow_inner(&self, flow_id: FlowId) -> Result<(), Error> {
         if self.tasks.write().await.remove(&flow_id).is_none() {
-            warn!("Flow {flow_id} not found in tasks")
+            warn!("Flow {flow_id} not found in tasks");
+            FlowNotFoundSnafu { id: flow_id }.fail()?;
         }
         let Some(tx) = self.shutdown_txs.write().await.remove(&flow_id) else {
             UnexpectedSnafu {
@@ -366,9 +368,7 @@ impl BatchingEngine {
     pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
         debug!("Try flush flow {flow_id}");
         let task = self.tasks.read().await.get(&flow_id).cloned();
-        let task = task.with_context(|| UnexpectedSnafu {
-            reason: format!("Can't found task for flow {flow_id}"),
-        })?;
+        let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
 
         task.mark_all_windows_as_dirty()?;
 

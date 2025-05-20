@@ -180,6 +180,8 @@ pub enum CacheIdent {
     SchemaName(SchemaName),
     CreateFlow(CreateFlow),
     DropFlow(DropFlow),
+    /// For invalid all caches of a list of table id to flow mapping.
+    TableFlow(Vec<TableId>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

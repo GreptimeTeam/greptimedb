@@ -16,7 +16,8 @@ use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_meta::DatanodeId;
+use common_meta::key::{FlowId, FlowPartitionId};
+use common_meta::{DatanodeId, FlownodeId};
 use common_runtime::JoinError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -647,6 +648,21 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display(
+        "Flow (flow_id={}, partition_id={}) failed to migrate to dest flownode {}",
+        flow_id,
+        partition_id,
+        dest_flownode_id
+    ))]
+    MigrateToFlownode {
+        #[snafu(implicit)]
+        location: Location,
+        flow_id: FlowId,
+        partition_id: FlowPartitionId,
+        dest_flownode_id: FlownodeId,
+        source: common_meta::error::Error,
+    },
+
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error"))]
@@ -917,7 +933,8 @@ impl ErrorExt for Error {
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
-            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
+            | Error::PruneTaskAlreadyRunning { .. }
+            | Error::MigrateToFlownode { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
