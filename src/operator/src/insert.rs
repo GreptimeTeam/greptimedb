@@ -812,7 +812,7 @@ impl Inserter {
     /// Returns an alter table expression if it finds new columns in the request.
     /// When `accommodate_existing_schema` is false, it always adds columns if not exist.
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
-    /// accomodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
+    /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
     fn get_alter_table_expr_on_demand(
         &self,
