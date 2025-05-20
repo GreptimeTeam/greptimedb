@@ -34,7 +34,7 @@ use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
     move |v: &LeaseValue| {
         ((time_util::current_time_millis() - v.timestamp_millis) as u64)
-            < lease_secs.checked_mul(1000).unwrap_or(u64::MAX)
+            < lease_secs.saturating_mul(1000)
     }
 }
 

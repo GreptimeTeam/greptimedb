@@ -217,13 +217,10 @@ impl FlowRouteManager {
         current_flow_info: &DeserializedValueWithBytes<FlowInfoValue>,
         flow_routes: I,
     ) -> Result<Txn> {
-        let del_txns = current_flow_info
-            .flownode_ids()
-            .iter()
-            .map(|(partition_id, _)| {
-                let key = FlowRouteKey::new(flow_id, *partition_id).to_bytes();
-                Ok(TxnOp::Delete(key))
-            });
+        let del_txns = current_flow_info.flownode_ids().keys().map(|partition_id| {
+            let key = FlowRouteKey::new(flow_id, *partition_id).to_bytes();
+            Ok(TxnOp::Delete(key))
+        });
 
         let put_txns = flow_routes.into_iter().map(|(partition_id, route)| {
             let key = FlowRouteKey::new(flow_id, partition_id).to_bytes();

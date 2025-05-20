@@ -243,7 +243,7 @@ mod test {
     // From prometheus `promql/functions_test.go` case `TestKahanSum`
     #[test]
     fn test_kahan_sum() {
-        let inputs = vec![1.0, 10.0f64.powf(100.0), 1.0, -1.0 * 10.0f64.powf(100.0)];
+        let inputs = vec![1.0, 10.0f64.powf(100.0), 1.0, -10.0f64.powf(100.0)];
 
         let mut sum = 0.0;
         let mut c = 0f64;

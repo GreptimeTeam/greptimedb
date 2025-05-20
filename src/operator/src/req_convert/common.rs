@@ -319,8 +319,8 @@ pub fn column_schema(
     columns: &HashMap<String, VectorRef>,
 ) -> Result<Vec<ColumnSchema>> {
     columns
-        .iter()
-        .map(|(column_name, _vector)| {
+        .keys()
+        .map(|column_name| {
             let column_schema = table_info
                 .meta
                 .schema
