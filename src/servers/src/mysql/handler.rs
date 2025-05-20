@@ -489,7 +489,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             if query.starts_with("--") || query.starts_with('#') {
                 // Skip single line comment
                 if let Some(pos) = query.find('\n') {
-                    query = &query[pos + 1..].trim_start();
+                    query = query[pos + 1..].trim_start();
                 } else {
                     let outputs = vec![Ok(Output::new_with_affected_rows(0))];
                     writer::write_output(writer, query_ctx, outputs).await?;
