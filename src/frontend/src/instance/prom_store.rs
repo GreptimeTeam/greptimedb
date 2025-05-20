@@ -195,7 +195,7 @@ impl PromStoreProtocolHandler for Instance {
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?
         } else {
-            self.handle_row_inserts(request, ctx.clone())
+            self.handle_row_inserts(request, ctx.clone(), true)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?

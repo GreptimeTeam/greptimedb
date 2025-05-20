@@ -72,7 +72,10 @@ impl GrpcQueryHandler for Instance {
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
-            Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
+            Request::RowInserts(requests) => {
+                self.handle_row_inserts(requests, ctx.clone(), false)
+                    .await?
+            }
             Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
             Request::RowDeletes(requests) => self.handle_row_deletes(requests, ctx.clone()).await?,
             Request::Query(query_request) => {
@@ -407,9 +410,15 @@ impl Instance {
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
+        accommodate_existing_schema: bool,
     ) -> Result<Output> {
         self.inserter
-            .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
+            .handle_row_inserts(
+                requests,
+                ctx,
+                self.statement_executor.as_ref(),
+                accommodate_existing_schema,
+            )
             .await
             .context(TableOperationSnafu)
     }
@@ -421,7 +430,7 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         self.inserter
-            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref())
+            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref(), true)
             .await
             .context(TableOperationSnafu)
     }

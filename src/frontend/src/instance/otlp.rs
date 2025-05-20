@@ -63,7 +63,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        self.handle_row_inserts(requests, ctx)
+        self.handle_row_inserts(requests, ctx, false)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
