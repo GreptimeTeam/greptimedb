@@ -127,6 +127,12 @@ async fn handle_create_flow(
     }
 }
 
+async fn handle_table_flow(cache: &Cache<TableId, FlownodeFlowSet>, table_ids: &Vec<TableId>) {
+    for table_id in table_ids {
+        cache.invalidate(table_id);
+    }
+}
+
 async fn handle_drop_flow(
     cache: &Cache<TableId, FlownodeFlowSet>,
     DropFlow {
@@ -167,6 +173,7 @@ fn invalidator<'a>(
         match ident {
             CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
             CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
+            CacheIdent::TableFlow(table_ids) => handle_table_flow(cache, table_ids).await,
             _ => {}
         }
         Ok(())

@@ -369,6 +369,93 @@ impl FlowMigrationProcedure {
         Ok(Status::done())
     }
 
+    async fn rollback_metadata_if_needed(&mut self) -> common_meta::error::Result<()> {
+        let flow_id = self.data.flow_id;
+        let partition_id = self.data.partition_id;
+        let dest_flownode = self.data.dest_flownode.clone();
+
+        let Some(new_flow_info) = self.data.new_flow_info.as_ref() else {
+            return Ok(());
+        };
+        let current_flow_info = self
+            .context
+            .flow_metadata_manager
+            .flow_info_manager()
+            .get_raw(flow_id)
+            .await?
+            .with_context(|| common_meta::error::FlowNotExistOnFlownodeSnafu {
+                flow_id,
+                flownode_id: dest_flownode.id,
+                partition_id,
+            })?;
+        if *current_flow_info != *new_flow_info {
+            return Ok(());
+        }
+        let Some(old_flow_info) = self.data.old_flow_info.as_ref() else {
+            return Ok(());
+        };
+        let Some(old_flow_routes) = self.data.old_flow_routes.as_ref() else {
+            return Ok(());
+        };
+
+        // rollback metadata
+        self.context
+            .flow_metadata_manager
+            .update_flow_metadata(
+                flow_id,
+                &current_flow_info,
+                &old_flow_info,
+                old_flow_routes
+                    .into_iter()
+                    .map(|(k, v)| (*k, v.clone().into()))
+                    .collect(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Invalidate all table flow cache mapping if needed.
+    async fn invalid_table_flow_cache_if_needed(&mut self) -> common_meta::error::Result<()> {
+        // if cache invalid went wrong, then invalid all related entries just in case
+        let old_flow_info = self.data.old_flow_info.as_ref().unwrap();
+        let new_flow_info = self.data.new_flow_info.as_ref().unwrap();
+        let flow_id = self.data.flow_id;
+
+        let invalid_old = CacheIdent::DropFlow(DropFlow {
+            flow_id,
+            source_table_ids: old_flow_info.source_table_ids().to_vec(),
+            flow_part2node_id: old_flow_info.flownode_ids().clone().into_iter().collect(),
+        });
+
+        let invalid_new = CacheIdent::DropFlow(DropFlow {
+            flow_id,
+            source_table_ids: new_flow_info.source_table_ids().to_vec(),
+            flow_part2node_id: new_flow_info.flownode_ids().clone().into_iter().collect(),
+        });
+
+        let ctx = common_meta::cache_invalidator::Context {
+                    subject: Some(
+                        format!(
+                            "Rollback after failed, invalid all related entries: Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}",
+                            flow_id,
+                            self.data.partition_id,
+                            self.data.src_flownode,
+                            self.data.dest_flownode
+                        )
+                    ),
+                };
+
+        self.context
+            .cache_invalidator
+            .invalidate(
+                &ctx,
+                &[invalid_old, invalid_new, CacheIdent::FlowId(flow_id)],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn rollback_inner(&mut self) -> common_meta::error::Result<()> {
         match self.data.state {
             FlowMigrationState::Prepare => {
@@ -396,53 +483,20 @@ impl FlowMigrationProcedure {
             }
             FlowMigrationState::AlterMetadata => {
                 // if the txns failed, nothing will change
-                // if something else failed, no need to change
-                Ok(())
+                // if something else failed, rollback the metadata
+                self.rollback_metadata_if_needed().await
             }
             FlowMigrationState::InvalidateFlowCache => {
-                // if cache invalid went wrong, then invalid all related entries just in case
-                let old_flow_info = self.data.old_flow_info.as_ref().unwrap();
-                let new_flow_info = self.data.new_flow_info.as_ref().unwrap();
-                let flow_id = self.data.flow_id;
-
-                let invalid_old = CacheIdent::DropFlow(DropFlow {
-                    flow_id,
-                    source_table_ids: old_flow_info.source_table_ids().to_vec(),
-                    flow_part2node_id: old_flow_info.flownode_ids().clone().into_iter().collect(),
-                });
-
-                let invalid_new = CacheIdent::DropFlow(DropFlow {
-                    flow_id,
-                    source_table_ids: new_flow_info.source_table_ids().to_vec(),
-                    flow_part2node_id: new_flow_info.flownode_ids().clone().into_iter().collect(),
-                });
-
-                let ctx = common_meta::cache_invalidator::Context {
-                    subject: Some(
-                        format!(
-                            "Rollback after failed, invalid all related entries: Invalidate flow cache by migrating flow(id={}, partition={}) from flownode {:?} to {:?}",
-                            flow_id,
-                            self.data.partition_id,
-                            self.data.src_flownode,
-                            self.data.dest_flownode
-                        )
-                    ),
-                };
-
-                self.context
-                    .cache_invalidator
-                    .invalidate(
-                        &ctx,
-                        &[invalid_old, invalid_new, CacheIdent::FlowId(flow_id)],
-                    )
-                    .await?;
-                Ok(())
+                self.rollback_metadata_if_needed().await?;
+                self.invalid_table_flow_cache_if_needed().await
             }
             FlowMigrationState::DropFlowOnSrc => {
                 // shouldn't fail,
                 // since both flush_flow&drop_flow
                 // shouldn't fail/only fail with FlowNotFound Error which are safely ignored
-                Ok(())
+                // if somehow still failed, rollback the metadata anyway
+                self.rollback_metadata_if_needed().await?;
+                self.invalid_table_flow_cache_if_needed().await
             }
         }
     }
