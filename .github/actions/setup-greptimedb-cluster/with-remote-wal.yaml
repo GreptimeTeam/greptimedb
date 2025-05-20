@@ -22,7 +22,6 @@ datanode:
     [wal]
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
-    linger = "2ms"
     overwrite_entry_start_id = true
 frontend:
   configData: |-
