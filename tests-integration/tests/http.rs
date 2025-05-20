@@ -2206,7 +2206,7 @@ transform:
                 "data_type": "STRING",
                 "key": "log",
                 "semantic_type": "FIELD",
-                "value": "ClusterAdapter:enter sendTextDataToCluster\\n"
+                "value": "ClusterAdapter:enter sendTextDataToCluster"
             },
             {
                 "data_type": "STRING",
@@ -2220,6 +2220,44 @@ transform:
                 "semantic_type": "TIMESTAMP",
                 "value": "2024-05-25 20:16:37.217+0000"
             }
+        ],
+        [
+            {
+                "data_type": "INT32",
+                "key": "id1",
+                "semantic_type": "FIELD",
+                "value": 1111
+            },
+            {
+                "data_type": "INT32",
+                "key": "id2",
+                "semantic_type": "FIELD",
+                "value": 2222
+            },
+            {
+                "data_type": "STRING",
+                "key": "type",
+                "semantic_type": "FIELD",
+                "value": "D"
+            },
+            {
+                "data_type": "STRING",
+                "key": "log",
+                "semantic_type": "FIELD",
+                "value": "ClusterAdapter:enter sendTextDataToCluster ggg"
+            },
+            {
+                "data_type": "STRING",
+                "key": "logger",
+                "semantic_type": "FIELD",
+                "value": "INTERACT.MANAGER"
+            },
+            {
+                "data_type": "TIMESTAMP_NANOSECOND",
+                "key": "time",
+                "semantic_type": "TIMESTAMP",
+                "value": "2024-05-25 20:16:38.217+0000"
+            }
         ]
     ]);
     {
@@ -2232,7 +2270,15 @@ transform:
             "logger": "INTERACT.MANAGER",
             "type": "I",
             "time": "2024-05-25 20:16:37.217",
-            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            "log": "ClusterAdapter:enter sendTextDataToCluster"
+          },
+         {
+            "id1": "1111",
+            "id2": "2222",
+            "logger": "INTERACT.MANAGER",
+            "type": "D",
+            "time": "2024-05-25 20:16:38.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster ggg"
           }
         ]
         "#;
@@ -2251,25 +2297,29 @@ transform:
     }
     {
         // test new api specify pipeline via pipeline_name
-        let body = r#"
-            {
-            "pipeline_name": "test",
-            "data": [
+        let data = r#"[
                 {
                 "id1": "2436",
                 "id2": "2528",
                 "logger": "INTERACT.MANAGER",
                 "type": "I",
                 "time": "2024-05-25 20:16:37.217",
-                "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+                "log": "ClusterAdapter:enter sendTextDataToCluster"
+                },
+                {
+                "id1": "1111",
+                "id2": "2222",
+                "logger": "INTERACT.MANAGER",
+                "type": "D",
+                "time": "2024-05-25 20:16:38.217",
+                "log": "ClusterAdapter:enter sendTextDataToCluster ggg"
                 }
-            ]
-            }
-        "#;
+            ]"#;
+        let body = json!({"pipeline_name":"test","data":data});
         let res = client
             .post("/v1/pipelines/_dryrun")
             .header("Content-Type", "application/json")
-            .body(body)
+            .body(body.to_string())
             .send()
             .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2280,18 +2330,55 @@ transform:
         assert_eq!(rows, &dryrun_rows);
     }
     {
+        let pipeline_content_for_text = r#"
+processors:
+  - dissect:
+      fields:
+        - message
+      patterns:
+        - "%{id1} %{id2} %{logger} %{type} \"%{time}\" \"%{log}\""
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1
+      - id2
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
         // test new api specify pipeline via pipeline raw data
-        let mut body = json!({
-        "data": [
+        let data = r#"[
             {
             "id1": "2436",
             "id2": "2528",
             "logger": "INTERACT.MANAGER",
             "type": "I",
             "time": "2024-05-25 20:16:37.217",
-            "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            "log": "ClusterAdapter:enter sendTextDataToCluster"
+            },
+            {
+            "id1": "1111",
+            "id2": "2222",
+            "logger": "INTERACT.MANAGER",
+            "type": "D",
+            "time": "2024-05-25 20:16:38.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster ggg"
             }
-        ]
+        ]"#;
+        let mut body = json!({
+        "data": data
         });
         body["pipeline"] = json!(pipeline_content);
         let res = client
@@ -2302,6 +2389,73 @@ transform:
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         let body: Value = res.json().await;
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+        let mut body_for_text = json!({
+            "data": r#"2436 2528 INTERACT.MANAGER I "2024-05-25 20:16:37.217" "ClusterAdapter:enter sendTextDataToCluster"
+1111 2222 INTERACT.MANAGER D "2024-05-25 20:16:38.217" "ClusterAdapter:enter sendTextDataToCluster ggg"
+"#,
+        });
+        body_for_text["pipeline"] = json!(pipeline_content_for_text);
+        body_for_text["data_type"] = json!("text/plain");
+        let ndjson_content = r#"{"id1":"2436","id2":"2528","logger":"INTERACT.MANAGER","type":"I","time":"2024-05-25 20:16:37.217","log":"ClusterAdapter:enter sendTextDataToCluster"}
+{"id1":"1111","id2":"2222","logger":"INTERACT.MANAGER","type":"D","time":"2024-05-25 20:16:38.217","log":"ClusterAdapter:enter sendTextDataToCluster ggg"}
+"#;
+        let body_for_ndjson = json!({
+            "pipeline":pipeline_content,
+            "data_type": "application/x-ndjson",
+            "data": ndjson_content,
+        });
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_ndjson.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+        let schema = &body[0]["schema"];
+        let rows = &body[0]["rows"];
+        assert_eq!(schema, &dryrun_schema);
+        assert_eq!(rows, &dryrun_rows);
+
+        body_for_text["data_type"] = json!("application/yaml");
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_text.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(body["error"], json!("Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"));
+
+        body_for_text["data_type"] = json!("application/json");
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_text.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body: Value = res.json().await;
+        assert_eq!(
+            body["error"],
+            json!("Invalid request parameter: json format error, please check the date is valid JSON.")
+        );
+
+        body_for_text["data_type"] = json!("text/plain");
+        let res = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(body_for_text.to_string())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: Value = res.json().await;
+
         let schema = &body[0]["schema"];
         let rows = &body[0]["rows"];
         assert_eq!(schema, &dryrun_schema);
@@ -2319,6 +2473,14 @@ transform:
             "type": "I",
             "time": "2024-05-25 20:16:37.217",
             "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+            },
+            {
+            "id1": "1111",
+            "id2": "2222",
+            "logger": "INTERACT.MANAGER",
+            "type": "D",
+            "time": "2024-05-25 20:16:38.217",
+            "log": "ClusterAdapter:enter sendTextDataToCluster ggg"
             }
         ]
         });

@@ -29,7 +29,7 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    IntermediateKeyIndexSnafu, PrepareValueMustBeObjectSnafu, Result,
+    InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
     TransformNoTimestampProcessorSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
@@ -186,7 +186,7 @@ pub fn json_to_map(val: serde_json::Value) -> Result<PipelineMap> {
             }
             Ok(intermediate_state)
         }
-        _ => PrepareValueMustBeObjectSnafu.fail(),
+        _ => InputValueMustBeObjectSnafu.fail(),
     }
 }
 
@@ -203,7 +203,7 @@ pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<PipelineMap> {
             }
             Ok(intermediate_state)
         }
-        _ => PrepareValueMustBeObjectSnafu.fail(),
+        _ => InputValueMustBeObjectSnafu.fail(),
     }
 }
 
