@@ -43,7 +43,7 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::GreptimeQueryOutput;
-use servers::prom_store;
+use servers::prom_store::{self, mock_timeseries_new_label};
 use table::table_name::TableName;
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
@@ -1221,6 +1221,24 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .body(compressed_request)
         .send()
         .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Write snappy encoded data with new labels
+    let write_request = WriteRequest {
+        timeseries: mock_timeseries_new_label(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
     guard.remove_all().await;
