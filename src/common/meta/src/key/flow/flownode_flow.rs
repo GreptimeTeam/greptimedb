@@ -167,7 +167,7 @@ impl FlownodeFlowManager {
     }
 
     /// Whether given flow exist on this flownode.
-    pub async fn exist(
+    pub async fn exists(
         &self,
         flownode_id: FlownodeId,
         flow_id: FlowId,
