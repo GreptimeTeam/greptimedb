@@ -404,9 +404,9 @@ impl FlowMigrationProcedure {
             .update_flow_metadata(
                 flow_id,
                 &current_flow_info,
-                &old_flow_info,
+                old_flow_info,
                 old_flow_routes
-                    .into_iter()
+                    .iter()
                     .map(|(k, v)| (*k, v.clone().into()))
                     .collect(),
             )

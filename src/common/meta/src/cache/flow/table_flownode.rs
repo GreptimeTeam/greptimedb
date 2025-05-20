@@ -129,7 +129,7 @@ async fn handle_create_flow(
 
 async fn handle_table_flow(cache: &Cache<TableId, FlownodeFlowSet>, table_ids: &Vec<TableId>) {
     for table_id in table_ids {
-        cache.invalidate(table_id);
+        cache.invalidate(table_id).await;
     }
 }
 

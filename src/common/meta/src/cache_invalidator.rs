@@ -19,6 +19,7 @@ use crate::flow_name::FlowName;
 use crate::instruction::CacheIdent;
 use crate::key::flow::flow_info::FlowInfoKey;
 use crate::key::flow::flow_name::FlowNameKey;
+use crate::key::flow::table_flow::TableFlowKey;
 use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
@@ -102,6 +103,16 @@ where
                 CacheIdent::FlowId(flow_id) => {
                     let key = FlowInfoKey::new(*flow_id);
                     self.invalidate_key(&key.to_bytes()).await;
+                }
+                CacheIdent::TableFlow(table_ids) => {
+                    let mut keys = vec![];
+                    for table_id in table_ids {
+                        let key = TableFlowKey::range_start_key(*table_id);
+                        keys.push(key);
+                    }
+                    for key in keys {
+                        self.invalidate_key(&key).await;
+                    }
                 }
             }
         }
