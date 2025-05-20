@@ -46,7 +46,7 @@ use crate::error::{
     PipelineNotFoundSnafu, Result,
 };
 use crate::etl::{parse, Content, Pipeline};
-use crate::manager::{PipelineName, PipelineVersion};
+use crate::manager::PipelineName;
 use crate::util::{generate_pipeline_cache_key, prepare_dataframe_conditions};
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -266,16 +266,9 @@ impl PipelineTable {
     /// Get a pipeline by name.
     /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
     pub async fn get_pipeline(&self, pipeline_name: &PipelineName) -> Result<Arc<Pipeline>> {
-        let PipelineName {
-            name,
-            schema,
-            version,
-        } = pipeline_name;
-        let version = *version;
-
         if let Some(pipeline) = self
             .pipelines
-            .get(&generate_pipeline_cache_key(schema, name, version))
+            .get(&generate_pipeline_cache_key(pipeline_name))
         {
             return Ok(pipeline);
         }
@@ -284,7 +277,7 @@ impl PipelineTable {
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
-            generate_pipeline_cache_key(schema, name, version),
+            generate_pipeline_cache_key(pipeline_name),
             compiled_pipeline.clone(),
         );
         Ok(compiled_pipeline)
@@ -296,27 +289,21 @@ impl PipelineTable {
         &self,
         pipeline_name: &PipelineName,
     ) -> Result<(String, TimestampNanosecond)> {
-        let PipelineName {
-            name,
-            schema,
-            version,
-        } = pipeline_name;
-        let version = *version;
-
         if let Some(pipeline) = self
             .original_pipelines
-            .get(&generate_pipeline_cache_key(schema, name, version))
+            .get(&generate_pipeline_cache_key(pipeline_name))
         {
             return Ok(pipeline);
         }
         let pipeline = self
-            .find_pipeline(schema, name, version)
+            .find_pipeline(pipeline_name)
             .await?
-            .context(PipelineNotFoundSnafu { name, version })?;
-        self.original_pipelines.insert(
-            generate_pipeline_cache_key(schema, name, version),
-            pipeline.clone(),
-        );
+            .context(PipelineNotFoundSnafu {
+                name: pipeline_name.name.clone(),
+                version: pipeline_name.version,
+            })?;
+        self.original_pipelines
+            .insert(generate_pipeline_cache_key(pipeline_name), pipeline.clone());
         Ok(pipeline)
     }
 
@@ -336,21 +323,23 @@ impl PipelineTable {
             .await?;
 
         {
+            let mut pipeline_name = PipelineName::new(name.to_string(), schema.to_string(), None);
             self.pipelines.insert(
-                generate_pipeline_cache_key(schema, name, None),
+                generate_pipeline_cache_key(&pipeline_name),
                 compiled_pipeline.clone(),
             );
-            self.pipelines.insert(
-                generate_pipeline_cache_key(schema, name, Some(version)),
-                compiled_pipeline.clone(),
-            );
-
             self.original_pipelines.insert(
-                generate_pipeline_cache_key(schema, name, None),
+                generate_pipeline_cache_key(&pipeline_name),
                 (pipeline.to_owned(), version),
             );
+
+            pipeline_name.version = Some(version);
+            self.pipelines.insert(
+                generate_pipeline_cache_key(&pipeline_name),
+                compiled_pipeline.clone(),
+            );
             self.original_pipelines.insert(
-                generate_pipeline_cache_key(schema, name, Some(version)),
+                generate_pipeline_cache_key(&pipeline_name),
                 (pipeline.to_owned(), version),
             );
         }
@@ -378,10 +367,9 @@ impl PipelineTable {
         let version = *version;
 
         // 1. check pipeline exist in catalog
-        let pipeline = self.find_pipeline(schema, name, version).await?;
-        if pipeline.is_none() {
+        let Some(_) = self.find_pipeline(pipeline_name).await? else {
             return Ok(None);
-        }
+        };
 
         // 2. prepare dataframe
         let dataframe = self
@@ -439,23 +427,32 @@ impl PipelineTable {
 
         // remove cache with version and latest
         self.pipelines
-            .remove(&generate_pipeline_cache_key(schema, name, version));
+            .remove(&generate_pipeline_cache_key(pipeline_name));
+        self.original_pipelines
+            .remove(&generate_pipeline_cache_key(pipeline_name));
+
+        let mut pipeline_without_version = pipeline_name.clone();
+        pipeline_without_version.version = None;
+
         self.pipelines
-            .remove(&generate_pipeline_cache_key(schema, name, None));
+            .remove(&generate_pipeline_cache_key(&pipeline_without_version));
         self.original_pipelines
-            .remove(&generate_pipeline_cache_key(schema, name, version));
-        self.original_pipelines
-            .remove(&generate_pipeline_cache_key(schema, name, None));
+            .remove(&generate_pipeline_cache_key(&pipeline_without_version));
 
         Ok(Some(()))
     }
 
     async fn find_pipeline(
         &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
     ) -> Result<Option<(String, TimestampNanosecond)>> {
+        let PipelineName {
+            name,
+            schema,
+            version,
+        } = pipeline_name;
+        let version = *version;
+
         // 1. prepare dataframe
         let dataframe = self
             .query_engine

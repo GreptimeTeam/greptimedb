@@ -21,7 +21,7 @@ use crate::table::{
     PIPELINE_TABLE_CREATED_AT_COLUMN_NAME, PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME,
     PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME,
 };
-use crate::PipelineVersion;
+use crate::{PipelineName, PipelineVersion};
 
 pub fn to_pipeline_version(version_str: Option<&str>) -> Result<PipelineVersion> {
     match version_str {
@@ -52,14 +52,15 @@ pub(crate) fn prepare_dataframe_conditions(
     conditions.into_iter().reduce(Expr::and).unwrap()
 }
 
-pub(crate) fn generate_pipeline_cache_key(
-    schema: &str,
-    name: &str,
-    version: PipelineVersion,
-) -> String {
-    match version {
-        Some(version) => format!("{}/{}/{}", schema, name, i64::from(version)),
-        None => format!("{}/{}/latest", schema, name),
+pub(crate) fn generate_pipeline_cache_key(pipeline_name: &PipelineName) -> String {
+    match pipeline_name.version {
+        Some(version) => format!(
+            "{}/{}/{}",
+            pipeline_name.schema,
+            pipeline_name.name,
+            i64::from(version)
+        ),
+        None => format!("{}/{}/latest", pipeline_name.schema, pipeline_name.name),
     }
 }
 
@@ -86,16 +87,16 @@ mod tests {
 
     #[test]
     fn test_generate_pipeline_cache_key() {
-        let schema = "test_schema";
-        let name = "test_name";
-        let latest = generate_pipeline_cache_key(schema, name, None);
+        let schema = "test_schema".to_string();
+        let name = "test_name".to_string();
+
+        let mut p_name = PipelineName::new(name, schema, None);
+
+        let latest = generate_pipeline_cache_key(&p_name);
         assert_eq!(latest, "test_schema/test_name/latest");
 
-        let versioned = generate_pipeline_cache_key(
-            schema,
-            name,
-            Some(TimestampNanosecond::new(1672531200000000000)),
-        );
+        p_name.version = Some(TimestampNanosecond::new(1672531200000000000));
+        let versioned = generate_pipeline_cache_key(&p_name);
         assert_eq!(versioned, "test_schema/test_name/1672531200000000000");
     }
 }
