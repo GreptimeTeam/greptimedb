@@ -24,7 +24,10 @@ use session::context::Channel;
 use snafu::ensure;
 use util::to_pipeline_version;
 
-use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
+use crate::error::{
+    CastTypeSnafu, InvalidCustomTimeIndexSnafu, InvalidPipelineNameSnafu, PipelineMissingSnafu,
+    PipelineSchemaDifferSnafu, Result,
+};
 use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
 use crate::{GreptimePipelineParams, Pipeline, Value};
@@ -41,7 +44,10 @@ pub mod util;
 pub type PipelineVersion = Option<TimestampNanosecond>;
 
 /// Unique reference to pipeline name.
+/// A valid pipeline name should be in the format of [<schema>.]<name>
+/// The optional schema is for cross-schema reference.
 /// Note the version can be None while query, which means the latest version of the pipeline.
+#[derive(Debug, Clone)]
 pub struct PipelineName {
     pub name: String,
     pub schema: String,
@@ -49,12 +55,73 @@ pub struct PipelineName {
 }
 
 impl PipelineName {
-    pub fn new(name: String, schema: String, version: PipelineVersion) -> Self {
+    /// use [`from_name_and_version`] outside of this crate
+    pub(crate) fn new(name: String, schema: String, version: PipelineVersion) -> Self {
         Self {
             name,
             schema,
             version,
         }
+    }
+
+    pub fn from_name_and_version(
+        name: &str,
+        version_str: Option<&str>,
+        schema: String,
+        check_schema: bool,
+    ) -> Result<Self> {
+        let version = to_pipeline_version(version_str)?;
+
+        ensure!(
+            !name.is_empty(),
+            InvalidPipelineNameSnafu {
+                reason: "pipeline name cannot be empty",
+            }
+        );
+
+        let parts = name.split('.').collect::<Vec<&str>>();
+        // if schema is not provided, use the schema from ctx
+        match parts.len() {
+            1 => Ok(Self {
+                name: name.to_string(),
+                schema,
+                version,
+            }),
+            2 => {
+                let p_schema = parts[0].to_string();
+                if check_schema {
+                    ensure!(
+                        p_schema == schema,
+                        PipelineSchemaDifferSnafu { p_schema, schema }
+                    );
+                }
+                Ok(Self {
+                    name: parts[1].to_string(),
+                    schema: p_schema,
+                    version,
+                })
+            }
+            _ => InvalidPipelineNameSnafu {
+                reason: "pipeline name must be in the format of [<schema>.]<name>",
+            }
+            .fail()?,
+        }
+    }
+
+    pub fn check_internal_name(&self) -> Result<()> {
+        ensure!(
+            !self
+                .name
+                .starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
+            InvalidPipelineNameSnafu {
+                reason: "custom pipeline name cannot start with 'greptime_'",
+            }
+        );
+        Ok(())
+    }
+
+    pub fn set_timestamp(&mut self, timestamp: PipelineVersion) {
+        self.version = timestamp;
     }
 }
 
@@ -87,6 +154,7 @@ impl SelectInfo {
     }
 }
 
+pub const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 pub const GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME: &str = "greptime_identity";
 pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V0_NAME: &str = "greptime_trace_v0";
 pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
@@ -96,14 +164,15 @@ pub const GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME: &str = "greptime_trace_v1";
 #[derive(Debug, Clone)]
 pub enum PipelineDefinition {
     Resolved(Arc<Pipeline>),
-    ByNameAndValue((String, PipelineVersion)),
+    ByNameAndValue(PipelineName),
     GreptimeIdentityPipeline(Option<IdentityTimeIndex>),
 }
 
 impl PipelineDefinition {
     pub fn from_name(
         name: &str,
-        version: PipelineVersion,
+        version: Option<&str>,
+        schema: String,
         custom_time_index: Option<(String, bool)>,
     ) -> Result<Self> {
         if name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME {
@@ -115,7 +184,9 @@ impl PipelineDefinition {
                     .transpose()?,
             ))
         } else {
-            Ok(Self::ByNameAndValue((name.to_owned(), version)))
+            Ok(Self::ByNameAndValue(PipelineName::from_name_and_version(
+                name, version, schema, false,
+            )?))
         }
     }
 
@@ -162,6 +233,7 @@ impl PipelineWay {
     pub fn from_name_and_default(
         name: Option<&str>,
         version: Option<&str>,
+        schema: String,
         default_pipeline: Option<PipelineWay>,
     ) -> Result<PipelineWay> {
         if let Some(pipeline_name) = name {
@@ -172,7 +244,8 @@ impl PipelineWay {
             } else {
                 Ok(PipelineWay::Pipeline(PipelineDefinition::from_name(
                     pipeline_name,
-                    to_pipeline_version(version)?,
+                    version,
+                    schema,
                     None,
                 )?))
             }

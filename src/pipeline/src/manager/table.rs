@@ -265,12 +265,14 @@ impl PipelineTable {
 
     /// Get a pipeline by name.
     /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
-    pub async fn get_pipeline(
-        &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
-    ) -> Result<Arc<Pipeline>> {
+    pub async fn get_pipeline(&self, pipeline_name: &PipelineName) -> Result<Arc<Pipeline>> {
+        let PipelineName {
+            name,
+            schema,
+            version,
+        } = pipeline_name;
+        let version = *version;
+
         if let Some(pipeline) = self
             .pipelines
             .get(&generate_pipeline_cache_key(schema, name, version))
@@ -278,7 +280,7 @@ impl PipelineTable {
             return Ok(pipeline);
         }
 
-        let pipeline = self.get_pipeline_str(schema, name, version).await?;
+        let pipeline = self.get_pipeline_str(pipeline_name).await?;
         let compiled_pipeline = Arc::new(Self::compile_pipeline(&pipeline.0)?);
 
         self.pipelines.insert(
@@ -292,10 +294,15 @@ impl PipelineTable {
     /// If the pipeline is not in the cache, it will be get from table and compiled and inserted into the cache.
     pub async fn get_pipeline_str(
         &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
     ) -> Result<(String, TimestampNanosecond)> {
+        let PipelineName {
+            name,
+            schema,
+            version,
+        } = pipeline_name;
+        let version = *version;
+
         if let Some(pipeline) = self
             .original_pipelines
             .get(&generate_pipeline_cache_key(schema, name, version))
@@ -355,17 +362,20 @@ impl PipelineTable {
         ))
     }
 
-    pub async fn delete_pipeline(
-        &self,
-        schema: &str,
-        name: &str,
-        version: PipelineVersion,
-    ) -> Result<Option<()>> {
+    pub async fn delete_pipeline(&self, pipeline_name: &PipelineName) -> Result<Option<()>> {
+        let PipelineName {
+            name,
+            schema,
+            version,
+        } = pipeline_name;
+
         // 0. version is ensured at the http api level not None
         ensure!(
             version.is_some(),
             InvalidPipelineVersionSnafu { version: "None" }
         );
+
+        let version = *version;
 
         // 1. check pipeline exist in catalog
         let pipeline = self.find_pipeline(schema, name, version).await?;

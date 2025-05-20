@@ -49,10 +49,8 @@ pub async fn get_pipeline(
 ) -> Result<Arc<Pipeline>> {
     match pipeline_def {
         PipelineDefinition::Resolved(pipeline) => Ok(pipeline.clone()),
-        PipelineDefinition::ByNameAndValue((name, version)) => {
-            handler
-                .get_pipeline(name, *version, query_ctx.clone())
-                .await
+        PipelineDefinition::ByNameAndValue(pipeline_name) => {
+            handler.get_pipeline(pipeline_name, query_ctx.clone()).await
         }
         _ => {
             unreachable!("Never call get_pipeline on identity.")
@@ -221,8 +219,13 @@ async fn run_custom_pipeline(
             .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME);
 
         // run pipeline recursively.
-        let next_pipeline_def =
-            PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?;
+        let next_pipeline_def = PipelineDefinition::from_name(
+            next_pipeline_name,
+            None,
+            query_ctx.current_schema(),
+            None,
+        )
+        .context(PipelineSnafu)?;
         let next_pipeline_ctx = PipelineContext::new(
             &next_pipeline_def,
             pipeline_ctx.pipeline_param,

@@ -21,7 +21,7 @@ use client::Output;
 use common_error::ext::BoxedError;
 use datatypes::timestamp::TimestampNanosecond;
 use pipeline::pipeline_operator::PipelineOperator;
-use pipeline::{Pipeline, PipelineName, PipelineVersion};
+use pipeline::{Pipeline, PipelineName};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, InFlightWriteBytesExceededSnafu,
     PipelineSnafu, Result as ServerResult,
@@ -54,12 +54,11 @@ impl PipelineHandler for Instance {
 
     async fn get_pipeline(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> ServerResult<Arc<Pipeline>> {
         self.pipeline_operator
-            .get_pipeline(query_ctx, name, version)
+            .get_pipeline(query_ctx, pipeline_name)
             .await
             .context(PipelineSnafu)
     }
@@ -79,12 +78,11 @@ impl PipelineHandler for Instance {
 
     async fn delete_pipeline(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         ctx: QueryContextRef,
     ) -> ServerResult<Option<()>> {
         self.pipeline_operator
-            .delete_pipeline(name, version, ctx)
+            .delete_pipeline(pipeline_name, ctx)
             .await
             .context(PipelineSnafu)
     }
@@ -107,12 +105,11 @@ impl PipelineHandler for Instance {
 
     async fn get_pipeline_str(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> ServerResult<(String, TimestampNanosecond)> {
         self.pipeline_operator
-            .get_pipeline_str(name, version, query_ctx)
+            .get_pipeline_str(pipeline_name, query_ctx)
             .await
             .context(PipelineSnafu)
     }

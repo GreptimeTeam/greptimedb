@@ -40,7 +40,7 @@ use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimePipelineParams, Pipeline, PipelineName, PipelineVersion, PipelineWay};
+use pipeline::{GreptimePipelineParams, Pipeline, PipelineName, PipelineWay};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 
@@ -138,8 +138,7 @@ pub trait PipelineHandler {
 
     async fn get_pipeline(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> Result<Arc<Pipeline>>;
 
@@ -153,8 +152,7 @@ pub trait PipelineHandler {
 
     async fn delete_pipeline(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>>;
 
@@ -170,8 +168,7 @@ pub trait PipelineHandler {
     /// Get a original pipeline by name.
     async fn get_pipeline_str(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> Result<(String, TimestampNanosecond)>;
 }

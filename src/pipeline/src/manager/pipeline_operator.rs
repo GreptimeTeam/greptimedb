@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, CreateTableSnafu, PipelineTableNotFoundSnafu, Result};
-use crate::manager::{PipelineName, PipelineTableRef, PipelineVersion};
+use crate::manager::{PipelineName, PipelineTableRef};
 use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
@@ -180,17 +180,15 @@ impl PipelineOperator {
     pub async fn get_pipeline(
         &self,
         query_ctx: QueryContextRef,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
     ) -> Result<Arc<Pipeline>> {
-        let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_pipeline(&schema, name, version)
+            .get_pipeline(pipeline_name)
             .inspect(|re| {
                 METRIC_PIPELINE_RETRIEVE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])
@@ -202,18 +200,16 @@ impl PipelineOperator {
     /// Get a original pipeline by name.
     pub async fn get_pipeline_str(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> Result<(String, TimestampNanosecond)> {
-        let schema = query_ctx.current_schema();
         self.create_pipeline_table_if_not_exists(query_ctx.clone())
             .await?;
 
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .get_pipeline_str(&schema, name, version)
+            .get_pipeline_str(pipeline_name)
             .inspect(|re| {
                 METRIC_PIPELINE_RETRIEVE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])
@@ -248,8 +244,7 @@ impl PipelineOperator {
     /// Delete a pipeline by name from pipeline table.
     pub async fn delete_pipeline(
         &self,
-        name: &str,
-        version: PipelineVersion,
+        pipeline_name: &PipelineName,
         query_ctx: QueryContextRef,
     ) -> Result<Option<()>> {
         // trigger load pipeline table
@@ -259,7 +254,7 @@ impl PipelineOperator {
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .delete_pipeline(&query_ctx.current_schema(), name, version)
+            .delete_pipeline(pipeline_name)
             .inspect(|re| {
                 METRIC_PIPELINE_DELETE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])

@@ -28,7 +28,6 @@ use common_telemetry::tracing;
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
-use pipeline::util::to_pipeline_version;
 use pipeline::PipelineDefinition;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -120,8 +119,8 @@ pub async fn remote_write(
     if let Some(pipeline_name) = pipeline_info.pipeline_name {
         let pipeline_def = PipelineDefinition::from_name(
             &pipeline_name,
-            to_pipeline_version(pipeline_info.pipeline_version.as_deref())
-                .context(PipelineSnafu)?,
+            pipeline_info.pipeline_version.as_deref(),
+            query_ctx.current_schema(),
             None,
         )
         .context(PipelineSnafu)?;

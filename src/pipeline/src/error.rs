@@ -634,6 +634,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid pipeline name: {}", reason))]
+    InvalidPipelineName {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Pipeline schema should be the same in pipeline name and db name, pipeline name's: {}, db's: {}", p_schema, schema))]
+    PipelineSchemaDiffer {
+        p_schema: String,
+        schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to insert pipeline to pipelines table"))]
     InsertPipeline {
         #[snafu(source)]
@@ -749,7 +764,9 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
-            | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
+            | InvalidCustomTimeIndex { .. }
+            | InvalidPipelineName { .. }
+            | PipelineSchemaDiffer { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),

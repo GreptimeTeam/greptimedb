@@ -33,7 +33,6 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
-use pipeline::util::to_pipeline_version;
 use pipeline::{
     GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, PipelineName,
 };
@@ -58,8 +57,6 @@ use crate::metrics::{
 };
 use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
-
-const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -159,28 +156,22 @@ pub async fn query_pipeline(
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
     let handler = state.log_handler;
-    ensure!(
-        !pipeline_name.is_empty(),
-        InvalidParameterSnafu {
-            reason: "pipeline_name is required in path",
-        }
-    );
-
-    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
-
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
-    let (pipeline, pipeline_version) = handler
-        .get_pipeline_str(&pipeline_name, version, query_ctx.clone())
-        .await?;
+    let mut p_name = PipelineName::from_name_and_version(
+        &pipeline_name,
+        query_params.version.as_deref(),
+        query_ctx.current_schema(),
+        true,
+    )
+    .context(PipelineSnafu)?;
+
+    let (pipeline, pipeline_version) = handler.get_pipeline_str(&p_name, query_ctx.clone()).await?;
+    p_name.set_timestamp(Some(pipeline_version));
 
     Ok(GreptimedbManageResponse::from_pipeline_name(
-        PipelineName::new(
-            pipeline_name,
-            query_ctx.current_schema(),
-            Some(pipeline_version),
-        ),
+        p_name,
         start.elapsed().as_millis() as u64,
         Some(pipeline),
     ))
@@ -195,27 +186,22 @@ pub async fn add_pipeline(
 ) -> Result<GreptimedbManageResponse> {
     let start = Instant::now();
     let handler = state.log_handler;
-    ensure!(
-        !pipeline_name.is_empty(),
-        InvalidParameterSnafu {
-            reason: "pipeline_name is required in path",
-        }
-    );
-    ensure!(
-        !pipeline_name.starts_with(GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX),
-        InvalidParameterSnafu {
-            reason: "pipeline_name cannot start with greptime_",
-        }
-    );
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
+    // parse and check pipeline name
+    let input_p_name =
+        PipelineName::from_name_and_version(&pipeline_name, None, query_ctx.current_schema(), true)
+            .context(PipelineSnafu)?;
+    input_p_name.check_internal_name().context(PipelineSnafu)?;
+
     ensure!(
         !payload.is_empty(),
         InvalidParameterSnafu {
             reason: "pipeline is required in body",
         }
     );
-
-    query_ctx.set_channel(Channel::Http);
-    let query_ctx = Arc::new(query_ctx);
 
     let content_type = "yaml";
     let result = handler
@@ -256,18 +242,24 @@ pub async fn delete_pipeline(
         reason: "version is required",
     })?;
 
-    let version = to_pipeline_version(Some(&version_str)).context(PipelineSnafu)?;
+    let p_name = PipelineName::from_name_and_version(
+        &pipeline_name,
+        Some(&version_str),
+        query_ctx.current_schema(),
+        true,
+    )
+    .context(PipelineSnafu)?;
 
     query_ctx.set_channel(Channel::Http);
     let query_ctx = Arc::new(query_ctx);
 
     handler
-        .delete_pipeline(&pipeline_name, version, query_ctx.clone())
+        .delete_pipeline(&p_name, query_ctx.clone())
         .await
         .map(|v| {
             if v.is_some() {
                 GreptimedbManageResponse::from_pipeline_name(
-                    PipelineName::new(pipeline_name, query_ctx.current_schema(), version),
+                    p_name,
                     start.elapsed().as_millis() as u64,
                     None,
                 )
@@ -519,11 +511,16 @@ pub async fn pipeline_dryrun(
 
             match params.pipeline {
                 None => {
-                    let version = to_pipeline_version(params.pipeline_version.as_deref())
-                        .context(PipelineSnafu)?;
-                    let pipeline_name = check_pipeline_name_exists(params.pipeline_name)?;
+                    let pipeline_name = PipelineName::from_name_and_version(
+                        &check_pipeline_name_exists(params.pipeline_name)?,
+                        params.pipeline_version.as_deref(),
+                        query_ctx.current_schema(),
+                        false,
+                    )
+                    .context(PipelineSnafu)?;
+
                     let pipeline = handler
-                        .get_pipeline(&pipeline_name, version, query_ctx.clone())
+                        .get_pipeline(&pipeline_name, query_ctx.clone())
                         .await?;
                     dryrun_pipeline_inner(data, pipeline, handler, &query_ctx).await
                 }
@@ -558,10 +555,13 @@ pub async fn pipeline_dryrun(
             // This path is for back compatibility with the previous dry run code
             // where the payload is just data (JSON or plain text) and the pipeline name
             // is specified using query param.
-            let pipeline_name = check_pipeline_name_exists(query_params.pipeline_name)?;
-
-            let version =
-                to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+            let pipeline_name = PipelineName::from_name_and_version(
+                &check_pipeline_name_exists(query_params.pipeline_name)?,
+                query_params.version.as_deref(),
+                query_ctx.current_schema(),
+                false,
+            )
+            .context(PipelineSnafu)?;
 
             let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
@@ -571,7 +571,7 @@ pub async fn pipeline_dryrun(
             check_data_valid(value.len())?;
 
             let pipeline = handler
-                .get_pipeline(&pipeline_name, version, query_ctx.clone())
+                .get_pipeline(&pipeline_name, query_ctx.clone())
                 .await?;
 
             dryrun_pipeline_inner(value, pipeline, handler, &query_ctx).await
@@ -609,18 +609,19 @@ pub async fn log_ingester(
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
-    let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
+
+    query_ctx.set_channel(Channel::Http);
+    let query_ctx = Arc::new(query_ctx);
+
     let pipeline = PipelineDefinition::from_name(
         &pipeline_name,
-        version,
+        query_params.version.as_deref(),
+        query_ctx.current_schema(),
         query_params.custom_time_index.map(|s| (s, ignore_errors)),
     )
     .context(PipelineSnafu)?;
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
-
-    query_ctx.set_channel(Channel::Http);
-    let query_ctx = Arc::new(query_ctx);
 
     let value = log_state
         .ingest_interceptor
