@@ -4,7 +4,7 @@ DEV_BUILDER_IMAGE_TAG=$1
 
 update_dev_builder_version() {
   if [ -z "$DEV_BUILDER_IMAGE_TAG" ]; then
-    echo "Error: Should specify the dev-builder image tag" 
+    echo "Error: Should specify the dev-builder image tag"
     exit 1
   fi
 
@@ -17,7 +17,7 @@ update_dev_builder_version() {
   git checkout -b $BRANCH_NAME
 
   # Update the dev-builder image tag in the Makefile.
-  gsed -i "s/DEV_BUILDER_IMAGE_TAG ?=.*/DEV_BUILDER_IMAGE_TAG ?= ${DEV_BUILDER_IMAGE_TAG}/g" Makefile
+  sed -i "s/DEV_BUILDER_IMAGE_TAG ?=.*/DEV_BUILDER_IMAGE_TAG ?= ${DEV_BUILDER_IMAGE_TAG}/g" Makefile
 
   # Commit the changes.
   git add Makefile
