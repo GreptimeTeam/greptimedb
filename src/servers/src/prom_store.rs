@@ -475,6 +475,38 @@ pub fn mock_timeseries() -> Vec<TimeSeries> {
     ]
 }
 
+/// Add new labels to the mock timeseries.
+pub fn mock_timeseries_new_label() -> Vec<TimeSeries> {
+    let ts_demo_metrics = TimeSeries {
+        labels: vec![
+            new_label(METRIC_NAME_LABEL.to_string(), "demo_metrics".to_string()),
+            new_label("idc".to_string(), "idc3".to_string()),
+            new_label("new_label1".to_string(), "foo".to_string()),
+        ],
+        samples: vec![Sample {
+            value: 42.0,
+            timestamp: 3000,
+        }],
+        ..Default::default()
+    };
+    let ts_multi_labels = TimeSeries {
+        labels: vec![
+            new_label(METRIC_NAME_LABEL.to_string(), "metric1".to_string()),
+            new_label("idc".to_string(), "idc4".to_string()),
+            new_label("env".to_string(), "prod".to_string()),
+            new_label("host".to_string(), "host9".to_string()),
+            new_label("new_label2".to_string(), "bar".to_string()),
+        ],
+        samples: vec![Sample {
+            value: 99.0,
+            timestamp: 4000,
+        }],
+        ..Default::default()
+    };
+
+    vec![ts_demo_metrics, ts_multi_labels]
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
