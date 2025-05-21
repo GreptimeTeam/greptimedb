@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write  # Add permissions to modify PRs
+      issues: write
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
