@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
@@ -375,6 +376,8 @@ impl BatchingEngine {
         let res = task
             .gen_exec_once(&self.query_engine, &self.frontend_client)
             .await?;
+        // TODO(discord9): found a better way to make sure results get into result table instead of waiting
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;
         debug!(
