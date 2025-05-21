@@ -15,6 +15,7 @@
 //! This file contains code to find sorted runs in a set if ranged items and
 //! along with the best way to merge these items to satisfy the desired run count.
 
+use common_base::readable_size::ReadableSize;
 use common_base::BitVec;
 use common_time::Timestamp;
 
@@ -306,9 +307,10 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
     let target_size = match max_file_size {
         Some(size) => size as usize,
         None => {
-            // Calculate 1.5*average_file_size if max_file_size is not provided
+            // Calculate 1.5*average_file_size if max_file_size is not provided and clamp to 2GB
             let total_size: usize = files_to_process.iter().map(|f| f.size()).sum();
-            (((total_size as f64) / (files_to_process.len() as f64)) * 1.5) as usize
+            ((((total_size as f64) / (files_to_process.len() as f64)) * 1.5) as usize)
+                .min(ReadableSize::gb(2).as_bytes() as usize)
         }
     };
 
