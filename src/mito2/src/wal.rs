@@ -204,7 +204,12 @@ impl<S: LogStore> WalWriter<S> {
             .context(EncodeWalSnafu { region_id })?;
         let entry = self
             .store
-            .entry(&mut self.entry_encode_buf, entry_id, region_id, provider)
+            .entry(
+                mem::take(&mut self.entry_encode_buf),
+                entry_id,
+                region_id,
+                provider,
+            )
             .map_err(BoxedError::new)
             .context(BuildEntrySnafu { region_id })?;
 
