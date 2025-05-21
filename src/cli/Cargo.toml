@@ -44,10 +44,11 @@ futures.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
 nu-ansi-term = "0.46"
-opendal = { version = "0.51.1", features = [
-    "services-fs",
-    "services-s3",
-] }
+# opendal = { version = "0.51.1", features = [
+#     "services-fs",
+#     "services-s3",
+# ] }
+object-store.workspace = true
 query.workspace = true
 rand.workspace = true
 reqwest.workspace = true
