@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Greptime Community Slack
     url: https://greptime.com/slack
-    about: Get free help from the Greptime community
+    about: Get free help from the Greptime community.
   - name: Greptime Community Discussion
     url: https://github.com/greptimeTeam/discussions
-    about: Get free help from the Greptime community
+    about: Get free help from the Greptime community.
