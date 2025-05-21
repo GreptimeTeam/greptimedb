@@ -29,7 +29,10 @@ use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::distributed_time_constants;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
+use common_meta::kv_backend::{
+    KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, DEFAULT_META_ELECTION_LOCK_ID,
+    DEFAULT_META_TABLE_NAME,
+};
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
@@ -74,11 +77,6 @@ use crate::state::{become_follower, become_leader, StateRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
 pub const METASRV_HOME: &str = "./greptimedb_data/metasrv";
-
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
