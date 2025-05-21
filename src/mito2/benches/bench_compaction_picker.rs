@@ -14,7 +14,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mito2::compaction::run::{
-    find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs, Item, Ranged,
+    find_overlapping_items, find_sorted_runs, merge_seq_files, reduce_runs, Item, Ranged, SortedRun,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -103,9 +103,11 @@ fn bench_find_overlapping_items(c: &mut Criterion) {
                 });
             }
 
+            let mut r1 = SortedRun::from(files1);
+            let mut r2 = SortedRun::from(files2);
             b.iter(|| {
                 let mut result = vec![];
-                find_overlapping_items(black_box(&mut files1), black_box(&mut files2), &mut result);
+                find_overlapping_items(black_box(&mut r1), black_box(&mut r2), &mut result);
             });
         });
     }
