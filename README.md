@@ -121,7 +121,7 @@ docker pull greptime/greptimedb
 
 ```shell
 docker run -p 127.0.0.1:4000-4003:4000-4003 \
-  -v "$(pwd)/greptimedb:/greptimedb_data" \
+  -v "$(pwd)/greptimedb_data:/greptimedb_data" \
   --name greptime --rm \
   greptime/greptimedb:latest standalone start \
   --http-addr 0.0.0.0:4000 \
@@ -129,7 +129,7 @@ docker run -p 127.0.0.1:4000-4003:4000-4003 \
   --mysql-addr 0.0.0.0:4002 \
   --postgres-addr 0.0.0.0:4003
 ```
-Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)  
+Dashboard: [http://localhost:4000/dashboard](http://localhost:4000/dashboard)
 [Full Install Guide](https://docs.greptime.com/getting-started/installation/overview)
 
 **Troubleshooting:**
@@ -167,7 +167,7 @@ cargo run -- standalone start
 
 ## Project Status
 
-> **Status:** Beta.  
+> **Status:** Beta.
 > **GA (v1.0):** Targeted for mid 2025.
 
 - Being used in production by early adopters
@@ -197,8 +197,8 @@ GreptimeDB is licensed under the [Apache License 2.0](https://apache.org/license
 
 ## Commercial Support
 
-Running GreptimeDB in your organization?  
-We offer enterprise add-ons, services, training, and consulting.  
+Running GreptimeDB in your organization?
+We offer enterprise add-ons, services, training, and consulting.
 [Contact us](https://greptime.com/contactus) for details.
 
 ## Contributing
