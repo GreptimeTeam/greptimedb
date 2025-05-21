@@ -289,13 +289,8 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
     // Try different starting positions - iterate from end to start to prefer older files
     for start_idx in (0..files_to_process.len()).rev() {
         // Try different ending positions - also iterate from end to start
-        for end_idx in (start_idx + 1..files_to_process.len() + 1).rev() {
-            // Skip if only one file in the group
-            if end_idx - start_idx <= 1 {
-                continue;
-            }
-
-            let group = &files_to_process[start_idx..end_idx];
+        for end_idx in (start_idx + 1..files_to_process.len()).rev() {
+            let group = &files_to_process[start_idx..=end_idx];
             let total_size: usize = group.iter().map(|f| f.size()).sum();
 
             // Skip if total size exceeds target size
