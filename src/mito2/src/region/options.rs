@@ -236,7 +236,7 @@ impl Default for TwcsOptions {
         Self {
             trigger_file_num: 4,
             time_window: None,
-            max_output_file_size: Some(ReadableSize::gb(2)),
+            max_output_file_size: Some(ReadableSize::mb(512)),
             remote_compaction: false,
             fallback_to_local: true,
         }

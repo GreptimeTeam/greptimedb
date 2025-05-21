@@ -131,7 +131,19 @@ fn log_pick_result(
     let window_str = Timestamp::new_second(window).to_iso8601_string();
     let active_window_str = active_window.map(|s| Timestamp::new_second(s).to_iso8601_string());
     let max_output_file_size = max_output_file_size.map(|size| ReadableSize(size).to_string());
-    info!("Region ({:?}) compaction pick result: current window: {}, active window: {:?}, found runs: {}, file num: {}, max output file size: {:?}, filter deleted: {}, input files: {:?}", region_id,window_str, active_window_str, found_runs, file_num , max_output_file_size, filter_deleted, input_file_str);
+    info!(
+        "Region ({:?}) compaction pick result: current window: {}, active window: {:?}, \
+            found runs: {}, file num: {}, max output file size: {:?}, filter deleted: {}, \
+            input files: {:?}",
+        region_id,
+        window_str,
+        active_window_str,
+        found_runs,
+        file_num,
+        max_output_file_size,
+        filter_deleted,
+        input_file_str
+    );
 }
 
 impl Picker for TwcsPicker {
