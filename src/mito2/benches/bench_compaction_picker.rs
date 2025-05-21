@@ -104,7 +104,8 @@ fn bench_find_overlapping_items(c: &mut Criterion) {
             }
 
             b.iter(|| {
-                find_overlapping_items(black_box(&mut files1), black_box(&mut files2));
+                let mut result = vec![];
+                find_overlapping_items(black_box(&mut files1), black_box(&mut files2), &mut result);
             });
         });
     }

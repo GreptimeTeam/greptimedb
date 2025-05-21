@@ -38,12 +38,13 @@ pub trait Ranged {
     }
 }
 
-pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut [T], r: &mut [T]) -> Vec<T> {
+pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut [T], r: &mut [T], result: &mut Vec<T>) {
     if l.is_empty() || r.is_empty() {
-        return vec![];
+        return;
     }
 
-    let mut res = Vec::with_capacity(l.len() + r.len());
+    result.clear();
+    result.reserve(l.len() + r.len());
 
     // Sort both arrays by start boundary for more efficient overlap detection
     sort_ranged_items(l);
@@ -79,13 +80,13 @@ pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut [T], r: &mut [T]) -> Ve
             // We have an overlap
             if lhs_start.max(rhs_start) <= lhs_end.min(rhs_end) {
                 if !selected[lhs_idx] {
-                    res.push(lhs.clone());
+                    result.push(lhs.clone());
                     selected.set(lhs_idx, true);
                 }
 
                 let rhs_selected_idx = l.len() + j;
                 if !selected[rhs_selected_idx] {
-                    res.push(r[j].clone());
+                    result.push(r[j].clone());
                     selected.set(rhs_selected_idx, true);
                 }
             }
@@ -93,8 +94,6 @@ pub fn find_overlapping_items<T: Ranged + Clone>(l: &mut [T], r: &mut [T]) -> Ve
             j += 1;
         }
     }
-
-    res
 }
 
 // Sorts ranges by start asc and end desc.
@@ -225,14 +224,16 @@ pub fn reduce_runs<T: Item>(mut runs: Vec<SortedRun<T>>) -> Vec<T> {
     let probe_end = runs.len().min(100);
     let mut min_penalty = usize::MAX;
     let mut files = vec![];
+    let mut temp_files = vec![];
     for i in 0..probe_end {
         for j in i + 1..probe_end {
             let (a, b) = runs.split_at_mut(j);
-            let files_to_merge = find_overlapping_items(&mut a[i].items, &mut b[0].items);
-            let penalty = files_to_merge.iter().map(|e| e.size()).sum();
+            find_overlapping_items(&mut a[i].items, &mut b[0].items, &mut temp_files);
+            let penalty = temp_files.iter().map(|e| e.size()).sum();
             if penalty < min_penalty {
                 min_penalty = penalty;
-                files = files_to_merge;
+                files.clear();
+                files.extend_from_slice(&temp_files);
             }
         }
     }
@@ -541,34 +542,37 @@ mod tests {
 
     #[test]
     fn test_find_overlapping_items() {
+        let mut result = Vec::new();
+
         // Test empty inputs
-        assert_eq!(
-            find_overlapping_items(&mut Vec::<MockFile>::new(), &mut Vec::<MockFile>::new()),
-            Vec::<MockFile>::new()
+        find_overlapping_items(
+            &mut Vec::<MockFile>::new(),
+            &mut Vec::<MockFile>::new(),
+            &mut result,
         );
+        assert_eq!(result, Vec::<MockFile>::new());
 
         let mut files1 = build_items(&[(1, 3)]);
-        assert_eq!(
-            find_overlapping_items(&mut files1.clone(), &mut Vec::<MockFile>::new()),
-            Vec::<MockFile>::new()
+        find_overlapping_items(
+            &mut files1.clone(),
+            &mut Vec::<MockFile>::new(),
+            &mut result,
         );
-        assert_eq!(
-            find_overlapping_items(&mut Vec::<MockFile>::new(), &mut files1),
-            Vec::<MockFile>::new()
-        );
+        assert_eq!(result, Vec::<MockFile>::new());
+
+        find_overlapping_items(&mut Vec::<MockFile>::new(), &mut files1, &mut result);
+        assert_eq!(result, Vec::<MockFile>::new());
 
         // Test non-overlapping ranges
         let mut files1 = build_items(&[(1, 3), (5, 7)]);
         let mut files2 = build_items(&[(10, 12), (15, 20)]);
-        assert_eq!(
-            find_overlapping_items(&mut files1, &mut files2),
-            Vec::<MockFile>::new()
-        );
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
+        assert_eq!(result, Vec::<MockFile>::new());
 
         // Test simple overlap
         let mut files1 = build_items(&[(1, 5)]);
         let mut files2 = build_items(&[(3, 7)]);
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].range(), (1, 5));
         assert_eq!(result[1].range(), (3, 7));
@@ -576,31 +580,31 @@ mod tests {
         // Test multiple overlaps
         let mut files1 = build_items(&[(1, 5), (8, 12), (15, 20)]);
         let mut files2 = build_items(&[(3, 6), (7, 10), (18, 25)]);
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 6);
 
         // Test boundary cases (touching but not overlapping)
         let mut files1 = build_items(&[(1, 5)]);
         let mut files2 = build_items(&[(5, 10)]); // Touching at 5
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 2); // Should overlap since ranges are inclusive
 
         // Test completely contained ranges
         let mut files1 = build_items(&[(1, 10)]);
         let mut files2 = build_items(&[(3, 7)]);
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 2);
 
         // Test identical ranges
         let mut files1 = build_items(&[(1, 5)]);
         let mut files2 = build_items(&[(1, 5)]);
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 2);
 
         // Test unsorted input handling
         let mut files1 = build_items(&[(5, 10), (1, 3)]); // Unsorted
         let mut files2 = build_items(&[(2, 7), (8, 12)]); // Unsorted
-        let result = find_overlapping_items(&mut files1, &mut files2);
+        find_overlapping_items(&mut files1, &mut files2, &mut result);
         assert_eq!(result.len(), 4); // Should find both overlaps
     }
 
