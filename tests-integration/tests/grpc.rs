@@ -659,38 +659,45 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .body;
     let instant_query_result =
         serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
-    let expected = PrometheusJsonResponse {
-        status: "success".to_string(),
-        data: PrometheusResponse::PromData(PromData {
-            result_type: "vector".to_string(),
-            result: PromQueryResult::Vector(vec![
-                PromSeriesVector {
-                    metric: [
-                        ("k".to_string(), "a".to_string()),
-                        ("__name__".to_string(), "test".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    value: Some((5.0, "2".to_string())),
-                },
-                PromSeriesVector {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "b".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    value: Some((5.0, "1".to_string())),
-                },
-            ]),
-        }),
-        error: None,
-        error_type: None,
-        warnings: None,
-        resp_metrics: Default::default(),
-        status_code: None,
+    assert_eq!(&instant_query_result.status, "success");
+    assert!(instant_query_result.error.is_none());
+    assert!(instant_query_result.error_type.is_none());
+    assert!(instant_query_result.warnings.is_none());
+    assert!(instant_query_result.resp_metrics.is_empty());
+    assert!(instant_query_result.status_code.is_none());
+    let PrometheusResponse::PromData(data) = instant_query_result.data else {
+        panic!("unexpected result data type")
     };
-    assert_eq!(instant_query_result, expected);
+    assert_eq!(&data.result_type, "vector");
+    let PromQueryResult::Vector(mut vector) = data.result else {
+        panic!("unexpected result type")
+    };
+
+    vector.sort_unstable_by_key(|v| v.value.as_ref().map(|f| f.1.clone()));
+
+    assert_eq!(
+        vector,
+        vec![
+            PromSeriesVector {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "b".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                value: Some((5.0, "1".to_string())),
+            },
+            PromSeriesVector {
+                metric: [
+                    ("k".to_string(), "a".to_string()),
+                    ("__name__".to_string(), "test".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                value: Some((5.0, "2".to_string())),
+            },
+        ]
+    );
 
     // Range query using prometheus gateway service
     let range_query = PromRangeQuery {
@@ -711,38 +718,46 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .into_inner()
         .body;
     let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
-    let expected = PrometheusJsonResponse {
-        status: "success".to_string(),
-        data: PrometheusResponse::PromData(PromData {
-            result_type: "matrix".to_string(),
-            result: PromQueryResult::Matrix(vec![
-                PromSeriesMatrix {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "a".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                },
-                PromSeriesMatrix {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "b".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
-                },
-            ]),
-        }),
-        error: None,
-        error_type: None,
-        warnings: None,
-        resp_metrics: Default::default(),
-        status_code: None,
+
+    assert_eq!(&range_query_result.status, "success");
+    assert!(range_query_result.error.is_none());
+    assert!(range_query_result.error_type.is_none());
+    assert!(range_query_result.warnings.is_none());
+    assert!(range_query_result.resp_metrics.is_empty());
+    assert!(range_query_result.status_code.is_none());
+    let PrometheusResponse::PromData(data) = range_query_result.data else {
+        panic!("unexpected result data type")
     };
-    assert_eq!(range_query_result, expected);
+    assert_eq!(&data.result_type, "matrix");
+    let PromQueryResult::Matrix(mut mat) = data.result else {
+        panic!("unexpected result type")
+    };
+
+    mat.sort_unstable_by_key(|v| v.values[0].1.clone());
+
+    assert_eq!(
+        mat,
+        vec![
+            PromSeriesMatrix {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "b".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+            },
+            PromSeriesMatrix {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "a".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+            },
+        ]
+    );
 
     // query nonexistent data
     let range_query = PromRangeQuery {
