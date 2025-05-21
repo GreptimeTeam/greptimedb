@@ -153,8 +153,8 @@ impl FlowInfoValue {
         &self.flownode_ids
     }
 
-    /// move a partition from old flownode to new flownode
-    pub fn migrate_flow(
+    /// Insert a new flownode id for a partition.
+    pub fn insert_flownode_id(
         &mut self,
         partition: FlowPartitionId,
         node: FlownodeId,
