@@ -191,7 +191,7 @@ async fn test_series_scan() {
         distribution: Some(TimeSeriesDistribution::PerSeries),
         ..Default::default()
     };
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     let Scanner::Series(mut scanner) = scanner else {
         panic!("Scanner should be series scan");
     };

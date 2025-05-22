@@ -49,6 +49,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
+use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -81,6 +82,14 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
             Scanner::Series(series_scan) => series_scan.build_stream().await,
+        }
+    }
+
+    pub(crate) fn scan_batch(&self) -> Result<ScanBatchStream, BoxedError> {
+        match self {
+            Scanner::Seq(x) => x.scan_all_partitions(),
+            Scanner::Unordered(x) => x.scan_all_partitions(),
+            Scanner::Series(x) => x.scan_all_partitions(),
         }
     }
 }

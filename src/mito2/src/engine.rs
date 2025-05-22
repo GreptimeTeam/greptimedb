@@ -101,6 +101,7 @@ use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
 use crate::sst::file::FileMeta;
@@ -181,6 +182,17 @@ impl MitoEngine {
             .map_err(BoxedError::new)?
             .scan()
             .await
+    }
+
+    pub async fn scan_batch(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<ScanBatchStream, BoxedError> {
+        self.scanner(region_id, request)
+            .await
+            .map_err(BoxedError::new)?
+            .scan_batch()
     }
 
     /// Returns a scanner to scan for `request`.

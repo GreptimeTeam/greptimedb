@@ -20,13 +20,11 @@ use std::time::Instant;
 
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
-use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
@@ -36,6 +34,7 @@ use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
@@ -87,6 +86,28 @@ impl UnorderedScan {
         Ok(stream)
     }
 
+    pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream, BoxedError> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+
+        let streams = (0..self.properties.partitions.len())
+            .map(|partition| {
+                let input = &self.stream_ctx.input;
+                let metrics = PartitionMetrics::new(
+                    input.mapper.metadata().region_id,
+                    partition,
+                    "UnorderedScan",
+                    self.stream_ctx.query_start,
+                    &metrics_set,
+                );
+                self.metrics_list.set(partition, metrics.clone());
+
+                self.scan_batch_in_partition(partition, metrics)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Box::pin(futures::stream::iter(streams).flatten()))
+    }
+
     /// Scans a [PartitionRange] by its `identifier` and returns a stream.
     fn scan_partition_range(
         stream_ctx: Arc<StreamContext>,
@@ -136,6 +157,36 @@ impl UnorderedScan {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
+        let input = &self.stream_ctx.input;
+        let metrics = PartitionMetrics::new(
+            input.mapper.metadata().region_id,
+            partition,
+            "UnorderedScan",
+            self.stream_ctx.query_start,
+            metrics_set,
+        );
+        self.metrics_list.set(partition, metrics.clone());
+
+        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
+
+        let record_batch_stream = ConvertBatchStream::new(
+            batch_stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+
+        Ok(Box::pin(RecordBatchStreamWrapper::new(
+            input.mapper.output_schema(),
+            Box::pin(record_batch_stream),
+        )))
+    }
+
+    fn scan_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+    ) -> Result<ScanBatchStream, BoxedError> {
         if partition >= self.properties.partitions.len() {
             return Err(BoxedError::new(
                 PartitionOutOfRangeSnafu {
@@ -146,14 +197,6 @@ impl UnorderedScan {
             ));
         }
 
-        let part_metrics = PartitionMetrics::new(
-            self.stream_ctx.input.mapper.metadata().region_id,
-            partition,
-            "UnorderedScan",
-            self.stream_ctx.query_start,
-            metrics_set,
-        );
-        self.metrics_list.set(partition, part_metrics.clone());
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
@@ -161,7 +204,6 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let cache = &stream_ctx.input.cache_strategy;
             let range_builder_list = Arc::new(RangeBuilderList::new(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
@@ -182,7 +224,7 @@ impl UnorderedScan {
                     range_builder_list.clone(),
                 );
                 for await batch in stream {
-                    let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
+                    let batch = batch?;
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
@@ -201,11 +243,8 @@ impl UnorderedScan {
                         &batch,
                     );
 
-                    let convert_start = Instant::now();
-                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
-                    metrics.convert_cost += convert_start.elapsed();
                     let yield_start = Instant::now();
-                    yield record_batch;
+                    yield ScanBatch::Normal(batch);
                     metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
@@ -215,22 +254,15 @@ impl UnorderedScan {
                 // The query engine can use this to optimize some queries.
                 if distinguish_range {
                     let yield_start = Instant::now();
-                    yield stream_ctx.input.mapper.empty_record_batch();
+                    yield ScanBatch::Normal(Batch::empty());
                     metrics.yield_cost += yield_start.elapsed();
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
-
-            part_metrics.on_finish();
         };
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.stream_ctx.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 }
 

@@ -21,7 +21,7 @@ use common_config::Configurable;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
+use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
@@ -65,12 +65,7 @@ where
     }
 
     pub fn grpc_server_builder(&self, opts: &GrpcOptions) -> Result<GrpcServerBuilder> {
-        let grpc_config = GrpcServerConfig {
-            max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
-            max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
-            tls: opts.tls.clone(),
-        };
-        let builder = GrpcServerBuilder::new(grpc_config, common_runtime::global_runtime())
+        let builder = GrpcServerBuilder::new(opts.as_config(), common_runtime::global_runtime())
             .with_tls_config(opts.tls.clone())
             .context(error::InvalidTlsConfigSnafu)?;
         Ok(builder)
