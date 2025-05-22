@@ -20,6 +20,8 @@ set search_path to 'test';
 drop database test;
 -- SQLNESS PROTOCOL POSTGRES
 set search_path to 'public';
+-- SQLNESS PROTOCOL POSTGRES
+set search_path = public;
 
 -- SQLNESS PROTOCOL POSTGRES
 select current_schema();
