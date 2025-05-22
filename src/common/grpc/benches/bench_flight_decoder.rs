@@ -105,10 +105,9 @@ fn decode_flight_data_from_header_and_body(
     data_body: &Bytes,
 ) -> DfRecordBatch {
     let mut decoder = FlightDecoder::try_from_schema_bytes(schema).unwrap();
-    let batch = decoder
+    decoder
         .try_decode_record_batch(data_header, data_body)
-        .unwrap();
-    batch
+        .unwrap()
 }
 
 fn bench_decode_flight_data(c: &mut Criterion) {
@@ -121,20 +120,18 @@ fn bench_decode_flight_data(c: &mut Criterion) {
         let schema_bytes = Bytes::from(schema.encode_to_vec());
         let payload_bytes = Bytes::from(payload.encode_to_vec());
 
-        // arguments for decode_flight_data_from_header_and_body
-        let schema_header = schema.data_header.clone();
-        let data_header = Bytes::from(payload.data_header.clone());
-        let data_body = Bytes::from(payload.data_body.clone());
-
         let mut group = c.benchmark_group(format!("flight_decoder_{}_rows", row_count));
-
         group.bench_function("decode_from_protobuf", |b| {
             b.iter(|| decode_flight_data_from_protobuf(&schema_bytes, &payload_bytes));
         });
 
         group.bench_function("decode_from_header_and_body", |b| {
             b.iter(|| {
-                decode_flight_data_from_header_and_body(&schema_header, &data_header, &data_body)
+                decode_flight_data_from_header_and_body(
+                    &schema.data_header,
+                    &payload.data_header,
+                    &payload.data_body,
+                )
             });
         });
 
