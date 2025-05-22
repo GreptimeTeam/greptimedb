@@ -650,6 +650,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them under current schema or delete until only one schema left. schemas: {}",
+        schemas
+    ))]
+    MultiPipelineWithDiffSchema {
+        schemas: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         #[snafu(implicit)]
@@ -750,6 +760,7 @@ impl ErrorExt for Error {
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
+            MultiPipelineWithDiffSchema { .. } => StatusCode::IllegalState,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
