@@ -44,7 +44,7 @@ DESC TABLE test_alt_table;
 DROP TABLE test_alt_table;
 
 -- test if column with default value can change type properly
-CREATE TABLE test_alt_table_default(h INTEGER, i INTEGER DEFAULT 0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+CREATE TABLE test_alt_table_default(h INTEGER, i Float64 DEFAULT 0.0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
