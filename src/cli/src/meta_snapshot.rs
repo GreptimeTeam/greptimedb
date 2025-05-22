@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use clap::Parser;
 use common_error::ext::BoxedError;
+use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::rds::{MySqlStore, PgStore};
 use common_meta::kv_backend::{KvBackendRef, DEFAULT_META_TABLE_NAME};
@@ -56,7 +59,7 @@ impl MetaConnection {
                 .fail()
                 .map_err(BoxedError::new)
         } else {
-            match self.backend {
+            let kvbackend = match self.backend {
                 Some(BackendImpl::EtcdStore) => {
                     let etcd_client = create_etcd_client(store_addrs)
                         .await
@@ -78,7 +81,6 @@ impl MetaConnection {
                     let pool = create_mysql_pool(store_addrs)
                         .await
                         .map_err(BoxedError::new)?;
-
                     Ok(MySqlStore::with_mysql_pool(pool, table_name, max_txn_ops)
                         .await
                         .map_err(BoxedError::new)?)
@@ -86,6 +88,13 @@ impl MetaConnection {
                 _ => KVBackendNotSetSnafu { backend: "all" }
                     .fail()
                     .map_err(BoxedError::new),
+            };
+            if self.store_key_prefix.is_empty() {
+                kvbackend
+            } else {
+                let chroot_kvbackend =
+                    ChrootKvBackend::new(self.store_key_prefix.as_bytes().to_vec(), kvbackend?);
+                Ok(Arc::new(chroot_kvbackend))
             }
         }
     }
@@ -161,7 +170,7 @@ pub struct MetaSnapshotCommand {
     #[clap(flatten)]
     s3_config: S3Config,
     /// The name of the target snapshot file.
-    #[clap(long, default_value = "backup.bin")]
+    #[clap(long, default_value = "metadata_snapshot")]
     file_name: String,
     /// The directory to store the snapshot file.
     #[clap(long, default_value = ".")]
@@ -226,7 +235,7 @@ pub struct MetaRestoreCommand {
     #[clap(flatten)]
     s3_config: S3Config,
     /// The name of the target snapshot file.
-    #[clap(long, default_value = "metadata_snapshot")]
+    #[clap(long, default_value = "metadata_snapshot.metadata.fb")]
     file_name: String,
     /// The directory to store the snapshot file.
     #[clap(long, default_value = ".")]
