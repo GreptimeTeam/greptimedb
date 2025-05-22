@@ -182,6 +182,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             channel: channel as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
+                sst_min_sequences: Default::default(),
             }),
             explain,
         }

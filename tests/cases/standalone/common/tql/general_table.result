@@ -1,0 +1,58 @@
+-- run PromQL on non-typical prometheus table schema
+CREATE TABLE IF NOT EXISTS `cpu_usage` (
+  `job` STRING NULL,
+  `value` DOUBLE NULL,
+  `ts` TIMESTAMP(9) NOT NULL,
+  TIME INDEX (`ts`),
+  PRIMARY KEY (`job`) 
+)
+ENGINE=mito
+WITH(
+  merge_mode = 'last_non_null'
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[job@0 as job, ts@1 as ts, sum(prom_irate(ts_range,value))@2 / 1000000000 as sum(prom_irate(ts_range,value)) / Float64(1000000000)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_SortExec: expr=[job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_partitioning=[false] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[job@0 as job, ts@1 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[job@2 as job, ts@0 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: prom_irate(ts_range,value)@1 IS NOT NULL REDACTED
+|_|_|_ProjectionExec: expr=[ts@2 as ts, prom_irate(ts_range@3, value@0) as prom_irate(ts_range,value), job@1 as job] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[5000], time index=[ts] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["job"] REDACTED
+|_|_|_SortExec: expr=[ts@2 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_ProjectionExec: expr=[value@1 as value, job@0 as job, CAST(ts@2 AS Timestamp(Millisecond, None)) as ts] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: job@0 = fire AND ts@2 >= -305000000000 AND ts@2 <= 310000000000 REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SeqScan: region=REDACTED, partition_count=0 (0 memtable ranges, 0 file 0 ranges) REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+drop table `cpu_usage`;
+
+Affected Rows: 0
+
