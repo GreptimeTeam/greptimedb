@@ -21,6 +21,9 @@ use common_time::Timestamp;
 
 use crate::sst::file::FileHandle;
 
+/// Default max compaction output file size when not specified.
+const DEFAULT_MAX_OUTPUT_SIZE: u64 = ReadableSize::gb(2).as_bytes();
+
 /// Trait for any items with specific range (both boundaries are inclusive).
 pub trait Ranged {
     type BoundType: Ord + Copy;
@@ -310,7 +313,7 @@ pub fn merge_seq_files<T: Item>(input_files: &[T], max_file_size: Option<u64>) -
             // Calculate 1.5*average_file_size if max_file_size is not provided and clamp to 2GB
             let total_size: usize = files_to_process.iter().map(|f| f.size()).sum();
             ((((total_size as f64) / (files_to_process.len() as f64)) * 1.5) as usize)
-                .min(ReadableSize::gb(2).as_bytes() as usize)
+                .min(DEFAULT_MAX_OUTPUT_SIZE as usize)
         }
     };
 
