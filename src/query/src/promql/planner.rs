@@ -1035,11 +1035,13 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?;
 
         // make divide plan
-        let time_index_column = self
-            .ctx
-            .time_index_column
-            .clone()
-            .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?;
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: table_ref.to_string(),
+                })?;
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
                 self.ctx.tag_columns.clone(),

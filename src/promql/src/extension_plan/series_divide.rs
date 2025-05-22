@@ -49,7 +49,7 @@ pub struct SeriesDivide {
     tag_columns: Vec<String>,
     /// `SeriesDivide` requires `time_index` column's name to generate ordering requirement
     /// for input data. But this plan itself doesn't depend on the ordering of time index
-    /// column. This is for follow on plans like `RangeManipluate`. Because requiring ordering
+    /// column. This is for follow on plans like `RangeManipulate`. Because requiring ordering
     /// here can avoid unnecessary sort in follow on plans.
     time_index_column: String,
     input: LogicalPlan,
