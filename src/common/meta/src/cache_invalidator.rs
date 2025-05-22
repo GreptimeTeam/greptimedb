@@ -101,7 +101,10 @@ where
                     flow_part2node_id,
                 }) => {
                     // invalidate flow route/flownode flow/table flow
-                    let mut keys = vec![];
+                    let mut keys = Vec::with_capacity(
+                        source_table_ids.len() * flow_part2node_id.len()
+                            + flow_part2node_id.len() * 2,
+                    );
                     for table_id in source_table_ids {
                         for (partition_id, node_id) in flow_part2node_id {
                             let key =
