@@ -137,6 +137,18 @@ CREATE TABLE test_alt_table_default(h INTEGER, i Float64 DEFAULT 0.0, j TIMESTAM
 
 Affected Rows: 0
 
+INSERT INTO test_alt_table_default (h, j) VALUES (0, 0);
+
+Affected Rows: 1
+
+SELECT * FROM test_alt_table_default ORDER BY h;
+
++---+-----+---------------------+
+| h | i   | j                   |
++---+-----+---------------------+
+| 0 | 0.0 | 1970-01-01T00:00:00 |
++---+-----+---------------------+
+
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
 Affected Rows: 0
@@ -150,6 +162,7 @@ SELECT * FROM test_alt_table_default ORDER BY h;
 +---+-------+-------------------------+
 | h | i     | j                       |
 +---+-------+-------------------------+
+| 0 | false | 1970-01-01T00:00:00     |
 | 1 | false | 1970-01-01T00:00:00     |
 | 2 | false | 1970-01-01T00:00:00.001 |
 +---+-------+-------------------------+
@@ -177,6 +190,7 @@ SELECT * FROM test_alt_table_default ORDER BY h;
 +---+---+-------------------------+
 | h | i | j                       |
 +---+---+-------------------------+
+| 0 | 0 | 1970-01-01T00:00:00     |
 | 1 | 0 | 1970-01-01T00:00:00     |
 | 2 | 0 | 1970-01-01T00:00:00.001 |
 | 3 | 0 | 1970-01-01T00:00:00     |
@@ -200,6 +214,7 @@ SELECT * FROM test_alt_table_default ORDER BY h;
 +---+------+-------------------------+
 | h | i    | j                       |
 +---+------+-------------------------+
+| 0 | 0    | 1970-01-01T00:00:00     |
 | 1 | 0    | 1970-01-01T00:00:00     |
 | 2 | 0    | 1970-01-01T00:00:00.001 |
 | 3 | 0    | 1970-01-01T00:00:00     |
@@ -209,6 +224,101 @@ SELECT * FROM test_alt_table_default ORDER BY h;
 +---+------+-------------------------+
 
 DROP TABLE test_alt_table_default;
+
+Affected Rows: 0
+
+-- test with non-zero default value
+CREATE TABLE test_alt_table_default_nz(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (0, 0);
+
+Affected Rows: 1
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
++---+-----+---------------------+
+| h | i   | j                   |
++---+-----+---------------------+
+| 0 | 0.1 | 1970-01-01T00:00:00 |
++---+-----+---------------------+
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i BOOLEAN;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (1, 0), (2, 1);
+
+Affected Rows: 2
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
++---+------+-------------------------+
+| h | i    | j                       |
++---+------+-------------------------+
+| 0 | true | 1970-01-01T00:00:00     |
+| 1 | true | 1970-01-01T00:00:00     |
+| 2 | true | 1970-01-01T00:00:00.001 |
++---+------+-------------------------+
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE test_alt_table_default_nz;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| h      | Int32                | PRI | YES  |         | TAG           |
+| i      | Int32                |     | YES  | 1       | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (3, 0), (4, 1);
+
+Affected Rows: 2
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
++---+---+-------------------------+
+| h | i | j                       |
++---+---+-------------------------+
+| 0 | 1 | 1970-01-01T00:00:00     |
+| 1 | 1 | 1970-01-01T00:00:00     |
+| 2 | 1 | 1970-01-01T00:00:00.001 |
+| 3 | 1 | 1970-01-01T00:00:00     |
+| 4 | 1 | 1970-01-01T00:00:00.001 |
++---+---+-------------------------+
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i STRING;
+
+Affected Rows: 0
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (5, 0);
+
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (6, "word" ,1);
+
+Affected Rows: 1
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
++---+------+-------------------------+
+| h | i    | j                       |
++---+------+-------------------------+
+| 0 | 1    | 1970-01-01T00:00:00     |
+| 1 | 1    | 1970-01-01T00:00:00     |
+| 2 | 1    | 1970-01-01T00:00:00.001 |
+| 3 | 1    | 1970-01-01T00:00:00     |
+| 4 | 1    | 1970-01-01T00:00:00.001 |
+| 5 | 1    | 1970-01-01T00:00:00     |
+| 6 | word | 1970-01-01T00:00:00.001 |
++---+------+-------------------------+
+
+DROP TABLE test_alt_table_default_nz;
 
 Affected Rows: 0
 

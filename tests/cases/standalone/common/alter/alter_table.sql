@@ -46,9 +46,9 @@ DROP TABLE test_alt_table;
 -- test if column with default value can change type properly
 CREATE TABLE test_alt_table_default(h INTEGER, i Float64 DEFAULT 0.0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (0, 0);
+INSERT INTO test_alt_table_default (h, j) VALUES (0, 0);
 
-SELECT * FROM test_alt_table_default_nz ORDER BY h;
+SELECT * FROM test_alt_table_default ORDER BY h;
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
