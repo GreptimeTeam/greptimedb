@@ -188,6 +188,9 @@ impl MetasrvInstance {
     pub fn get_inner(&self) -> &Metasrv {
         &self.metasrv
     }
+    pub fn bind_addr(&self) -> &Option<SocketAddr> {
+        &self.bind_addr
+    }
 }
 
 pub async fn bootstrap_metasrv_with_router(
@@ -217,7 +220,7 @@ pub async fn bootstrap_metasrv_with_router(
             .await
             .inspect_err(|err| common_telemetry::error!(err;"Failed to start metasrv"))
             .context(error::StartGrpcSnafu);
-        serve_state_tx.send(result).unwrap();
+        let _ = serve_state_tx.send(result);
     });
 
     Ok(real_bind_addr)
