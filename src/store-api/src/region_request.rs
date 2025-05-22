@@ -42,9 +42,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -340,10 +340,10 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
     let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
         .with_label_values(&["decode"])
         .start_timer();
-    let mut decoder = FlightDecoder::try_from_schema_bytes(&schema).unwrap();
+    let mut decoder = FlightDecoder::try_from_schema_bytes(&schema).context(FlightCodecSnafu)?;
     let payload = decoder
         .try_decode_record_batch(&data_header, &payload)
-        .unwrap();
+        .context(FlightCodecSnafu)?;
     decoder_timer.observe_duration();
     let region_id: RegionId = region_id.into();
     Ok(vec![(
