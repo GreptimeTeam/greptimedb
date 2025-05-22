@@ -244,7 +244,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
