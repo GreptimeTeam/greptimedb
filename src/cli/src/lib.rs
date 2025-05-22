@@ -28,7 +28,7 @@ use error::Result;
 pub use crate::bench::BenchTableMetadataCommand;
 pub use crate::export::ExportCommand;
 pub use crate::import::ImportCommand;
-pub use crate::meta_snapshot::MetaSnapshotCommand;
+pub use crate::meta_snapshot::{MetaRestoreCommand, MetaSnapshotCommand};
 
 #[async_trait]
 pub trait Tool: Send + Sync {

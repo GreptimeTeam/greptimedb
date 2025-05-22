@@ -1852,6 +1852,7 @@ dependencies = [
  "futures",
  "humantime",
  "meta-client",
+ "meta-srv",
  "nu-ansi-term",
  "object-store",
  "query",
