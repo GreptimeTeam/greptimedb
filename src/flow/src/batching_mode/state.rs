@@ -71,18 +71,33 @@ impl TaskState {
         self.last_update_time = Instant::now();
     }
 
-    /// wait for at least `last_query_duration`, at most `max_timeout` to start next query
+    /// Compute the next query delay based on the time window size or the last query duration.
+    /// Aiming to avoid too frequent queries. But also not too long delay.
+    /// The delay is computed as follows:
+    /// - If `time_window_size` is set, the delay is half the time window size, constrained to be
+    ///   at least `last_query_duration` and at most `max_timeout`.
+    /// - If `time_window_size` is not set, the delay defaults to `last_query_duration`, constrained
+    ///   to be at least `MIN_REFRESH_DURATION` and at most `max_timeout`.
     ///
-    /// if have more dirty time window, exec next query immediately
+    /// If there are dirty time windows, the function returns an immediate execution time to clean them.
+    /// TODO: Make this behavior configurable.
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
+        time_window_size: &Option<Duration>,
         max_timeout: Option<Duration>,
     ) -> Instant {
-        let next_duration = max_timeout
+        let last_duration = max_timeout
             .unwrap_or(self.last_query_duration)
-            .min(self.last_query_duration);
-        let next_duration = next_duration.max(MIN_REFRESH_DURATION);
+            .min(self.last_query_duration)
+            .max(MIN_REFRESH_DURATION);
+
+        let next_duration = time_window_size
+            .map(|t| {
+                let half = t / 2;
+                half.max(last_duration)
+            })
+            .unwrap_or(last_duration);
 
         // if have dirty time window, execute immediately to clean dirty time window
         if self.dirty_time_windows.windows.is_empty() {

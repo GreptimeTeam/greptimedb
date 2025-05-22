@@ -55,6 +55,9 @@ use crate::error::{
 use crate::expr::error::DataTypeSnafu;
 use crate::Error;
 
+/// Represents a test timestamp in seconds since the Unix epoch.
+const DEFAULT_TEST_TIMESTAMP: Timestamp = Timestamp::new_second(17_0000_0000);
+
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
 /// evaluating the expr using given timestamp
 ///
@@ -70,6 +73,7 @@ pub struct TimeWindowExpr {
     pub column_name: String,
     logical_expr: Expr,
     df_schema: DFSchema,
+    eval_time_window_size: Option<std::time::Duration>,
 }
 
 impl std::fmt::Display for TimeWindowExpr {
@@ -84,6 +88,11 @@ impl std::fmt::Display for TimeWindowExpr {
 }
 
 impl TimeWindowExpr {
+    /// The time window size of the expr, get from calling `eval` with a test timestamp
+    pub fn time_window_size(&self) -> &Option<std::time::Duration> {
+        &self.eval_time_window_size
+    }
+
     pub fn from_expr(
         expr: &Expr,
         column_name: &str,
@@ -91,12 +100,28 @@ impl TimeWindowExpr {
         session: &SessionState,
     ) -> Result<Self, Error> {
         let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema, session)?;
-        Ok(Self {
+        let mut zelf = Self {
             phy_expr,
             column_name: column_name.to_string(),
             logical_expr: expr.clone(),
             df_schema: df_schema.clone(),
-        })
+            eval_time_window_size: None,
+        };
+        let test_ts = DEFAULT_TEST_TIMESTAMP;
+        let (l, u) = zelf.eval(test_ts)?;
+        let time_window_size = match (l, u) {
+            (Some(l), Some(u)) => u.sub(&l).map(|r| r.to_std()).transpose().map_err(|_| {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Expect upper bound older than lower bound, found upper={u:?} and lower={l:?}"
+                    ),
+                }
+                .build()
+            })?,
+            _ => None,
+        };
+        zelf.eval_time_window_size = time_window_size;
+        Ok(zelf)
     }
 
     pub fn eval(
