@@ -17,42 +17,82 @@ use clap::Parser;
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::rds::{MySqlStore, PgStore};
-use common_meta::kv_backend::DEFAULT_META_TABLE_NAME;
+use common_meta::kv_backend::{KvBackendRef, DEFAULT_META_TABLE_NAME};
 use common_meta::snapshot::MetadataSnapshotManager;
+use meta_srv::bootstrap::{create_etcd_client, create_mysql_pool, create_postgres_pool};
+use meta_srv::metasrv::BackendImpl;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{KVBackendNotSetSnafu, OpenDalSnafu};
+use crate::error::{KVBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
 use crate::Tool;
-
-/// Export metadata snapshot tool.
-/// This tool is used to export metadata snapshot from etcd, pg or mysql.
-/// It will dump the metadata snapshot to local file or s3 bucket.
-/// The snapshot file will be in binary format.
-/// The snapshot file will be in the format of `backup.bin`.
 #[derive(Debug, Default, Parser)]
-pub struct MetaSnapshotCommand {
-    /// Etcd address, e.g. "127.0.0.1:2379"
-    #[clap(long)]
-    etcd_addr: Option<String>,
-    /// Postgres address, e.g. "password=password dbname=postgres user=postgres host=localhost port=5432"
-    #[clap(long)]
-    pg_addr: Option<String>,
-    /// MySQL address, e.g. "mysql://user:password@ip:port/dbname"
-    #[clap(long)]
-    mysql_addr: Option<String>,
-    /// The table name to store metadata. available for pg and mysql.
-    #[clap(long)]
+struct MetaConnection {
+    /// The endpoint of store. one of etcd, pg or mysql.
+    #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
+    store_addrs: Vec<String>,
+    /// The database backend.
+    #[clap(long, value_enum)]
+    backend: Option<BackendImpl>,
+    #[clap(long, default_value = "")]
+    store_key_prefix: String,
+    #[clap(long,default_value = DEFAULT_META_TABLE_NAME)]
     meta_table_name: Option<String>,
     #[clap(long, default_value = "128")]
     max_txn_ops: Option<usize>,
-    /// The name of the target snapshot file.
-    #[clap(long, default_value = "backup.bin")]
-    file_name: Option<String>,
-    /// The directory to store the snapshot file.
-    #[clap(long, default_value = ".")]
-    output_dir: Option<String>,
+}
+
+impl MetaConnection {
+    pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
+        let max_txn_ops = self.max_txn_ops.unwrap_or(128);
+        let table_name = self
+            .meta_table_name
+            .as_deref()
+            .unwrap_or(DEFAULT_META_TABLE_NAME);
+        let store_addrs = &self.store_addrs;
+        if store_addrs.is_empty() {
+            KVBackendNotSetSnafu { backend: "all" }
+                .fail()
+                .map_err(BoxedError::new)
+        } else {
+            match self.backend {
+                Some(BackendImpl::EtcdStore) => {
+                    let etcd_client = create_etcd_client(store_addrs)
+                        .await
+                        .map_err(BoxedError::new)?;
+                    Ok(EtcdStore::with_etcd_client(
+                        etcd_client.clone(),
+                        max_txn_ops,
+                    ))
+                }
+                Some(BackendImpl::PostgresStore) => {
+                    let pool = create_postgres_pool(store_addrs)
+                        .await
+                        .map_err(BoxedError::new)?;
+                    Ok(PgStore::with_pg_pool(pool, table_name, max_txn_ops)
+                        .await
+                        .map_err(BoxedError::new)?)
+                }
+                Some(BackendImpl::MysqlStore) => {
+                    let pool = create_mysql_pool(store_addrs)
+                        .await
+                        .map_err(BoxedError::new)?;
+
+                    Ok(MySqlStore::with_mysql_pool(pool, table_name, max_txn_ops)
+                        .await
+                        .map_err(BoxedError::new)?)
+                }
+                _ => KVBackendNotSetSnafu { backend: "all" }
+                    .fail()
+                    .map_err(BoxedError::new),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default, Parser)]
+struct S3Config {
     /// weather to use s3 as the output directory. default is false.
     #[clap(long, default_value = "false")]
     s3: bool,
@@ -76,70 +116,157 @@ pub struct MetaSnapshotCommand {
     s3_root: Option<String>,
 }
 
+impl S3Config {
+    pub fn build(&self, root: &str) -> Result<Option<ObjectStore>, BoxedError> {
+        if !self.s3 {
+            Ok(None)
+        } else {
+            if self.s3_region.is_none()
+                || self.s3_access_key.is_none()
+                || self.s3_secret_key.is_none()
+                || self.s3_bucket.is_none()
+            {
+                return S3ConfigNotSetSnafu.fail().map_err(BoxedError::new);
+            }
+            let mut config = S3::default()
+                .bucket(self.s3_bucket.as_ref().unwrap())
+                .region(self.s3_region.as_ref().unwrap())
+                .access_key_id(self.s3_access_key.as_ref().unwrap())
+                .secret_access_key(self.s3_secret_key.as_ref().unwrap())
+                .root(root);
+
+            if let Some(endpoint) = &self.s3_endpoint {
+                config = config.endpoint(endpoint);
+            }
+            Ok(Some(
+                ObjectStore::new(config)
+                    .context(OpenDalSnafu)
+                    .map_err(BoxedError::new)?
+                    .finish(),
+            ))
+        }
+    }
+}
+
+/// Export metadata snapshot tool.
+/// This tool is used to export metadata snapshot from etcd, pg or mysql.
+/// It will dump the metadata snapshot to local file or s3 bucket.
+/// The snapshot file will be in binary format.
+#[derive(Debug, Default, Parser)]
+pub struct MetaSnapshotCommand {
+    /// The connection to the metadata store.
+    #[clap(flatten)]
+    connection: MetaConnection,
+    /// The s3 config.
+    #[clap(flatten)]
+    s3_config: S3Config,
+    /// The name of the target snapshot file.
+    #[clap(long, default_value = "backup.bin")]
+    file_name: String,
+    /// The directory to store the snapshot file.
+    #[clap(long, default_value = ".")]
+    output_dir: Option<String>,
+}
+
+fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError> {
+    let object_store = ObjectStore::new(Fs::default().root(root))
+        .context(OpenDalSnafu)
+        .map_err(BoxedError::new)?
+        .finish();
+    Ok(object_store)
+}
+
 impl MetaSnapshotCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        let max_txn_ops = self.max_txn_ops.unwrap_or(128);
-        let table_name = self
-            .meta_table_name
-            .as_ref()
-            .map(|n| n.as_str())
-            .unwrap_or(DEFAULT_META_TABLE_NAME);
-        let kvbackend = if let Some(etcd_addr) = &self.etcd_addr {
-            let addr = etcd_addr.split(',').collect::<Vec<_>>();
-            if addr.is_empty() {
-                return KVBackendNotSetSnafu { backend: "etcd" }
-                    .fail()
-                    .map_err(BoxedError::new);
-            }
-            EtcdStore::with_endpoints(addr, max_txn_ops)
-                .await
-                .map_err(BoxedError::new)?
-        } else if let Some(pg_addr) = &self.pg_addr {
-            // Initialize PgStore
-            // ...
-            PgStore::with_url(pg_addr, table_name, max_txn_ops)
-                .await
-                .map_err(BoxedError::new)?
-        } else if let Some(mysql_addr) = &self.mysql_addr {
-            MySqlStore::with_url(mysql_addr, table_name, max_txn_ops)
-                .await
-                .map_err(BoxedError::new)?
+        let kvbackend = self.connection.build().await?;
+        let output_dir = self.output_dir.clone().unwrap_or_default();
+        let object_store = self.s3_config.build(&output_dir).map_err(BoxedError::new)?;
+        if let Some(store) = object_store {
+            let tool = MetaSnapshotTool {
+                inner: MetadataSnapshotManager::new(kvbackend, store),
+                target_file: self.file_name.clone(),
+            };
+            Ok(Box::new(tool))
         } else {
-            return KVBackendNotSetSnafu { backend: "etcd" }
-                .fail()
-                .map_err(BoxedError::new);
-        };
-
-        let output_dir = self.output_dir.clone().unwrap_or_else(|| ".".to_string());
-        let tool = if self.s3 {
-            let operator = ObjectStore::new(S3::default().root(&output_dir))
-                .context(OpenDalSnafu)
-                .map_err(BoxedError::new)?
-                .finish();
-            Box::new(MetaSnapshotTool {
-                inner: MetadataSnapshotManager::new(kvbackend, operator),
-            })
-        } else {
-            let operator = ObjectStore::new(Fs::default().root(&output_dir))
-                .context(OpenDalSnafu)
-                .map_err(BoxedError::new)?
-                .finish();
-            Box::new(MetaSnapshotTool {
-                inner: MetadataSnapshotManager::new(kvbackend, operator),
-            })
-        };
-        Ok(tool)
+            let object_store = create_local_file_object_store(&output_dir)?;
+            let tool = MetaSnapshotTool {
+                inner: MetadataSnapshotManager::new(kvbackend, object_store),
+                target_file: self.file_name.clone(),
+            };
+            Ok(Box::new(tool))
+        }
     }
 }
 
 pub struct MetaSnapshotTool {
     inner: MetadataSnapshotManager,
+    target_file: String,
 }
 
 #[async_trait]
 impl Tool for MetaSnapshotTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
-        self.inner.dump("/", "").await.map_err(BoxedError::new)?;
+        self.inner
+            .dump("", &self.target_file)
+            .await
+            .map_err(BoxedError::new)?;
+        Ok(())
+    }
+}
+
+/// Restore metadata snapshot tool.
+/// This tool is used to restore metadata snapshot from etcd, pg or mysql.
+/// It will restore the metadata snapshot from local file or s3 bucket.
+#[derive(Debug, Default, Parser)]
+pub struct MetaRestoreCommand {
+    /// The connection to the metadata store.
+    #[clap(flatten)]
+    connection: MetaConnection,
+    /// The s3 config.
+    #[clap(flatten)]
+    s3_config: S3Config,
+    /// The name of the target snapshot file.
+    #[clap(long, default_value = "metadata_snapshot")]
+    file_name: String,
+    /// The directory to store the snapshot file.
+    #[clap(long, default_value = ".")]
+    input_dir: Option<String>,
+}
+
+impl MetaRestoreCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        let kvbackend = self.connection.build().await?;
+        let input_dir = self.input_dir.clone().unwrap_or_default();
+        let object_store = self.s3_config.build(&input_dir).map_err(BoxedError::new)?;
+        if let Some(store) = object_store {
+            let tool = MetaRestoreTool {
+                inner: MetadataSnapshotManager::new(kvbackend, store),
+                source_file: self.file_name.clone(),
+            };
+            Ok(Box::new(tool))
+        } else {
+            let object_store = create_local_file_object_store(&input_dir)?;
+            let tool = MetaRestoreTool {
+                inner: MetadataSnapshotManager::new(kvbackend, object_store),
+                source_file: self.file_name.clone(),
+            };
+            Ok(Box::new(tool))
+        }
+    }
+}
+
+pub struct MetaRestoreTool {
+    inner: MetadataSnapshotManager,
+    source_file: String,
+}
+
+#[async_trait]
+impl Tool for MetaRestoreTool {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        self.inner
+            .restore(&self.source_file)
+            .await
+            .map_err(BoxedError::new)?;
         Ok(())
     }
 }
