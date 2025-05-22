@@ -49,6 +49,7 @@ ADMIN FLUSH_FLOW('calc_access_log_10s');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- query should return 3 rows
 -- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window FROM access_log_10s
@@ -162,6 +163,7 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, `percentile_state`) AS p99
@@ -258,6 +260,7 @@ ADMIN FLUSH_FLOW('calc_percentile_5s');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_percentile_10s');
 
@@ -267,6 +270,7 @@ ADMIN FLUSH_FLOW('calc_percentile_10s');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, percentile_state) AS p99

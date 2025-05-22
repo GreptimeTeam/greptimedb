@@ -43,6 +43,7 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 |  FLOW_FLUSHED  |
 +----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- SQLNESS ARG restart=true
 SELECT 1;
 

@@ -19,6 +19,7 @@ SHOW CREATE TABLE out_num_cnt_basic;
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
+-- SQLNESS SLEEP 1s
 -- SQLNESS ARG restart=true
 SELECT 1;
 

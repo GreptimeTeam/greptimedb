@@ -38,6 +38,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_avg_speed');
 
+-- SQLNESS SLEEP 1s
 SELECT
     avg_speed,
     start_window
@@ -53,6 +54,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_avg_speed');
 
+-- SQLNESS SLEEP 1s
 SELECT
     avg_speed,
     start_window

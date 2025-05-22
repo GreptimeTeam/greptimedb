@@ -35,6 +35,7 @@ INSERT INTO access_log VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_access_log_10s');
 
+-- SQLNESS SLEEP 1s
 -- query should return 3 rows
 -- SQLNESS SORT_RESULT 3 1
 SELECT "url", time_window FROM access_log_10s
@@ -103,6 +104,7 @@ INSERT INTO percentile_base ("id", "value", ts) VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_percentile_5s');
 
+-- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, `percentile_state`) AS p99
@@ -166,9 +168,11 @@ INSERT INTO percentile_base ("id", "value", ts) VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_percentile_5s');
 
+-- SQLNESS SLEEP 1s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_percentile_10s');
 
+-- SQLNESS SLEEP 1s
 SELECT
     time_window,
     uddsketch_calc(0.99, percentile_state) AS p99

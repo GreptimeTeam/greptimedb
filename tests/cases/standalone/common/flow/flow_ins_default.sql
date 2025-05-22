@@ -30,6 +30,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
+-- SQLNESS SLEEP 1s
 -- since ts is default to now(), omit it when querying
 SELECT
     rate
