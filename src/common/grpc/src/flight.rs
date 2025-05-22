@@ -132,20 +132,20 @@ pub struct FlightDecoder {
 
 impl FlightDecoder {
     /// Build a [FlightDecoder] instance from provided schema bytes.
-    pub fn try_from_schema_bytes(schema_bytes: bytes::Bytes) -> Result<Self> {
+    pub fn try_from_schema_bytes(schema_bytes: &bytes::Bytes) -> Result<Self> {
         let arrow_schema = convert::try_schema_from_flatbuffer_bytes(&schema_bytes[..])
             .context(error::ArrowSnafu)?;
         let schema = Arc::new(Schema::try_from(arrow_schema).context(ConvertArrowSchemaSnafu)?);
         Ok(Self {
             schema: Some(schema),
-            schema_bytes: Some(schema_bytes),
+            schema_bytes: Some(schema_bytes.clone()),
         })
     }
 
     pub fn try_decode_record_batch(
         &mut self,
-        data_header: bytes::Bytes,
-        data_body: bytes::Bytes,
+        data_header: &bytes::Bytes,
+        data_body: &bytes::Bytes,
     ) -> Result<DfRecordBatch> {
         let schema = self
             .schema
