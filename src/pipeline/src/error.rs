@@ -412,13 +412,6 @@ pub enum Error {
         location: Location,
     },
     #[snafu(display(
-        "At least one timestamp-related processor is required to use auto transform"
-    ))]
-    TransformNoTimestampProcessor {
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display(
         "Illegal to set multiple timestamp Index columns, please set only one: {columns}"
     ))]
     TransformMultipleTimestampIndex {
@@ -433,7 +426,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Exactly one timestamp value is required to use auto transform"))]
+    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform"))]
     AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
@@ -813,7 +806,6 @@ impl ErrorExt for Error {
             | TransformTypeMustBeSet { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
-            | TransformNoTimestampProcessor { .. }
             | TransformTimestampIndexCount { .. }
             | AutoTransformOneTimestamp { .. }
             | CoerceUnsupportedNullType { .. }

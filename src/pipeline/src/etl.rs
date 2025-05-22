@@ -29,8 +29,8 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
-    TransformNoTimestampProcessorSnafu, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
+    YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::tablesuffix::TableSuffixTemplate;
@@ -79,16 +79,14 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 // check processors have at least one timestamp-related processor
                 let cnt = processors
                     .iter()
-                    .filter(|p| {
-                        matches!(
-                            p,
-                            ProcessorKind::Date(_)
-                                | ProcessorKind::Timestamp(_)
-                                | ProcessorKind::Epoch(_)
-                        )
+                    .filter_map(|p| match p {
+                        ProcessorKind::Date(d) => Some(d.target_count()),
+                        ProcessorKind::Timestamp(t) => Some(t.target_count()),
+                        ProcessorKind::Epoch(e) => Some(e.target_count()),
+                        _ => None,
                     })
-                    .count();
-                ensure!(cnt > 0, TransformNoTimestampProcessorSnafu);
+                    .sum::<usize>();
+                ensure!(cnt == 1, AutoTransformOneTimestampSnafu);
                 None
             } else {
                 Some(GreptimeTransformer::new(transformers)?)

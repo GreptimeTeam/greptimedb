@@ -205,6 +205,10 @@ impl TimestampProcessor {
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
+
+    pub(crate) fn target_count(&self) -> usize {
+        self.fields.len()
+    }
 }
 
 fn parse_formats(yaml: &yaml_rust::yaml::Yaml) -> Result<Vec<(Arc<String>, Tz)>> {
