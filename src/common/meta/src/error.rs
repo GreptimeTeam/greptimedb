@@ -857,13 +857,6 @@ pub enum Error {
         reason: String,
     },
 
-    #[snafu(display("Invalid file context: {}", reason))]
-    InvalidFileContext {
-        #[snafu(implicit)]
-        location: Location,
-        reason: String,
-    },
-
     #[snafu(display("Failed to write object, file path: {}", file_path))]
     WriteObject {
         #[snafu(implicit)]
@@ -940,8 +933,7 @@ impl ErrorExt for Error {
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
-            | DeserializeFlexbuffers { .. }
-            | InvalidFileContext { .. } => StatusCode::Unexpected,
+            | DeserializeFlexbuffers { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
