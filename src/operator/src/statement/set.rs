@@ -125,6 +125,10 @@ pub fn set_search_path(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
             ctx.set_current_schema(&search_path.clone());
             Ok(())
         }
+        Expr::Identifier(Ident { value, .. }) => {
+            ctx.set_current_schema(&value.clone());
+            Ok(())
+        }
         expr => NotSupportedSnafu {
             feat: format!(
                 "Unsupported search path expr {} in set variable statement",
