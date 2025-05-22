@@ -337,20 +337,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Flow (flow_id={}, partition_id={}) not exist on flownode {}",
-        flow_id,
-        partition_id,
-        flownode_id
-    ))]
-    FlowNotExistOnFlownode {
-        #[snafu(implicit)]
-        location: Location,
-        flow_id: FlowId,
-        partition_id: FlowPartitionId,
-        flownode_id: FlownodeId,
-    },
-
     #[snafu(display("Schema already exists, catalog:{}, schema: {}", catalog, schema))]
     SchemaAlreadyExists {
         catalog: String,
@@ -900,9 +886,7 @@ impl ErrorExt for Error {
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
             | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } | FlowNotExistOnFlownode { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
