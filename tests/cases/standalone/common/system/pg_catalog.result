@@ -53,6 +53,11 @@ set search_path to 'public';
 Affected Rows: 0
 
 -- SQLNESS PROTOCOL POSTGRES
+set search_path = public;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
 select current_schema();
 
 +------------------+
