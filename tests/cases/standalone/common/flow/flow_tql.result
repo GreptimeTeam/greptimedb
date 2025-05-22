@@ -1,0 +1,172 @@
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val BIGINT,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE cnt_reqs;
+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" BIGINT NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" BIGINT NULL,              |
+|          |   "update_at" TIMESTAMP(3) NULL,          |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
+
+INSERT INTO TABLE http_requests VALUES
+    (now() - '17s'::interval, 'host1', 'idc1', 200),
+    (now() - '17s'::interval, 'host2', 'idc1', 200),
+    (now() - '17s'::interval, 'host3', 'idc2', 200),
+    (now() - '17s'::interval, 'host4', 'idc2', 401),
+    (now() - '13s'::interval, 'host1', 'idc1', 404),
+    (now() - '13s'::interval, 'host2', 'idc1', 401),
+    (now() - '13s'::interval, 'host3', 'idc2', 404),
+    (now() - '13s'::interval, 'host4', 'idc2', 500),
+    (now() - '7s'::interval, 'host1', 'idc1', 200),
+    (now() - '7s'::interval, 'host2', 'idc1', 200),
+    (now() - '7s'::interval, 'host3', 'idc2', 201),
+    (now() - '7s'::interval, 'host4', 'idc2', 201),
+    (now() - '3s'::interval, 'host1', 'idc1', 500),
+    (now() - '3s'::interval, 'host2', 'idc1', 500),
+    (now() - '3s'::interval, 'host3', 'idc2', 500),
+    (now() - '3s'::interval, 'host4', 'idc2', 500);
+
+Affected Rows: 16
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_reqs');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_reqs') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+-- too much indeterminsticity in the test, so just check that the flow is running
+SELECT count(*) > 0 FROM cnt_reqs;
+
++---------------------+
+| count(*) > Int64(0) |
++---------------------+
+| true                |
++---------------------+
+
+DROP FLOW calc_reqs;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE cnt_reqs;
+
+Affected Rows: 0
+
+CREATE TABLE http_requests (
+  ts timestamp(3) time index,
+  host STRING,
+  idc STRING,
+  val BIGINT,
+  PRIMARY KEY(host, idc),
+);
+
+Affected Rows: 0
+
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE cnt_reqs;
+
++----------+-------------------------------------------+
+| Table    | Create Table                              |
++----------+-------------------------------------------+
+| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
+|          |   "count(http_requests.val)" BIGINT NULL, |
+|          |   "ts" TIMESTAMP(3) NOT NULL,             |
+|          |   "status_code" BIGINT NULL,              |
+|          |   "update_at" TIMESTAMP(3) NULL,          |
+|          |   TIME INDEX ("ts"),                      |
+|          |   PRIMARY KEY ("status_code")             |
+|          | )                                         |
+|          |                                           |
+|          | ENGINE=mito                               |
+|          |                                           |
++----------+-------------------------------------------+
+
+INSERT INTO TABLE http_requests VALUES
+    (0::Timestamp, 'host1', 'idc1', 200),
+    (0::Timestamp, 'host2', 'idc1', 200),
+    (0::Timestamp, 'host3', 'idc2', 200),
+    (0::Timestamp, 'host4', 'idc2', 401),
+    (5000::Timestamp, 'host1', 'idc1', 404),
+    (5000::Timestamp, 'host2', 'idc1', 401),
+    (5000::Timestamp, 'host3', 'idc2', 404),
+    (5000::Timestamp, 'host4', 'idc2', 500),
+    (10000::Timestamp, 'host1', 'idc1', 200),
+    (10000::Timestamp, 'host2', 'idc1', 200),
+    (10000::Timestamp, 'host3', 'idc2', 201),
+    (10000::Timestamp, 'host4', 'idc2', 201),
+    (15000::Timestamp, 'host1', 'idc1', 500),
+    (15000::Timestamp, 'host2', 'idc1', 500),
+    (15000::Timestamp, 'host3', 'idc2', 500),
+    (15000::Timestamp, 'host4', 'idc2', 500);
+
+Affected Rows: 16
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('calc_reqs');
+
++-------------------------------+
+| ADMIN FLUSH_FLOW('calc_reqs') |
++-------------------------------+
+|  FLOW_FLUSHED  |
++-------------------------------+
+
+SELECT "count(http_requests.val)", ts, status_code FROM cnt_reqs ORDER BY ts, status_code;
+
++--------------------------+---------------------+-------------+
+| count(http_requests.val) | ts                  | status_code |
++--------------------------+---------------------+-------------+
+| 3                        | 1970-01-01T00:00:00 | 200         |
+| 1                        | 1970-01-01T00:00:00 | 401         |
+| 1                        | 1970-01-01T00:00:05 | 401         |
+| 2                        | 1970-01-01T00:00:05 | 404         |
+| 1                        | 1970-01-01T00:00:05 | 500         |
+| 2                        | 1970-01-01T00:00:10 | 200         |
+| 2                        | 1970-01-01T00:00:10 | 201         |
+| 4                        | 1970-01-01T00:00:15 | 500         |
++--------------------------+---------------------+-------------+
+
+DROP FLOW calc_reqs;
+
+Affected Rows: 0
+
+DROP TABLE http_requests;
+
+Affected Rows: 0
+
+DROP TABLE cnt_reqs;
+
+Affected Rows: 0
+

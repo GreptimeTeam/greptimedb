@@ -195,6 +195,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid flow query: {}", reason))]
+    InvalidFlowQuery {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid default constraint, column: {}", column))]
     InvalidDefault {
         column: String,
@@ -390,6 +397,7 @@ impl ErrorExt for Error {
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidFlowName { .. }
+            | InvalidFlowQuery { .. }
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
             | InvalidTableOption { .. }

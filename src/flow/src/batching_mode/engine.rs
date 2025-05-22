@@ -312,7 +312,7 @@ impl BatchingEngine {
                 .unwrap_or("None".to_string())
         );
 
-        let task = BatchingTask::new(
+        let task = BatchingTask::try_new(
             flow_id,
             &sql,
             plan,
@@ -323,7 +323,7 @@ impl BatchingEngine {
             query_ctx,
             self.catalog_manager.clone(),
             rx,
-        );
+        )?;
 
         let task_inner = task.clone();
         let engine = self.query_engine.clone();

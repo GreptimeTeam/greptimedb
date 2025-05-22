@@ -55,7 +55,7 @@ pub use show_create_table::create_table_stmt;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::parser::ParserContext;
-use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions};
+use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
     ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowTableStatus,
     ShowTables, ShowVariables, ShowViews,
@@ -958,7 +958,15 @@ pub fn show_create_flow(
     let mut parser_ctx =
         ParserContext::new(query_ctx.sql_dialect(), flow_val.raw_sql()).context(error::SqlSnafu)?;
 
-    let query = parser_ctx.parser_query().context(error::SqlSnafu)?;
+    let query = parser_ctx.parse_statement().context(error::SqlSnafu)?;
+
+    // since prom ql will parse `now()` to a fixed time, we need to not use it for generating raw query
+    let raw_query = match &query {
+        Statement::Tql(_) => flow_val.raw_sql().clone(),
+        _ => query.to_string(),
+    };
+
+    let query = Box::new(SqlOrTql::try_from_statement(query, &raw_query).context(error::SqlSnafu)?);
 
     let comment = if flow_val.comment().is_empty() {
         None

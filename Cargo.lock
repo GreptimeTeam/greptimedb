@@ -4352,6 +4352,7 @@ dependencies = [
  "session",
  "smallvec",
  "snafu 0.8.5",
+ "sql",
  "store-api",
  "strum 0.27.1",
  "substrait 0.15.0",
