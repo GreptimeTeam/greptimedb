@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true
+bytes = "1.10"
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -30,7 +31,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tower.workspace = true
-bytes = "1.10"
 
 [dev-dependencies]
 criterion = "0.4"
