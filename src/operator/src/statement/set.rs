@@ -122,11 +122,11 @@ pub fn set_search_path(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     match search_expr {
         Expr::Value(Value::SingleQuotedString(search_path))
         | Expr::Value(Value::DoubleQuotedString(search_path)) => {
-            ctx.set_current_schema(&search_path.clone());
+            ctx.set_current_schema(search_path);
             Ok(())
         }
         Expr::Identifier(Ident { value, .. }) => {
-            ctx.set_current_schema(&value.clone());
+            ctx.set_current_schema(value);
             Ok(())
         }
         expr => NotSupportedSnafu {
