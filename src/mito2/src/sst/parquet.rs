@@ -102,7 +102,7 @@ mod tests {
     use crate::access_layer::FilePathProvider;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::sst::index::{Indexer, IndexerBuilder};
-    use crate::sst::parquet::format::WriteFormat;
+    use crate::sst::parquet::format::PrimaryKeyWriteFormat;
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
@@ -468,7 +468,7 @@ mod tests {
 
         let writer_props = props_builder.build();
 
-        let write_format = WriteFormat::new(metadata);
+        let write_format = PrimaryKeyWriteFormat::new(metadata);
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()
