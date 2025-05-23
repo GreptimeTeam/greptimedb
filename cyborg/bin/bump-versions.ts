@@ -38,7 +38,7 @@ const REPO_CONFIGS: Record<string, RepoConfig> = {
   },
   demo: {
     tokenEnv: "DEMO_REPO_TOKEN",
-    repo: "demo",
+    repo: "demo-scene",
     workflowLogic: (version: string) => {
       // Skip nightly versions for demo
       if (version.includes('nightly')) {
