@@ -465,7 +465,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
           DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
-
+          DEMO_REPO_TOKEN: ${{ secrets.DEMO_REPO_TOKEN }}
 
   bump-helm-charts-version:
     name: Bump helm charts version
