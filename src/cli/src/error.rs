@@ -239,7 +239,7 @@ pub enum Error {
         location: Location,
     },
     #[snafu(display("KV backend not set: {}", backend))]
-    KVBackendNotSet {
+    KvBackendNotSet {
         backend: String,
         #[snafu(implicit)]
         location: Location,
@@ -282,7 +282,7 @@ impl ErrorExt for Error {
             Error::OpenDal { .. } => StatusCode::Internal,
             Error::S3ConfigNotSet { .. }
             | Error::OutputDirNotSet { .. }
-            | Error::KVBackendNotSet { .. } => StatusCode::InvalidArguments,
+            | Error::KvBackendNotSet { .. } => StatusCode::InvalidArguments,
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 

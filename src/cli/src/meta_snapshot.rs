@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -28,7 +29,7 @@ use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{KVBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
+use crate::error::{KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
 use crate::Tool;
 #[derive(Debug, Default, Parser)]
 struct MetaConnection {
@@ -41,21 +42,18 @@ struct MetaConnection {
     #[clap(long, default_value = "")]
     store_key_prefix: String,
     #[clap(long,default_value = DEFAULT_META_TABLE_NAME)]
-    meta_table_name: Option<String>,
+    meta_table_name: String,
     #[clap(long, default_value = "128")]
-    max_txn_ops: Option<usize>,
+    max_txn_ops: usize,
 }
 
 impl MetaConnection {
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
-        let max_txn_ops = self.max_txn_ops.unwrap_or(128);
-        let table_name = self
-            .meta_table_name
-            .as_deref()
-            .unwrap_or(DEFAULT_META_TABLE_NAME);
+        let max_txn_ops = self.max_txn_ops;
+        let table_name = &self.meta_table_name;
         let store_addrs = &self.store_addrs;
         if store_addrs.is_empty() {
-            KVBackendNotSetSnafu { backend: "all" }
+            KvBackendNotSetSnafu { backend: "all" }
                 .fail()
                 .map_err(BoxedError::new)
         } else {
@@ -64,10 +62,7 @@ impl MetaConnection {
                     let etcd_client = create_etcd_client(store_addrs)
                         .await
                         .map_err(BoxedError::new)?;
-                    Ok(EtcdStore::with_etcd_client(
-                        etcd_client.clone(),
-                        max_txn_ops,
-                    ))
+                    Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
                 }
                 Some(BackendImpl::PostgresStore) => {
                     let pool = create_postgres_pool(store_addrs)
@@ -85,7 +80,7 @@ impl MetaConnection {
                         .await
                         .map_err(BoxedError::new)?)
                 }
-                _ => KVBackendNotSetSnafu { backend: "all" }
+                _ => KvBackendNotSetSnafu { backend: "all" }
                     .fail()
                     .map_err(BoxedError::new),
             };
@@ -113,10 +108,10 @@ struct S3Config {
     s3_region: Option<String>,
     /// The s3 access key.
     #[clap(long)]
-    s3_access_key: Option<String>,
+    s3_access_key: Option<SecretString>,
     /// The s3 secret key.
     #[clap(long)]
-    s3_secret_key: Option<String>,
+    s3_secret_key: Option<SecretString>,
     /// The s3 endpoint.
     #[clap(long)]
     s3_endpoint: Option<String>,
@@ -137,11 +132,12 @@ impl S3Config {
             {
                 return S3ConfigNotSetSnafu.fail().map_err(BoxedError::new);
             }
+            // Safety, unwrap is safe because we have checked the options above.
             let mut config = S3::default()
                 .bucket(self.s3_bucket.as_ref().unwrap())
                 .region(self.s3_region.as_ref().unwrap())
-                .access_key_id(self.s3_access_key.as_ref().unwrap())
-                .secret_access_key(self.s3_secret_key.as_ref().unwrap())
+                .access_key_id(self.s3_access_key.as_ref().unwrap().expose_secret())
+                .secret_access_key(self.s3_secret_key.as_ref().unwrap().expose_secret())
                 .root(root);
 
             if let Some(endpoint) = &self.s3_endpoint {
@@ -174,7 +170,7 @@ pub struct MetaSnapshotCommand {
     file_name: String,
     /// The directory to store the snapshot file.
     #[clap(long, default_value = ".")]
-    output_dir: Option<String>,
+    output_dir: String,
 }
 
 fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError> {
@@ -188,8 +184,8 @@ fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError>
 impl MetaSnapshotCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.connection.build().await?;
-        let output_dir = self.output_dir.clone().unwrap_or_default();
-        let object_store = self.s3_config.build(&output_dir).map_err(BoxedError::new)?;
+        let output_dir = &self.output_dir;
+        let object_store = self.s3_config.build(output_dir).map_err(BoxedError::new)?;
         if let Some(store) = object_store {
             let tool = MetaSnapshotTool {
                 inner: MetadataSnapshotManager::new(kvbackend, store),
@@ -197,7 +193,7 @@ impl MetaSnapshotCommand {
             };
             Ok(Box::new(tool))
         } else {
-            let object_store = create_local_file_object_store(&output_dir)?;
+            let object_store = create_local_file_object_store(output_dir)?;
             let tool = MetaSnapshotTool {
                 inner: MetadataSnapshotManager::new(kvbackend, object_store),
                 target_file: self.file_name.clone(),
@@ -239,26 +235,30 @@ pub struct MetaRestoreCommand {
     file_name: String,
     /// The directory to store the snapshot file.
     #[clap(long, default_value = ".")]
-    input_dir: Option<String>,
+    input_dir: String,
+    #[clap(long, default_value = "false")]
+    force: bool,
 }
 
 impl MetaRestoreCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.connection.build().await?;
-        let input_dir = self.input_dir.clone().unwrap_or_default();
-        let object_store = self.s3_config.build(&input_dir).map_err(BoxedError::new)?;
+        let input_dir = &self.input_dir;
+        let object_store = self.s3_config.build(input_dir).map_err(BoxedError::new)?;
         if let Some(store) = object_store {
-            let tool = MetaRestoreTool {
-                inner: MetadataSnapshotManager::new(kvbackend, store),
-                source_file: self.file_name.clone(),
-            };
+            let tool = MetaRestoreTool::new(
+                MetadataSnapshotManager::new(kvbackend, store),
+                self.file_name.clone(),
+                self.force,
+            );
             Ok(Box::new(tool))
         } else {
-            let object_store = create_local_file_object_store(&input_dir)?;
-            let tool = MetaRestoreTool {
-                inner: MetadataSnapshotManager::new(kvbackend, object_store),
-                source_file: self.file_name.clone(),
-            };
+            let object_store = create_local_file_object_store(input_dir)?;
+            let tool = MetaRestoreTool::new(
+                MetadataSnapshotManager::new(kvbackend, object_store),
+                self.file_name.clone(),
+                self.force,
+            );
             Ok(Box::new(tool))
         }
     }
@@ -267,11 +267,37 @@ impl MetaRestoreCommand {
 pub struct MetaRestoreTool {
     inner: MetadataSnapshotManager,
     source_file: String,
+    force: bool,
+}
+
+impl MetaRestoreTool {
+    pub fn new(inner: MetadataSnapshotManager, source_file: String, force: bool) -> Self {
+        Self {
+            inner,
+            source_file,
+            force,
+        }
+    }
 }
 
 #[async_trait]
 impl Tool for MetaRestoreTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        if !self.force {
+            let clean = self
+                .inner
+                .check_target_srouce_clean()
+                .await
+                .map_err(BoxedError::new)?;
+            if clean {
+                common_telemetry::info!(
+                    "The target source is clean, we will restore the metadata snapshot."
+                );
+            } else {
+                common_telemetry::info!("The target source is not clean, restore will be skipped. you can use --force to force restore.");
+                return Ok(());
+            }
+        }
         self.inner
             .restore(&self.source_file)
             .await
