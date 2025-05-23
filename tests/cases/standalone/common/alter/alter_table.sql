@@ -116,25 +116,33 @@ DROP TABLE test_alt_table_default_nz;
 -- test alter table type will cause wired behavior due to CompatBatch
 CREATE TABLE test_alt_table_col_ty(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
-INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (0, 0.2, 0);
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (0, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (1, 0.2, 0);
 
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i BOOLEAN;
 
-INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (1, TRUE, 0);
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (2, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (3, TRUE, 0);
 
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i INTEGER;
 
-INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (2, 42, 0);
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (4, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (5, 42, 0);
 
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i STRING;
 
-INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (3, "how many roads must a man walk down before they call him a man", 0);
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (6, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (7, "how many roads must a man walk down before they call him a man", 0);
 
 -- here see 0.0 is converted to "0.0" since underlying column data is unchanged
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
