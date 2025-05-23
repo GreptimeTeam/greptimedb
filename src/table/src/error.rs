@@ -194,8 +194,8 @@ impl ErrorExt for Error {
             }
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
-            | Error::InvalidAlterRequest { .. }
-            | Error::CastDefaultValue { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
+            Error::CastDefaultValue { source, .. } => source.status_code(),
             Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } | Error::SetFulltextOptions { source, .. } => {
