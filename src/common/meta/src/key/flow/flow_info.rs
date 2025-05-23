@@ -153,6 +153,15 @@ impl FlowInfoValue {
         &self.flownode_ids
     }
 
+    /// Insert a new flownode id for a partition.
+    pub fn insert_flownode_id(
+        &mut self,
+        partition: FlowPartitionId,
+        node: FlownodeId,
+    ) -> Option<FlownodeId> {
+        self.flownode_ids.insert(partition, node)
+    }
+
     /// Returns the `source_table`.
     pub fn source_table_ids(&self) -> &[TableId] {
         &self.source_table_ids

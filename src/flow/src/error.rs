@@ -321,8 +321,8 @@ impl ErrorExt for Error {
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
-            | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
+            Self::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
             Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
