@@ -166,6 +166,17 @@ impl FlownodeFlowManager {
         Self { kv_backend }
     }
 
+    /// Whether given flow exist on this flownode.
+    pub async fn exists(
+        &self,
+        flownode_id: FlownodeId,
+        flow_id: FlowId,
+        partition_id: FlowPartitionId,
+    ) -> Result<bool> {
+        let key = FlownodeFlowKey::new(flownode_id, flow_id, partition_id).to_bytes();
+        Ok(self.kv_backend.get(&key).await?.is_some())
+    }
+
     /// Retrieves all [FlowId] and [FlowPartitionId]s of the specified `flownode_id`.
     pub fn flows(
         &self,

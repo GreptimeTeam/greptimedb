@@ -818,9 +818,17 @@ fn to_meta_err(
     location: snafu::Location,
 ) -> impl FnOnce(crate::error::Error) -> common_meta::error::Error {
     move |err: crate::error::Error| -> common_meta::error::Error {
-        common_meta::error::Error::External {
-            location,
-            source: BoxedError::new(err),
+        match err {
+            crate::error::Error::FlowNotFound { id, .. } => {
+                common_meta::error::Error::FlowNotFound {
+                    flow_name: format!("flow_id={id}"),
+                    location,
+                }
+            }
+            _ => common_meta::error::Error::External {
+                location,
+                source: BoxedError::new(err),
+            },
         }
     }
 }

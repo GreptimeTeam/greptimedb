@@ -45,7 +45,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::BatchDeleteRequest;
 
 /// The key of `__flow/` scope.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FlowScoped<T> {
     inner: T,
 }

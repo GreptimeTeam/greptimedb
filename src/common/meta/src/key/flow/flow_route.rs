@@ -42,7 +42,7 @@ lazy_static! {
 /// The key stores the route info of the flow.
 ///
 /// The layout: `__flow/route/{flow_id}/{partition_id}`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FlowRouteKey(FlowScoped<FlowRouteKeyInner>);
 
 impl FlowRouteKey {
@@ -143,6 +143,12 @@ impl<'a> MetadataKey<'a, FlowRouteKeyInner> for FlowRouteKeyInner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowRouteValue {
     pub(crate) peer: Peer,
+}
+
+impl From<Peer> for FlowRouteValue {
+    fn from(peer: Peer) -> Self {
+        Self { peer }
+    }
 }
 
 impl FlowRouteValue {
