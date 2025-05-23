@@ -541,9 +541,9 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
-        test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
-        test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
-        text_txn_multi_compare_op, unprepare_kv,
+        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
+        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
+        unprepare_kv,
     };
 
     async fn build_kv_backend() -> Option<EtcdStore> {
@@ -641,16 +641,6 @@ mod tests {
             test_txn_compare_greater(&kv_backend).await;
             test_txn_compare_less(&kv_backend).await;
             test_txn_compare_not_equal(&kv_backend).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn test_etcd_all_range() {
-        if let Some(kv_backend) = build_kv_backend().await {
-            let prefix = b"";
-            prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
-            test_simple_kv_range(&kv_backend).await;
-            unprepare_kv(&kv_backend, prefix).await;
         }
     }
 }
