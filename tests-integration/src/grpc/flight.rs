@@ -59,10 +59,10 @@ mod test {
         let record_batches = create_record_batches(1);
         test_put_record_batches(&client, record_batches).await;
 
-        let sql = "select ts, a, b from foo order by ts";
+        let sql = "select ts, a, `B` from foo order by ts";
         let expected = "\
 +-------------------------+----+----+
-| ts                      | a  | b  |
+| ts                      | a  | B  |
 +-------------------------+----+----+
 | 1970-01-01T00:00:00.001 | -1 | s1 |
 | 1970-01-01T00:00:00.002 | -2 | s2 |
@@ -116,10 +116,10 @@ mod test {
         let record_batches = create_record_batches(1);
         test_put_record_batches(&client, record_batches).await;
 
-        let sql = "select ts, a, b from foo order by ts";
+        let sql = "select ts, a, `B` from foo order by ts";
         let expected = "\
 +-------------------------+----+----+
-| ts                      | a  | b  |
+| ts                      | a  | B  |
 +-------------------------+----+----+
 | 1970-01-01T00:00:00.001 | -1 | s1 |
 | 1970-01-01T00:00:00.002 | -2 | s2 |
@@ -192,7 +192,7 @@ mod test {
             )
             .with_time_index(true),
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("B", ConcreteDataType::string_datatype(), true),
         ]));
 
         let mut record_batches = Vec::with_capacity(3);
@@ -250,7 +250,7 @@ mod test {
                         ..Default::default()
                     },
                     ColumnDef {
-                        name: "b".to_string(),
+                        name: "B".to_string(),
                         data_type: ColumnDataType::String as i32,
                         semantic_type: SemanticType::Field as i32,
                         is_nullable: true,

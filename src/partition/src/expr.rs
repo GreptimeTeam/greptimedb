@@ -61,7 +61,7 @@ impl From<Value> for Operand {
 impl Operand {
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
         match self {
-            Self::Column(c) => Ok(datafusion_expr::col(c)),
+            Self::Column(c) => Ok(datafusion_expr::col(format!(r#""{}""#, c))),
             Self::Value(v) => {
                 let scalar_value = match v {
                     Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
