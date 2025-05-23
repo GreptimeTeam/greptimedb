@@ -19,7 +19,6 @@ use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema as PbColumnSchema, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
 use common_telemetry::{debug, info};
@@ -55,6 +54,7 @@ const PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME: &str = "schema";
 const PIPELINE_TABLE_PIPELINE_CONTENT_TYPE_COLUMN_NAME: &str = "content_type";
 const PIPELINE_TABLE_PIPELINE_CONTENT_COLUMN_NAME: &str = "pipeline";
 pub(crate) const PIPELINE_TABLE_CREATED_AT_COLUMN_NAME: &str = "created_at";
+pub(crate) const EMPTY_SCHEMA_NAME: &str = "";
 
 /// PipelineTable is a table that stores the pipeline schema and content.
 /// Every catalog has its own pipeline table.
@@ -216,7 +216,7 @@ impl PipelineTable {
                 rows: vec![Row {
                     values: vec![
                         ValueData::StringValue(name.to_string()).into(),
-                        ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
+                        ValueData::StringValue(EMPTY_SCHEMA_NAME.to_string()).into(),
                         ValueData::StringValue(content_type.to_string()).into(),
                         ValueData::StringValue(pipeline.to_string()).into(),
                         ValueData::TimestampNanosecondValue(now.value()).into(),
@@ -290,39 +290,47 @@ impl PipelineTable {
 
         // if the result is exact one, use it
         if pipeline_vec.len() == 1 {
-            let (pipeline_content, schema, version) = pipeline_vec.remove(0);
+            let (pipeline_content, found_schema, version) = pipeline_vec.remove(0);
             let p = (pipeline_content, version);
-            self.cache
-                .insert_pipeline_str_cache(&schema, name, Some(version), p.clone(), false);
+            self.cache.insert_pipeline_str_cache(
+                &found_schema,
+                name,
+                Some(version),
+                p.clone(),
+                false,
+            );
             return Ok(p);
         }
 
-        // result is more than one, check schema
-        if let Some((pipeline_content, schema, version)) =
-            pipeline_vec.iter().find(|v| v.1 == schema)
-        {
-            let v = *version;
-            let p = (pipeline_content.clone(), v);
-            self.cache
-                .insert_pipeline_str_cache(schema, name, Some(v), p.clone(), false);
-            Ok(p)
-        } else {
-            // multiple pipelines with no current schema
-            MultiPipelineWithDiffSchemaSnafu {
+        // check if there's empty schema pipeline
+        // if there isn't, check current schema
+        let pipeline = pipeline_vec
+            .iter()
+            .find(|v| v.1 == EMPTY_SCHEMA_NAME)
+            .or_else(|| pipeline_vec.iter().find(|v| v.1 == schema));
+
+        // multiple pipeline with no empty or current schema
+        // throw an error
+        let (pipeline_content, found_schema, version) =
+            pipeline.context(MultiPipelineWithDiffSchemaSnafu {
                 schemas: pipeline_vec
                     .iter()
                     .map(|v| v.1.split_once('/').unwrap().0)
                     .join(","),
-            }
-            .fail()?
-        }
+            })?;
+
+        let v = *version;
+        let p = (pipeline_content.clone(), v);
+        self.cache
+            .insert_pipeline_str_cache(found_schema, name, Some(v), p.clone(), false);
+        Ok(p)
     }
 
     /// Insert a pipeline into the pipeline table and compile it.
     /// The compiled pipeline will be inserted into the cache.
+    /// Newly created pipelines will be saved under empty schema.
     pub async fn insert_and_compile(
         &self,
-        schema: &str,
         name: &str,
         content_type: &str,
         pipeline: &str,
@@ -335,7 +343,7 @@ impl PipelineTable {
 
         {
             self.cache.insert_pipeline_cache(
-                schema,
+                EMPTY_SCHEMA_NAME,
                 name,
                 Some(TimestampNanosecond(version)),
                 compiled_pipeline.clone(),
@@ -343,7 +351,7 @@ impl PipelineTable {
             );
 
             self.cache.insert_pipeline_str_cache(
-                schema,
+                EMPTY_SCHEMA_NAME,
                 name,
                 Some(TimestampNanosecond(version)),
                 (pipeline.to_owned(), TimestampNanosecond(version)),

@@ -15,13 +15,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use datatypes::timestamp::TimestampNanosecond;
 use moka::sync::Cache;
 
 use crate::error::{MultiPipelineWithDiffSchemaSnafu, Result};
 use crate::etl::Pipeline;
 use crate::manager::PipelineVersion;
+use crate::table::EMPTY_SCHEMA_NAME;
 use crate::util::{generate_pipeline_cache_key, generate_pipeline_cache_key_suffix};
 
 /// Pipeline table cache size.
@@ -151,17 +151,15 @@ fn get_cache_generic<T: Clone + Send + Sync + 'static>(
     name: &str,
     version: PipelineVersion,
 ) -> Result<Option<T>> {
-    // lets try public first
-    let k = generate_pipeline_cache_key(DEFAULT_SCHEMA_NAME, name, version);
+    // lets try empty schema first
+    let k = generate_pipeline_cache_key(EMPTY_SCHEMA_NAME, name, version);
     if let Some(value) = cache.get(&k) {
         return Ok(Some(value));
     }
     // use input schema
-    if schema != DEFAULT_SCHEMA_NAME {
-        let k = generate_pipeline_cache_key(schema, name, version);
-        if let Some(value) = cache.get(&k) {
-            return Ok(Some(value));
-        }
+    let k = generate_pipeline_cache_key(schema, name, version);
+    if let Some(value) = cache.get(&k) {
+        return Ok(Some(value));
     }
 
     // try all schemas
