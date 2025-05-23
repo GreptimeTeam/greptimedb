@@ -441,7 +441,7 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
 
-  bump-downstream-repo-version:
+  bump-downstream-repo-versions:
     name: Bump downstream repo versions
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [allocate-runners, publish-github-release]
