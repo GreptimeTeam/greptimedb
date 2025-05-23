@@ -164,7 +164,7 @@ impl<'a> PgSqlTemplateFactory<'a> {
                 range: format!(
                     "SELECT k, v FROM \"{table_name}\" WHERE k >= $1 AND k < $2 ORDER BY k"
                 ),
-                full: format!("SELECT k, v FROM \"{table_name}\" $1 ORDER BY k"),
+                full: format!("SELECT k, v FROM \"{table_name}\" ORDER BY k"),
                 left_bounded: format!("SELECT k, v FROM \"{table_name}\" WHERE k >= $1 ORDER BY k"),
                 prefix: format!("SELECT k, v FROM \"{table_name}\" WHERE k LIKE $1 ORDER BY k"),
             },
@@ -511,9 +511,9 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
-        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
-        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
-        unprepare_kv,
+        test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
+        test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
+        text_txn_multi_compare_op, unprepare_kv,
     };
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
@@ -570,6 +570,15 @@ mod tests {
         let kv_backend = build_pg_kv_backend("range2_test").await.unwrap();
         let prefix = b"range2/";
         test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
+    async fn test_pg_all_range() {
+        let kv_backend = build_pg_kv_backend("simple_range_test").await.unwrap();
+        let prefix = b"";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_simple_kv_range(&kv_backend).await;
         unprepare_kv(&kv_backend, prefix).await;
     }
 
