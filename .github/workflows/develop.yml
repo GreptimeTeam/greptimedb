@@ -195,6 +195,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         target: [ "unstable_fuzz_create_table_standalone" ]
     steps:
@@ -299,6 +300,7 @@ jobs:
     needs:  build-greptime-ci
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         target: [ "fuzz_create_table", "fuzz_alter_table", "fuzz_create_database", "fuzz_create_logical_table", "fuzz_alter_logical_table", "fuzz_insert", "fuzz_insert_logical_table" ]
         mode:
@@ -431,6 +433,7 @@ jobs:
     needs:  build-greptime-ci
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         target: ["fuzz_migrate_mito_regions", "fuzz_migrate_metric_regions", "fuzz_failover_mito_regions", "fuzz_failover_metric_regions"]
         mode:
@@ -578,6 +581,7 @@ jobs:
     needs: build
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
         mode:
