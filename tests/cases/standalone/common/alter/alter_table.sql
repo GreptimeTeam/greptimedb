@@ -122,13 +122,19 @@ SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i BOOLEAN;
 
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (1, TRUE, 0);
+
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i INTEGER;
 
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (2, 42, 0);
+
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i STRING;
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (3, "how many roads must a man walk down before they call him a man", 0);
 
 -- here see 0.0 is converted to "0.0" since underlying column data is unchanged
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
