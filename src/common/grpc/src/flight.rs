@@ -21,16 +21,19 @@ use api::v1::{AffectedRows, FlightMetadata, Metrics};
 use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
-use common_recordbatch::{RecordBatch, RecordBatches};
+use common_recordbatch::{DfRecordBatch, RecordBatch, RecordBatches};
 use datatypes::arrow;
+use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::arrow::ipc::{root_as_message, writer, MessageHeader};
+use datatypes::arrow::error::ArrowError;
+use datatypes::arrow::ipc::{convert, reader, root_as_message, writer, MessageHeader};
 use datatypes::schema::{Schema, SchemaRef};
 use flatbuffers::FlatBufferBuilder;
 use prost::bytes::Bytes as ProstBytes;
 use prost::Message;
 use snafu::{OptionExt, ResultExt};
 
+use crate::error;
 use crate::error::{
     ConvertArrowSchemaSnafu, CreateRecordBatchSnafu, DecodeFlightDataSnafu, InvalidFlightDataSnafu,
     Result,
@@ -124,9 +127,60 @@ impl FlightEncoder {
 #[derive(Default)]
 pub struct FlightDecoder {
     schema: Option<SchemaRef>,
+    schema_bytes: Option<bytes::Bytes>,
 }
 
 impl FlightDecoder {
+    /// Build a [FlightDecoder] instance from provided schema bytes.
+    pub fn try_from_schema_bytes(schema_bytes: &bytes::Bytes) -> Result<Self> {
+        let arrow_schema = convert::try_schema_from_flatbuffer_bytes(&schema_bytes[..])
+            .context(error::ArrowSnafu)?;
+        let schema = Arc::new(Schema::try_from(arrow_schema).context(ConvertArrowSchemaSnafu)?);
+        Ok(Self {
+            schema: Some(schema),
+            schema_bytes: Some(schema_bytes.clone()),
+        })
+    }
+
+    pub fn try_decode_record_batch(
+        &mut self,
+        data_header: &bytes::Bytes,
+        data_body: &bytes::Bytes,
+    ) -> Result<DfRecordBatch> {
+        let schema = self
+            .schema
+            .as_ref()
+            .context(InvalidFlightDataSnafu {
+                reason: "Should have decoded schema first!",
+            })?
+            .clone();
+        let arrow_schema = schema.arrow_schema().clone();
+        let message = root_as_message(&data_header[..])
+            .map_err(|err| {
+                ArrowError::ParseError(format!("Unable to get root as message: {err:?}"))
+            })
+            .context(error::ArrowSnafu)?;
+        let result = message
+            .header_as_record_batch()
+            .ok_or_else(|| {
+                ArrowError::ParseError(
+                    "Unable to convert flight data header to a record batch".to_string(),
+                )
+            })
+            .and_then(|batch| {
+                reader::read_record_batch(
+                    &Buffer::from(data_body.as_ref()),
+                    batch,
+                    arrow_schema,
+                    &HashMap::new(),
+                    None,
+                    &message.version(),
+                )
+            })
+            .context(error::ArrowSnafu)?;
+        Ok(result)
+    }
+
     pub fn try_decode(&mut self, flight_data: &FlightData) -> Result<FlightMessage> {
         let message = root_as_message(&flight_data.data_header).map_err(|e| {
             InvalidFlightDataSnafu {
@@ -162,7 +216,7 @@ impl FlightDecoder {
                     Arc::new(Schema::try_from(arrow_schema).context(ConvertArrowSchemaSnafu)?);
 
                 self.schema = Some(schema.clone());
-
+                self.schema_bytes = Some(flight_data.data_header.clone());
                 Ok(FlightMessage::Schema(schema))
             }
             MessageHeader::RecordBatch => {
@@ -195,6 +249,10 @@ impl FlightDecoder {
 
     pub fn schema(&self) -> Option<&SchemaRef> {
         self.schema.as_ref()
+    }
+
+    pub fn schema_bytes(&self) -> Option<bytes::Bytes> {
+        self.schema_bytes.clone()
     }
 }
 

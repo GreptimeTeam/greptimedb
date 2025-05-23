@@ -19,14 +19,12 @@ use api::v1::region::{
     bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
     RegionRequestHeader,
 };
-use bytes::Bytes;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
 use common_recordbatch::RecordBatch;
 use common_telemetry::tracing_context::TracingContext;
 use datatypes::schema::Schema;
-use prost::Message;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -60,13 +58,8 @@ impl Inserter {
             .with_label_values(&["raw"])
             .observe(record_batch.num_rows() as f64);
 
-        // todo(hl): find a way to embed raw FlightData messages in greptimedb proto files so we don't have to encode here.
-
         // safety: when reach here schema must be present.
-        let schema_message = FlightEncoder::default()
-            .encode(FlightMessage::Schema(decoder.schema().unwrap().clone()));
-        let schema_bytes = Bytes::from(schema_message.encode_to_vec());
-
+        let schema_bytes = decoder.schema_bytes().unwrap();
         let partition_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["partition"])
             .start_timer();
@@ -96,12 +89,6 @@ impl Inserter {
                 .find_region_leader(region_id)
                 .await
                 .context(error::FindRegionLeaderSnafu)?;
-            let payload = {
-                let _encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                    .with_label_values(&["encode"])
-                    .start_timer();
-                Bytes::from(data.encode_to_vec())
-            };
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -111,7 +98,8 @@ impl Inserter {
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                         region_id: region_id.as_u64(),
                         schema: schema_bytes,
-                        payload,
+                        data_header: data.data_header,
+                        payload: data.data_body,
                     })),
                 })),
             };
@@ -149,6 +137,7 @@ impl Inserter {
         let record_batch_schema =
             Arc::new(Schema::try_from(record_batch.schema()).context(error::ConvertSchemaSnafu)?);
 
+        // raw daya header and payload bytes.
         let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
             for (region_id, mask) in masks {
@@ -157,10 +146,12 @@ impl Inserter {
                 let record_batch_schema = record_batch_schema.clone();
                 let node_manager = self.node_manager.clone();
                 let peer = peer.clone();
-                let raw_data = if mask.select_all() {
+                let raw_header_and_data = if mask.select_all() {
                     Some(
                         raw_data_bytes
-                            .get_or_insert_with(|| Bytes::from(data.encode_to_vec()))
+                            .get_or_insert_with(|| {
+                                (data.data_header.clone(), data.data_body.clone())
+                            })
                             .clone(),
                     )
                 } else {
@@ -168,9 +159,9 @@ impl Inserter {
                 };
                 let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
                     common_runtime::spawn_global(async move {
-                        let payload = if mask.select_all() {
+                        let (header, payload) = if mask.select_all() {
                             // SAFETY: raw data must be present, we can avoid re-encoding.
-                            raw_data.unwrap()
+                            raw_header_and_data.unwrap()
                         } else {
                             let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["filter"])
@@ -188,13 +179,10 @@ impl Inserter {
                             let batch =
                                 RecordBatch::try_from_df_record_batch(record_batch_schema, rb)
                                     .context(error::BuildRecordBatchSnafu)?;
-                            let payload = Bytes::from(
-                                FlightEncoder::default()
-                                    .encode(FlightMessage::Recordbatch(batch))
-                                    .encode_to_vec(),
-                            );
+                            let flight_data =
+                                FlightEncoder::default().encode(FlightMessage::Recordbatch(batch));
                             encode_timer.observe_duration();
-                            payload
+                            (flight_data.data_header, flight_data.data_body)
                         };
                         let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                             .with_label_values(&["datanode_handle"])
@@ -208,6 +196,7 @@ impl Inserter {
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
                                     region_id: region_id.as_u64(),
                                     schema: schema_bytes,
+                                    data_header: header,
                                     payload,
                                 })),
                             })),
@@ -231,6 +220,7 @@ impl Inserter {
         for res in region_responses {
             rows_inserted += res?.affected_rows;
         }
+        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
 }

@@ -18,6 +18,7 @@ use std::io;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -105,6 +106,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed arrow operation"))]
+    Arrow {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: ArrowError,
+    },
 }
 
 impl ErrorExt for Error {
@@ -123,6 +132,7 @@ impl ErrorExt for Error {
 
             Error::CreateRecordBatch { source, .. } => source.status_code(),
             Error::ConvertArrowSchema { source, .. } => source.status_code(),
+            Error::Arrow { .. } => StatusCode::Internal,
         }
     }
 

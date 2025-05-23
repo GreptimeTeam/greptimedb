@@ -22,22 +22,20 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
-    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
-    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests, ArrowIpc,
+    BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests,
+    DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
     self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
-use common_grpc::flight::{FlightDecoder, FlightMessage};
-use common_grpc::FlightData;
+use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
-use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
@@ -46,8 +44,7 @@ use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
     InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, ProstSnafu, RegionMetadata, Result,
-    UnexpectedSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -332,22 +329,21 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
         return Ok(vec![]);
     };
 
+    let ArrowIpc {
+        region_id,
+        schema,
+        payload,
+        data_header,
+    } = request;
     let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
         .with_label_values(&["decode"])
         .start_timer();
-    let schema_data = FlightData::decode(request.schema.clone()).context(ProstSnafu)?;
-    let payload_data = FlightData::decode(request.payload.clone()).context(ProstSnafu)?;
-    let mut decoder = FlightDecoder::default();
-    let _ = decoder.try_decode(&schema_data).context(FlightCodecSnafu)?;
-    let FlightMessage::Recordbatch(rb) = decoder
-        .try_decode(&payload_data)
-        .context(FlightCodecSnafu)?
-    else {
-        unreachable!("Always expect record batch message after schema");
-    };
+    let mut decoder = FlightDecoder::try_from_schema_bytes(&schema).context(FlightCodecSnafu)?;
+    let payload = decoder
+        .try_decode_record_batch(&data_header, &payload)
+        .context(FlightCodecSnafu)?;
     decoder_timer.observe_duration();
-    let payload = rb.into_df_record_batch();
-    let region_id: RegionId = request.region_id.into();
+    let region_id: RegionId = region_id.into();
     Ok(vec![(
         region_id,
         RegionRequest::BulkInserts(RegionBulkInsertsRequest { region_id, payload }),
