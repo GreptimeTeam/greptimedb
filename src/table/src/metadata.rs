@@ -817,7 +817,8 @@ impl TableMeta {
             );
         }
         // Collect columns after changed.
-        let mut columns: Vec<_> = vec![];
+
+        let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
         for mut column in table_schema.column_schemas().iter().cloned() {
             if let Some(change_column) = modify_column_types.get(&column.name) {
                 column.data_type = change_column.target_type.clone();
