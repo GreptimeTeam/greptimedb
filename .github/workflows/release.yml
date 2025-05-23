@@ -441,8 +441,8 @@ jobs:
           aws-region: ${{ vars.EC2_RUNNER_REGION }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
 
-  bump-doc-version:
-    name: Bump doc version
+  bump-downstream-repo-version:
+    name: Bump downstream repo versions
     if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
@@ -456,36 +456,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
-      - name: Bump doc version
+      - name: Bump downstream repo versions
         working-directory: cyborg
-        run: pnpm tsx bin/bump-doc-version.ts
+        run: pnpm tsx bin/bump-versions.ts
         env:
-          VERSION: ${{ needs.allocate-runners.outputs.version }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
-
-  bump-website-version:
-    name: Bump website version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
-    needs: [allocate-runners, publish-github-release]
-    runs-on: ubuntu-latest
-    # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
-    permissions:
-      issues: write # Allows the action to create issues for cyborg.
-      contents: write # Allows the action to create a release.
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: ./.github/actions/setup-cyborg
-      - name: Bump website version
-        working-directory: cyborg
-        run: pnpm tsx bin/bump-website-version.ts
-        env:
+          TARGET_REPOS: website,docs,demo
           VERSION: ${{ needs.allocate-runners.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEBSITE_REPO_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          DOCS_REPO_TOKEN: ${{ secrets.DOCS_REPO_TOKEN }}
+
 
   bump-helm-charts-version:
     name: Bump helm charts version
