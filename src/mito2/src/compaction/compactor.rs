@@ -36,6 +36,7 @@ use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Res
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
+use crate::metrics;
 use crate::read::Source;
 use crate::region::opener::new_manifest_dir;
 use crate::region::options::RegionOptions;
@@ -240,6 +241,14 @@ impl MergeOutput {
     pub fn is_empty(&self) -> bool {
         self.files_to_add.is_empty() && self.files_to_remove.is_empty()
     }
+
+    pub fn input_file_size(&self) -> u64 {
+        self.files_to_remove.iter().map(|f| f.file_size).sum()
+    }
+
+    pub fn output_file_size(&self) -> u64 {
+        self.files_to_add.iter().map(|f| f.file_size).sum()
+    }
 }
 
 /// Compactor is the trait that defines the compaction logic.
@@ -286,6 +295,7 @@ impl Compactor for DefaultCompactor {
             compacted_inputs.extend(output.inputs.iter().map(|f| f.meta_ref().clone()));
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
+                max_file_size: picker_output.max_file_size,
                 ..Default::default()
             };
 
@@ -460,6 +470,9 @@ impl Compactor for DefaultCompactor {
             );
             return Ok(());
         }
+
+        metrics::COMPACTION_INPUT_BYTES.inc_by(merge_output.input_file_size() as f64);
+        metrics::COMPACTION_OUTPUT_BYTES.inc_by(merge_output.output_file_size() as f64);
         self.update_manifest(compaction_region, merge_output)
             .await?;
 

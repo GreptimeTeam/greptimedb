@@ -1,5 +1,5 @@
 -- Test without PK, with a windowed sort query.
-CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
+CREATE TABLE test(i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs');
 
 INSERT INTO test VALUES (1, 1), (NULL, 2), (1, 3);
 
@@ -71,7 +71,7 @@ EXPLAIN ANALYZE SELECT * FROM test where t > 8 ORDER BY t DESC LIMIT 4;
 DROP TABLE test;
 
 -- Test with PK, with a windowed sort query.
-CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.max_inactive_window_files'='4');
+CREATE TABLE test_pk(pk INTEGER PRIMARY KEY, i INTEGER, t TIMESTAMP TIME INDEX) WITH('compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='4');
 
 INSERT INTO test_pk VALUES (1, 1, 1), (2, NULL, 2), (3, 1, 3);
 

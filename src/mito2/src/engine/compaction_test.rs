@@ -129,8 +129,6 @@ async fn test_compaction_region() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
         .build();
 
     let column_schemas = request
@@ -163,12 +161,12 @@ async fn test_compaction_region() {
     // [0..9]
     //       [10...19]
     //                [20....29]
-    //          -[15.........29]-
+    //          -[15.........29]- (delete)
     //           [15.....24]
     // Output:
     // [0..9]
-    //     [10..14]
-    //            [15..24]
+    //       [10............29] (contains delete)
+    //           [15....24]
     assert_eq!(
         3,
         scanner.num_files(),
@@ -179,6 +177,71 @@ async fn test_compaction_region() {
 
     let vec = collect_stream_ts(stream).await;
     assert_eq!((0..25).map(|v| v * 1000).collect::<Vec<_>>(), vec);
+}
+
+#[tokio::test]
+async fn test_compaction_overlapping_files() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Flush 5 SSTs for compaction.
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 30..40).await;
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.affected_rows, 0);
+
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        1,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
+
+    let vec = collect_stream_ts(stream).await;
+    assert_eq!(
+        vec,
+        (0..=9)
+            .map(|v| v * 1000)
+            .chain((20..=29).map(|v| v * 1000))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -201,8 +264,6 @@ async fn test_compaction_region_with_overlapping() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -257,10 +318,6 @@ async fn test_compaction_region_with_overlapping_delete_all() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .insert_option("compaction.twcs.time_window", "1h")
         .build();
 
@@ -290,7 +347,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(
-        4,
+        2,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -332,7 +389,6 @@ async fn test_readonly_during_compaction() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
         .build();
 
     let column_schemas = request
@@ -404,10 +460,6 @@ async fn test_compaction_update_time_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "2")
-        .insert_option("compaction.twcs.max_active_window_files", "2")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "2")
-        .insert_option("compaction.twcs.max_inactive_window_files", "2")
         .build();
 
     let column_schemas = request
@@ -420,9 +472,10 @@ async fn test_compaction_update_time_window() {
         .await
         .unwrap();
     // Flush 3 SSTs for compaction.
-    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 1200..2400).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 2400..3600).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 0..900).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 900..1800).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1800..2700).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 2700..3600).await; // window 3600
 
     let result = engine
         .handle_request(
@@ -433,11 +486,21 @@ async fn test_compaction_update_time_window() {
         .unwrap();
     assert_eq!(result.affected_rows, 0);
 
+    assert_eq!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .current()
+            .version
+            .compaction_time_window,
+        Some(Duration::from_secs(3600))
+    );
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(0, scanner.num_memtables());
-    // We keep at most two files.
+    // We keep all 3 files because no enough file to merge
     assert_eq!(
-        2,
+        1,
         scanner.num_files(),
         "unexpected files: {:?}",
         scanner.file_ids()
@@ -492,10 +555,6 @@ async fn test_change_region_compaction_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_active_window_files", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_files", "1")
         .build();
     let region_dir = request.region_dir.clone();
     let column_schemas = request
@@ -508,8 +567,10 @@ async fn test_change_region_compaction_window() {
         .await
         .unwrap();
     // Flush 2 SSTs for compaction.
-    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 1200..2400).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 0..600).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 600..1200).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1200..1800).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1800..2400).await; // window 3600
 
     engine
         .handle_request(
@@ -520,7 +581,7 @@ async fn test_change_region_compaction_window() {
         .unwrap();
 
     // Put window 7200
-    put_and_flush(&engine, region_id, &column_schemas, 4000..5000).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 4000..5000).await;
 
     // Check compaction window.
     let region = engine.get_region(region_id).unwrap();
@@ -543,6 +604,22 @@ async fn test_change_region_compaction_window() {
         },
     });
     engine.handle_request(region_id, request).await.unwrap();
+    assert_eq!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .current()
+            .version
+            .options
+            .compaction
+            .time_window(),
+        Some(Duration::from_secs(7200))
+    );
+
+    put_and_flush(&engine, region_id, &column_schemas, 5000..5100).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5100..5200).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5200..5300).await;
 
     // Compaction again. It should compacts window 3600 and 7200
     // into 7200.
@@ -585,12 +662,12 @@ async fn test_change_region_compaction_window() {
     {
         let region = engine.get_region(region_id).unwrap();
         let version = region.version();
+        // We open the region without options, so the time window should be None.
+        assert!(version.options.compaction.time_window().is_none());
         assert_eq!(
             Some(Duration::from_secs(7200)),
             version.compaction_time_window,
         );
-        // We open the region without options, so the time window should be None.
-        assert!(version.options.compaction.time_window().is_none());
     }
 }
 
@@ -615,10 +692,6 @@ async fn test_open_overwrite_compaction_window() {
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.max_active_window_runs", "1")
-        .insert_option("compaction.twcs.max_active_window_files", "1")
-        .insert_option("compaction.twcs.max_inactive_window_runs", "1")
-        .insert_option("compaction.twcs.max_inactive_window_files", "1")
         .build();
     let region_dir = request.region_dir.clone();
     let column_schemas = request
@@ -631,8 +704,10 @@ async fn test_open_overwrite_compaction_window() {
         .await
         .unwrap();
     // Flush 2 SSTs for compaction.
-    put_and_flush(&engine, region_id, &column_schemas, 0..1200).await; // window 3600
-    put_and_flush(&engine, region_id, &column_schemas, 1200..2400).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 0..600).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 600..1200).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1200..1800).await; // window 3600
+    put_and_flush(&engine, region_id, &column_schemas, 1800..2400).await; // window 3600
 
     engine
         .handle_request(

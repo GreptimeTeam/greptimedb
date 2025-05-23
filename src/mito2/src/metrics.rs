@@ -84,7 +84,7 @@ lazy_static! {
     /// Histogram of flushed bytes.
     pub static ref FLUSH_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_bytes_total", "mito flush bytes total").unwrap();
-    /// Gauge for inflight compaction tasks.
+    /// Gauge for inflight flush tasks.
     pub static ref INFLIGHT_FLUSH_COUNT: IntGauge =
         register_int_gauge!(
             "greptime_mito_inflight_flush_count",
@@ -153,7 +153,6 @@ lazy_static! {
             "greptime_mito_inflight_compaction_count",
             "inflight compaction count",
         ).unwrap();
-    // ------- End of compaction metrics.
 
     // Query metrics.
     /// Timer of different stages in query.
@@ -401,6 +400,20 @@ lazy_static! {
         exponential_buckets(0.001, 10.0, 5).unwrap()
     ).unwrap();
 
+}
+
+lazy_static! {
+    /// Counter for compaction input file size.
+    pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
+        "greptime_mito_compaction_input_bytes",
+        "mito compaction input file size",
+        ).unwrap();
+
+    /// Counter for compaction output file size.
+    pub static ref COMPACTION_OUTPUT_BYTES: Counter = register_counter!(
+        "greptime_mito_compaction_output_bytes",
+        "mito compaction output file size",
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

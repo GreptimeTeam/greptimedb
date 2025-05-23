@@ -9,8 +9,7 @@ with
     (
         append_mode = 'true',
         'compaction.type' = 'twcs',
-        'compaction.twcs.max_active_window_files' = '8',
-        'compaction.twcs.max_inactive_window_files' = '8'
+        'compaction.twcs.trigger_file_num' = '8',
     );
 
 insert into

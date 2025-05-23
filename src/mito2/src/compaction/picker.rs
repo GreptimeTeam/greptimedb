@@ -45,6 +45,8 @@ pub struct PickerOutput {
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
     pub time_window_size: i64,
+    /// Max single output file size in bytes.
+    pub max_file_size: Option<usize>,
 }
 
 /// SerializedPickerOutput is a serialized version of PickerOutput by replacing [CompactionOutput] and [FileHandle] with [SerializedCompactionOutput] and [FileMeta].
@@ -53,6 +55,7 @@ pub struct SerializedPickerOutput {
     pub outputs: Vec<SerializedCompactionOutput>,
     pub expired_ssts: Vec<FileMeta>,
     pub time_window_size: i64,
+    pub max_file_size: Option<usize>,
 }
 
 impl From<&PickerOutput> for SerializedPickerOutput {
@@ -76,6 +79,7 @@ impl From<&PickerOutput> for SerializedPickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -111,6 +115,7 @@ impl PickerOutput {
             outputs,
             expired_ssts,
             time_window_size: input.time_window_size,
+            max_file_size: input.max_file_size,
         }
     }
 }
@@ -131,10 +136,7 @@ pub fn new_picker(
     } else {
         match compaction_options {
             CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker {
-                max_active_window_runs: twcs_opts.max_active_window_runs,
-                max_active_window_files: twcs_opts.max_active_window_files,
-                max_inactive_window_runs: twcs_opts.max_inactive_window_runs,
-                max_inactive_window_files: twcs_opts.max_inactive_window_files,
+                trigger_file_num: twcs_opts.trigger_file_num,
                 time_window_seconds: twcs_opts.time_window_seconds(),
                 max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
                 append_mode,
@@ -179,6 +181,7 @@ mod tests {
             ],
             expired_ssts: expired_ssts_file_handle.clone(),
             time_window_size: 1000,
+            max_file_size: None,
         };
 
         let picker_output_str =
