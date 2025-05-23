@@ -115,24 +115,24 @@ pub async fn test_simple_kv_range(kvbackend: &impl KvBackend) {
         assert_eq!(response.kvs.len(), 4);
     }
     {
-        let point_query = RangeRequest::new().with_range(vec![0], vec![]);
+        let point_query = RangeRequest::new().with_range(b"key11".to_vec(), vec![]);
         let response = kvbackend.range(point_query).await.unwrap();
-        assert_eq!(response.kvs.len(), 0);
+        assert_eq!(response.kvs.len(), 1);
     }
     {
-        let left_bounded_query = RangeRequest::new().with_range(vec![], vec![0]);
+        let left_bounded_query = RangeRequest::new().with_range(b"key1".to_vec(), vec![0]);
         let response = kvbackend.range(left_bounded_query).await.unwrap();
         assert_eq!(response.kvs.len(), 4);
     }
     {
-        let prefix_query = RangeRequest::new().with_range(vec![1, 2, 3], vec![1, 2, 4]);
+        let prefix_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key11".to_vec());
         let response = kvbackend.range(prefix_query).await.unwrap();
-        assert_eq!(response.kvs.len(), 0);
+        assert_eq!(response.kvs.len(), 1);
     }
     {
-        let range_query = RangeRequest::new().with_range(vec![1, 2, 3], vec![4, 5, 6]);
+        let range_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key2".to_vec());
         let response = kvbackend.range(range_query).await.unwrap();
-        assert_eq!(response.kvs.len(), 0);
+        assert_eq!(response.kvs.len(), 2);
     }
 }
 
