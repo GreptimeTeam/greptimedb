@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_error::ext::BoxedError;
-use common_meta::instruction::{FlushRegions, Instruction};
+use common_meta::instruction::{FlushErrorStrategy, FlushRegionConfig, FlushTarget, Instruction};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::lock_key::RemoteWalLock;
 use common_meta::peer::Peer;
@@ -181,7 +181,12 @@ impl WalPruneProcedure {
         let peer_and_instructions = peer_region_ids_map
             .into_iter()
             .map(|(peer, region_ids)| {
-                let flush_instruction = Instruction::FlushRegions(FlushRegions { region_ids });
+                let flush_instruction = Instruction::FlushRegion(FlushRegionConfig {
+                    target: FlushTarget::Regions(region_ids),
+                    is_hint: false,
+                    timeout: None,
+                    error_strategy: FlushErrorStrategy::TryAll,
+                });
                 (peer.clone(), flush_instruction)
             })
             .collect();
@@ -535,10 +540,14 @@ mod tests {
         let resp = rx.recv().await.unwrap().unwrap();
         let msg = resp.mailbox_message.unwrap();
         let flush_instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
-        let mut flush_requested_region_ids = match flush_instruction {
-            Instruction::FlushRegions(FlushRegions { region_ids, .. }) => region_ids,
+        let flush_requested_region_ids = match flush_instruction {
+            Instruction::FlushRegion(config) => match &config.target {
+                FlushTarget::Regions(region_ids) => region_ids.clone(),
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         };
+        let mut flush_requested_region_ids = flush_requested_region_ids;
         let sorted_region_ids = region_ids
             .iter()
             .cloned()
