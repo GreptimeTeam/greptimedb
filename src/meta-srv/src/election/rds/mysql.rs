@@ -27,7 +27,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
 use crate::election::{
-    listen_leader_change, send_leader_change, Election, LeaderChangeMessage, CANDIDATES_ROOT,
+    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage, CANDIDATES_ROOT,
     ELECTION_KEY,
 };
 use crate::error::{
@@ -710,7 +710,7 @@ impl MySqlElection {
             key: key.clone(),
             ..Default::default()
         };
-        send_leader_change(
+        send_leader_change_and_set_flags(
             &self.is_leader,
             &self.leader_infancy,
             &self.leader_watcher,
@@ -732,7 +732,7 @@ impl MySqlElection {
         self.put_value_with_lease(&key, &self.leader_value, self.meta_lease_ttl_secs, executor)
             .await?;
 
-        send_leader_change(
+        send_leader_change_and_set_flags(
             &self.is_leader,
             &self.leader_infancy,
             &self.leader_watcher,

@@ -26,7 +26,7 @@ use tokio_postgres::Client;
 
 use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
 use crate::election::{
-    listen_leader_change, send_leader_change, Election, LeaderChangeMessage, CANDIDATES_ROOT,
+    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage, CANDIDATES_ROOT,
     ELECTION_KEY,
 };
 use crate::error::{
@@ -609,7 +609,7 @@ impl PgElection {
             .query(&self.sql_set.step_down, &[])
             .await
             .context(PostgresExecutionSnafu)?;
-        send_leader_change(
+        send_leader_change_and_set_flags(
             &self.is_leader,
             &self.leader_infancy,
             &self.leader_watcher,

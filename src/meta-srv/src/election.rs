@@ -110,7 +110,9 @@ fn listen_leader_change(leader_value: String) -> Sender<LeaderChangeMessage> {
     tx
 }
 
-fn send_leader_change(
+/// Sends a leader change message to the channel and sets the `is_leader` flag.
+/// If a leader is elected, it will also set the `leader_infancy` flag to true.
+fn send_leader_change_and_set_flags(
     is_leader: &AtomicBool,
     leader_infancy: &AtomicBool,
     tx: &Sender<LeaderChangeMessage>,

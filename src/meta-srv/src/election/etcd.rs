@@ -27,7 +27,7 @@ use tokio::sync::broadcast::Receiver;
 use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::election::{
-    listen_leader_change, send_leader_change, Election, LeaderChangeMessage, LeaderKey,
+    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage, LeaderKey,
     CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY, KEEP_ALIVE_INTERVAL_SECS,
 };
 use crate::error;
@@ -247,7 +247,7 @@ impl Election for EtcdElection {
                 }
             }
 
-            send_leader_change(
+            send_leader_change_and_set_flags(
                 &self.is_leader,
                 &self.infancy,
                 &self.leader_watcher,
@@ -299,7 +299,7 @@ impl EtcdElection {
             );
 
             // Only after a successful `keep_alive` is the leader considered official.
-            send_leader_change(
+            send_leader_change_and_set_flags(
                 &self.is_leader,
                 &self.infancy,
                 &self.leader_watcher,
