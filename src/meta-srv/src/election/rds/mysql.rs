@@ -16,9 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::{error, warn};
+use common_telemetry::warn;
 use common_time::Timestamp;
-use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlx::mysql::{MySqlArguments, MySqlRow};
 use sqlx::query::Query;
@@ -26,28 +25,16 @@ use sqlx::{MySql, MySqlConnection, MySqlTransaction, Row};
 use tokio::sync::{broadcast, Mutex, MutexGuard};
 use tokio::time::MissedTickBehavior;
 
+use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
 use crate::election::{
-    listen_leader_change, Election, LeaderChangeMessage, LeaderKey, CANDIDATES_ROOT, ELECTION_KEY,
+    listen_leader_change, send_leader_change, Election, LeaderChangeMessage, CANDIDATES_ROOT,
+    ELECTION_KEY,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
     UnexpectedSnafu,
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
-
-// Separator between value and expire time.
-const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
-
-/// Lease information.
-/// TODO(CookiePie): PgElection can also use this struct. Refactor it to a common module.
-#[derive(Default, Clone, Debug)]
-struct Lease {
-    leader_value: String,
-    expire_time: Timestamp,
-    current: Timestamp,
-    // origin is the origin value of the lease, used for CAS.
-    origin: String,
-}
 
 struct ElectionSqlFactory<'a> {
     table_name: &'a str,
@@ -201,55 +188,6 @@ impl<'a> ElectionSqlFactory<'a> {
 
     fn delete_value_sql(&self) -> String {
         format!("DELETE FROM {} WHERE k = ?;", self.table_name)
-    }
-}
-
-/// Parse the value and expire time from the given string. The value should be in the format "value || LEASE_SEP || expire_time".
-fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
-    let (value, expire_time) =
-        value
-            .split(LEASE_SEP)
-            .collect_tuple()
-            .with_context(|| UnexpectedSnafu {
-                violated: format!(
-                    "Invalid value {}, expect node info || {} || expire time",
-                    value, LEASE_SEP
-                ),
-            })?;
-    // Given expire_time is in the format 'YYYY-MM-DD HH24:MI:SS.MS'
-    let expire_time = match Timestamp::from_str(expire_time, None) {
-        Ok(ts) => ts,
-        Err(_) => UnexpectedSnafu {
-            violated: format!("Invalid timestamp: {}", expire_time),
-        }
-        .fail()?,
-    };
-    Ok((value.to_string(), expire_time))
-}
-
-#[derive(Debug, Clone, Default)]
-struct MySqlLeaderKey {
-    name: Vec<u8>,
-    key: Vec<u8>,
-    rev: i64,
-    lease: i64,
-}
-
-impl LeaderKey for MySqlLeaderKey {
-    fn name(&self) -> &[u8] {
-        &self.name
-    }
-
-    fn key(&self) -> &[u8] {
-        &self.key
-    }
-
-    fn revision(&self) -> i64 {
-        self.rev
-    }
-
-    fn lease_id(&self) -> i64 {
-        self.lease
     }
 }
 
@@ -767,23 +705,17 @@ impl MySqlElection {
     /// Still consider itself as the leader locally but failed to acquire the lock. Step down without deleting the key.
     async fn step_down_without_lock(&self) -> Result<()> {
         let key = self.election_key().into_bytes();
-        let leader_key = MySqlLeaderKey {
+        let leader_key = RdsLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone(),
             ..Default::default()
         };
-        if self
-            .is_leader
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            if let Err(e) = self
-                .leader_watcher
-                .send(LeaderChangeMessage::StepDown(Arc::new(leader_key)))
-            {
-                error!(e; "Failed to send leader change message");
-            }
-        }
+        send_leader_change(
+            &self.is_leader,
+            &self.leader_infancy,
+            &self.leader_watcher,
+            LeaderChangeMessage::StepDown(Arc::new(leader_key)),
+        );
         Ok(())
     }
 
@@ -791,7 +723,7 @@ impl MySqlElection {
     /// Caution: Should only elected while holding the lock.
     async fn elected(&self, executor: &mut Executor<'_>) -> Result<()> {
         let key = self.election_key();
-        let leader_key = MySqlLeaderKey {
+        let leader_key = RdsLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone().into_bytes(),
             ..Default::default()
@@ -800,20 +732,12 @@ impl MySqlElection {
         self.put_value_with_lease(&key, &self.leader_value, self.meta_lease_ttl_secs, executor)
             .await?;
 
-        if self
-            .is_leader
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            self.leader_infancy.store(true, Ordering::Relaxed);
-
-            if let Err(e) = self
-                .leader_watcher
-                .send(LeaderChangeMessage::Elected(Arc::new(leader_key)))
-            {
-                error!(e; "Failed to send leader change message");
-            }
-        }
+        send_leader_change(
+            &self.is_leader,
+            &self.leader_infancy,
+            &self.leader_watcher,
+            LeaderChangeMessage::Elected(Arc::new(leader_key)),
+        );
         Ok(())
     }
 
