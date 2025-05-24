@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use clap::Parser;
-use cli::{BenchTableMetadataCommand, ExportCommand, ImportCommand, Tool};
+use cli::{
+    BenchTableMetadataCommand, ExportCommand, ImportCommand, MetaRestoreCommand,
+    MetaSnapshotCommand, Tool,
+};
 use common_error::ext::BoxedError;
 
 #[derive(Parser)]
@@ -22,6 +25,8 @@ pub enum SubCommand {
     Bench(BenchTableMetadataCommand),
     Export(ExportCommand),
     Import(ImportCommand),
+    MetaSnapshot(MetaSnapshotCommand),
+    MetaRestore(MetaRestoreCommand),
 }
 
 impl SubCommand {
@@ -31,6 +36,8 @@ impl SubCommand {
             SubCommand::Bench(cmd) => cmd.build().await,
             SubCommand::Export(cmd) => cmd.build().await,
             SubCommand::Import(cmd) => cmd.build().await,
+            SubCommand::MetaSnapshot(cmd) => cmd.build().await,
+            SubCommand::MetaRestore(cmd) => cmd.build().await,
         }
     }
 }

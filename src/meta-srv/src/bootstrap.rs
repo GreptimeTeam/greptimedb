@@ -257,7 +257,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(opts).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.server_addr,
@@ -270,7 +270,7 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
-            let pool = create_postgres_pool(opts).await?;
+            let pool = create_postgres_pool(&opts.store_addrs).await?;
             let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;
@@ -290,7 +290,7 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "mysql_kvbackend")]
         (None, BackendImpl::MysqlStore) => {
-            let pool = create_mysql_pool(opts).await?;
+            let pool = create_mysql_pool(&opts.store_addrs).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
@@ -360,9 +360,8 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
-    let etcd_endpoints = opts
-        .store_addrs
+pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+    let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
@@ -393,13 +392,10 @@ async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres:
 }
 
 #[cfg(feature = "pg_kvbackend")]
-async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres::Pool> {
-    let postgres_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
+pub async fn create_postgres_pool(store_addrs: &[String]) -> Result<deadpool_postgres::Pool> {
+    let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
+        err_msg: "empty store addrs",
+    })?;
     let mut cfg = Config::new();
     cfg.url = Some(postgres_url.to_string());
     let pool = cfg
@@ -409,13 +405,10 @@ async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres
 }
 
 #[cfg(feature = "mysql_kvbackend")]
-async fn setup_mysql_options(opts: &MetasrvOptions) -> Result<MySqlConnectOptions> {
-    let mysql_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
+async fn setup_mysql_options(store_addrs: &[String]) -> Result<MySqlConnectOptions> {
+    let mysql_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
+        err_msg: "empty store addrs",
+    })?;
     // Avoid `SET` commands in sqlx
     let opts: MySqlConnectOptions = mysql_url
         .parse()
@@ -429,8 +422,8 @@ async fn setup_mysql_options(opts: &MetasrvOptions) -> Result<MySqlConnectOption
 }
 
 #[cfg(feature = "mysql_kvbackend")]
-async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
-    let opts = setup_mysql_options(opts).await?;
+pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
+    let opts = setup_mysql_options(store_addrs).await?;
     let pool = MySqlPool::connect_with(opts)
         .await
         .context(error::CreateMySqlPoolSnafu)?;
@@ -439,7 +432,7 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
 
 #[cfg(feature = "mysql_kvbackend")]
 async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
-    let opts = setup_mysql_options(opts).await?;
+    let opts = setup_mysql_options(&opts.store_addrs).await?;
     let client = MySqlConnection::connect_with(&opts)
         .await
         .context(error::ConnectMySqlSnafu)?;

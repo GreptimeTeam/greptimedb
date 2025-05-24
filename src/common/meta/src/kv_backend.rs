@@ -38,6 +38,11 @@ pub mod txn;
 pub mod util;
 pub type KvBackendRef<E = Error> = Arc<dyn KvBackend<Error = E> + Send + Sync>;
 
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
+
 #[async_trait]
 pub trait KvBackend: TxnService
 where

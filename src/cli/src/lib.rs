@@ -17,6 +17,7 @@ mod database;
 pub mod error;
 mod export;
 mod import;
+mod meta_snapshot;
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -27,6 +28,7 @@ use error::Result;
 pub use crate::bench::BenchTableMetadataCommand;
 pub use crate::export::ExportCommand;
 pub use crate::import::ImportCommand;
+pub use crate::meta_snapshot::{MetaRestoreCommand, MetaSnapshotCommand};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
