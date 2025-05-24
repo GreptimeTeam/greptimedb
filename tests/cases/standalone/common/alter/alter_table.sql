@@ -44,7 +44,11 @@ DESC TABLE test_alt_table;
 DROP TABLE test_alt_table;
 
 -- test if column with default value can change type properly
-CREATE TABLE test_alt_table_default(h INTEGER, i INTEGER DEFAULT 0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+CREATE TABLE test_alt_table_default(h INTEGER, i Float64 DEFAULT 0.0, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+INSERT INTO test_alt_table_default (h, j) VALUES (0, 0);
+
+SELECT * FROM test_alt_table_default ORDER BY h;
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
@@ -69,6 +73,81 @@ INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
 SELECT * FROM test_alt_table_default ORDER BY h;
 
 DROP TABLE test_alt_table_default;
+
+-- test with non-zero default value
+CREATE TABLE test_alt_table_default_nz(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (0, 0.0, 0);
+
+ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i BOOLEAN;
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (1, 0), (2, 1);
+
+-- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i INTEGER;
+
+DESC TABLE test_alt_table_default_nz;
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (3, 0), (4, 1);
+
+-- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
+ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i STRING;
+
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (5, 0);
+
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (6, "word" ,1);
+
+-- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+
+SELECT * FROM test_alt_table_default_nz ORDER BY h;
+
+DROP TABLE test_alt_table_default_nz;
+
+-- test alter table type will cause wired behavior due to CompatBatch
+CREATE TABLE test_alt_table_col_ty(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
+
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (0, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (1, 0.2, 0);
+
+SELECT * FROM test_alt_table_col_ty ORDER BY h;
+
+ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i BOOLEAN;
+
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (2, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (3, TRUE, 0);
+
+SELECT * FROM test_alt_table_col_ty ORDER BY h;
+
+ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i INTEGER;
+
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (4, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (5, 42, 0);
+
+SELECT * FROM test_alt_table_col_ty ORDER BY h;
+
+ALTER TABLE test_alt_table_col_ty MODIFY COLUMN i STRING;
+
+INSERT INTO test_alt_table_col_ty (h, j) VALUES (6, 0);
+
+INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (7, "how many roads must a man walk down before they call him a man", 0);
+
+-- here see 0.0 is converted to "0.0" since underlying column data is unchanged
+SELECT * FROM test_alt_table_col_ty ORDER BY h;
+
+DROP TABLE test_alt_table_col_ty;
 
 -- to test if same name column can be added
 CREATE TABLE phy (ts timestamp time index, val double) engine = metric with ("physical_metric_table" = "");

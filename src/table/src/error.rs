@@ -175,6 +175,14 @@ pub enum Error {
 
     #[snafu(display("Invalid table name: '{s}'"))]
     InvalidTableName { s: String },
+
+    #[snafu(display("Failed to cast default value, reason: {}", reason))]
+    CastDefaultValue {
+        reason: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -187,6 +195,7 @@ impl ErrorExt for Error {
             Error::RemoveColumnInIndex { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
+            Error::CastDefaultValue { source, .. } => source.status_code(),
             Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
             Error::ColumnExists { .. } => StatusCode::TableColumnExists,
             Error::SchemaBuild { source, .. } | Error::SetFulltextOptions { source, .. } => {
