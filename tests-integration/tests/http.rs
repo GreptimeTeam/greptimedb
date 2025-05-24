@@ -1403,7 +1403,7 @@ pub async fn test_pipeline_api(store_type: StorageType) {
     // handshake
     let client = TestClient::new(app).await;
 
-    let body = r#"
+    let pipeline_body = r#"
 processors:
   - date:
       field: time
@@ -1437,7 +1437,7 @@ transform:
     let res = client
         .post("/v1/pipelines/greptime_guagua")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_body)
         .send()
         .await;
 
@@ -1452,7 +1452,7 @@ transform:
     let res = client
         .post("/v1/pipelines/test")
         .header("Content-Type", "application/x-yaml")
-        .body(body)
+        .body(pipeline_body)
         .send()
         .await;
 
@@ -1505,7 +1505,7 @@ transform:
         .as_str()
         .unwrap();
     let docs = YamlLoader::load_from_str(pipeline_yaml).unwrap();
-    let body_yaml = YamlLoader::load_from_str(body).unwrap();
+    let body_yaml = YamlLoader::load_from_str(pipeline_body).unwrap();
     assert_eq!(docs, body_yaml);
 
     // Do not specify version, get the latest version
@@ -1560,7 +1560,43 @@ transform:
     )
     .await;
 
-    // 4. remove pipeline
+    // 4. cross-ref pipeline
+    // create database test_db
+    let res = client
+        .post("/v1/sql?sql=create database test_db")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // check test_db created
+    validate_data(
+        "pipeline_db_schema",
+        &client,
+        "show databases",
+        "[[\"greptime_private\"],[\"information_schema\"],[\"public\"],[\"test_db\"]]",
+    )
+    .await;
+
+    // cross ref using public's pipeline
+    let res = client
+        .post("/v1/ingest?db=test_db&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // check write success
+    validate_data(
+        "pipeline_db_schema",
+        &client,
+        "select * from test_db.logs1",
+        "[[2436,2528,\"INTERACT.MANAGER\",\"I\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",1716668197217000000]]",
+    )
+    .await;
+
+    // 5. remove pipeline
     let encoded_ver_str: String =
         url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
     let res = client
@@ -1580,7 +1616,7 @@ transform:
         format!(r#"[{{"name":"test","version":"{}"}}]"#, version_str).as_str()
     );
 
-    // 5. write data failed
+    // 6. write data failed
     let res = client
         .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
         .header("Content-Type", "application/json")
