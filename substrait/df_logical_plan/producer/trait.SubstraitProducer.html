@@ -1,0 +1,296 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="This trait is used to produce Substrait plans, converting them from DataFusion Logical Plans. It can be implemented by users to allow for custom handling of relations, expressions, etc."><title>SubstraitProducer in substrait::df_logical_plan::producer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0ce1a80b.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="substrait" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (4d051fb30 2025-05-18)" data-channel="nightly" data-search-js="search-f7877310.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-7ef8a74a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../substrait/index.html">substrait</a><span class="version">0.15.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Substrait<wbr>Producer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#example-usage" title="Example Usage">Example Usage</a></li></ul><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.get_extensions" title="get_extensions">get_extensions</a></li><li><a href="#tymethod.register_function" title="register_function">register_function</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.handle_aggregate" title="handle_aggregate">handle_aggregate</a></li><li><a href="#method.handle_aggregate_function" title="handle_aggregate_function">handle_aggregate_function</a></li><li><a href="#method.handle_alias" title="handle_alias">handle_alias</a></li><li><a href="#method.handle_between" title="handle_between">handle_between</a></li><li><a href="#method.handle_binary_expr" title="handle_binary_expr">handle_binary_expr</a></li><li><a href="#method.handle_case" title="handle_case">handle_case</a></li><li><a href="#method.handle_cast" title="handle_cast">handle_cast</a></li><li><a href="#method.handle_column" title="handle_column">handle_column</a></li><li><a href="#method.handle_distinct" title="handle_distinct">handle_distinct</a></li><li><a href="#method.handle_empty_relation" title="handle_empty_relation">handle_empty_relation</a></li><li><a href="#method.handle_expr" title="handle_expr">handle_expr</a></li><li><a href="#method.handle_extension" title="handle_extension">handle_extension</a></li><li><a href="#method.handle_filter" title="handle_filter">handle_filter</a></li><li><a href="#method.handle_in_list" title="handle_in_list">handle_in_list</a></li><li><a href="#method.handle_in_subquery" title="handle_in_subquery">handle_in_subquery</a></li><li><a href="#method.handle_join" title="handle_join">handle_join</a></li><li><a href="#method.handle_like" title="handle_like">handle_like</a></li><li><a href="#method.handle_limit" title="handle_limit">handle_limit</a></li><li><a href="#method.handle_literal" title="handle_literal">handle_literal</a></li><li><a href="#method.handle_plan" title="handle_plan">handle_plan</a></li><li><a href="#method.handle_projection" title="handle_projection">handle_projection</a></li><li><a href="#method.handle_repartition" title="handle_repartition">handle_repartition</a></li><li><a href="#method.handle_scalar_function" title="handle_scalar_function">handle_scalar_function</a></li><li><a href="#method.handle_sort" title="handle_sort">handle_sort</a></li><li><a href="#method.handle_subquery_alias" title="handle_subquery_alias">handle_subquery_alias</a></li><li><a href="#method.handle_table_scan" title="handle_table_scan">handle_table_scan</a></li><li><a href="#method.handle_try_cast" title="handle_try_cast">handle_try_cast</a></li><li><a href="#method.handle_unary_expr" title="handle_unary_expr">handle_unary_expr</a></li><li><a href="#method.handle_union" title="handle_union">handle_union</a></li><li><a href="#method.handle_values" title="handle_values">handle_values</a></li><li><a href="#method.handle_window" title="handle_window">handle_window</a></li><li><a href="#method.handle_window_function" title="handle_window_function">handle_window_function</a></li></ul><h3><a href="#dyn-compatibility">Dyn Compatibility</a></h3><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In substrait::<wbr>df_<wbr>logical_<wbr>plan::<wbr>producer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">substrait</a>::<wbr><a href="../index.html">df_logical_plan</a>::<wbr><a href="index.html">producer</a></div><h1>Trait <span class="trait">SubstraitProducer</span><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"></span></div><pre class="rust item-decl"><code>pub trait SubstraitProducer:
+    <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> {
+<details class="toggle type-contents-toggle"><summary class="hideme"><span>Show 34 methods</span></summary>    // Required methods
+    fn <a href="#tymethod.register_function" class="fn">register_function</a>(&amp;mut self, signature: <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_extensions" class="fn">get_extensions</a>(self) -&gt; Extensions;
+
+    // Provided methods
+    fn <a href="#method.handle_plan" class="fn">handle_plan</a>(
+        &amp;mut self,
+        plan: &amp;LogicalPlan,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_projection" class="fn">handle_projection</a>(
+        &amp;mut self,
+        plan: &amp;Projection,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_filter" class="fn">handle_filter</a>(
+        &amp;mut self,
+        plan: &amp;Filter,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_window" class="fn">handle_window</a>(
+        &amp;mut self,
+        plan: &amp;Window,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_aggregate" class="fn">handle_aggregate</a>(
+        &amp;mut self,
+        plan: &amp;Aggregate,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_sort" class="fn">handle_sort</a>(&amp;mut self, plan: &amp;Sort) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_join" class="fn">handle_join</a>(&amp;mut self, plan: &amp;Join) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_repartition" class="fn">handle_repartition</a>(
+        &amp;mut self,
+        plan: &amp;Repartition,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_union" class="fn">handle_union</a>(
+        &amp;mut self,
+        plan: &amp;Union,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_table_scan" class="fn">handle_table_scan</a>(
+        &amp;mut self,
+        plan: &amp;TableScan,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_empty_relation" class="fn">handle_empty_relation</a>(
+        &amp;mut self,
+        plan: &amp;EmptyRelation,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_subquery_alias" class="fn">handle_subquery_alias</a>(
+        &amp;mut self,
+        plan: &amp;SubqueryAlias,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_limit" class="fn">handle_limit</a>(
+        &amp;mut self,
+        plan: &amp;Limit,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_values" class="fn">handle_values</a>(
+        &amp;mut self,
+        plan: &amp;Values,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_distinct" class="fn">handle_distinct</a>(
+        &amp;mut self,
+        plan: &amp;Distinct,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_extension" class="fn">handle_extension</a>(
+        &amp;mut self,
+        _plan: &amp;Extension,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_expr" class="fn">handle_expr</a>(
+        &amp;mut self,
+        expr: &amp;Expr,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_alias" class="fn">handle_alias</a>(
+        &amp;mut self,
+        alias: &amp;Alias,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_column" class="fn">handle_column</a>(
+        &amp;mut self,
+        column: &amp;Column,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_literal" class="fn">handle_literal</a>(
+        &amp;mut self,
+        value: &amp;ScalarValue,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_binary_expr" class="fn">handle_binary_expr</a>(
+        &amp;mut self,
+        expr: &amp;BinaryExpr,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_like" class="fn">handle_like</a>(
+        &amp;mut self,
+        like: &amp;Like,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_unary_expr" class="fn">handle_unary_expr</a>(
+        &amp;mut self,
+        expr: &amp;Expr,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_between" class="fn">handle_between</a>(
+        &amp;mut self,
+        between: &amp;Between,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_case" class="fn">handle_case</a>(
+        &amp;mut self,
+        case: &amp;Case,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_cast" class="fn">handle_cast</a>(
+        &amp;mut self,
+        cast: &amp;Cast,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_try_cast" class="fn">handle_try_cast</a>(
+        &amp;mut self,
+        cast: &amp;TryCast,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_scalar_function" class="fn">handle_scalar_function</a>(
+        &amp;mut self,
+        scalar_fn: &amp;ScalarFunction,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_aggregate_function" class="fn">handle_aggregate_function</a>(
+        &amp;mut self,
+        agg_fn: &amp;AggregateFunction,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Measure, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_window_function" class="fn">handle_window_function</a>(
+        &amp;mut self,
+        window_fn: &amp;WindowFunction,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_in_list" class="fn">handle_in_list</a>(
+        &amp;mut self,
+        in_list: &amp;InList,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.handle_in_subquery" class="fn">handle_in_subquery</a>(
+        &amp;mut self,
+        in_subquery: &amp;InSubquery,
+        schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt; { ... }
+</details>}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>This trait is used to produce Substrait plans, converting them from DataFusion Logical Plans.
+It can be implemented by users to allow for custom handling of relations, expressions, etc.</p>
+<p>Combined with the <a href="../consumer/trait.SubstraitConsumer.html" title="trait substrait::df_logical_plan::consumer::SubstraitConsumer">crate::logical_plan::consumer::SubstraitConsumer</a> this allows for fully
+customizable Substrait serde.</p>
+<h2 id="example-usage"><a class="doc-anchor" href="#example-usage">§</a>Example Usage</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>
+<span class="kw">struct </span>CustomSubstraitProducer {
+    extensions: Extensions,
+    state: Arc&lt;SessionState&gt;,
+}
+
+<span class="kw">impl </span>SubstraitProducer <span class="kw">for </span>CustomSubstraitProducer {
+
+    <span class="kw">fn </span>register_function(<span class="kw-2">&amp;mut </span><span class="self">self</span>, signature: String) -&gt; u32 {
+       <span class="self">self</span>.extensions.register_function(signature)
+    }
+
+    <span class="kw">fn </span>get_extensions(<span class="self">self</span>) -&gt; Extensions {
+        <span class="self">self</span>.extensions
+    }
+
+    <span class="comment">// You can set additional metadata on the Rels you produce
+    </span><span class="kw">fn </span>handle_projection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, plan: <span class="kw-2">&amp;</span>Projection) -&gt; <span class="prelude-ty">Result</span>&lt;Box&lt;Rel&gt;&gt; {
+        <span class="kw">let </span><span class="kw-2">mut </span>rel = from_projection(<span class="self">self</span>, plan)<span class="question-mark">?</span>;
+        <span class="kw">match </span>rel.rel_type {
+            <span class="prelude-val">Some</span>(RelType::Project(<span class="kw-2">mut </span>project)) =&gt; {
+                <span class="kw">let </span><span class="kw-2">mut </span>project = project.clone();
+                <span class="comment">// set common metadata or advanced extension
+                </span>project.common = <span class="prelude-val">None</span>;
+                project.advanced_extension = <span class="prelude-val">None</span>;
+                <span class="prelude-val">Ok</span>(Box::new(Rel {
+                    rel_type: <span class="prelude-val">Some</span>(RelType::Project(project)),
+                }))
+            }
+            rel_type =&gt; <span class="prelude-val">Ok</span>(Box::new(Rel { rel_type })),
+       }
+    }
+
+    <span class="comment">// You can tweak how you convert expressions for your target system
+    </span><span class="kw">fn </span>handle_between(<span class="kw-2">&amp;mut </span><span class="self">self</span>, between: <span class="kw-2">&amp;</span>Between, schema: <span class="kw-2">&amp;</span>DFSchemaRef) -&gt; <span class="prelude-ty">Result</span>&lt;Expression&gt; {
+       <span class="comment">// add your own encoding for Between
+       </span><span class="macro">todo!</span>()
+   }
+
+    <span class="comment">// You can fully control how you convert UserDefinedLogicalNodes into Substrait
+    </span><span class="kw">fn </span>handle_extension(<span class="kw-2">&amp;mut </span><span class="self">self</span>, _plan: <span class="kw-2">&amp;</span>Extension) -&gt; <span class="prelude-ty">Result</span>&lt;Box&lt;Rel&gt;&gt; {
+        <span class="comment">// implement your own serializer into Substrait
+       </span><span class="macro">todo!</span>()
+   }
+}</code></pre></div>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.register_function" class="method"><h4 class="code-header">fn <a href="#tymethod.register_function" class="fn">register_function</a>(&amp;mut self, signature: <a class="struct" href="https://doc.rust-lang.org/nightly/alloc/string/struct.String.html" title="struct alloc::string::String">String</a>) -&gt; <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.u32.html">u32</a></h4></section></summary><div class="docblock"><p>Within a Substrait plan, functions are referenced using function anchors that are stored at
+the top level of the [Plan] within
+<a href="substrait::proto::extensions::simple_extension_declaration::ExtensionFunction">ExtensionFunction</a>
+messages.</p>
+<p>When given a function signature, this method should return the existing anchor for it if
+there is one. Otherwise, it should generate a new anchor.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="tymethod.get_extensions" class="method"><h4 class="code-header">fn <a href="#tymethod.get_extensions" class="fn">get_extensions</a>(self) -&gt; Extensions</h4></section></summary><div class="docblock"><p>Consume the producer to generate the [Extensions] for the Substrait plan based on the
+functions that have been registered</p>
+</div></details></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><section id="method.handle_plan" class="method"><h4 class="code-header">fn <a href="#method.handle_plan" class="fn">handle_plan</a>(
+    &amp;mut self,
+    plan: &amp;LogicalPlan,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_projection" class="method"><h4 class="code-header">fn <a href="#method.handle_projection" class="fn">handle_projection</a>(
+    &amp;mut self,
+    plan: &amp;Projection,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_filter" class="method"><h4 class="code-header">fn <a href="#method.handle_filter" class="fn">handle_filter</a>(&amp;mut self, plan: &amp;Filter) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_window" class="method"><h4 class="code-header">fn <a href="#method.handle_window" class="fn">handle_window</a>(&amp;mut self, plan: &amp;Window) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_aggregate" class="method"><h4 class="code-header">fn <a href="#method.handle_aggregate" class="fn">handle_aggregate</a>(
+    &amp;mut self,
+    plan: &amp;Aggregate,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_sort" class="method"><h4 class="code-header">fn <a href="#method.handle_sort" class="fn">handle_sort</a>(&amp;mut self, plan: &amp;Sort) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_join" class="method"><h4 class="code-header">fn <a href="#method.handle_join" class="fn">handle_join</a>(&amp;mut self, plan: &amp;Join) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_repartition" class="method"><h4 class="code-header">fn <a href="#method.handle_repartition" class="fn">handle_repartition</a>(
+    &amp;mut self,
+    plan: &amp;Repartition,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_union" class="method"><h4 class="code-header">fn <a href="#method.handle_union" class="fn">handle_union</a>(&amp;mut self, plan: &amp;Union) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_table_scan" class="method"><h4 class="code-header">fn <a href="#method.handle_table_scan" class="fn">handle_table_scan</a>(
+    &amp;mut self,
+    plan: &amp;TableScan,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_empty_relation" class="method"><h4 class="code-header">fn <a href="#method.handle_empty_relation" class="fn">handle_empty_relation</a>(
+    &amp;mut self,
+    plan: &amp;EmptyRelation,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_subquery_alias" class="method"><h4 class="code-header">fn <a href="#method.handle_subquery_alias" class="fn">handle_subquery_alias</a>(
+    &amp;mut self,
+    plan: &amp;SubqueryAlias,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_limit" class="method"><h4 class="code-header">fn <a href="#method.handle_limit" class="fn">handle_limit</a>(&amp;mut self, plan: &amp;Limit) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_values" class="method"><h4 class="code-header">fn <a href="#method.handle_values" class="fn">handle_values</a>(&amp;mut self, plan: &amp;Values) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_distinct" class="method"><h4 class="code-header">fn <a href="#method.handle_distinct" class="fn">handle_distinct</a>(
+    &amp;mut self,
+    plan: &amp;Distinct,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_extension" class="method"><h4 class="code-header">fn <a href="#method.handle_extension" class="fn">handle_extension</a>(
+    &amp;mut self,
+    _plan: &amp;Extension,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;Rel&gt;, DataFusionError&gt;</h4></section><section id="method.handle_expr" class="method"><h4 class="code-header">fn <a href="#method.handle_expr" class="fn">handle_expr</a>(
+    &amp;mut self,
+    expr: &amp;Expr,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_alias" class="method"><h4 class="code-header">fn <a href="#method.handle_alias" class="fn">handle_alias</a>(
+    &amp;mut self,
+    alias: &amp;Alias,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_column" class="method"><h4 class="code-header">fn <a href="#method.handle_column" class="fn">handle_column</a>(
+    &amp;mut self,
+    column: &amp;Column,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_literal" class="method"><h4 class="code-header">fn <a href="#method.handle_literal" class="fn">handle_literal</a>(
+    &amp;mut self,
+    value: &amp;ScalarValue,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_binary_expr" class="method"><h4 class="code-header">fn <a href="#method.handle_binary_expr" class="fn">handle_binary_expr</a>(
+    &amp;mut self,
+    expr: &amp;BinaryExpr,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_like" class="method"><h4 class="code-header">fn <a href="#method.handle_like" class="fn">handle_like</a>(
+    &amp;mut self,
+    like: &amp;Like,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><details class="toggle method-toggle" open><summary><section id="method.handle_unary_expr" class="method"><h4 class="code-header">fn <a href="#method.handle_unary_expr" class="fn">handle_unary_expr</a>(
+    &amp;mut self,
+    expr: &amp;Expr,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section></summary><div class="docblock"><p>For handling Not, IsNotNull, IsNull, IsTrue, IsFalse, IsUnknown, IsNotTrue, IsNotFalse, IsNotUnknown, Negative</p>
+</div></details><section id="method.handle_between" class="method"><h4 class="code-header">fn <a href="#method.handle_between" class="fn">handle_between</a>(
+    &amp;mut self,
+    between: &amp;Between,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_case" class="method"><h4 class="code-header">fn <a href="#method.handle_case" class="fn">handle_case</a>(
+    &amp;mut self,
+    case: &amp;Case,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_cast" class="method"><h4 class="code-header">fn <a href="#method.handle_cast" class="fn">handle_cast</a>(
+    &amp;mut self,
+    cast: &amp;Cast,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_try_cast" class="method"><h4 class="code-header">fn <a href="#method.handle_try_cast" class="fn">handle_try_cast</a>(
+    &amp;mut self,
+    cast: &amp;TryCast,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_scalar_function" class="method"><h4 class="code-header">fn <a href="#method.handle_scalar_function" class="fn">handle_scalar_function</a>(
+    &amp;mut self,
+    scalar_fn: &amp;ScalarFunction,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_aggregate_function" class="method"><h4 class="code-header">fn <a href="#method.handle_aggregate_function" class="fn">handle_aggregate_function</a>(
+    &amp;mut self,
+    agg_fn: &amp;AggregateFunction,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Measure, DataFusionError&gt;</h4></section><section id="method.handle_window_function" class="method"><h4 class="code-header">fn <a href="#method.handle_window_function" class="fn">handle_window_function</a>(
+    &amp;mut self,
+    window_fn: &amp;WindowFunction,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_in_list" class="method"><h4 class="code-header">fn <a href="#method.handle_in_list" class="fn">handle_in_list</a>(
+    &amp;mut self,
+    in_list: &amp;InList,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section><section id="method.handle_in_subquery" class="method"><h4 class="code-header">fn <a href="#method.handle_in_subquery" class="fn">handle_in_subquery</a>(
+    &amp;mut self,
+    in_subquery: &amp;InSubquery,
+    schema: &amp;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;DFSchema&gt;,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expression, DataFusionError&gt;</h4></section></div><h2 id="dyn-compatibility" class="section-header">Dyn Compatibility<a href="#dyn-compatibility" class="anchor">§</a></h2><div class="dyn-compatibility-info"><p>This trait is <b>not</b> <a href="https://doc.rust-lang.org/nightly/reference/items/traits.html#dyn-compatibility">dyn compatible</a>.</p><p><i>In older versions of Rust, dyn compatibility was called "object safety", so this trait is not object safe.</i></p></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"></div><script src="../../../trait.impl/datafusion_substrait/logical_plan/producer/trait.SubstraitProducer.js" async></script></section></div></main></body></html>

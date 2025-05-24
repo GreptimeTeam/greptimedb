@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ShowCreateTableVariant","ShowKind"],"macro":["format_kind"],"struct":["ShowColumns","ShowCreateDatabase","ShowCreateFlow","ShowCreateTable","ShowCreateView","ShowDatabases","ShowFlows","ShowIndex","ShowRegion","ShowSearchPath","ShowStatus","ShowTableStatus","ShowTables","ShowVariables","ShowViews"]};

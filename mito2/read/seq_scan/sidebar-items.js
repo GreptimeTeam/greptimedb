@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_sources","get_scanner_type"],"struct":["SeqScan"]};

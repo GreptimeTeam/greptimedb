@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_TYPE_BLOOM_FILTER_INDEX"],"enum":["Tag"],"fn":["bloom_filter_index_content_weight","bloom_filter_index_metadata_weight"],"struct":["CachedBloomFilterIndexBlobReader"],"type":["BloomFilterIndexCache","BloomFilterIndexCacheRef"]};

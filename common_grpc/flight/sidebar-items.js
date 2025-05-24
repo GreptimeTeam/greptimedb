@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlightMessage"],"fn":["build_none_flight_msg","flight_messages_to_recordbatches"],"mod":["do_put"],"struct":["FlightDecoder","FlightEncoder"]};
