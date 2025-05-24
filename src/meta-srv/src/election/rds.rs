@@ -10,6 +10,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "mysql_kvbackend")]
+pub mod mysql;
+#[cfg(feature = "pg_kvbackend")]
+pub mod postgres;
+
 use common_time::Timestamp;
 use itertools::Itertools;
 use snafu::OptionExt;
@@ -17,17 +22,12 @@ use snafu::OptionExt;
 use crate::election::LeaderKey;
 use crate::error::{Result, UnexpectedSnafu};
 
-#[cfg(feature = "mysql_kvbackend")]
-pub mod mysql;
-#[cfg(feature = "pg_kvbackend")]
-pub mod postgres;
-
 // Separator between value and expire time in the lease string.
 // A lease is put into rds election in the format:
 // <node_info> || __metadata_lease_sep || <expire_time>
 const LEASE_SEP: &str = r#"||__metadata_lease_sep||"#;
 
-/// Parse the value and expire time from the given string retrieved from rds.
+/// Parses the value and expire time from the given string retrieved from rds.
 fn parse_value_and_expire_time(value: &str) -> Result<(String, Timestamp)> {
     let (value, expire_time) =
         value

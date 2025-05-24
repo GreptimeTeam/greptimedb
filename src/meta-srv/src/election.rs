@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod etcd;
-
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 pub mod rds;
 

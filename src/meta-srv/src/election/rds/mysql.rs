@@ -27,8 +27,8 @@ use tokio::time::MissedTickBehavior;
 
 use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
 use crate::election::{
-    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage, CANDIDATES_ROOT,
-    ELECTION_KEY,
+    listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
+    CANDIDATES_ROOT, ELECTION_KEY,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result, SerializeToJsonSnafu,
