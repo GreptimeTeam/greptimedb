@@ -35,6 +35,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -51,6 +52,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -67,6 +69,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window
@@ -83,6 +86,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('find_approx_rate');
 
+-- SQLNESS SLEEP 1s
 SELECT
     rate,
     time_window

@@ -22,6 +22,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -54,6 +55,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -74,6 +76,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 -- this is expected to be the same as above("2") since the new `input_basic` table
 -- have different table id, so is a different table
 SELECT wildcard FROM out_basic;
@@ -97,6 +100,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 -- flow batching mode
 SELECT wildcard FROM out_basic;
 
@@ -129,6 +133,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -151,6 +156,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 -- test again, this time with db restart
@@ -186,6 +192,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -224,6 +231,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
@@ -251,6 +259,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 -- this is expected to be the same as above("2") since the new `input_basic` table
 -- have different table id, so is a different table
 SELECT wildcard FROM out_basic;
@@ -279,6 +288,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 -- 4 is also expected, since flow batching mode
 SELECT wildcard FROM out_basic;
 
@@ -316,6 +326,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -343,6 +354,7 @@ VALUES
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 DROP FLOW test_wildcard_basic;
@@ -396,6 +408,7 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('api_stats_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 -- SQLNESS ARG restart=true
@@ -409,6 +422,7 @@ INSERT INTO `api_log` (`time`, `key`, `status_code`, `method`, `path`, `raw_quer
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('api_stats_flow');
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 DROP FLOW api_stats_flow;
