@@ -14,9 +14,9 @@
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::region::{
-    bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
-    RegionRequestHeader,
+    bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
+use api::v1::ArrowIpc;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;

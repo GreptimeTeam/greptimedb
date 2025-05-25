@@ -234,9 +234,16 @@ impl<S: LogStore> WalWriter<S> {
 #[cfg(test)]
 mod tests {
     use api::v1::{
-        value, ColumnDataType, ColumnSchema, Mutation, OpType, Row, Rows, SemanticType, Value,
+        bulk_wal_entry, value, ArrowIpc, BulkWalEntry, ColumnDataType, ColumnSchema, Mutation,
+        OpType, Row, Rows, SemanticType, Value,
     };
+    use common_recordbatch::DfRecordBatch;
+    use common_test_util::flight::encode_to_flight_data;
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
+    use datatypes::arrow;
+    use datatypes::arrow::array::{ArrayRef, TimestampMillisecondArray};
+    use datatypes::arrow::datatypes::Field;
+    use datatypes::arrow_array::StringArray;
     use futures::TryStreamExt;
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::test_util::log_store_util;
@@ -318,6 +325,7 @@ mod tests {
                 new_mutation(OpType::Put, 1, &[("k1", 1), ("k2", 2)]),
                 new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
             ],
+            bulk_entries: vec![],
         };
         let mut writer = wal.writer();
         // Region 1 entry 1.
@@ -355,6 +363,42 @@ mod tests {
         writer.write_to_wal().await.unwrap();
     }
 
+    fn build_record_batch(rows: &[(&str, i64)]) -> DfRecordBatch {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            Field::new("tag", arrow::datatypes::DataType::Utf8, false),
+            Field::new(
+                "ts",
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Millisecond,
+                    None,
+                ),
+                false,
+            ),
+        ]));
+
+        let tag = Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.0.to_string()),
+        )) as ArrayRef;
+        let ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+            rows.iter().map(|r| r.1),
+        )) as ArrayRef;
+        DfRecordBatch::try_new(schema, vec![tag, ts]).unwrap()
+    }
+
+    fn build_bulk_wal_entry(sequence_number: SequenceNumber, rows: &[(&str, i64)]) -> BulkWalEntry {
+        let rb = build_record_batch(rows);
+        let (schema, rb) = encode_to_flight_data(rb);
+        BulkWalEntry {
+            sequence: sequence_number,
+            body: Some(bulk_wal_entry::Body::ArrowIpc(ArrowIpc {
+                region_id: 0,
+                schema: schema.data_header,
+                data_header: rb.data_header,
+                payload: rb.data_body,
+            })),
+        }
+    }
+
     fn sample_entries() -> Vec<WalEntry> {
         vec![
             WalEntry {
@@ -362,18 +406,22 @@ mod tests {
                     new_mutation(OpType::Put, 1, &[("k1", 1), ("k2", 2)]),
                     new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
                 ],
+                bulk_entries: vec![],
             },
             WalEntry {
                 mutations: vec![new_mutation(OpType::Put, 3, &[("k1", 1), ("k2", 2)])],
+                bulk_entries: vec![],
             },
             WalEntry {
                 mutations: vec![
                     new_mutation(OpType::Put, 4, &[("k1", 1), ("k2", 2)]),
                     new_mutation(OpType::Put, 5, &[("k3", 3), ("k4", 4)]),
                 ],
+                bulk_entries: vec![],
             },
             WalEntry {
                 mutations: vec![new_mutation(OpType::Put, 6, &[("k1", 1), ("k2", 2)])],
+                bulk_entries: vec![build_bulk_wal_entry(7, &[("k1", 8), ("k2", 9)])],
             },
         ]
     }

@@ -198,6 +198,7 @@ pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option
         min_ts,
         sequence: part.sequence,
         timestamp_index: part.timestamp_index,
+        raw_data: None,
     }))
 }
 
@@ -1189,6 +1190,7 @@ mod tests {
             min_ts,
             sequence,
             timestamp_index: 0,
+            raw_data: None,
         }
     }
 
@@ -1302,6 +1304,7 @@ mod tests {
             min_ts: 1000,
             sequence: 0,
             timestamp_index: 0,
+            raw_data: None,
         };
 
         let result = filter_record_batch(&part, 1000, 2000).unwrap();

@@ -118,6 +118,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             min_ts,
             sequence: 0,
             timestamp_index: ts_index,
+            raw_data: Some(request.raw_data),
         };
         pending_bulk_request.push(SenderBulkRequest {
             sender,

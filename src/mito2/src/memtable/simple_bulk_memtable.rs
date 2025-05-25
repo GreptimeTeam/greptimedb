@@ -565,6 +565,7 @@ mod tests {
             max_ts: 2,
             num_rows: 2,
             timestamp_index: 0,
+            raw_data: None,
         };
         memtable.write_bulk(part).unwrap();
 

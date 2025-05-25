@@ -15,7 +15,8 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use api::v1::bulk_wal_entry::Body;
+use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
@@ -256,6 +257,13 @@ impl RegionWriteCtx {
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows));
         bulk.sequence = self.next_sequence;
+        let ipc = std::mem::take(&mut bulk.raw_data).expect("Should have raw data");
+
+        self.wal_entry.bulk_entries.push(BulkWalEntry {
+            sequence: bulk.sequence,
+            body: Some(Body::ArrowIpc(ipc)),
+        });
+
         self.next_sequence += bulk.num_rows as u64;
         self.bulk_parts.push(bulk);
     }

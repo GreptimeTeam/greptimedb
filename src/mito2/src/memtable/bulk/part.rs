@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
-use api::v1::{Mutation, OpType};
+use api::v1::{ArrowIpc, Mutation, OpType};
 use bytes::Bytes;
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
@@ -64,6 +64,7 @@ pub struct BulkPart {
     pub min_ts: i64,
     pub sequence: u64,
     pub timestamp_index: usize,
+    pub raw_data: Option<ArrowIpc>,
 }
 
 impl BulkPart {

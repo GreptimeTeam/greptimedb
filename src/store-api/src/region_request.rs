@@ -22,13 +22,13 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, ArrowIpc,
-    BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests,
-    DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
+    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
+    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
-    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption,
+    Rows, SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
@@ -329,24 +329,23 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
         return Ok(vec![]);
     };
 
-    let ArrowIpc {
-        region_id,
-        schema,
-        payload,
-        data_header,
-    } = request;
     let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
         .with_label_values(&["decode"])
         .start_timer();
-    let mut decoder = FlightDecoder::try_from_schema_bytes(&schema).context(FlightCodecSnafu)?;
+    let mut decoder =
+        FlightDecoder::try_from_schema_bytes(&request.schema).context(FlightCodecSnafu)?;
     let payload = decoder
-        .try_decode_record_batch(&data_header, &payload)
+        .try_decode_record_batch(&request.data_header, &request.payload)
         .context(FlightCodecSnafu)?;
     decoder_timer.observe_duration();
-    let region_id: RegionId = region_id.into();
+    let region_id: RegionId = request.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::BulkInserts(RegionBulkInsertsRequest { region_id, payload }),
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            region_id,
+            payload,
+            raw_data: request,
+        }),
     )])
 }
 
@@ -1137,6 +1136,7 @@ pub struct RegionSequencesRequest {
 pub struct RegionBulkInsertsRequest {
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
+    pub raw_data: ArrowIpc,
 }
 
 impl RegionBulkInsertsRequest {
