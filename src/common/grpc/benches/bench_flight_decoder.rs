@@ -17,16 +17,16 @@ use std::sync::Arc;
 use arrow_flight::FlightData;
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
-use common_recordbatch::{DfRecordBatch, RecordBatch};
+use common_recordbatch::DfRecordBatch;
 use criterion::{criterion_group, criterion_main, Criterion};
+use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::Helper;
+use datatypes::schema::{ColumnSchema, Schema};
 use prost::Message;
 
-fn schema() -> SchemaRef {
+fn schema() -> arrow::datatypes::SchemaRef {
     let schema = Schema::new(vec![
         ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
@@ -38,18 +38,21 @@ fn schema() -> SchemaRef {
         ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), false),
         ColumnSchema::new("v1", ConcreteDataType::int64_datatype(), false),
     ]);
-    Arc::new(schema)
+    schema.arrow_schema().clone()
 }
 
 /// Generate record batch according to provided schema and num rows.
-fn prepare_random_record_batch(schema: SchemaRef, num_rows: usize) -> RecordBatch {
+fn prepare_random_record_batch(
+    schema: arrow::datatypes::SchemaRef,
+    num_rows: usize,
+) -> DfRecordBatch {
     let tag_candidates = (0..10000).map(|i| i.to_string()).collect::<Vec<_>>();
 
-    let columns: Vec<VectorRef> = schema
-        .column_schemas()
+    let columns: Vec<ArrayRef> = schema
+        .fields
         .iter()
-        .map(|col| match &col.data_type {
-            ConcreteDataType::String(_) => {
+        .map(|col| match col.data_type() {
+            DataType::Utf8 => {
                 let array = StringArray::from(
                     (0..num_rows)
                         .map(|_| {
@@ -58,24 +61,24 @@ fn prepare_random_record_batch(schema: SchemaRef, num_rows: usize) -> RecordBatc
                         })
                         .collect::<Vec<_>>(),
                 );
-                Helper::try_into_vector(Arc::new(array) as ArrayRef).unwrap()
+                Arc::new(array) as ArrayRef
             }
-            ConcreteDataType::Timestamp(_) => {
+            DataType::Timestamp(_, _) => {
                 let now = common_time::util::current_time_millis();
                 let array = TimestampMillisecondArray::from(
                     (0..num_rows).map(|i| now + i as i64).collect::<Vec<_>>(),
                 );
-                Helper::try_into_vector(Arc::new(array) as ArrayRef).unwrap()
+                Arc::new(array) as ArrayRef
             }
-            ConcreteDataType::Int64(_) => {
+            DataType::Int64 => {
                 let array = Int64Array::from((0..num_rows).map(|i| i as i64).collect::<Vec<_>>());
-                Helper::try_into_vector(Arc::new(array) as ArrayRef).unwrap()
+                Arc::new(array) as ArrayRef
             }
             _ => unreachable!(),
         })
         .collect();
 
-    RecordBatch::new(schema, columns).unwrap()
+    DfRecordBatch::try_new(schema, columns).unwrap()
 }
 
 fn prepare_flight_data(num_rows: usize) -> (FlightData, FlightData) {
@@ -83,7 +86,7 @@ fn prepare_flight_data(num_rows: usize) -> (FlightData, FlightData) {
     let mut encoder = FlightEncoder::default();
     let schema_data = encoder.encode(FlightMessage::Schema(schema.clone()));
     let rb = prepare_random_record_batch(schema, num_rows);
-    let rb_data = encoder.encode(FlightMessage::Recordbatch(rb));
+    let rb_data = encoder.encode(FlightMessage::RecordBatch(rb));
     (schema_data, rb_data)
 }
 
@@ -93,10 +96,10 @@ fn decode_flight_data_from_protobuf(schema: &Bytes, payload: &Bytes) -> DfRecord
     let mut decoder = FlightDecoder::default();
     let _schema = decoder.try_decode(&schema).unwrap();
     let message = decoder.try_decode(&payload).unwrap();
-    let FlightMessage::Recordbatch(batch) = message else {
+    let FlightMessage::RecordBatch(batch) = message else {
         unreachable!("unexpected message");
     };
-    batch.into_df_record_batch()
+    batch
 }
 
 fn decode_flight_data_from_header_and_body(

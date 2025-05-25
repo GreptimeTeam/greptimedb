@@ -60,13 +60,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create RecordBatch"))]
-    CreateRecordBatch {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Failed to convert Arrow type: {}", from))]
     Conversion {
         from: String,
@@ -87,13 +80,6 @@ pub enum Error {
         reason: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to convert Arrow Schema"))]
-    ConvertArrowSchema {
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Not supported: {}", feat))]
@@ -130,8 +116,6 @@ impl ErrorExt for Error {
             | Error::DecodeFlightData { .. }
             | Error::SerdeJson { .. } => StatusCode::Internal,
 
-            Error::CreateRecordBatch { source, .. } => source.status_code(),
-            Error::ConvertArrowSchema { source, .. } => source.status_code(),
             Error::Arrow { .. } => StatusCode::Internal,
         }
     }
