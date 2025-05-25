@@ -53,7 +53,6 @@ fn random_array(num: usize) -> BulkPart {
     .unwrap();
     BulkPart {
         batch,
-        num_rows: num,
         max_ts: max,
         min_ts: min,
         sequence: 0,
@@ -77,7 +76,6 @@ fn filter_arrow_impl(part: &BulkPart, min: i64, max: i64) -> Option<BulkPart> {
         return None;
     }
 
-    let num_rows_filtered = ts_filtered.len();
     let i64array = ts_filtered
         .as_any()
         .downcast_ref::<TimestampMillisecondArray>()
@@ -88,7 +86,6 @@ fn filter_arrow_impl(part: &BulkPart, min: i64, max: i64) -> Option<BulkPart> {
     let batch = arrow::compute::filter_record_batch(&part.batch, &predicate).unwrap();
     Some(BulkPart {
         batch,
-        num_rows: num_rows_filtered,
         max_ts: max,
         min_ts: min,
         sequence: 0,

@@ -325,6 +325,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = request.region_id.into();
     let Some(Body::ArrowIpc(request)) = request.body else {
         return Ok(vec![]);
     };
@@ -338,7 +339,6 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
         .try_decode_record_batch(&request.data_header, &request.payload)
         .context(FlightCodecSnafu)?;
     decoder_timer.observe_duration();
-    let region_id: RegionId = request.region_id.into();
     Ok(vec![(
         region_id,
         RegionRequest::BulkInserts(RegionBulkInsertsRequest {

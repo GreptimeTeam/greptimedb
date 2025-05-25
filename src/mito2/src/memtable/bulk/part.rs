@@ -18,8 +18,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
-use api::v1::{ArrowIpc, Mutation, OpType};
+use api::v1::bulk_wal_entry::Body;
+use api::v1::{bulk_wal_entry, ArrowIpc, BulkWalEntry, Mutation, OpType};
 use bytes::Bytes;
+use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
 use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
@@ -59,12 +61,66 @@ use crate::sst::to_sst_arrow_schema;
 #[derive(Clone)]
 pub struct BulkPart {
     pub batch: RecordBatch,
-    pub num_rows: usize,
     pub max_ts: i64,
     pub min_ts: i64,
     pub sequence: u64,
     pub timestamp_index: usize,
     pub raw_data: Option<ArrowIpc>,
+}
+
+impl TryFrom<BulkWalEntry> for BulkPart {
+    type Error = error::Error;
+
+    fn try_from(value: BulkWalEntry) -> std::result::Result<Self, Self::Error> {
+        match value.body.expect("Entry payload should be present") {
+            Body::ArrowIpc(ipc) => {
+                let mut decoder = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    .context(error::ConvertBulkWalEntrySnafu)?;
+                let batch = decoder
+                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                    .context(error::ConvertBulkWalEntrySnafu)?;
+                Ok(Self {
+                    batch,
+                    max_ts: value.max_ts,
+                    min_ts: value.min_ts,
+                    sequence: value.sequence,
+                    timestamp_index: value.timestamp_index as usize,
+                    raw_data: Some(ipc),
+                })
+            }
+        }
+    }
+}
+
+impl From<&BulkPart> for BulkWalEntry {
+    fn from(value: &BulkPart) -> Self {
+        if let Some(ipc) = &value.raw_data {
+            BulkWalEntry {
+                sequence: value.sequence,
+                max_ts: value.max_ts,
+                min_ts: value.min_ts,
+                timestamp_index: value.timestamp_index as u32,
+                body: Some(Body::ArrowIpc(ipc.clone())),
+            }
+        } else {
+            let mut encoder = FlightEncoder::default();
+            let schema_bytes = encoder
+                .encode(FlightMessage::Schema(value.batch.schema()))
+                .data_header;
+            let rb_data = encoder.encode(FlightMessage::RecordBatch(value.batch.clone()));
+            BulkWalEntry {
+                sequence: value.sequence,
+                max_ts: value.max_ts,
+                min_ts: value.min_ts,
+                timestamp_index: value.timestamp_index as u32,
+                body: Some(Body::ArrowIpc(ArrowIpc {
+                    schema: schema_bytes,
+                    data_header: rb_data.data_header,
+                    payload: rb_data.data_body,
+                })),
+            }
+        }
+    }
 }
 
 impl BulkPart {
@@ -85,7 +141,7 @@ impl BulkPart {
             .collect::<datatypes::error::Result<Vec<_>>>()
             .context(error::ComputeVectorSnafu)?;
 
-        let rows = (0..self.num_rows)
+        let rows = (0..self.num_rows())
             .map(|row_idx| {
                 let values = (0..self.batch.num_columns())
                     .map(|col_idx| {
@@ -130,6 +186,10 @@ impl BulkPart {
 
     pub fn timestamps(&self) -> &ArrayRef {
         self.batch.column(self.timestamp_index)
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.batch.num_rows()
     }
 }
 

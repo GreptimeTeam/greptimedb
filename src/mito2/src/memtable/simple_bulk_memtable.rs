@@ -221,7 +221,7 @@ impl Memtable for SimpleBulkMemtable {
             value_bytes: part.estimated_size(),
             min_ts: part.min_ts,
             max_ts: part.max_ts,
-            num_rows: part.num_rows,
+            num_rows: part.num_rows(),
             max_sequence: sequence,
         });
         Ok(())
@@ -563,7 +563,6 @@ mod tests {
             sequence: 1,
             min_ts: 1,
             max_ts: 2,
-            num_rows: 2,
             timestamp_index: 0,
             raw_data: None,
         };

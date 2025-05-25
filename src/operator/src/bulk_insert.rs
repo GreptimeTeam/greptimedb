@@ -90,8 +90,8 @@ impl Inserter {
                     ..Default::default()
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    region_id: region_id.as_u64(),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        region_id: region_id.as_u64(),
                         schema: schema_bytes,
                         data_header: data.data_header,
                         payload: data.data_body,
@@ -182,8 +182,8 @@ impl Inserter {
                                 ..Default::default()
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                                region_id: region_id.as_u64(),
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                                    region_id: region_id.as_u64(),
                                     schema: schema_bytes,
                                     data_header: header,
                                     payload,

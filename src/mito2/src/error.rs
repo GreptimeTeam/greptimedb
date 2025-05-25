@@ -1037,6 +1037,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode bulk wal entry"))]
+    ConvertBulkWalEntry {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1192,6 +1199,7 @@ impl ErrorExt for Error {
             ScanSeries { source, .. } => source.status_code(),
 
             ScanMultiTimes { .. } => StatusCode::InvalidArguments,
+            Error::ConvertBulkWalEntry { source, .. } => source.status_code(),
         }
     }
 

@@ -48,7 +48,7 @@ use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::time_partition::TimePartitions;
-use crate::memtable::MemtableBuilderProvider;
+use crate::memtable::{BulkPart, MemtableBuilderProvider};
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
@@ -646,6 +646,12 @@ where
                 mutation.write_hint,
                 OptionOutputTx::none(),
             );
+        }
+
+        for bulk_entry in entry.bulk_entries {
+            let part = BulkPart::try_from(bulk_entry)?;
+            rows_replayed += part.num_rows();
+            region_write_ctx.push_bulk(OptionOutputTx::none(), part);
         }
 
         // set next_entry_id and write to memtable.

@@ -4859,7 +4859,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=e7361106f1a6e3aa40576e9562ae8332a9fe88ce#e7361106f1a6e3aa40576e9562ae8332a9fe88ce"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=442348b2518c0bf187fb1ad011ba370c38b96cc4#442348b2518c0bf187fb1ad011ba370c38b96cc4"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -6959,6 +6959,7 @@ dependencies = [
  "common-decimal",
  "common-error",
  "common-function",
+ "common-grpc",
  "common-macro",
  "common-meta",
  "common-query",

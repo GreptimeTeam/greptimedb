@@ -193,7 +193,6 @@ pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option
     .context(error::NewRecordBatchSnafu)?;
     Ok(Some(BulkPart {
         batch,
-        num_rows,
         max_ts,
         min_ts,
         sequence: part.sequence,
@@ -1185,7 +1184,6 @@ mod tests {
         let min_ts = ts.iter().min().copied().unwrap();
         BulkPart {
             batch,
-            num_rows: ts.len(),
             max_ts,
             min_ts,
             sequence,
@@ -1299,7 +1297,6 @@ mod tests {
 
         let part = BulkPart {
             batch,
-            num_rows: 5,
             max_ts: 8000,
             min_ts: 1000,
             sequence: 0,
@@ -1310,7 +1307,7 @@ mod tests {
         let result = filter_record_batch(&part, 1000, 2000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
-        assert_eq!(filtered.num_rows, 1);
+        assert_eq!(filtered.num_rows(), 1);
         assert_eq!(filtered.min_ts, 1000);
         assert_eq!(filtered.max_ts, 1000);
 
@@ -1318,7 +1315,7 @@ mod tests {
         let result = filter_record_batch(&part, 3000, 6000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
-        assert_eq!(filtered.num_rows, 1);
+        assert_eq!(filtered.num_rows(), 1);
         assert_eq!(filtered.min_ts, 5000);
         assert_eq!(filtered.max_ts, 5000);
 
@@ -1330,7 +1327,7 @@ mod tests {
         let result = filter_record_batch(&part, 0, 9000).unwrap();
         assert!(result.is_some());
         let filtered = result.unwrap();
-        assert_eq!(filtered.num_rows, 5);
+        assert_eq!(filtered.num_rows(), 5);
         assert_eq!(filtered.min_ts, 1000);
         assert_eq!(filtered.max_ts, 8000);
     }

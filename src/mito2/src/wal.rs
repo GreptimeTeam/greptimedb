@@ -388,10 +388,14 @@ mod tests {
     fn build_bulk_wal_entry(sequence_number: SequenceNumber, rows: &[(&str, i64)]) -> BulkWalEntry {
         let rb = build_record_batch(rows);
         let (schema, rb) = encode_to_flight_data(rb);
+        let max_ts = rows.iter().map(|r| r.1).max().unwrap();
+        let min_ts = rows.iter().map(|r| r.1).min().unwrap();
         BulkWalEntry {
             sequence: sequence_number,
+            max_ts,
+            min_ts,
+            timestamp_index: 1,
             body: Some(bulk_wal_entry::Body::ArrowIpc(ArrowIpc {
-                region_id: 0,
                 schema: schema.data_header,
                 data_header: rb.data_header,
                 payload: rb.data_body,
