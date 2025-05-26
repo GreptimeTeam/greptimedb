@@ -175,7 +175,7 @@ fn get_cache_generic<T: Clone + Send + Sync + 'static>(
         _ => MultiPipelineWithDiffSchemaSnafu {
             schemas: ks
                 .iter()
-                .map(|(k, _)| k.split_once('/').unwrap().0)
+                .filter_map(|(k, _)| k.split_once('/').map(|k| k.0))
                 .collect::<Vec<_>>()
                 .join(","),
         }
