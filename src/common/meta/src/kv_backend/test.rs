@@ -125,14 +125,24 @@ pub async fn test_simple_kv_range(kvbackend: &impl KvBackend) {
         assert_eq!(response.kvs.len(), 4);
     }
     {
-        let prefix_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key11".to_vec());
-        let response = kvbackend.range(prefix_query).await.unwrap();
+        let range_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key11".to_vec());
+        let response = kvbackend.range(range_query).await.unwrap();
         assert_eq!(response.kvs.len(), 1);
     }
     {
-        let range_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key2".to_vec());
-        let response = kvbackend.range(range_query).await.unwrap();
+        let prefix_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key2".to_vec());
+        let response = kvbackend.range(prefix_query).await.unwrap();
         assert_eq!(response.kvs.len(), 2);
+    }
+    {
+        let range_query = RangeRequest::new().with_range(b"key10".to_vec(), b"key100".to_vec());
+        let response = kvbackend.range(range_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 0);
+    }
+    {
+        let prefix_query = RangeRequest::new().with_range(b"key10".to_vec(), b"key11".to_vec());
+        let response = kvbackend.range(prefix_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 0);
     }
 }
 
