@@ -105,6 +105,7 @@ impl MockDatanodeHandler for RetryErrorDatanodeHandler {
                 }
                 .build(),
             ),
+            clean_poisons: false,
         })
     }
 
@@ -218,6 +219,7 @@ impl MockDatanodeHandler for PartialSuccessDatanodeHandler {
                     }
                     .build(),
                 ),
+                clean_poisons: false,
             })
         } else {
             error::UnexpectedSnafu {
@@ -252,6 +254,7 @@ impl MockDatanodeHandler for AllFailureDatanodeHandler {
                     }
                     .build(),
                 ),
+                clean_poisons: false,
             })
         } else {
             error::UnexpectedSnafu {

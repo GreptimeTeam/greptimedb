@@ -358,10 +358,11 @@ impl Runner {
                     Err(e) => {
                         error!(
                             e;
-                            "Failed to execute procedure {}-{}, retry: {}",
+                            "Failed to execute procedure {}-{}, retry: {}, clean_poisons: {}",
                             self.procedure.type_name(),
                             self.meta.id,
                             e.is_retry_later(),
+                            e.need_clean_poisons(),
                         );
 
                         // Don't store state if `ProcedureManager` is stopped.
@@ -378,6 +379,11 @@ impl Runner {
                                 self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
                                 return;
                             }
+                            debug!(
+                                "Procedure {}-{} cleaned poisons",
+                                self.procedure.type_name(),
+                                self.meta.id,
+                            );
                         }
 
                         if e.is_retry_later() {
@@ -581,6 +587,7 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -1596,6 +1603,75 @@ mod tests {
 
         // If the procedure is poisoned, the poison key shouldn't be deleted.
         assert_eq!(&procedure_id.to_string(), ROOT_ID);
+    }
+
+    #[tokio::test]
+    async fn test_execute_exceed_max_retry_after_set_poison() {
+        common_telemetry::init_default_ut_logging();
+        let mut times = 0;
+        let poison_key = PoisonKey::new("table/1024");
+        let moved_poison_key = poison_key.clone();
+        let exec_fn = move |ctx: Context| {
+            times += 1;
+            let poison_key = moved_poison_key.clone();
+            async move {
+                if times == 1 {
+                    Ok(Status::executing(true))
+                } else {
+                    // Put the poison to the context.
+                    ctx.provider
+                        .try_put_poison(&poison_key, ctx.procedure_id)
+                        .await
+                        .unwrap();
+                    Err(Error::retry_later_and_clean_poisons(MockError::new(
+                        StatusCode::Unexpected,
+                    )))
+                }
+            }
+            .boxed()
+        };
+        let poison = ProcedureAdapter {
+            data: "poison".to_string(),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
+            poison_keys: PoisonKeys::new(vec![poison_key.clone()]),
+            exec_fn,
+            rollback_fn: None,
+        };
+
+        let dir = create_temp_dir("exceed_max_after_set_poison");
+        let meta = poison.new_meta(ROOT_ID);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta.clone(), Box::new(poison), procedure_store);
+        runner.manager_ctx.start();
+        runner.exponential_builder = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_times(3);
+        // Use the manager ctx as the context provider.
+        let ctx = context_with_provider(
+            meta.id,
+            runner.manager_ctx.clone() as Arc<dyn ContextProvider>,
+        );
+        // Manually add this procedure to the manager ctx.
+        runner
+            .manager_ctx
+            .procedures
+            .write()
+            .unwrap()
+            .insert(meta.id, runner.meta.clone());
+        // Run the runner and execute the procedure.
+        runner.execute_once_with_retry(&ctx).await;
+        let err = meta.state().error().unwrap().clone();
+        assert_matches!(&*err, Error::RetryTimesExceeded { .. });
+
+        // Check the poison is deleted.
+        let procedure_id = runner
+            .manager_ctx
+            .poison_manager
+            .get_poison(&poison_key.to_string())
+            .await
+            .unwrap();
+        assert_eq!(procedure_id, None);
     }
 
     #[tokio::test]

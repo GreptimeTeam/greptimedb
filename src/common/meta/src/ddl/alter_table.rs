@@ -43,7 +43,9 @@ use crate::ddl::utils::{
     add_peer_context_if_needed, handle_multiple_results, sync_follower_regions, MultipleResults,
 };
 use crate::ddl::DdlContext;
-use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
+use crate::error::{
+    AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu,
+};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -195,7 +197,10 @@ impl AlterTableProcedure {
             }
             MultipleResults::AllRetryable(error) => {
                 // Just returns the error, and wait for the next try.
-                Err(error)
+                let err = BoxedError::new(error);
+                Err(err).context(RetryLaterSnafu {
+                    clean_poisons: true,
+                })
             }
             MultipleResults::Ok(results) => {
                 self.submit_sync_region_requests(results, &physical_table_route.region_routes)
@@ -323,14 +328,11 @@ impl Procedure for AlterTableProcedure {
     }
 
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e: Error| {
-            if e.is_retry_later() {
-                ProcedureError::retry_later(e)
-            } else if e.need_clean_poisons() {
-                ProcedureError::external_and_clean_poisons(e)
-            } else {
-                ProcedureError::external(e)
-            }
+        let error_handler = |e: Error| match (e.is_retry_later(), e.need_clean_poisons()) {
+            (true, true) => ProcedureError::retry_later_and_clean_poisons(e),
+            (true, false) => ProcedureError::retry_later(e),
+            (false, true) => ProcedureError::external_and_clean_poisons(e),
+            (false, false) => ProcedureError::external(e),
         };
 
         let state = &self.data.state;

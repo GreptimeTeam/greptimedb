@@ -454,7 +454,10 @@ pub enum Error {
     },
 
     #[snafu(display("Retry later"))]
-    RetryLater { source: BoxedError },
+    RetryLater {
+        source: BoxedError,
+        clean_poisons: bool,
+    },
 
     #[snafu(display("Abort procedure"))]
     AbortProcedure {
@@ -970,6 +973,7 @@ impl Error {
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::RetryLater {
             source: BoxedError::new(err),
+            clean_poisons: false,
         }
     }
 
@@ -980,7 +984,13 @@ impl Error {
 
     /// Determine whether it needs to clean poisons.
     pub fn need_clean_poisons(&self) -> bool {
-        matches!(self, Error::AbortProcedure { clean_poisons, .. } if *clean_poisons)
+        matches!(
+            self,
+            Error::AbortProcedure { clean_poisons, .. } if *clean_poisons
+        ) || matches!(
+            self,
+            Error::RetryLater { clean_poisons, .. } if *clean_poisons
+        )
     }
 
     /// Returns true if the response exceeds the size limit.
