@@ -112,12 +112,9 @@ struct S3Config {
     /// The s3 secret key.
     #[clap(long)]
     s3_secret_key: Option<SecretString>,
-    /// The s3 endpoint.
+    /// The s3 endpoint. we will automatically use the default s3 decided by the region if not set.
     #[clap(long)]
     s3_endpoint: Option<String>,
-    /// The s3 root path.
-    #[clap(long)]
-    s3_root: Option<String>,
 }
 
 impl S3Config {
@@ -137,8 +134,11 @@ impl S3Config {
                 .bucket(self.s3_bucket.as_ref().unwrap())
                 .region(self.s3_region.as_ref().unwrap())
                 .access_key_id(self.s3_access_key.as_ref().unwrap().expose_secret())
-                .secret_access_key(self.s3_secret_key.as_ref().unwrap().expose_secret())
-                .root(root);
+                .secret_access_key(self.s3_secret_key.as_ref().unwrap().expose_secret());
+
+            if !root.is_empty() && root != "." {
+                config = config.root(root);
+            }
 
             if let Some(endpoint) = &self.s3_endpoint {
                 config = config.endpoint(endpoint);
@@ -165,15 +165,18 @@ pub struct MetaSnapshotCommand {
     /// The s3 config.
     #[clap(flatten)]
     s3_config: S3Config,
-    /// The name of the target snapshot file.
+    /// The name of the target snapshot file. we will add the file extension automatically.
     #[clap(long, default_value = "metadata_snapshot")]
     file_name: String,
     /// The directory to store the snapshot file.
-    #[clap(long, default_value = ".")]
+    /// if target output is s3 bucket, this is the root directory in the bucket.
+    /// if target output is local file, this is the local directory.
+    #[clap(long, default_value = "")]
     output_dir: String,
 }
 
 fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError> {
+    let root = if root.is_empty() { "." } else { root };
     let object_store = ObjectStore::new(Fs::default().root(root))
         .context(OpenDalSnafu)
         .map_err(BoxedError::new)?
