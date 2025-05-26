@@ -48,11 +48,15 @@ CREATE TABLE test_alt_table_default(h INTEGER, i Float64 DEFAULT 0.0, j TIMESTAM
 
 INSERT INTO test_alt_table_default (h, j) VALUES (0, 0);
 
+INSERT INTO test_alt_table_default (h, i, j) VALUES (1, 0.1, 0);
+
 SELECT * FROM test_alt_table_default ORDER BY h;
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
-INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table_default (h, j) VALUES (2, 0);
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (3, TRUE, 0);
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
@@ -60,15 +64,17 @@ ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
 
 DESC TABLE test_alt_table_default;
 
-INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+INSERT INTO test_alt_table_default (h, j) VALUES (4, 0);
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (5, 42, 0);
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
 
-INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+INSERT INTO test_alt_table_default (h, j) VALUES (6, 0);
 
-INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+INSERT INTO test_alt_table_default (h, i, j) VALUES (7, "word" ,1);
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
@@ -77,7 +83,9 @@ DROP TABLE test_alt_table_default;
 -- test with non-zero default value
 CREATE TABLE test_alt_table_default_nz(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
-INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (0, 0.0, 0);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (0, 0);
+
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (1, 0.0, 0);
 
 ADMIN FLUSH_TABLE('test_alt_table_default_nz');
 
@@ -85,9 +93,9 @@ SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
 ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i BOOLEAN;
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (2, 0);
 
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (3, FALSE, 0);
 
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
@@ -95,25 +103,23 @@ ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i INTEGER;
 
 DESC TABLE test_alt_table_default_nz;
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (3, 0), (4, 1);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (4, 0);
 
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (5, 42, 0);
 
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
 ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i STRING;
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (5, 0);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (6, 0);
 
-INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (6, "word" ,1);
-
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (7, "word" ,1);
 
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
 DROP TABLE test_alt_table_default_nz;
 
--- test alter table type will cause wired behavior due to CompatBatch
+-- test alter table type will cause wired behavior due to underlying column data is unchanged
 CREATE TABLE test_alt_table_col_ty(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
 INSERT INTO test_alt_table_col_ty (h, j) VALUES (0, 0);
@@ -144,7 +150,7 @@ INSERT INTO test_alt_table_col_ty (h, j) VALUES (6, 0);
 
 INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (7, "how many roads must a man walk down before they call him a man", 0);
 
--- here see 0.0 is converted to "0.0" since underlying column data is unchanged
+-- here see 0.1 is converted to "0.1" since underlying column data is unchanged
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 DROP TABLE test_alt_table_col_ty;

@@ -141,31 +141,41 @@ INSERT INTO test_alt_table_default (h, j) VALUES (0, 0);
 
 Affected Rows: 1
 
+INSERT INTO test_alt_table_default (h, i, j) VALUES (1, 0.1, 0);
+
+Affected Rows: 1
+
 SELECT * FROM test_alt_table_default ORDER BY h;
 
 +---+-----+---------------------+
 | h | i   | j                   |
 +---+-----+---------------------+
 | 0 | 0.0 | 1970-01-01T00:00:00 |
+| 1 | 0.1 | 1970-01-01T00:00:00 |
 +---+-----+---------------------+
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i BOOLEAN;
 
 Affected Rows: 0
 
-INSERT INTO test_alt_table_default (h, j) VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table_default (h, j) VALUES (2, 0);
 
-Affected Rows: 2
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (3, TRUE, 0);
+
+Affected Rows: 1
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
-+---+-------+-------------------------+
-| h | i     | j                       |
-+---+-------+-------------------------+
-| 0 | false | 1970-01-01T00:00:00     |
-| 1 | false | 1970-01-01T00:00:00     |
-| 2 | false | 1970-01-01T00:00:00.001 |
-+---+-------+-------------------------+
++---+-------+---------------------+
+| h | i     | j                   |
++---+-------+---------------------+
+| 0 | false | 1970-01-01T00:00:00 |
+| 1 | true  | 1970-01-01T00:00:00 |
+| 2 | false | 1970-01-01T00:00:00 |
+| 3 | true  | 1970-01-01T00:00:00 |
++---+-------+---------------------+
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i INTEGER;
 
@@ -181,47 +191,53 @@ DESC TABLE test_alt_table_default;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
-INSERT INTO test_alt_table_default (h, j) VALUES (3, 0), (4, 1);
+INSERT INTO test_alt_table_default (h, j) VALUES (4, 0);
 
-Affected Rows: 2
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default (h, i, j) VALUES (5, 42, 0);
+
+Affected Rows: 1
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
-+---+---+-------------------------+
-| h | i | j                       |
-+---+---+-------------------------+
-| 0 | 0 | 1970-01-01T00:00:00     |
-| 1 | 0 | 1970-01-01T00:00:00     |
-| 2 | 0 | 1970-01-01T00:00:00.001 |
-| 3 | 0 | 1970-01-01T00:00:00     |
-| 4 | 0 | 1970-01-01T00:00:00.001 |
-+---+---+-------------------------+
++---+----+---------------------+
+| h | i  | j                   |
++---+----+---------------------+
+| 0 | 0  | 1970-01-01T00:00:00 |
+| 1 | 0  | 1970-01-01T00:00:00 |
+| 2 | 0  | 1970-01-01T00:00:00 |
+| 3 | 1  | 1970-01-01T00:00:00 |
+| 4 | 0  | 1970-01-01T00:00:00 |
+| 5 | 42 | 1970-01-01T00:00:00 |
++---+----+---------------------+
 
 ALTER TABLE test_alt_table_default MODIFY COLUMN i STRING;
 
 Affected Rows: 0
 
-INSERT INTO test_alt_table_default (h, j) VALUES (5, 0);
+INSERT INTO test_alt_table_default (h, j) VALUES (6, 0);
 
 Affected Rows: 1
 
-INSERT INTO test_alt_table_default (h, i, j) VALUES (6, "word" ,1);
+INSERT INTO test_alt_table_default (h, i, j) VALUES (7, "word" ,1);
 
 Affected Rows: 1
 
 SELECT * FROM test_alt_table_default ORDER BY h;
 
-+---+------+-------------------------+
-| h | i    | j                       |
-+---+------+-------------------------+
-| 0 | 0    | 1970-01-01T00:00:00     |
-| 1 | 0    | 1970-01-01T00:00:00     |
-| 2 | 0    | 1970-01-01T00:00:00.001 |
-| 3 | 0    | 1970-01-01T00:00:00     |
-| 4 | 0    | 1970-01-01T00:00:00.001 |
-| 5 | 0    | 1970-01-01T00:00:00     |
-| 6 | word | 1970-01-01T00:00:00.001 |
-+---+------+-------------------------+
++---+-------+-------------------------+
+| h | i     | j                       |
++---+-------+-------------------------+
+| 0 | 0.0   | 1970-01-01T00:00:00     |
+| 1 | 0.1   | 1970-01-01T00:00:00     |
+| 2 | false | 1970-01-01T00:00:00     |
+| 3 | true  | 1970-01-01T00:00:00     |
+| 4 | 0     | 1970-01-01T00:00:00     |
+| 5 | 42    | 1970-01-01T00:00:00     |
+| 6 | 0     | 1970-01-01T00:00:00     |
+| 7 | word  | 1970-01-01T00:00:00.001 |
++---+-------+-------------------------+
 
 DROP TABLE test_alt_table_default;
 
@@ -232,7 +248,11 @@ CREATE TABLE test_alt_table_default_nz(h INTEGER, i Float64 DEFAULT 0.1, j TIMES
 
 Affected Rows: 0
 
-INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (0, 0.0, 0);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (0, 0);
+
+Affected Rows: 1
+
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (1, 0.0, 0);
 
 Affected Rows: 1
 
@@ -249,27 +269,32 @@ SELECT * FROM test_alt_table_default_nz ORDER BY h;
 +---+-----+---------------------+
 | h | i   | j                   |
 +---+-----+---------------------+
-| 0 | 0.0 | 1970-01-01T00:00:00 |
+| 0 | 0.1 | 1970-01-01T00:00:00 |
+| 1 | 0.0 | 1970-01-01T00:00:00 |
 +---+-----+---------------------+
 
 ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i BOOLEAN;
 
 Affected Rows: 0
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (1, 0), (2, 1);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (2, 0);
 
-Affected Rows: 2
+Affected Rows: 1
 
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (3, FALSE, 0);
+
+Affected Rows: 1
+
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
-+---+-------+-------------------------+
-| h | i     | j                       |
-+---+-------+-------------------------+
-| 0 | false | 1970-01-01T00:00:00     |
-| 1 | true  | 1970-01-01T00:00:00     |
-| 2 | true  | 1970-01-01T00:00:00.001 |
-+---+-------+-------------------------+
++---+-------+---------------------+
+| h | i     | j                   |
++---+-------+---------------------+
+| 0 | true  | 1970-01-01T00:00:00 |
+| 1 | false | 1970-01-01T00:00:00 |
+| 2 | true  | 1970-01-01T00:00:00 |
+| 3 | false | 1970-01-01T00:00:00 |
++---+-------+---------------------+
 
 ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i INTEGER;
 
@@ -285,55 +310,59 @@ DESC TABLE test_alt_table_default_nz;
 | j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (3, 0), (4, 1);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (4, 0);
 
-Affected Rows: 2
+Affected Rows: 1
 
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (5, 42, 0);
+
+Affected Rows: 1
+
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
-+---+---+-------------------------+
-| h | i | j                       |
-+---+---+-------------------------+
-| 0 | 0 | 1970-01-01T00:00:00     |
-| 1 | 1 | 1970-01-01T00:00:00     |
-| 2 | 1 | 1970-01-01T00:00:00.001 |
-| 3 | 1 | 1970-01-01T00:00:00     |
-| 4 | 1 | 1970-01-01T00:00:00.001 |
-+---+---+-------------------------+
++---+----+---------------------+
+| h | i  | j                   |
++---+----+---------------------+
+| 0 | 0  | 1970-01-01T00:00:00 |
+| 1 | 0  | 1970-01-01T00:00:00 |
+| 2 | 1  | 1970-01-01T00:00:00 |
+| 3 | 0  | 1970-01-01T00:00:00 |
+| 4 | 1  | 1970-01-01T00:00:00 |
+| 5 | 42 | 1970-01-01T00:00:00 |
++---+----+---------------------+
 
 ALTER TABLE test_alt_table_default_nz MODIFY COLUMN i STRING;
 
 Affected Rows: 0
 
-INSERT INTO test_alt_table_default_nz (h, j) VALUES (5, 0);
+INSERT INTO test_alt_table_default_nz (h, j) VALUES (6, 0);
 
 Affected Rows: 1
 
-INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (6, "word" ,1);
+INSERT INTO test_alt_table_default_nz (h, i, j) VALUES (7, "word" ,1);
 
 Affected Rows: 1
 
--- ADMIN FLUSH_TABLE('test_alt_table_default_nz');
 SELECT * FROM test_alt_table_default_nz ORDER BY h;
 
-+---+------+-------------------------+
-| h | i    | j                       |
-+---+------+-------------------------+
-| 0 | 0    | 1970-01-01T00:00:00     |
-| 1 | 1    | 1970-01-01T00:00:00     |
-| 2 | 1    | 1970-01-01T00:00:00.001 |
-| 3 | 1    | 1970-01-01T00:00:00     |
-| 4 | 1    | 1970-01-01T00:00:00.001 |
-| 5 | 1    | 1970-01-01T00:00:00     |
-| 6 | word | 1970-01-01T00:00:00.001 |
-+---+------+-------------------------+
++---+-------+-------------------------+
+| h | i     | j                       |
++---+-------+-------------------------+
+| 0 | 0.1   | 1970-01-01T00:00:00     |
+| 1 | 0.0   | 1970-01-01T00:00:00     |
+| 2 | true  | 1970-01-01T00:00:00     |
+| 3 | false | 1970-01-01T00:00:00     |
+| 4 | 1     | 1970-01-01T00:00:00     |
+| 5 | 42    | 1970-01-01T00:00:00     |
+| 6 | 1     | 1970-01-01T00:00:00     |
+| 7 | word  | 1970-01-01T00:00:00.001 |
++---+-------+-------------------------+
 
 DROP TABLE test_alt_table_default_nz;
 
 Affected Rows: 0
 
--- test alter table type will cause wired behavior due to CompatBatch
+-- test alter table type will cause wired behavior due to underlying column data is unchanged
 CREATE TABLE test_alt_table_col_ty(h INTEGER, i Float64 DEFAULT 0.1, j TIMESTAMP TIME INDEX, PRIMARY KEY (h));
 
 Affected Rows: 0
@@ -415,7 +444,7 @@ INSERT INTO test_alt_table_col_ty (h, i, j) VALUES (7, "how many roads must a ma
 
 Affected Rows: 1
 
--- here see 0.0 is converted to "0.0" since underlying column data is unchanged
+-- here see 0.1 is converted to "0.1" since underlying column data is unchanged
 SELECT * FROM test_alt_table_col_ty ORDER BY h;
 
 +---+----------------------------------------------------------------+---------------------+
