@@ -658,6 +658,7 @@ where
         // set next_entry_id and write to memtable.
         region_write_ctx.set_next_entry_id(last_entry_id + 1);
         region_write_ctx.write_memtable().await;
+        region_write_ctx.write_bulk().await;
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest
