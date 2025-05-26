@@ -136,7 +136,7 @@ mod test {
 
     async fn test_put_record_batches(client: &Database, record_batches: Vec<RecordBatch>) {
         let requests_count = record_batches.len();
-        let schema = record_batches[0].schema.clone();
+        let schema = record_batches[0].schema.arrow_schema().clone();
 
         let stream = futures::stream::once(async move {
             let mut schema_data = FlightEncoder::default().encode(FlightMessage::Schema(schema));
@@ -155,7 +155,7 @@ mod test {
                 .enumerate()
                 .map(|(i, x)| {
                     let mut encoder = FlightEncoder::default();
-                    let message = FlightMessage::Recordbatch(x);
+                    let message = FlightMessage::RecordBatch(x.into_df_record_batch());
                     let mut data = encoder.encode(message);
                     let metadata = DoPutMetadata::new((i + 1) as i64);
                     data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();

@@ -103,13 +103,6 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to convert arrow schema"))]
-    ConvertArrowSchema {
-        #[snafu(implicit)]
-        location: Location,
-        source: DataTypeError,
-    },
-
     #[snafu(display("Failed to cast array to {:?}", typ))]
     TypeCast {
         #[snafu(source)]
@@ -244,7 +237,6 @@ impl ErrorExt for Error {
             Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source, .. }
-            | Error::ConvertArrowSchema { source, .. }
             | Error::FromArrowArray { source, .. }
             | Error::InvalidVectorString { source, .. } => source.status_code(),
 

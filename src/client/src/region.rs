@@ -28,7 +28,7 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
 use common_query::request::QueryRequest;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use prost::Message;
@@ -146,6 +146,10 @@ impl RegionRequester {
 
         let tracing_context = TracingContext::from_current_span();
 
+        let schema = Arc::new(
+            datatypes::schema::Schema::try_from(schema).context(error::ConvertSchemaSnafu)?,
+        );
+        let schema_cloned = schema.clone();
         let stream = Box::pin(stream!({
             let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
                 "poll_flight_data_stream"
@@ -156,7 +160,12 @@ impl RegionRequester {
                     .context(ExternalSnafu)?;
 
                 match flight_message {
-                    FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                    FlightMessage::RecordBatch(record_batch) => {
+                        yield RecordBatch::try_from_df_record_batch(
+                            schema_cloned.clone(),
+                            record_batch,
+                        )
+                    }
                     FlightMessage::Metrics(s) => {
                         let m = serde_json::from_str(&s).ok().map(Arc::new);
                         metrics_ref.swap(m);

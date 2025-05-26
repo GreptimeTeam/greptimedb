@@ -1889,6 +1889,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "datatypes",
  "enum_dispatch",
  "futures",
  "futures-util",
