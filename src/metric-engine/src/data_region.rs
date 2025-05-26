@@ -206,7 +206,9 @@ impl DataRegion {
     ) -> Result<AffectedRows> {
         match request.kind {
             AlterKind::SetRegionOptions { options: _ }
-            | AlterKind::UnsetRegionOptions { keys: _ } => {
+            | AlterKind::UnsetRegionOptions { keys: _ }
+            | AlterKind::SetIndex { options: _ }
+            | AlterKind::UnsetIndex { options: _ } => {
                 let region_id = utils::to_data_region_id(region_id);
                 self.mito
                     .handle_request(region_id, RegionRequest::Alter(request))
