@@ -212,17 +212,13 @@ impl MetadataSnapshotManager {
         Ok(count)
     }
 
-    pub async fn check_target_srouce_clean(&self) -> Result<bool> {
+    pub async fn check_target_source_clean(&self) -> Result<bool> {
         let req = RangeRequest::new().with_range(vec![0], vec![0]);
         let mut stream = Box::pin(
-            PaginationStream::new(self.kv_backend.clone(), req, 1, |kv| Ok(kv)).into_stream(),
+            PaginationStream::new(self.kv_backend.clone(), req, 1, Result::Ok).into_stream(),
         );
         let v = stream.as_mut().try_next().await?;
-        if v.is_none() {
-            return Ok(true);
-        } else {
-            return Ok(false);
-        }
+        Ok(v.is_none())
     }
 
     /// Dumps the metadata to the backup file.

@@ -283,25 +283,32 @@ impl MetaRestoreTool {
 #[async_trait]
 impl Tool for MetaRestoreTool {
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
-        if !self.force {
-            let clean = self
-                .inner
-                .check_target_srouce_clean()
-                .await
-                .map_err(BoxedError::new)?;
-            if clean {
-                common_telemetry::info!(
-                    "The target source is clean, we will restore the metadata snapshot."
-                );
-            } else {
-                common_telemetry::info!("The target source is not clean, restore will be skipped. you can use --force to force restore.");
-                return Ok(());
-            }
-        }
-        self.inner
-            .restore(&self.source_file)
+        let clean = self
+            .inner
+            .check_target_source_clean()
             .await
             .map_err(BoxedError::new)?;
-        Ok(())
+        if clean {
+            common_telemetry::info!(
+                "The target source is clean, we will restore the metadata snapshot."
+            );
+            self.inner
+                .restore(&self.source_file)
+                .await
+                .map_err(BoxedError::new)?;
+            Ok(())
+        } else if !self.force {
+            common_telemetry::warn!(
+                 "The target source is not clean, if you want to restore the metadata snapshot forcefully, please use --force option."
+             );
+            Ok(())
+        } else {
+            common_telemetry::info!("The target source is not clean, We will restore the metadata snapshot with --force.");
+            self.inner
+                .restore(&self.source_file)
+                .await
+                .map_err(BoxedError::new)?;
+            Ok(())
+        }
     }
 }
