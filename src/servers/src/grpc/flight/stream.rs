@@ -71,7 +71,7 @@ impl FlightRecordBatchStream {
                 Ok(recordbatch) => {
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
-                            recordbatch.df_record_batch().clone(),
+                            recordbatch.into_df_record_batch(),
                         )))
                         .await
                     {
