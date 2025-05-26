@@ -95,6 +95,7 @@ impl MetaConnection {
     }
 }
 
+// TODO(qtang): Abstract a generic s3 config for export import meta snapshot restore
 #[derive(Debug, Default, Parser)]
 struct S3Config {
     /// weather to use s3 as the output directory. default is false.
