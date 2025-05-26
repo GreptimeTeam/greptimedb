@@ -103,11 +103,15 @@ impl Inserter {
                 .with_label_values(&["datanode_handle"])
                 .start_timer();
             let datanode = self.node_manager.datanode(&datanode).await;
-            return datanode
+            let result = datanode
                 .handle(request)
                 .await
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
+            if let Ok(rows) = result {
+                crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows as u64);
+            }
+            return result;
         }
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
