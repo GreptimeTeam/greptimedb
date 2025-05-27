@@ -306,10 +306,6 @@ impl QueryContext {
         self.extensions.clone()
     }
 
-    pub fn clone_inner(&self) -> QueryContext {
-        self.clone()
-    }
-
     /// Default to double quote and fallback to back quote
     pub fn quote_style(&self) -> char {
         if self.sql_dialect().is_delimited_identifier_start('"') {
