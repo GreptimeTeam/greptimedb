@@ -394,10 +394,7 @@ impl PromSeriesProcessor {
         Ok(())
     }
 
-    pub(crate) async fn exec_pipeline(
-        &mut self,
-        // ) -> crate::error::Result<(RowInsertRequests, usize)> {
-    ) -> crate::error::Result<ContextReq> {
+    pub(crate) async fn exec_pipeline(&mut self) -> crate::error::Result<ContextReq> {
         // prepare params
         let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
             err_msg: "pipeline handler is not set",
@@ -411,7 +408,6 @@ impl PromSeriesProcessor {
         })?;
 
         let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param, query_ctx.channel());
-        // let mut size = 0;
 
         // run pipeline
         let mut req = ContextReq::default();
@@ -423,11 +419,6 @@ impl PromSeriesProcessor {
             let row_req =
                 run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;
             req.merge(row_req);
-            // size += row_req
-            //     .iter()
-            //     .map(|rq| rq.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
-            //     .sum::<usize/>();
-            // inserts.extend(row_req);
         }
 
         Ok(req)

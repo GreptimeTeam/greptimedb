@@ -52,16 +52,10 @@ impl TablesBuilder {
 
     /// Converts [TablesBuilder] to [RowInsertRequests] and row numbers and clears inner states.
     pub(crate) fn as_insert_requests(&mut self) -> Vec<RowInsertRequest> {
-        // let mut total_rows = 0;
-        let inserts = self
-            .tables
+        self.tables
             .drain()
-            .map(|(name, mut table)| {
-                // total_rows += table.num_rows();
-                table.as_row_insert_request(name)
-            })
-            .collect();
-        inserts
+            .map(|(name, mut table)| table.as_row_insert_request(name))
+            .collect()
     }
 }
 
