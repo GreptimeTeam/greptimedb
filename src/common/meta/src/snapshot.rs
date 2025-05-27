@@ -15,6 +15,7 @@
 pub mod file;
 
 use std::fmt::{Display, Formatter};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use common_telemetry::info;
@@ -170,12 +171,14 @@ impl MetadataSnapshotManager {
 
     /// Restores the metadata from the backup file to the metadata store.
     pub async fn restore(&self, file_path: &str) -> Result<u64> {
-        let filename = FileName::try_from(
-            file_path
-                .rsplit("/")
-                .next()
-                .context(InvalidFilePathSnafu { file_path })?,
-        )?;
+        let path = Path::new(file_path);
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context(InvalidFilePathSnafu { file_path })?;
+
+        let filename = FileName::try_from(file_name)?;
         let data = self
             .object_store
             .read(file_path)
@@ -222,16 +225,21 @@ impl MetadataSnapshotManager {
     }
 
     /// Dumps the metadata to the backup file.
-    pub async fn dump(&self, path: &str, filename: &str) -> Result<(String, u64)> {
+    pub async fn dump(&self, path: &str, filename_str: &str) -> Result<(String, u64)> {
         let format = FileFormat::FlexBuffers;
         let filename = FileName::new(
-            filename.to_string(),
+            filename_str.to_string(),
             FileExtension {
                 format,
                 data_type: DataType::Metadata,
             },
         );
-        let file_path = format!("{}/{}", path.trim_end_matches('/'), filename);
+        let file_path_buf = [path, filename.to_string().as_str()]
+            .iter()
+            .collect::<PathBuf>();
+        let file_path = file_path_buf.to_str().context(InvalidFileNameSnafu {
+            reason: format!("Invalid file path: {}, filename: {}", path, filename_str),
+        })?;
         let now = Instant::now();
         let req = RangeRequest::new().with_range(vec![0], vec![0]);
         let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
@@ -250,11 +258,9 @@ impl MetadataSnapshotManager {
         let bytes = document.to_bytes(&format)?;
         let r = self
             .object_store
-            .write(&file_path, bytes)
+            .write(file_path, bytes)
             .await
-            .context(WriteObjectSnafu {
-                file_path: &file_path,
-            })?;
+            .context(WriteObjectSnafu { file_path })?;
         info!(
             "Dumped metadata to {} successfully, total {} key-value pairs, file size {} bytes, elapsed {:?}",
             file_path,
