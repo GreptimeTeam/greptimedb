@@ -37,13 +37,16 @@ use query::dataframe::DataFrame;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::dialect::GreptimeDbDialect;
+use sql::parser::ParserContext;
+use sql::statements::statement::Statement;
 use table::metadata::TableInfo;
 use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
-    ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
-    PipelineNotFoundSnafu, Result,
+    ExecuteInternalStatementSnafu, FlushPipelineSnafu, InsertPipelineSnafu,
+    InvalidPipelineVersionSnafu, ParserContextSnafu, PipelineNotFoundSnafu, Result,
 };
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::{PipelineInfo, PipelineVersion};
@@ -69,6 +72,7 @@ pub struct PipelineTable {
     table: TableRef,
     query_engine: QueryEngineRef,
     pipelines: Cache<String, Arc<Pipeline>>,
+    flush_stmt: Statement,
     original_pipelines: Cache<String, (String, TimestampNanosecond)>,
 }
 
@@ -79,8 +83,16 @@ impl PipelineTable {
         statement_executor: StatementExecutorRef,
         table: TableRef,
         query_engine: QueryEngineRef,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let flush_table_sql = format!(
+            "admin flush_table('{}')",
+            table.table_info().full_table_name()
+        );
+        let mut parser = ParserContext::new(&GreptimeDbDialect {}, flush_table_sql.as_str())
+            .context(ParserContextSnafu)?;
+        let statement = parser.parse_statement().context(ParserContextSnafu)?;
+        Ok(Self {
+            flush_stmt: statement,
             inserter,
             statement_executor,
             table,
@@ -93,7 +105,7 @@ impl PipelineTable {
                 .max_capacity(PIPELINES_CACHE_SIZE)
                 .time_to_live(PIPELINES_CACHE_TTL)
                 .build(),
-        }
+        })
     }
 
     /// Build the schema for the pipeline table.
@@ -243,14 +255,10 @@ impl PipelineTable {
             inserts: vec![insert],
         };
 
+        let query_ctx = Self::query_ctx(&table_info);
         let output = self
             .inserter
-            .handle_row_inserts(
-                requests,
-                Self::query_ctx(&table_info),
-                &self.statement_executor,
-                false,
-            )
+            .handle_row_inserts(requests, query_ctx.clone(), &self.statement_executor, false)
             .await
             .context(InsertPipelineSnafu)?;
 
@@ -259,6 +267,21 @@ impl PipelineTable {
             name,
             table_info.full_table_name(),
             output
+        );
+
+        // Flush the pipeline table to make sure the inserted pipeline is visible.
+        // This is necessary because the pipeline table is changed very infrequently,
+        // this can result in very late flushes of the disk
+        let flush_result = self
+            .statement_executor
+            .execute_sql(self.flush_stmt.clone(), query_ctx)
+            .await
+            .context(FlushPipelineSnafu)?;
+        info!(
+            "Flush pipeline table success, name: {:?}, table: {:?}, output: {:?}",
+            name,
+            table_info.full_table_name(),
+            flush_result.extract_rows_and_cost()
         );
 
         Ok(now)

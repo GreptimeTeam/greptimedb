@@ -642,6 +642,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to retrieve pipeline table"))]
+    FlushPipeline {
+        #[snafu(source)]
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to retrieve pipeline table"))]
+    ParserContext {
+        #[snafu(source)]
+        source: sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.map(|ts| ts.0.to_iso8601_string()).unwrap_or("latest".to_string())))]
     PipelineNotFound {
         name: String,
@@ -746,6 +762,8 @@ impl ErrorExt for Error {
             CastType { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
+            FlushPipeline { source, .. } => source.status_code(),
+            ParserContext { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }

@@ -79,10 +79,10 @@ impl PipelineOperator {
         }
     }
 
-    fn add_pipeline_table_to_cache(&self, catalog: &str, table: TableRef) {
+    fn add_pipeline_table_to_cache(&self, catalog: &str, table: TableRef) -> Result<()> {
         let mut tables = self.tables.write().unwrap();
         if tables.contains_key(catalog) {
-            return;
+            return Ok(());
         }
         tables.insert(
             catalog.to_string(),
@@ -91,8 +91,9 @@ impl PipelineOperator {
                 self.statement_executor.clone(),
                 table,
                 self.query_engine.clone(),
-            )),
+            )?),
         );
+        Ok(())
     }
 
     async fn create_pipeline_table_if_not_exists(&self, ctx: QueryContextRef) -> Result<()> {
@@ -120,7 +121,7 @@ impl PipelineOperator {
             .await
             .context(CatalogSnafu)?
         {
-            self.add_pipeline_table_to_cache(catalog, table);
+            self.add_pipeline_table_to_cache(catalog, table)?;
             return Ok(());
         }
 
@@ -148,7 +149,7 @@ impl PipelineOperator {
         );
 
         // put to cache
-        self.add_pipeline_table_to_cache(catalog, table);
+        self.add_pipeline_table_to_cache(catalog, table)?;
 
         Ok(())
     }
