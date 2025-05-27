@@ -18,10 +18,7 @@ use std::string::ToString;
 use ahash::HashMap;
 use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    Value,
-};
+use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use prost::DecodeError;
 
@@ -54,17 +51,17 @@ impl TablesBuilder {
     }
 
     /// Converts [TablesBuilder] to [RowInsertRequests] and row numbers and clears inner states.
-    pub(crate) fn as_insert_requests(&mut self) -> (RowInsertRequests, usize) {
-        let mut total_rows = 0;
+    pub(crate) fn as_insert_requests(&mut self) -> Vec<RowInsertRequest> {
+        // let mut total_rows = 0;
         let inserts = self
             .tables
             .drain()
             .map(|(name, mut table)| {
-                total_rows += table.num_rows();
+                // total_rows += table.num_rows();
                 table.as_row_insert_request(name)
             })
             .collect();
-        (RowInsertRequests { inserts }, total_rows)
+        inserts
     }
 }
 
@@ -113,11 +110,6 @@ impl TableBuilder {
             rows: Vec::with_capacity(rows),
             col_indexes,
         }
-    }
-
-    /// Total number of rows inside table builder.
-    fn num_rows(&self) -> usize {
-        self.rows.len()
     }
 
     /// Adds a set of labels and samples to table builder.
