@@ -540,7 +540,7 @@ fn identity_pipeline_inner(
         options: None,
     });
 
-    let mut opt_map = HashMap::with_capacity(32);
+    let mut opt_map = HashMap::new();
     let len = pipeline_maps.len();
 
     for mut pipeline_map in pipeline_maps {

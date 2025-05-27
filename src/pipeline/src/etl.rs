@@ -161,6 +161,7 @@ pub enum PipelineExecOutput {
 }
 
 impl PipelineExecOutput {
+    // Note: This is a test only function, do not use it in production.
     pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
         if let Self::Transformed((_, row, table_suffix)) = self {
             Some((row, table_suffix))
@@ -169,6 +170,7 @@ impl PipelineExecOutput {
         }
     }
 
+    // Note: This is a test only function, do not use it in production.
     pub fn into_dispatched(self) -> Option<DispatchedTo> {
         if let Self::DispatchedTo(d) = self {
             Some(d)

@@ -148,7 +148,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         .await?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_opt_req(&opt_req);
+            let result = limiter.limit_ctx_req(&opt_req);
             if result.is_none() {
                 return InFlightWriteBytesExceededSnafu.fail();
             }

@@ -94,7 +94,7 @@ impl Limiter {
         self.limit_in_flight_write_bytes(size as u64)
     }
 
-    pub fn limit_opt_req(&self, opt_req: &ContextReq) -> Option<InFlightWriteBytesCounter> {
+    pub fn limit_ctx_req(&self, opt_req: &ContextReq) -> Option<InFlightWriteBytesCounter> {
         let size = self.rows_insert_requests_data_size(opt_req.ref_all_req());
         self.limit_in_flight_write_bytes(size as u64)
     }
