@@ -53,7 +53,7 @@ fn from_opt_to_map(opt: &str) -> HashMap<&str, &str> {
 
 // ContextReq is a collection of row insert requests with different options.
 // The default option is empty string.
-// Becasue options are set in query context, we have to split them into sequential calls
+// Because options are set in query context, we have to split them into sequential calls
 // e.g:
 // {
 //     "skip_wal=true,ttl=1d": [RowInsertRequest],
