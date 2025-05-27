@@ -370,6 +370,38 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Missing `{}` clause", name))]
+    MissingClause {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Unrecognized trigger webhook option key: {}", key))]
+    InvalidTriggerWebhookOption {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Failed to convert int"))]
+    TryFromInt {
+        #[snafu(source)]
+        error: std::num::TryFromIntError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Must specify at least one notify channel"))]
+    MissingNotifyChannel {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -390,6 +422,9 @@ impl ErrorExt for Error {
             | UnexpectedToken { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
+            #[cfg(feature = "enterprise")]
+            MissingClause { .. } | MissingNotifyChannel { .. } => StatusCode::InvalidSyntax,
+
             InvalidColumnOption { .. }
             | InvalidTableOptionValue { .. }
             | InvalidDatabaseName { .. }
@@ -409,6 +444,9 @@ impl ErrorExt for Error {
             | InvalidPartitionNumber { .. }
             | UnsupportedUnaryOp { .. }
             | ConvertStr { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            InvalidTriggerWebhookOption { .. } | TryFromInt { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
