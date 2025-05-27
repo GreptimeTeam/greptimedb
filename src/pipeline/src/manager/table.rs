@@ -84,6 +84,8 @@ impl PipelineTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> Result<Self> {
+        // bucause the ParseContext is not Send + Sync, so we can make flush stmt in insert_pipeline_to_pipeline_table
+        // we need to create flush stmt early in sync fn
         let flush_table_sql = format!(
             "admin flush_table('{}')",
             table.table_info().full_table_name()
