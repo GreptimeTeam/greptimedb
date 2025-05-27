@@ -49,11 +49,11 @@ fn from_opt_to_map(opt: &str) -> HashMap<&str, &str> {
 }
 
 #[derive(Debug, Default)]
-pub struct PipelineOptReq {
+pub struct ContextReq {
     req: HashMap<String, Vec<RowInsertRequest>>,
 }
 
-impl PipelineOptReq {
+impl ContextReq {
     pub fn from_opt_map(opt_map: HashMap<String, Rows>, table_name: String) -> Self {
         Self {
             req: opt_map
@@ -87,10 +87,10 @@ impl PipelineOptReq {
         }
     }
 
-    pub fn as_req_iter(self, ctx: QueryContextRef) -> PipelineOptReqIter {
+    pub fn as_req_iter(self, ctx: QueryContextRef) -> ContextReqIter {
         let ctx = ctx.clone_inner();
 
-        PipelineOptReqIter {
+        ContextReqIter {
             opt_req: self.req.into_iter(),
             ctx_template: ctx,
         }
@@ -105,12 +105,12 @@ impl PipelineOptReq {
     }
 }
 
-pub struct PipelineOptReqIter {
+pub struct ContextReqIter {
     opt_req: IntoIter<String, Vec<RowInsertRequest>>,
     ctx_template: QueryContext,
 }
 
-impl Iterator for PipelineOptReqIter {
+impl Iterator for ContextReqIter {
     type Item = (QueryContextRef, RowInsertRequests);
 
     fn next(&mut self) -> Option<Self::Item> {

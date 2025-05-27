@@ -34,7 +34,7 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
-    GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, PipelineOptReq,
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
@@ -799,7 +799,7 @@ pub(crate) async fn ingest_logs_inner(
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let mut req = PipelineOptReq::default();
+    let mut req = ContextReq::default();
 
     let pipeline_params = GreptimePipelineParams::from_params(
         headers
