@@ -18,7 +18,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
@@ -34,7 +33,9 @@ use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
-use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap};
+use pipeline::{
+    GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, PipelineOptReq,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -345,7 +346,7 @@ async fn dryrun_pipeline_inner(
     let name_key = "name";
 
     let results = results
-        .into_iter()
+        .all_req()
         .filter_map(|row| {
             if let Some(rows) = row.rows {
                 let table_name = row.table_name;
@@ -798,7 +799,7 @@ pub(crate) async fn ingest_logs_inner(
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
-    let mut insert_requests = Vec::with_capacity(log_ingest_requests.len());
+    let mut req = PipelineOptReq::default();
 
     let pipeline_params = GreptimePipelineParams::from_params(
         headers
@@ -811,36 +812,33 @@ pub(crate) async fn ingest_logs_inner(
         let requests =
             run_pipeline(&handler, &pipeline_ctx, pipeline_req, &query_ctx, true).await?;
 
-        insert_requests.extend(requests);
+        req.merge(requests);
     }
 
-    let output = handler
-        .insert(
-            RowInsertRequests {
-                inserts: insert_requests,
-            },
-            query_ctx,
-        )
-        .await;
+    let mut outputs = Vec::new();
+    for (temp_ctx, act_req) in req.as_req_iter(query_ctx) {
+        let output = handler.insert(act_req, temp_ctx).await;
 
-    if let Ok(Output {
-        data: OutputData::AffectedRows(rows),
-        meta: _,
-    }) = &output
-    {
-        METRIC_HTTP_LOGS_INGESTION_COUNTER
-            .with_label_values(&[db.as_str()])
-            .inc_by(*rows as u64);
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
-    } else {
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
+        if let Ok(Output {
+            data: OutputData::AffectedRows(rows),
+            meta: _,
+        }) = &output
+        {
+            METRIC_HTTP_LOGS_INGESTION_COUNTER
+                .with_label_values(&[db.as_str()])
+                .inc_by(*rows as u64);
+            METRIC_HTTP_LOGS_INGESTION_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+                .observe(exec_timer.elapsed().as_secs_f64());
+        } else {
+            METRIC_HTTP_LOGS_INGESTION_ELAPSED
+                .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                .observe(exec_timer.elapsed().as_secs_f64());
+        }
+        outputs.push(output);
     }
 
-    let response = GreptimedbV1Response::from_output(vec![output])
+    let response = GreptimedbV1Response::from_output(outputs)
         .await
         .with_execution_time(exec_timer.elapsed().as_millis() as u64);
     Ok(response)

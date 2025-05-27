@@ -21,7 +21,7 @@ use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
     DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    PipelineExecOutput, PipelineMap, PipelineOptReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -66,7 +66,7 @@ pub(crate) async fn run_pipeline(
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<Vec<RowInsertRequest>> {
+) -> Result<PipelineOptReq> {
     if pipeline_ctx.pipeline_definition.is_identity() {
         run_identity_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx).await
     } else {
@@ -79,7 +79,7 @@ async fn run_identity_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
-) -> Result<Vec<RowInsertRequest>> {
+) -> Result<PipelineOptReq> {
     let PipelineIngestRequest {
         table: table_name,
         values: data_array,
@@ -93,12 +93,7 @@ async fn run_identity_pipeline(
             .context(CatalogSnafu)?
     };
     pipeline::identity_pipeline(data_array, table, pipeline_ctx)
-        .map(|rows| {
-            vec![RowInsertRequest {
-                rows: Some(rows),
-                table_name,
-            }]
-        })
+        .map(|opt_map| PipelineOptReq::from_opt_map(opt_map, table_name))
         .context(PipelineSnafu)
 }
 
@@ -108,7 +103,7 @@ async fn run_custom_pipeline(
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<Vec<RowInsertRequest>> {
+) -> Result<PipelineOptReq> {
     let db = query_ctx.get_db_string();
     let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
@@ -135,9 +130,9 @@ async fn run_custom_pipeline(
             .context(PipelineSnafu)?;
 
         match r {
-            PipelineExecOutput::Transformed((row, table_suffix)) => {
+            PipelineExecOutput::Transformed((opt, row, table_suffix)) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(transformed_map, act_table_name, row, arr_len);
+                push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
             }
             PipelineExecOutput::AutoTransform(table_suffix, ts_keys) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
@@ -153,7 +148,7 @@ async fn run_custom_pipeline(
         }
     }
 
-    let mut results = Vec::new();
+    let mut results = PipelineOptReq::default();
 
     if let Some(s) = pipeline.schemas() {
         // transformed
@@ -161,14 +156,17 @@ async fn run_custom_pipeline(
         // if current pipeline generates some transformed results, build it as
         // `RowInsertRequest` and append to results. If the pipeline doesn't
         // have dispatch, this will be only output of the pipeline.
-        for (table_name, rows) in transformed_map {
-            results.push(RowInsertRequest {
-                rows: Some(Rows {
-                    rows,
-                    schema: s.clone(),
-                }),
-                table_name,
-            });
+        for ((opt, table_name), rows) in transformed_map {
+            results.add_rows(
+                opt,
+                RowInsertRequest {
+                    rows: Some(Rows {
+                        rows,
+                        schema: s.clone(),
+                    }),
+                    table_name,
+                },
+            );
         }
     } else {
         // auto map
@@ -205,7 +203,7 @@ async fn run_custom_pipeline(
             )
             .await?;
 
-            results.extend(reqs);
+            results.merge(reqs);
         }
     }
 
@@ -240,7 +238,7 @@ async fn run_custom_pipeline(
         ))
         .await?;
 
-        results.extend(requests);
+        results.merge(requests);
     }
 
     if is_top_level {

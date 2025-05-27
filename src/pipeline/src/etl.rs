@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 pub mod field;
+pub mod opt_req;
 pub mod processor;
 pub mod transform;
 pub mod value;
@@ -153,7 +154,7 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    Transformed((Row, Option<String>)),
+    Transformed((String, Row, Option<String>)),
     // table_suffix, ts_key -> unit
     AutoTransform(Option<String>, HashMap<String, TimeUnit>),
     DispatchedTo(DispatchedTo),
@@ -161,8 +162,8 @@ pub enum PipelineExecOutput {
 
 impl PipelineExecOutput {
     pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
-        if let Self::Transformed(o) = self {
-            Some(o)
+        if let Self::Transformed((_, row, table_suffix)) = self {
+            Some((row, table_suffix))
         } else {
             None
         }
@@ -224,9 +225,9 @@ impl Pipeline {
         }
 
         if let Some(transformer) = self.transformer() {
-            let row = transformer.transform_mut(val)?;
+            let (opt, row) = transformer.transform_mut(val)?;
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
-            Ok(PipelineExecOutput::Transformed((row, table_suffix)))
+            Ok(PipelineExecOutput::Transformed((opt, row, table_suffix)))
         } else {
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
             let mut ts_unit_map = HashMap::with_capacity(4);
