@@ -26,6 +26,8 @@ use crate::PipelineMap;
 
 const DEFAULT_OPT: &str = "";
 
+// Remove hints from the pipeline context and form a option string
+// e.g: skip_wal=true,ttl=1d
 pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> String {
     let mut btreemap = BTreeMap::new();
     for k in HINT_KEYS {
@@ -39,6 +41,7 @@ pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> String {
         .join(",")
 }
 
+// split the option string back to a map
 fn from_opt_to_map(opt: &str) -> HashMap<&str, &str> {
     opt.split(',')
         .filter_map(|s| {
@@ -48,6 +51,14 @@ fn from_opt_to_map(opt: &str) -> HashMap<&str, &str> {
         .collect()
 }
 
+// ContextReq is a collection of row insert requests with different options.
+// The default option is empty string.
+// Becasue options are set in query context, we have to split them into sequential calls
+// e.g:
+// {
+//     "skip_wal=true,ttl=1d": [RowInsertRequest],
+//     "ttl=1d": [RowInsertRequest],
+// }
 #[derive(Debug, Default)]
 pub struct ContextReq {
     req: HashMap<String, Vec<RowInsertRequest>>,
@@ -105,6 +116,10 @@ impl ContextReq {
     }
 }
 
+// ContextReqIter is an iterator that iterates over the ContextReq.
+// The context template is cloned from the original query context.
+// It will clone the query context for each option and set the options to the context.
+// Then it will return the context and the row insert requests for actual insert.
 pub struct ContextReqIter {
     opt_req: IntoIter<String, Vec<RowInsertRequest>>,
     ctx_template: QueryContext,
