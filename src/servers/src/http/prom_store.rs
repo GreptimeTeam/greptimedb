@@ -28,7 +28,7 @@ use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use pipeline::util::to_pipeline_version;
-use pipeline::{PipelineDefinition, PipelineOptReq};
+use pipeline::{ContextReq, PipelineDefinition};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
@@ -205,7 +205,7 @@ async fn decode_remote_write_request(
     body: Bytes,
     is_strict_mode: bool,
     processor: &mut PromSeriesProcessor,
-) -> Result<PipelineOptReq> {
+) -> Result<ContextReq> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
 
     // due to vmagent's limitation, there is a chance that vmagent is
@@ -231,7 +231,7 @@ async fn decode_remote_write_request(
         processor.exec_pipeline().await
     } else {
         let reqs = request.as_row_insert_requests();
-        Ok(PipelineOptReq::default_opt_with_reqs(reqs))
+        Ok(ContextReq::default_opt_with_reqs(reqs))
     }
 }
 

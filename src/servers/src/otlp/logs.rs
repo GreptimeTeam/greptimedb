@@ -25,7 +25,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use pipeline::{
-    GreptimePipelineParams, PipelineContext, PipelineOptReq, PipelineWay, SchemaInfo, SelectInfo,
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineWay, SchemaInfo, SelectInfo,
 };
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
@@ -57,7 +57,7 @@ pub async fn to_grpc_insert_requests(
     table_name: String,
     query_ctx: &QueryContextRef,
     pipeline_handler: PipelineHandlerRef,
-) -> Result<PipelineOptReq> {
+) -> Result<ContextReq> {
     match pipeline {
         PipelineWay::OtlpLogDirect(select_info) => {
             let rows = parse_export_logs_service_request_to_rows(request, select_info)?;
@@ -66,7 +66,7 @@ pub async fn to_grpc_insert_requests(
                 table_name,
             };
 
-            Ok(PipelineOptReq::default_opt_with_reqs(vec![insert_request]))
+            Ok(ContextReq::default_opt_with_reqs(vec![insert_request]))
         }
         PipelineWay::Pipeline(pipeline_def) => {
             let data = parse_export_logs_service_request(request);

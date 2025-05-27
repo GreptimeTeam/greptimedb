@@ -22,7 +22,7 @@ use api::v1::RowInsertRequest;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use pipeline::{
-    GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, PipelineOptReq, Value,
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value,
 };
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
@@ -397,7 +397,7 @@ impl PromSeriesProcessor {
     pub(crate) async fn exec_pipeline(
         &mut self,
         // ) -> crate::error::Result<(RowInsertRequests, usize)> {
-    ) -> crate::error::Result<PipelineOptReq> {
+    ) -> crate::error::Result<ContextReq> {
         // prepare params
         let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
             err_msg: "pipeline handler is not set",
@@ -414,7 +414,7 @@ impl PromSeriesProcessor {
         // let mut size = 0;
 
         // run pipeline
-        let mut req = PipelineOptReq::default();
+        let mut req = ContextReq::default();
         for (table_name, pipeline_maps) in self.table_values.iter_mut() {
             let pipeline_req = PipelineIngestRequest {
                 table: table_name.clone(),

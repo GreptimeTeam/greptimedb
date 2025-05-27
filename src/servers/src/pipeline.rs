@@ -20,8 +20,8 @@ use api::v1::{RowInsertRequest, Rows};
 use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, PipelineOptReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
+    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -66,7 +66,7 @@ pub(crate) async fn run_pipeline(
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<PipelineOptReq> {
+) -> Result<ContextReq> {
     if pipeline_ctx.pipeline_definition.is_identity() {
         run_identity_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx).await
     } else {
@@ -79,7 +79,7 @@ async fn run_identity_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
-) -> Result<PipelineOptReq> {
+) -> Result<ContextReq> {
     let PipelineIngestRequest {
         table: table_name,
         values: data_array,
@@ -93,7 +93,7 @@ async fn run_identity_pipeline(
             .context(CatalogSnafu)?
     };
     pipeline::identity_pipeline(data_array, table, pipeline_ctx)
-        .map(|opt_map| PipelineOptReq::from_opt_map(opt_map, table_name))
+        .map(|opt_map| ContextReq::from_opt_map(opt_map, table_name))
         .context(PipelineSnafu)
 }
 
@@ -103,7 +103,7 @@ async fn run_custom_pipeline(
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<PipelineOptReq> {
+) -> Result<ContextReq> {
     let db = query_ctx.get_db_string();
     let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
@@ -148,7 +148,7 @@ async fn run_custom_pipeline(
         }
     }
 
-    let mut results = PipelineOptReq::default();
+    let mut results = ContextReq::default();
 
     if let Some(s) = pipeline.schemas() {
         // transformed

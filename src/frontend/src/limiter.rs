@@ -22,7 +22,7 @@ use api::v1::{
     Decimal128, InsertRequests, IntervalMonthDayNano, RowInsertRequest, RowInsertRequests,
 };
 use common_telemetry::{debug, warn};
-use pipeline::PipelineOptReq;
+use pipeline::ContextReq;
 
 pub(crate) type LimiterRef = Arc<Limiter>;
 
@@ -94,7 +94,7 @@ impl Limiter {
         self.limit_in_flight_write_bytes(size as u64)
     }
 
-    pub fn limit_opt_req(&self, opt_req: &PipelineOptReq) -> Option<InFlightWriteBytesCounter> {
+    pub fn limit_opt_req(&self, opt_req: &ContextReq) -> Option<InFlightWriteBytesCounter> {
         let size = self.rows_insert_requests_data_size(opt_req.ref_all_req());
         self.limit_in_flight_write_bytes(size as u64)
     }
