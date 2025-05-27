@@ -816,6 +816,8 @@ pub(crate) async fn ingest_logs_inner(
     }
 
     let mut outputs = Vec::new();
+    let mut total_rows: u64 = 0;
+    let mut fail = false;
     for (temp_ctx, act_req) in req.as_req_iter(query_ctx) {
         let output = handler.insert(act_req, temp_ctx).await;
 
@@ -824,18 +826,25 @@ pub(crate) async fn ingest_logs_inner(
             meta: _,
         }) = &output
         {
-            METRIC_HTTP_LOGS_INGESTION_COUNTER
-                .with_label_values(&[db.as_str()])
-                .inc_by(*rows as u64);
-            METRIC_HTTP_LOGS_INGESTION_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
-                .observe(exec_timer.elapsed().as_secs_f64());
+            total_rows += *rows as u64;
         } else {
-            METRIC_HTTP_LOGS_INGESTION_ELAPSED
-                .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
-                .observe(exec_timer.elapsed().as_secs_f64());
+            fail = true;
         }
         outputs.push(output);
+    }
+
+    if total_rows > 0 {
+        METRIC_HTTP_LOGS_INGESTION_COUNTER
+            .with_label_values(&[db.as_str()])
+            .inc_by(total_rows);
+        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
+    }
+    if fail {
+        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+            .observe(exec_timer.elapsed().as_secs_f64());
     }
 
     let response = GreptimedbV1Response::from_output(outputs)
