@@ -59,6 +59,7 @@ sql.workspace = true
 table.workspace = true
 tokio.workspace = true
 urlencoding = "2.1"
+vrl = "0.24"
 yaml-rust = "0.4"
 
 [dev-dependencies]

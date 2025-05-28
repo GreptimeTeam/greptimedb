@@ -668,6 +668,42 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to compile VRL, {}", msg))]
+    CompileVRL {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute VRL, {}", msg))]
+    ExecuteVRL {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Float is not a number: {}", input_float))]
+    FloatNaN {
+        input_float: f64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid timestamp value: {}", input))]
+    InvalidTimestamp {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert bytes to utf8"))]
+    BytesToUtf8 {
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType {
         msg: String,
@@ -847,6 +883,11 @@ impl ErrorExt for Error {
             | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
+            | CompileVRL { .. }
+            | ExecuteVRL { .. }
+            | FloatNaN { .. }
+            | BytesToUtf8 { .. }
+            | InvalidTimestamp { .. }
             | PipelineMissing { .. } => StatusCode::InvalidArguments,
         }
     }

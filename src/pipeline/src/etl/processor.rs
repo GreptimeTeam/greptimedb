@@ -29,6 +29,7 @@ pub mod select;
 pub mod simple_extract;
 pub mod timestamp;
 pub mod urlencoding;
+pub mod vrl;
 
 use std::str::FromStr;
 
