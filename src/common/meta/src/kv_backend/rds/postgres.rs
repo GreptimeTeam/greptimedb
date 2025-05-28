@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -62,18 +61,6 @@ enum RangeTemplateType {
     Full,
     LeftBounded,
     Prefix,
-}
-
-impl Display for RangeTemplateType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RangeTemplateType::Point => write!(f, "Point"),
-            RangeTemplateType::Range => write!(f, "Range"),
-            RangeTemplateType::Full => write!(f, "Full"),
-            RangeTemplateType::LeftBounded => write!(f, "LeftBounded"),
-            RangeTemplateType::Prefix => write!(f, "Prefix"),
-        }
-    }
 }
 
 /// Builds params for the given range template type.
