@@ -388,9 +388,8 @@ pub enum Error {
     },
 
     #[cfg(feature = "enterprise")]
-    #[snafu(display("Failed to convert int, detail: {}", detail))]
-    TryFromInt {
-        detail: String,
+    #[snafu(display("The execution interval cannot be negative"))]
+    NegativeInterval {
         #[snafu(source)]
         error: std::num::TryFromIntError,
         #[snafu(implicit)]
@@ -447,7 +446,9 @@ impl ErrorExt for Error {
             | ConvertStr { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
-            InvalidTriggerWebhookOption { .. } | TryFromInt { .. } => StatusCode::InvalidArguments,
+            InvalidTriggerWebhookOption { .. } | NegativeInterval { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

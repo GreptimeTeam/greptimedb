@@ -150,9 +150,7 @@ impl<'a> ParserContext<'a> {
         let interval = self
             .parse_interval()?
             .try_into()
-            .context(error::TryFromIntSnafu {
-                detail: "trigger interval",
-            })?;
+            .context(error::NegativeIntervalSnafu)?;
 
         Ok((query, interval))
     }
