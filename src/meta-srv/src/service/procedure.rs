@@ -139,11 +139,11 @@ impl procedure_service_server::ProcedureService for Metasrv {
 
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let from_peer = self
-            .lookup_peer(from_peer)
+            .lookup_datanode_peer(from_peer)
             .await?
             .context(error::PeerUnavailableSnafu { peer_id: from_peer })?;
         let to_peer = self
-            .lookup_peer(to_peer)
+            .lookup_datanode_peer(to_peer)
             .await?
             .context(error::PeerUnavailableSnafu { peer_id: to_peer })?;
 
