@@ -33,6 +33,12 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+const RDS_STORE_OP_BATCH_GET: &str = "batch_get";
+const RDS_STORE_OP_BATCH_PUT: &str = "batch_put";
+const RDS_STORE_OP_RANGE_QUERY: &str = "range_query";
+const RDS_STORE_OP_RANGE_DELETE: &str = "range_delete";
+const RDS_STORE_OP_BATCH_DELETE: &str = "batch_delete";
+
 #[cfg(feature = "pg_kvbackend")]
 mod postgres;
 #[cfg(feature = "pg_kvbackend")]

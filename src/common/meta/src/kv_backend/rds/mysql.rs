@@ -20,7 +20,12 @@ use snafu::ResultExt;
 use sqlx::mysql::MySqlRow;
 use sqlx::pool::Pool;
 use sqlx::{MySql, MySqlPool, Row, Transaction as MySqlTransaction};
+use strum::AsRefStr;
 
+use super::{
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY,
+};
 use crate::error::{CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result};
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
@@ -32,6 +37,8 @@ use crate::rpc::store::{
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
+
+const MYSQL_STORE_NAME: &str = "mysql_store";
 
 type MySqlClient = Arc<Pool<MySql>>;
 pub struct MySqlTxnClient(MySqlTransaction<'static, MySql>);
@@ -47,7 +54,7 @@ fn key_value_from_row(row: MySqlRow) -> KeyValue {
 const EMPTY: &[u8] = &[0];
 
 /// Type of range template.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsRefStr)]
 enum RangeTemplateType {
     Point,
     Range,
@@ -58,16 +65,8 @@ enum RangeTemplateType {
 
 /// Builds params for the given range template type.
 impl RangeTemplateType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RangeTemplateType::Point => "Point",
-            RangeTemplateType::Range => "Range",
-            RangeTemplateType::Full => "Full",
-            RangeTemplateType::LeftBounded => "LeftBounded",
-            RangeTemplateType::Prefix => "Prefix",
-        }
-    }
-
+    /// Builds the parameters for the given range template type.
+    /// You can check out the conventions at [RangeRequest]
     fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
         match self {
             RangeTemplateType::Point => vec![key],
@@ -355,9 +354,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         debug!("query: {:?}, params: {:?}", query, params);
         let mut kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params_ref).await,
-            "MysqlStore",
-            "range_query",
-            template_type.as_str()
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_RANGE_QUERY,
+            template_type.as_ref()
         )?;
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
@@ -398,9 +397,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         if !req.prev_kv {
             crate::record_rds_sql_execute_elapsed!(
                 query_executor.execute(&update, &values_params).await,
-                "MysqlStore",
-                "batch_put",
-                "OnlyBatchUpsert"
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_PUT,
+                ""
             )?;
             return Ok(BatchPutResponse::default());
         }
@@ -414,9 +413,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         }
         let prev_kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&select, &in_params).await,
-            "MysqlStore",
-            "batch_put",
-            "BatchUpsertWithPrevKvs"
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_PUT,
+            ""
         )?;
         query_executor.execute(&update, &values_params).await?;
         Ok(BatchPutResponse { prev_kvs })
@@ -436,9 +435,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params).await,
-            "MysqlStore",
-            "batch_get",
-            "BatchGet"
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_GET,
+            ""
         )?;
         Ok(BatchGetResponse { kvs })
     }
@@ -473,9 +472,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
         crate::record_rds_sql_execute_elapsed!(
             query_executor.execute(template, &params_ref).await,
-            "MysqlStore",
-            "delete_range",
-            "Delete"
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_RANGE_DELETE,
+            template_type.as_ref()
         )?;
         let mut resp = DeleteRangeResponse::new(prev_kvs.len() as i64);
         if req.prev_kv {
@@ -500,9 +499,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         if !req.prev_kv {
             crate::record_rds_sql_execute_elapsed!(
                 query_executor.execute(&query, &params).await,
-                "MysqlStore",
-                "batch_delete",
-                "OnlyBatchDelete"
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_DELETE,
+                ""
             )?;
             return Ok(BatchDeleteResponse::default());
         }
@@ -525,9 +524,9 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         // Pure `DELETE` has no return value, so we need to use `execute` instead of `query`.
         crate::record_rds_sql_execute_elapsed!(
             query_executor.execute(&query, &params).await,
-            "MysqlStore",
-            "batch_delete",
-            "OnlyBatchDelete"
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_DELETE,
+            ""
         )?;
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs })

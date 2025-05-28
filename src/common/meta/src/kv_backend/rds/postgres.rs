@@ -19,9 +19,14 @@ use std::sync::Arc;
 use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
 use snafu::ResultExt;
+use strum::AsRefStr;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{IsolationLevel, NoTls, Row};
 
+use super::{
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY,
+};
 use crate::error::{
     CreatePostgresPoolSnafu, GetPostgresConnectionSnafu, PostgresExecutionSnafu,
     PostgresTransactionSnafu, Result,
@@ -37,6 +42,8 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
+const PG_STORE_NAME: &str = "pg_store";
+
 pub struct PgClient(deadpool::managed::Object<deadpool_postgres::Manager>);
 pub struct PgTxnClient<'a>(deadpool_postgres::Transaction<'a>);
 
@@ -51,7 +58,7 @@ fn key_value_from_row(r: Row) -> KeyValue {
 const EMPTY: &[u8] = &[0];
 
 /// Type of range template.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsRefStr)]
 enum RangeTemplateType {
     Point,
     Range,
@@ -74,16 +81,6 @@ impl Display for RangeTemplateType {
 
 /// Builds params for the given range template type.
 impl RangeTemplateType {
-    /// Converts the range template type to a string representation.
-    fn as_str(&self) -> &str {
-        match self {
-            RangeTemplateType::Point => "Point",
-            RangeTemplateType::Range => "Range",
-            RangeTemplateType::Full => "Full",
-            RangeTemplateType::LeftBounded => "LeftBounded",
-            RangeTemplateType::Prefix => "Prefix",
-        }
-    }
     /// Builds the parameters for the given range template type.
     /// You can check out the conventions at [RangeRequest]
     fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
@@ -385,9 +382,9 @@ impl KvQueryExecutor<PgClient> for PgStore {
         debug!("query: {:?}, params: {:?}", query, params);
         let mut kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params_ref).await,
-            "PgStore",
-            "range_query",
-            template_type.as_str()
+            PG_STORE_NAME,
+            RDS_STORE_OP_RANGE_QUERY,
+            template_type.as_ref()
         )?;
 
         if req.keys_only {
@@ -427,9 +424,9 @@ impl KvQueryExecutor<PgClient> for PgStore {
 
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params).await,
-            "PgStore",
-            "batch_put",
-            "BatchPut"
+            PG_STORE_NAME,
+            RDS_STORE_OP_BATCH_PUT,
+            ""
         )?;
         if req.prev_kv {
             Ok(BatchPutResponse { prev_kvs: kvs })
@@ -453,9 +450,9 @@ impl KvQueryExecutor<PgClient> for PgStore {
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params).await,
-            "PgStore",
-            "batch_get",
-            "BatchGet"
+            PG_STORE_NAME,
+            RDS_STORE_OP_BATCH_GET,
+            ""
         )?;
         Ok(BatchGetResponse { kvs })
     }
@@ -471,9 +468,9 @@ impl KvQueryExecutor<PgClient> for PgStore {
         let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(template, &params_ref).await,
-            "PgStore",
-            "delete_range",
-            template_type.as_str()
+            PG_STORE_NAME,
+            RDS_STORE_OP_RANGE_DELETE,
+            template_type.as_ref()
         )?;
         let mut resp = DeleteRangeResponse::new(kvs.len() as i64);
         if req.prev_kv {
@@ -497,9 +494,9 @@ impl KvQueryExecutor<PgClient> for PgStore {
 
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params).await,
-            "PgStore",
-            "batch_delete",
-            "BatchDelete"
+            PG_STORE_NAME,
+            RDS_STORE_OP_BATCH_DELETE,
+            ""
         )?;
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs: kvs })
