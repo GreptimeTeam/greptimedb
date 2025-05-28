@@ -669,14 +669,14 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to compile VRL, {}", msg))]
-    CompileVRL {
+    CompileVrl {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
 
     #[snafu(display("Failed to execute VRL, {}", msg))]
-    ExecuteVRL {
+    ExecuteVrl {
         msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -700,6 +700,18 @@ pub enum Error {
     BytesToUtf8 {
         #[snafu(source)]
         error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Please don't use regex in Vrl script"))]
+    VrlRegexValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Vrl script should return `.` in the end"))]
+    VrlReturnValue {
         #[snafu(implicit)]
         location: Location,
     },
@@ -883,11 +895,13 @@ impl ErrorExt for Error {
             | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
-            | CompileVRL { .. }
-            | ExecuteVRL { .. }
+            | CompileVrl { .. }
+            | ExecuteVrl { .. }
             | FloatNaN { .. }
             | BytesToUtf8 { .. }
             | InvalidTimestamp { .. }
+            | VrlRegexValue { .. }
+            | VrlReturnValue { .. }
             | PipelineMissing { .. } => StatusCode::InvalidArguments,
         }
     }

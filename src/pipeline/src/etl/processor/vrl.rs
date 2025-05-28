@@ -23,36 +23,40 @@ use vrl::prelude::{Bytes, NotNan, TimeZone};
 use vrl::value::{KeyString, Secrets, Value as VrlValue};
 
 use crate::error::{
-    BytesToUtf8Snafu, CompileVRLSnafu, ExecuteVRLSnafu, FloatNaNSnafu, InvalidTimestampSnafu,
-    Result,
+    BytesToUtf8Snafu, CompileVrlSnafu, Error, ExecuteVrlSnafu, FloatNaNSnafu,
+    InvalidTimestampSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu,
 };
+use crate::etl::processor::yaml_string;
 use crate::{PipelineMap, Value as PipelineValue};
 
+pub(crate) const PROCESSOR_VRL: &str = "vrl";
+const SOURCE: &str = "source";
+
+#[derive(Debug)]
 pub struct VrlProcessor {
     source: String,
     program: Program,
-    runtime: Runtime,
 }
 
 impl VrlProcessor {
     pub fn new(source: String) -> Result<Self> {
         let fns = vrl::stdlib::all();
 
-        let re = compile(&source, &fns).map_err(|e| {
-            CompileVRLSnafu {
+        let compile_result = compile(&source, &fns).map_err(|e| {
+            CompileVrlSnafu {
                 msg: Formatter::new(&source, e).to_string(),
             }
             .build()
         })?;
 
+        // TODO: can we check regex output here?
         Ok(Self {
             source,
-            program: re.program,
-            runtime: Runtime::default(),
+            program: compile_result.program,
         })
     }
 
-    pub fn resolve(&mut self, m: PipelineMap) -> Result<PipelineValue> {
+    pub fn resolve(&self, m: PipelineMap) -> Result<PipelineValue> {
         let pipeline_vrl = m
             .into_iter()
             .map(|(k, v)| pipeline_value_to_vrl_value(v).map(|v| (KeyString::from(k), v)))
@@ -65,18 +69,55 @@ impl VrlProcessor {
         };
 
         let timezone = TimeZone::Named(Tz::UTC);
-
-        let re = self
-            .runtime
+        let mut runtime = Runtime::default();
+        let re = runtime
             .resolve(&mut target, &self.program, &timezone)
             .map_err(|e| {
-                ExecuteVRLSnafu {
+                ExecuteVrlSnafu {
                     msg: e.get_expression_error().to_string(),
                 }
                 .build()
             })?;
 
         vrl_value_to_pipeline_value(re)
+    }
+}
+
+impl TryFrom<&yaml_rust::yaml::Hash> for VrlProcessor {
+    type Error = Error;
+
+    fn try_from(value: &yaml_rust::yaml::Hash) -> Result<Self> {
+        let mut source = String::new();
+        for (k, v) in value.iter() {
+            let key = k
+                .as_str()
+                .with_context(|| KeyMustBeStringSnafu { k: k.clone() })?;
+            if key == SOURCE {
+                source = yaml_string(v, SOURCE)?;
+            }
+        }
+        let processor = VrlProcessor::new(source)?;
+        Ok(processor)
+    }
+}
+
+impl crate::etl::processor::Processor for VrlProcessor {
+    fn kind(&self) -> &str {
+        PROCESSOR_VRL
+    }
+
+    fn ignore_missing(&self) -> bool {
+        true
+    }
+
+    fn exec_mut(&self, val: PipelineMap) -> Result<PipelineMap> {
+        let val = self.resolve(val)?;
+
+        if let PipelineValue::Map(m) = val {
+            Ok(m.values)
+        } else {
+            VrlRegexValueSnafu.fail()
+        }
     }
 }
 
@@ -127,7 +168,7 @@ fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
         VrlValue::Bytes(bytes) => String::from_utf8(bytes.to_vec())
             .context(BytesToUtf8Snafu)
             .map(PipelineValue::String),
-        VrlValue::Regex(_) => unreachable!(),
+        VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
         VrlValue::Integer(x) => Ok(PipelineValue::Int64(x)),
         VrlValue::Float(not_nan) => Ok(PipelineValue::Float64(not_nan.into_inner())),
         VrlValue::Boolean(b) => Ok(PipelineValue::Boolean(b)),
@@ -173,7 +214,7 @@ del(.user_info)
 
         let v = VrlProcessor::new(source.to_string());
         assert!(v.is_ok());
-        let mut v = v.unwrap();
+        let v = v.unwrap();
 
         let mut n = PipelineMap::new();
         n.insert(

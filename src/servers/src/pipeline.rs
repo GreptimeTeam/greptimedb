@@ -119,9 +119,9 @@ async fn run_custom_pipeline(
     let mut auto_map = HashMap::new();
     let mut auto_map_ts_keys = HashMap::new();
 
-    for mut pipeline_map in pipeline_maps {
+    for pipeline_map in pipeline_maps {
         let r = pipeline
-            .exec_mut(&mut pipeline_map)
+            .exec_mut(pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -130,20 +130,20 @@ async fn run_custom_pipeline(
             .context(PipelineSnafu)?;
 
         match r {
-            PipelineExecOutput::Transformed((opt, row, table_suffix)) => {
+            PipelineExecOutput::Transformed((opt, row, table_suffix, _val)) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
                 push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
             }
-            PipelineExecOutput::AutoTransform(table_suffix, ts_keys) => {
+            PipelineExecOutput::AutoTransform(table_suffix, ts_keys, val) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
+                push_to_map!(auto_map, act_table_name.clone(), val, arr_len);
                 auto_map_ts_keys
                     .entry(act_table_name)
                     .or_insert_with(HashMap::new)
                     .extend(ts_keys);
             }
-            PipelineExecOutput::DispatchedTo(dispatched_to) => {
-                push_to_map!(dispatched, dispatched_to, pipeline_map, arr_len);
+            PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
+                push_to_map!(dispatched, dispatched_to, val, arr_len);
             }
         }
     }
