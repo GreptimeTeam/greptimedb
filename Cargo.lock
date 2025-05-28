@@ -1852,8 +1852,9 @@ dependencies = [
  "futures",
  "humantime",
  "meta-client",
+ "meta-srv",
  "nu-ansi-term",
- "opendal 0.51.2",
+ "object-store",
  "query",
  "rand 0.9.0",
  "reqwest",
@@ -2322,6 +2323,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-test-util",
  "common-time",
  "common-wal",
  "common-workload",
@@ -2332,6 +2334,7 @@ dependencies = [
  "deadpool-postgres",
  "derive_builder 0.20.1",
  "etcd-client",
+ "flexbuffers",
  "futures",
  "futures-util",
  "hex",
@@ -2340,6 +2343,7 @@ dependencies = [
  "itertools 0.14.0",
  "lazy_static",
  "moka",
+ "object-store",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.0",
@@ -4258,6 +4262,19 @@ dependencies = [
  "crc32fast",
  "libz-sys",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flexbuffers"
+version = "25.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "935627e7bc8f083035d9faad09ffaed9128f73fb1f74a8798f115749c43378e8"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "num_enum 0.5.11",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -7577,11 +7594,32 @@ dependencies = [
 
 [[package]]
 name = "num_enum"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f646caf906c20226733ed5b1374287eb97e3c2a5c227ce668c1f2ce20ae57c9"
+dependencies = [
+ "num_enum_derive 0.5.11",
+]
+
+[[package]]
+name = "num_enum"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e613fc340b2220f734a8595782c551f1250e969d87d3be1ae0579e8d4065179"
 dependencies = [
- "num_enum_derive",
+ "num_enum_derive 0.7.3",
+]
+
+[[package]]
+name = "num_enum_derive"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcbff9bc912032c62bf65ef1d5aea88983b420f4f839db1e9b0c281a25c9c799"
+dependencies = [
+ "proc-macro-crate 1.3.1",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -7635,7 +7673,7 @@ dependencies = [
  "lazy_static",
  "md5",
  "moka",
- "opendal 0.52.0",
+ "opendal",
  "prometheus",
  "tokio",
  "uuid",
@@ -7674,7 +7712,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
- "opendal 0.52.0",
+ "opendal",
  "pin-project",
  "tokio",
 ]
@@ -7699,35 +7737,6 @@ name = "oorandom"
 version = "11.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b410bbe7e14ab526a0e86877eb47c6996a2bd7746f027ba551028c925390e4e9"
-
-[[package]]
-name = "opendal"
-version = "0.51.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1063ea459fa9e94584115743b06330f437902dd1d9f692b863ef1875a20548"
-dependencies = [
- "anyhow",
- "async-trait",
- "backon",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "crc32c",
- "futures",
- "getrandom 0.2.15",
- "http 1.1.0",
- "log",
- "md-5",
- "once_cell",
- "percent-encoding",
- "quick-xml 0.36.2",
- "reqsign",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
 
 [[package]]
 name = "opendal"
@@ -8080,7 +8089,7 @@ dependencies = [
  "arrow 53.4.1",
  "arrow-ipc 53.4.1",
  "lazy_static",
- "num_enum",
+ "num_enum 0.7.3",
  "opentelemetry-proto 0.27.0",
  "paste",
  "prost 0.13.5",
