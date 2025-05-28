@@ -358,7 +358,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             "MysqlStore",
             "range_query",
             template_type.as_str()
-        );
+        )?;
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
         }
@@ -401,7 +401,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
                 "MysqlStore",
                 "batch_put",
                 "OnlyBatchUpsert"
-            );
+            )?;
             return Ok(BatchPutResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -417,7 +417,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             "MysqlStore",
             "batch_put",
             "BatchUpsertWithPrevKvs"
-        );
+        )?;
         query_executor.execute(&update, &values_params).await?;
         Ok(BatchPutResponse { prev_kvs })
     }
@@ -439,7 +439,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             "MysqlStore",
             "batch_get",
             "BatchGet"
-        );
+        )?;
         Ok(BatchGetResponse { kvs })
     }
 
@@ -476,7 +476,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             "MysqlStore",
             "delete_range",
             "Delete"
-        );
+        )?;
         let mut resp = DeleteRangeResponse::new(prev_kvs.len() as i64);
         if req.prev_kv {
             resp.with_prev_kvs(prev_kvs);
@@ -503,7 +503,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
                 "MysqlStore",
                 "batch_delete",
                 "OnlyBatchDelete"
-            );
+            )?;
             return Ok(BatchDeleteResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -528,7 +528,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             "MysqlStore",
             "batch_delete",
             "OnlyBatchDelete"
-        );
+        )?;
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs })
         } else {

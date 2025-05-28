@@ -388,7 +388,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             "PgStore",
             "range_query",
             template_type.as_str()
-        );
+        )?;
 
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
@@ -430,7 +430,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             "PgStore",
             "batch_put",
             "BatchPut"
-        );
+        )?;
         if req.prev_kv {
             Ok(BatchPutResponse { prev_kvs: kvs })
         } else {
@@ -456,7 +456,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             "PgStore",
             "batch_get",
             "BatchGet"
-        );
+        )?;
         Ok(BatchGetResponse { kvs })
     }
 
@@ -474,7 +474,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             "PgStore",
             "delete_range",
             template_type.as_str()
-        );
+        )?;
         let mut resp = DeleteRangeResponse::new(kvs.len() as i64);
         if req.prev_kv {
             resp.with_prev_kvs(kvs);
@@ -500,7 +500,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             "PgStore",
             "batch_delete",
             "BatchDelete"
-        );
+        )?;
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs: kvs })
         } else {
