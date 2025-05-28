@@ -472,7 +472,7 @@ impl Metasrv {
     pub async fn try_start(&self) -> Result<()> {
         if self
             .started
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             warn!("Metasrv already started");
@@ -569,7 +569,7 @@ impl Metasrv {
                 let started = self.started.clone();
                 let node_info = self.node_info();
                 let _handle = common_runtime::spawn_global(async move {
-                    while started.load(Ordering::Relaxed) {
+                    while started.load(Ordering::Acquire) {
                         let res = election.register_candidate(&node_info).await;
                         if let Err(e) = res {
                             warn!(e; "Metasrv register candidate error");
@@ -583,7 +583,7 @@ impl Metasrv {
                 let election = election.clone();
                 let started = self.started.clone();
                 let _handle = common_runtime::spawn_global(async move {
-                    while started.load(Ordering::Relaxed) {
+                    while started.load(Ordering::Acquire) {
                         let res = election.campaign().await;
                         if let Err(e) = res {
                             warn!(e; "Metasrv election error");
@@ -618,11 +618,23 @@ impl Metasrv {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.started.store(false, Ordering::Relaxed);
+        if self
+            .started
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Metasrv already stopped");
+            return Ok(());
+        }
+
         self.procedure_manager
             .stop()
             .await
-            .context(StopProcedureManagerSnafu)
+            .context(StopProcedureManagerSnafu)?;
+
+        info!("Metasrv stopped");
+
+        Ok(())
     }
 
     pub fn start_time_ms(&self) -> u64 {
@@ -639,8 +651,9 @@ impl Metasrv {
         }
     }
 
-    /// Lookup a peer by peer_id, return it only when it's alive.
-    pub(crate) async fn lookup_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
+    /// Looks up a datanode peer by peer_id, returning it only when it's alive.
+    /// A datanode is considered alive when it's still within the lease period.
+    pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         lookup_datanode_peer(
             peer_id,
             &self.meta_peer_client,
