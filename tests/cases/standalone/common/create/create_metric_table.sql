@@ -84,7 +84,7 @@ INSERT INTO t1 (ts, val, host) VALUES
   ('2022-01-02 00:00:00', 4.56, 'example.com'),
   ('2022-01-03 00:00:00', 7.89, 'example.com');
 
-SELECT * FROM t1;
+SELECT * FROM t1 ORDER BY ts ASC;
 
 DROP TABLE t1;
 

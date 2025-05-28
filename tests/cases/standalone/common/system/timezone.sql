@@ -14,13 +14,13 @@ INSERT INTO test values
        (4, '2024-01-04 00:00:00'),
        (5, '2024-01-05 00:00:00+08:00');
 
-SELECT * from test;
+SELECT * from test ORDER BY ts ASC;
 
-SELECT * from test where ts >= '2024-01-02 08:00:00';
+SELECT * from test where ts >= '2024-01-02 08:00:00' ORDER BY ts;
 
-SELECT * from test where ts <= '2024-01-03 16:00:00';
+SELECT * from test where ts <= '2024-01-03 16:00:00' ORDER BY ts;
 
-select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test;
+select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test ORDER BY ts;
 
 select to_unixtime('2024-01-02 00:00:00');
 
@@ -35,13 +35,13 @@ SHOW VARIABLES system_time_zone;
 
 select timezone();
 
-SELECT * from test;
+SELECT * from test ORDER BY ts;
 
-SELECT * from test where ts >= '2024-01-02 08:00:00';
+SELECT * from test where ts >= '2024-01-02 08:00:00' ORDER BY ts;
 
-SELECT * from test where ts <= '2024-01-03 16:00:00';
+SELECT * from test where ts <= '2024-01-03 16:00:00' ORDER BY ts;
 
-select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test;
+select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test ORDER BY ts;
 
 select to_unixtime('2024-01-02 00:00:00');
 
@@ -56,13 +56,13 @@ SHOW VARIABLES system_time_zone;
 
 select timezone();
 
-SELECT * from test;
+SELECT * from test ORDER BY ts;
 
-SELECT * from test where ts >= '2024-01-02 08:00:00';
+SELECT * from test where ts >= '2024-01-02 08:00:00' ORDER BY ts;
 
-SELECT * from test where ts <= '2024-01-03 16:00:00';
+SELECT * from test where ts <= '2024-01-03 16:00:00' ORDER BY ts;
 
-select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test;
+select date_format(ts, '%Y-%m-%d %H:%M:%S:%3f') from test ORDER BY ts;
 
 select to_unixtime('2024-01-02 00:00:00');
 
