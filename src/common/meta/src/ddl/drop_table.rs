@@ -35,7 +35,7 @@ use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use self::executor::DropTableExecutor;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
@@ -221,7 +221,7 @@ impl Procedure for DropTableProcedure {
             DropTableState::DatanodeDropRegions => self.on_datanode_drop_regions().await,
             DropTableState::DeleteTombstone => self.on_delete_metadata_tombstone().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

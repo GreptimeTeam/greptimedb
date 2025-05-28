@@ -36,7 +36,7 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
@@ -304,7 +304,7 @@ impl Procedure for CreateFlowProcedure {
             CreateFlowState::CreateMetadata => self.on_create_metadata().await,
             CreateFlowState::InvalidateFlowCache => self.on_broadcast().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
