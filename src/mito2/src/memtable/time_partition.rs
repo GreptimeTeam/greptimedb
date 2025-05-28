@@ -48,17 +48,13 @@ pub struct TimePartition {
     /// Time range of the partition. `min` is inclusive and `max` is exclusive.
     /// `None` means there is no time range. The time
     /// range is `None` if and only if the [TimePartitions::part_duration] is `None`.
-    time_range: Option<PartTimeRange>,
+    time_range: PartTimeRange,
 }
 
 impl TimePartition {
     /// Returns whether the `ts` belongs to the partition.
     fn contains_timestamp(&self, ts: Timestamp) -> bool {
-        let Some(range) = self.time_range else {
-            return true;
-        };
-
-        range.contains_timestamp(ts)
+        self.time_range.contains_timestamp(ts)
     }
 
     /// Write rows to the part.
@@ -72,14 +68,11 @@ impl TimePartition {
     }
 
     /// Write a partial [BulkPart] according to [TimePartition::time_range].
-    fn write_record_batch_partial(&self, part: &BulkPart) -> error::Result<()> {
-        let Some(range) = self.time_range else {
-            unreachable!("TimePartition must have explicit time range when a bulk request involves multiple time partition")
-        };
+    fn write_record_batch_partial(&self, part: &BulkPart) -> Result<()> {
         let Some(filtered) = filter_record_batch(
             part,
-            range.min_timestamp.value(),
-            range.max_timestamp.value(),
+            self.time_range.min_timestamp.value(),
+            self.time_range.max_timestamp.value(),
         )?
         else {
             return Ok(());
@@ -229,23 +222,7 @@ impl TimePartitions {
         next_memtable_id: MemtableId,
         part_duration: Option<Duration>,
     ) -> Self {
-        let mut inner = PartitionsInner::new(next_memtable_id);
-        if part_duration.is_none() {
-            // If `part_duration` is None, then we create a partition with `None` time
-            // range so we will write all rows to that partition.
-            let memtable = builder.build(inner.alloc_memtable_id(), &metadata);
-            debug!(
-                "Creates a time partition for all timestamps, region: {}, memtable_id: {}",
-                metadata.region_id,
-                memtable.id(),
-            );
-            let part = TimePartition {
-                memtable,
-                time_range: None,
-            };
-            inner.parts.push(part);
-        }
-
+        let inner = PartitionsInner::new(next_memtable_id);
         Self {
             inner: Mutex::new(inner),
             part_duration,
@@ -329,11 +306,11 @@ impl TimePartitions {
         part_start: Timestamp,
         inner: &mut MutexGuard<PartitionsInner>,
     ) -> Result<TimePartition> {
-        let part_duration = self.part_duration.unwrap();
+        let part_duration = self.part_duration.unwrap_or(Duration::from_days(1));
         let part_pos = match inner
             .parts
             .iter()
-            .position(|part| part.time_range.unwrap().min_timestamp == part_start)
+            .position(|part| part.time_range.min_timestamp == part_start)
         {
             Some(pos) => pos,
             None => {
@@ -358,7 +335,7 @@ impl TimePartitions {
                 let pos = inner.parts.len();
                 inner.parts.push(TimePartition {
                     memtable,
-                    time_range: Some(range),
+                    time_range: range,
                 });
                 pos
             }
@@ -402,7 +379,7 @@ impl TimePartitions {
         let latest_part = inner
             .parts
             .iter()
-            .max_by_key(|part| part.time_range.map(|range| range.min_timestamp))
+            .max_by_key(|part| part.time_range.min_timestamp)
             .cloned();
 
         let Some(old_part) = latest_part else {
@@ -418,26 +395,33 @@ impl TimePartitions {
         let old_stats = old_part.memtable.stats();
         // Use the max timestamp to compute the new time range for the memtable.
         // If `part_duration` is None, the new range will be None.
-        let new_time_range =
-            old_stats
-                .time_range()
-                .zip(part_duration)
-                .and_then(|(range, bucket)| {
-                    partition_start_timestamp(range.1, bucket)
-                        .and_then(|start| PartTimeRange::from_start_duration(start, bucket))
-                });
-        // Forks the latest partition, but compute the time range based on the new duration.
-        let memtable = old_part.memtable.fork(inner.alloc_memtable_id(), metadata);
-        let new_part = TimePartition {
-            memtable,
-            time_range: new_time_range,
-        };
+        let partitions_inner = old_stats
+            .time_range()
+            .and_then(|(_, old_stats_end_timestamp)| {
+                partition_start_timestamp(
+                    old_stats_end_timestamp,
+                    part_duration.unwrap_or(Duration::from_days(1)),
+                )
+                .and_then(|start| {
+                    PartTimeRange::from_start_duration(
+                        start,
+                        part_duration.unwrap_or(Duration::from_days(1)),
+                    )
+                })
+            })
+            .map(|part_time_range| {
+                // Forks the latest partition, but compute the time range based on the new duration.
+                let memtable = old_part.memtable.fork(inner.alloc_memtable_id(), metadata);
+                let part = TimePartition {
+                    memtable,
+                    time_range: part_time_range,
+                };
+                PartitionsInner::with_partition(part, inner.next_memtable_id)
+            })
+            .unwrap_or_else(|| PartitionsInner::new(inner.next_memtable_id));
 
         Self {
-            inner: Mutex::new(PartitionsInner::with_partition(
-                new_part,
-                inner.next_memtable_id,
-            )),
+            inner: Mutex::new(partitions_inner),
             part_duration,
             metadata: metadata.clone(),
             builder: self.builder.clone(),
@@ -514,11 +498,7 @@ impl TimePartitions {
         let mut present = HashSet::new();
         // First find any existing partitions that overlap
         for part in existing_parts {
-            let Some(part_time_range) = part.time_range.as_ref() else {
-                matching.push(part);
-                return Ok((matching, Vec::new()));
-            };
-
+            let part_time_range = &part.time_range;
             if !(max < part_time_range.min_timestamp || min >= part_time_range.max_timestamp) {
                 matching.push(part);
                 present.insert(part_time_range.min_timestamp.value());
@@ -526,7 +506,7 @@ impl TimePartitions {
         }
 
         // safety: self.part_duration can only be present when reach here.
-        let part_duration = self.part_duration.unwrap();
+        let part_duration = self.part_duration_or_default();
         let timestamp_unit = self.metadata.time_index_type().unit();
 
         let part_duration_sec = part_duration.as_secs() as i64;
@@ -621,12 +601,12 @@ impl TimePartitions {
         Ok((matching, missing))
     }
 
+    fn part_duration_or_default(&self) -> Duration {
+        self.part_duration.unwrap_or(Duration::from_days(1))
+    }
+
     /// Write to multiple partitions.
     fn write_multi_parts(&self, kvs: &KeyValues, parts: &PartitionVec) -> Result<()> {
-        // If part duration is `None` then there is always one partition and all rows
-        // will be put in that partition before invoking this method.
-        debug_assert!(self.part_duration.is_some());
-
         let mut parts_to_write = HashMap::new();
         let mut missing_parts = HashMap::new();
         for kv in kvs.iter() {
@@ -635,9 +615,8 @@ impl TimePartitions {
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap();
             for part in parts {
                 if part.contains_timestamp(ts) {
-                    // Safety: Since part duration is `Some` so all time range should be `Some`.
                     parts_to_write
-                        .entry(part.time_range.unwrap().min_timestamp)
+                        .entry(part.time_range.min_timestamp)
                         .or_insert_with(|| PartitionToWrite {
                             partition: part.clone(),
                             key_values: Vec::new(),
@@ -652,7 +631,7 @@ impl TimePartitions {
             if !part_found {
                 // We need to write it to a new part.
                 // Safety: `new()` ensures duration is always Some if we do to this method.
-                let part_duration = self.part_duration.unwrap();
+                let part_duration = self.part_duration_or_default();
                 let part_start =
                     partition_start_timestamp(ts, part_duration).with_context(|| {
                         InvalidRequestSnafu {
@@ -787,7 +766,7 @@ mod tests {
         let metadata = memtable_util::metadata_for_test();
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder, 0, None);
-        assert_eq!(1, partitions.num_partitions());
+        assert_eq!(0, partitions.num_partitions());
         assert!(partitions.is_empty());
 
         let kvs = memtable_util::build_key_values(
@@ -849,11 +828,11 @@ mod tests {
         let parts = partitions.list_partitions();
         assert_eq!(
             Timestamp::new_millisecond(0),
-            parts[0].time_range.unwrap().min_timestamp
+            parts[0].time_range.min_timestamp
         );
         assert_eq!(
             Timestamp::new_millisecond(10000),
-            parts[0].time_range.unwrap().max_timestamp
+            parts[0].time_range.max_timestamp
         );
     }
 
@@ -900,11 +879,11 @@ mod tests {
         assert_eq!(0, parts[0].memtable.id());
         assert_eq!(
             Timestamp::new_millisecond(0),
-            parts[0].time_range.unwrap().min_timestamp
+            parts[0].time_range.min_timestamp
         );
         assert_eq!(
             Timestamp::new_millisecond(5000),
-            parts[0].time_range.unwrap().max_timestamp
+            parts[0].time_range.max_timestamp
         );
         assert_eq!(&[0, 2000, 3000, 4000], &timestamps[..]);
         let iter = parts[1].memtable.iter(None, None, None).unwrap();
@@ -913,11 +892,11 @@ mod tests {
         assert_eq!(&[5000, 7000], &timestamps[..]);
         assert_eq!(
             Timestamp::new_millisecond(5000),
-            parts[1].time_range.unwrap().min_timestamp
+            parts[1].time_range.min_timestamp
         );
         assert_eq!(
             Timestamp::new_millisecond(10000),
-            parts[1].time_range.unwrap().max_timestamp
+            parts[1].time_range.max_timestamp
         );
     }
 
@@ -929,25 +908,25 @@ mod tests {
 
         let new_parts = partitions.new_with_part_duration(Some(Duration::from_secs(5)));
         assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
-        assert_eq!(1, new_parts.next_memtable_id());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         // Won't update the duration if it's None.
         let new_parts = new_parts.new_with_part_duration(None);
         assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
         // Don't need to create new memtables.
-        assert_eq!(1, new_parts.next_memtable_id());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         let new_parts = new_parts.new_with_part_duration(Some(Duration::from_secs(10)));
         assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
         // Don't need to create new memtables.
-        assert_eq!(1, new_parts.next_memtable_id());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions = TimePartitions::new(metadata.clone(), builder.clone(), 0, None);
         // Need to build a new memtable as duration is still None.
         let new_parts = partitions.new_with_part_duration(None);
         assert!(new_parts.part_duration().is_none());
-        assert_eq!(2, new_parts.next_memtable_id());
+        assert_eq!(0, new_parts.next_memtable_id());
     }
 
     #[test]
@@ -958,27 +937,27 @@ mod tests {
         partitions.freeze().unwrap();
         let new_parts = partitions.fork(&metadata, None);
         assert!(new_parts.part_duration().is_none());
-        assert_eq!(1, new_parts.list_partitions()[0].memtable.id());
-        assert_eq!(2, new_parts.next_memtable_id());
+        assert!(new_parts.list_partitions().is_empty());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         new_parts.freeze().unwrap();
         let new_parts = new_parts.fork(&metadata, Some(Duration::from_secs(5)));
         assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
-        assert_eq!(2, new_parts.list_partitions()[0].memtable.id());
-        assert_eq!(3, new_parts.next_memtable_id());
+        assert!(new_parts.list_partitions().is_empty());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         new_parts.freeze().unwrap();
         let new_parts = new_parts.fork(&metadata, None);
         // Won't update the duration.
         assert_eq!(Duration::from_secs(5), new_parts.part_duration().unwrap());
-        assert_eq!(3, new_parts.list_partitions()[0].memtable.id());
-        assert_eq!(4, new_parts.next_memtable_id());
+        assert!(new_parts.list_partitions().is_empty());
+        assert_eq!(0, new_parts.next_memtable_id());
 
         new_parts.freeze().unwrap();
         let new_parts = new_parts.fork(&metadata, Some(Duration::from_secs(10)));
         assert_eq!(Duration::from_secs(10), new_parts.part_duration().unwrap());
-        assert_eq!(4, new_parts.list_partitions()[0].memtable.id());
-        assert_eq!(5, new_parts.next_memtable_id());
+        assert!(new_parts.list_partitions().is_empty());
+        assert_eq!(0, new_parts.next_memtable_id());
     }
 
     #[test]
@@ -1018,9 +997,9 @@ mod tests {
                 Timestamp::new_millisecond(2000),
             )
             .unwrap();
-        assert_eq!(matching.len(), 1);
-        assert!(missing.is_empty());
-        assert!(matching[0].time_range.is_none());
+        assert_eq!(matching.len(), 0);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0], Timestamp::new_millisecond(0));
 
         // Case 2: With time range partitioning
         let partitions = TimePartitions::new(
@@ -1052,7 +1031,7 @@ mod tests {
             .unwrap();
         assert_eq!(matching.len(), 1);
         assert!(missing.is_empty());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
 
         // Test case 2b: Query spanning multiple existing partitions
         let (matching, missing) = partitions
@@ -1065,8 +1044,8 @@ mod tests {
             .unwrap();
         assert_eq!(matching.len(), 2);
         assert!(missing.is_empty());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
-        assert_eq!(matching[1].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
+        assert_eq!(matching[1].time_range.min_timestamp.value(), 5000);
 
         // Test case 2c: Query requiring new partition
         let (matching, missing) = partitions
@@ -1092,8 +1071,8 @@ mod tests {
             .unwrap();
         assert_eq!(matching.len(), 2);
         assert!(missing.is_empty());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
-        assert_eq!(matching[1].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
+        assert_eq!(matching[1].time_range.min_timestamp.value(), 5000);
 
         // Test case 2e: Corner case
         let (matching, missing) = partitions
@@ -1106,8 +1085,8 @@ mod tests {
             .unwrap();
         assert_eq!(matching.len(), 2);
         assert!(missing.is_empty());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
-        assert_eq!(matching[1].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
+        assert_eq!(matching[1].time_range.min_timestamp.value(), 5000);
 
         // Test case 2f: Corner case with
         let (matching, missing) = partitions
@@ -1120,7 +1099,7 @@ mod tests {
             .unwrap();
         assert_eq!(matching.len(), 1);
         assert_eq!(1, missing.len());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 5000);
         assert_eq!(missing[0].value(), 10000);
 
         // Test case 2g: Cross 0
@@ -1133,7 +1112,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(matching.len(), 1);
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
         assert_eq!(1, missing.len());
         assert_eq!(missing[0].value(), -5000);
 
@@ -1151,8 +1130,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(2, matching.len());
-        assert_eq!(matching[0].time_range.unwrap().min_timestamp.value(), 0);
-        assert_eq!(matching[1].time_range.unwrap().min_timestamp.value(), 5000);
+        assert_eq!(matching[0].time_range.min_timestamp.value(), 0);
+        assert_eq!(matching[1].time_range.min_timestamp.value(), 5000);
         assert_eq!(2, missing.len());
         assert_eq!(missing[0].value(), -100000000000);
         assert_eq!(missing[1].value(), 100000000000);
@@ -1162,10 +1141,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "ts",
-                arrow::datatypes::DataType::Timestamp(
-                    arrow::datatypes::TimeUnit::Millisecond,
-                    None,
-                ),
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
                 false,
             ),
             Field::new("val", DataType::Utf8, true),
