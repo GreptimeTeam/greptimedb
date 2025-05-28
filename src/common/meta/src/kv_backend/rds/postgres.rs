@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ use crate::kv_backend::rds::{
     RDS_STORE_TXN_RETRY_COUNT,
 };
 use crate::kv_backend::KvBackendRef;
+use crate::metrics::RDS_SQL_EXECUTE_ELAPSED;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
@@ -59,8 +61,32 @@ enum RangeTemplateType {
     Prefix,
 }
 
+impl Display for RangeTemplateType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RangeTemplateType::Point => write!(f, "Point"),
+            RangeTemplateType::Range => write!(f, "Range"),
+            RangeTemplateType::Full => write!(f, "Full"),
+            RangeTemplateType::LeftBounded => write!(f, "LeftBounded"),
+            RangeTemplateType::Prefix => write!(f, "Prefix"),
+        }
+    }
+}
+
 /// Builds params for the given range template type.
 impl RangeTemplateType {
+    /// Converts the range template type to a string representation.
+    fn to_str(&self) -> &str {
+        match self {
+            RangeTemplateType::Point => "Point",
+            RangeTemplateType::Range => "Range",
+            RangeTemplateType::Full => "Full",
+            RangeTemplateType::LeftBounded => "LeftBounded",
+            RangeTemplateType::Prefix => "Prefix",
+        }
+    }
+    /// Builds the parameters for the given range template type.
+    /// You can check out the conventions at [RangeRequest]
     fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
         match self {
             RangeTemplateType::Point => vec![key],
@@ -358,7 +384,13 @@ impl KvQueryExecutor<PgClient> for PgStore {
             RangeTemplate::with_limit(template, if req.limit == 0 { 0 } else { req.limit + 1 });
         let limit = req.limit as usize;
         debug!("query: {:?}, params: {:?}", query, params);
-        let mut kvs = query_executor.query(&query, &params_ref).await?;
+        let mut kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params_ref).await,
+            "PgStore",
+            "range_query",
+            template_type.to_str()
+        );
+
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
         }
@@ -393,7 +425,13 @@ impl KvQueryExecutor<PgClient> for PgStore {
         let query = self
             .sql_template_set
             .generate_batch_upsert_query(req.kvs.len());
-        let kvs = query_executor.query(&query, &params).await?;
+
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params).await,
+            "PgStore",
+            "batch_put",
+            "BatchPut"
+        );
         if req.prev_kv {
             Ok(BatchPutResponse { prev_kvs: kvs })
         } else {
@@ -414,7 +452,16 @@ impl KvQueryExecutor<PgClient> for PgStore {
             .sql_template_set
             .generate_batch_get_query(req.keys.len());
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = query_executor.query(&query, &params).await?;
+        let timer = RDS_SQL_EXECUTE_ELAPSED
+            .with_label_values(&["PgStore", "batch_get", "BatchGet"])
+            .start_timer();
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params).await,
+            "PgStore",
+            "batch_get",
+            "BatchGet"
+        );
+        timer.stop_and_record();
         Ok(BatchGetResponse { kvs })
     }
 
@@ -427,7 +474,12 @@ impl KvQueryExecutor<PgClient> for PgStore {
         let template = self.sql_template_set.delete_template.get(template_type);
         let params = template_type.build_params(req.key, req.range_end);
         let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = query_executor.query(template, &params_ref).await?;
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(template, &params_ref).await,
+            "PgStore",
+            "delete_range",
+            template_type.to_str()
+        );
         let mut resp = DeleteRangeResponse::new(kvs.len() as i64);
         if req.prev_kv {
             resp.with_prev_kvs(kvs);
@@ -447,7 +499,13 @@ impl KvQueryExecutor<PgClient> for PgStore {
             .sql_template_set
             .generate_batch_delete_query(req.keys.len());
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = query_executor.query(&query, &params).await?;
+
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params).await,
+            "PgStore",
+            "batch_delete",
+            "BatchDelete"
+        );
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs: kvs })
         } else {

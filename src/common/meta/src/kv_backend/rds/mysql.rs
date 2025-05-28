@@ -58,6 +58,16 @@ enum RangeTemplateType {
 
 /// Builds params for the given range template type.
 impl RangeTemplateType {
+    fn to_str(&self) -> &'static str {
+        match self {
+            RangeTemplateType::Point => "Point",
+            RangeTemplateType::Range => "Range",
+            RangeTemplateType::Full => "Full",
+            RangeTemplateType::LeftBounded => "LeftBounded",
+            RangeTemplateType::Prefix => "Prefix",
+        }
+    }
+
     fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
         match self {
             RangeTemplateType::Point => vec![key],
@@ -343,7 +353,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             RangeTemplate::with_limit(template, if req.limit == 0 { 0 } else { req.limit + 1 });
         let limit = req.limit as usize;
         debug!("query: {:?}, params: {:?}", query, params);
-        let mut kvs = query_executor.query(&query, &params_ref).await?;
+        let mut kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params_ref).await,
+            "MysqlStore",
+            "range_query",
+            template_type.to_str()
+        );
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
         }
@@ -381,7 +396,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
 
         // Fast path: if we don't need previous kvs, we can just upsert the keys.
         if !req.prev_kv {
-            query_executor.execute(&update, &values_params).await?;
+            crate::record_rds_sql_execute_elapsed!(
+                query_executor.execute(&update, &values_params).await,
+                "MysqlStore",
+                "batch_put",
+                "OnlyBatchUpsert"
+            );
             return Ok(BatchPutResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -392,7 +412,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             txn.commit().await?;
             return res;
         }
-        let prev_kvs = query_executor.query(&select, &in_params).await?;
+        let prev_kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&select, &in_params).await,
+            "MysqlStore",
+            "batch_put",
+            "BatchUpsertWithPrevKvs"
+        );
         query_executor.execute(&update, &values_params).await?;
         Ok(BatchPutResponse { prev_kvs })
     }
@@ -409,7 +434,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             .sql_template_set
             .generate_batch_get_query(req.keys.len());
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = query_executor.query(&query, &params).await?;
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params).await,
+            "MysqlStore",
+            "batch_get",
+            "BatchGet"
+        );
         Ok(BatchGetResponse { kvs })
     }
 
@@ -441,7 +471,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let template = self.sql_template_set.delete_template.get(template_type);
         let params = template_type.build_params(req.key, req.range_end);
         let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
-        query_executor.execute(template, &params_ref).await?;
+        crate::record_rds_sql_execute_elapsed!(
+            query_executor.execute(template, &params_ref).await,
+            "MysqlStore",
+            "delete_range",
+            "Delete"
+        );
         let mut resp = DeleteRangeResponse::new(prev_kvs.len() as i64);
         if req.prev_kv {
             resp.with_prev_kvs(prev_kvs);
@@ -463,7 +498,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         // Fast path: if we don't need previous kvs, we can just delete the keys.
         if !req.prev_kv {
-            query_executor.execute(&query, &params).await?;
+            crate::record_rds_sql_execute_elapsed!(
+                query_executor.execute(&query, &params).await,
+                "MysqlStore",
+                "batch_delete",
+                "OnlyBatchDelete"
+            );
             return Ok(BatchDeleteResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -483,7 +523,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             .await?
             .kvs;
         // Pure `DELETE` has no return value, so we need to use `execute` instead of `query`.
-        query_executor.execute(&query, &params).await?;
+        crate::record_rds_sql_execute_elapsed!(
+            query_executor.execute(&query, &params).await,
+            "MysqlStore",
+            "batch_delete",
+            "OnlyBatchDelete"
+        );
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs })
         } else {

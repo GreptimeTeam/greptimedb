@@ -108,4 +108,10 @@ lazy_static! {
         &["name"]
     )
     .unwrap();
+    pub static ref RDS_SQL_EXECUTE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_meta_rds_pg_sql_execute_elapsed_ms",
+        "rds pg sql execute elapsed",
+        &["backend", "result", "op", "type"]
+    )
+    .unwrap();
 }

@@ -560,3 +560,21 @@ fn check_txn_ops(txn_ops: &[TxnOp]) -> Result<bool> {
     });
     Ok(same)
 }
+
+#[macro_export]
+macro_rules! record_rds_sql_execute_elapsed {
+    ($result:expr, $label_store:expr,$label_op:expr,$label_type:expr) => {{
+        let timer = std::time::Instant::now();
+        $result
+            .inspect(|_| {
+                crate::metrics::RDS_SQL_EXECUTE_ELAPSED
+                    .with_label_values(&[$label_store, "success", $label_op, $label_type])
+                    .observe(timer.elapsed().as_millis_f64())
+            })
+            .inspect_err(|_| {
+                crate::metrics::RDS_SQL_EXECUTE_ELAPSED
+                    .with_label_values(&[$label_store, "error", $label_op, $label_type])
+                    .observe(timer.elapsed().as_millis_f64());
+            })?
+    }};
+}
