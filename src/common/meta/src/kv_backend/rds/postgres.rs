@@ -76,7 +76,7 @@ impl Display for RangeTemplateType {
 /// Builds params for the given range template type.
 impl RangeTemplateType {
     /// Converts the range template type to a string representation.
-    fn to_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         match self {
             RangeTemplateType::Point => "Point",
             RangeTemplateType::Range => "Range",
@@ -388,7 +388,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             query_executor.query(&query, &params_ref).await,
             "PgStore",
             "range_query",
-            template_type.to_str()
+            template_type.as_str()
         );
 
         if req.keys_only {
@@ -478,7 +478,7 @@ impl KvQueryExecutor<PgClient> for PgStore {
             query_executor.query(template, &params_ref).await,
             "PgStore",
             "delete_range",
-            template_type.to_str()
+            template_type.as_str()
         );
         let mut resp = DeleteRangeResponse::new(kvs.len() as i64);
         if req.prev_kv {

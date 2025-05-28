@@ -58,7 +58,7 @@ enum RangeTemplateType {
 
 /// Builds params for the given range template type.
 impl RangeTemplateType {
-    fn to_str(&self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             RangeTemplateType::Point => "Point",
             RangeTemplateType::Range => "Range",
@@ -357,7 +357,7 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             query_executor.query(&query, &params_ref).await,
             "MysqlStore",
             "range_query",
-            template_type.to_str()
+            template_type.as_str()
         );
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
