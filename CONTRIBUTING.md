@@ -108,7 +108,7 @@ of what you were trying to do and what went wrong. You can also reach for help i
 The core team will be thrilled if you would like to participate in any way you like. When you are stuck, try to ask for help by filing an issue, with a detailed description of what you were trying to do and what went wrong. If you have any questions or if you would like to get involved in our community, please check out:
 
 - [GreptimeDB Community Slack](https://greptime.com/slack)
-- [GreptimeDB Github Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
+- [GreptimeDB GitHub Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
 
 Also, see some extra GreptimeDB content:
 
