@@ -40,7 +40,7 @@ pub(crate) fn infer_time_bucket<'a>(files: impl Iterator<Item = &'a FileHandle>)
         .unwrap_or_else(|| TIME_BUCKETS.max()) // safety: TIME_BUCKETS cannot be empty.
 }
 
-pub(crate) struct TimeBuckets([i64; 7]);
+pub(crate) struct TimeBuckets([i64; 5]);
 
 impl TimeBuckets {
     /// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
@@ -71,13 +71,11 @@ impl TimeBuckets {
 
 /// A set of predefined time buckets.
 pub(crate) const TIME_BUCKETS: TimeBuckets = TimeBuckets([
-    60 * 60,                 // one hour
-    2 * 60 * 60,             // two hours
-    12 * 60 * 60,            // twelve hours
-    24 * 60 * 60,            // one day
-    7 * 24 * 60 * 60,        // one week
-    365 * 24 * 60 * 60,      // one year
-    10 * 365 * 24 * 60 * 60, // ten years
+    60 * 60,          // one hour
+    2 * 60 * 60,      // two hours
+    12 * 60 * 60,     // twelve hours
+    24 * 60 * 60,     // one day
+    7 * 24 * 60 * 60, // one week
 ]);
 
 #[cfg(test)]
@@ -107,7 +105,7 @@ mod tests {
             TIME_BUCKETS.get(3),
             TIME_BUCKETS.fit_time_bucket(TIME_BUCKETS.get(3) - 1)
         );
-        assert_eq!(TIME_BUCKETS.get(6), TIME_BUCKETS.fit_time_bucket(i64::MAX));
+        assert_eq!(TIME_BUCKETS.get(4), TIME_BUCKETS.fit_time_bucket(i64::MAX));
     }
 
     #[test]

@@ -520,7 +520,7 @@ async fn insert_and_assert(db: &Database) {
 
     // select
     let output = db
-        .sql("SELECT host, cpu, memory, ts FROM demo")
+        .sql("SELECT host, cpu, memory, ts FROM demo order by host")
         .await
         .unwrap();
 
