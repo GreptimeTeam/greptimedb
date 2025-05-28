@@ -31,7 +31,6 @@ use crate::kv_backend::rds::{
     RDS_STORE_TXN_RETRY_COUNT,
 };
 use crate::kv_backend::KvBackendRef;
-use crate::metrics::RDS_SQL_EXECUTE_ELAPSED;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
@@ -452,16 +451,12 @@ impl KvQueryExecutor<PgClient> for PgStore {
             .sql_template_set
             .generate_batch_get_query(req.keys.len());
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let timer = RDS_SQL_EXECUTE_ELAPSED
-            .with_label_values(&["PgStore", "batch_get", "BatchGet"])
-            .start_timer();
         let kvs = crate::record_rds_sql_execute_elapsed!(
             query_executor.query(&query, &params).await,
             "PgStore",
             "batch_get",
             "BatchGet"
         );
-        timer.stop_and_record();
         Ok(BatchGetResponse { kvs })
     }
 
