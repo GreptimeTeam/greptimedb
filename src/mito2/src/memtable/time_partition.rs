@@ -46,8 +46,6 @@ pub struct TimePartition {
     /// Memtable of the partition.
     memtable: MemtableRef,
     /// Time range of the partition. `min` is inclusive and `max` is exclusive.
-    /// `None` means there is no time range. The time
-    /// range is `None` if and only if the [TimePartitions::part_duration] is `None`.
     time_range: PartTimeRange,
 }
 
@@ -601,6 +599,7 @@ impl TimePartitions {
         Ok((matching, missing))
     }
 
+    /// Returns partition duration, or use default 1day duration is not present.
     fn part_duration_or_default(&self) -> Duration {
         self.part_duration.unwrap_or(Duration::from_days(1))
     }

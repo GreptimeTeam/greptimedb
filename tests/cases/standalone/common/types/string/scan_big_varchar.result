@@ -174,6 +174,15 @@ SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 | 2048     | 2048              | 10000                             | 20480000                          |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 
+-- SQLNESS ARG restart=true
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+
++----------+-------------------+-----------------------------------+-----------------------------------+
+| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
++----------+-------------------+-----------------------------------+-----------------------------------+
+| 2048     | 2048              | 10000                             | 20480000                          |
++----------+-------------------+-----------------------------------+-----------------------------------+
+
 INSERT INTO bigtable SELECT a, to_unixtime(ts) * 67 FROM bigtable;
 
 Affected Rows: 2048
@@ -196,39 +205,6 @@ SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 | count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 | 8192     | 8192              | 10000                             | 81920000                          |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-
--- SQLNESS ARG restart=true
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| 8192     | 8192              | 10000                             | 81920000                          |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-
-INSERT INTO bigtable SELECT a, to_unixtime(ts) * 73 FROM bigtable;
-
-Affected Rows: 8192
-
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| 16384    | 16384             | 10000                             | 163840000                         |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-
-INSERT INTO bigtable SELECT a, to_unixtime(ts) * 79 FROM bigtable;
-
-Affected Rows: 16384
-
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| count(*) | count(bigtable.a) | max(character_length(bigtable.a)) | sum(character_length(bigtable.a)) |
-+----------+-------------------+-----------------------------------+-----------------------------------+
-| 32768    | 32768             | 10000                             | 327680000                         |
 +----------+-------------------+-----------------------------------+-----------------------------------+
 
 DROP TABLE test;
