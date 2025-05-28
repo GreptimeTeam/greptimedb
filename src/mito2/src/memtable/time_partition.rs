@@ -836,6 +836,7 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
     fn new_multi_partitions(metadata: &RegionMetadataRef) -> TimePartitions {
         let builder = Arc::new(PartitionTreeMemtableBuilder::default());
         let partitions =
