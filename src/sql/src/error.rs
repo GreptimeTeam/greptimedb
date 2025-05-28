@@ -388,8 +388,9 @@ pub enum Error {
     },
 
     #[cfg(feature = "enterprise")]
-    #[snafu(display("Failed to convert int"))]
+    #[snafu(display("Failed to convert int, detail: {}", detail))]
     TryFromInt {
+        detail: String,
         #[snafu(source)]
         error: std::num::TryFromIntError,
         #[snafu(implicit)]
