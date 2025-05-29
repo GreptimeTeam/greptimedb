@@ -281,6 +281,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -295,6 +296,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -309,6 +311,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -353,6 +356,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );
@@ -373,6 +377,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );
@@ -389,6 +394,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region2 = RegionId::new(1, 2);
         let region2_expected_wal_entry = WalEntry {
@@ -398,6 +404,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region3 = RegionId::new(1, 3);
         let region3_expected_wal_entry = WalEntry {
@@ -407,6 +414,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let provider = Provider::kafka_provider("my_topic".to_string());
         entries.extend(generate_tail_corrupted_stream(
@@ -485,6 +493,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region2 = RegionId::new(1, 2);
         let provider = Provider::kafka_provider("my_topic".to_string());
@@ -562,6 +571,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -576,6 +586,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -590,6 +601,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -604,6 +616,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -639,6 +652,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );

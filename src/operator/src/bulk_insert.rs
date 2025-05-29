@@ -14,9 +14,9 @@
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::region::{
-    bulk_insert_request, region_request, ArrowIpc, BulkInsertRequest, RegionRequest,
-    RegionRequestHeader,
+    bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
+use api::v1::ArrowIpc;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
@@ -90,8 +90,8 @@ impl Inserter {
                     ..Default::default()
                 }),
                 body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    region_id: region_id.as_u64(),
                     body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        region_id: region_id.as_u64(),
                         schema: schema_bytes,
                         data_header: data.data_header,
                         payload: data.data_body,
@@ -103,11 +103,15 @@ impl Inserter {
                 .with_label_values(&["datanode_handle"])
                 .start_timer();
             let datanode = self.node_manager.datanode(&datanode).await;
-            return datanode
+            let result = datanode
                 .handle(request)
                 .await
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
+            if let Ok(rows) = result {
+                crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows as u64);
+            }
+            return result;
         }
 
         let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
@@ -182,8 +186,8 @@ impl Inserter {
                                 ..Default::default()
                             }),
                             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                                region_id: region_id.as_u64(),
                                 body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                                    region_id: region_id.as_u64(),
                                     schema: schema_bytes,
                                     data_header: header,
                                     payload,
