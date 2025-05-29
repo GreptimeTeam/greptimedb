@@ -122,7 +122,7 @@ fn send_leader_change_and_set_flags(
         LeaderChangeMessage::StepDown(_) => false,
     };
     let ret =
-        is_leader.compare_exchange(!is_elected, is_elected, Ordering::AclRel, Ordering::Acquire);
+        is_leader.compare_exchange(!is_elected, is_elected, Ordering::AcqRel, Ordering::Acquire);
     if ret.is_ok() {
         if is_elected {
             leader_infancy.store(true, Ordering::Relaxed);
