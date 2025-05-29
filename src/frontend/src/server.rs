@@ -104,7 +104,7 @@ where
                     self.instance.clone(),
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
-                    opts.http.is_strict_mode,
+                    opts.http.prom_validation_mode,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
