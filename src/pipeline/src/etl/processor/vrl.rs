@@ -20,11 +20,11 @@ use vrl::compiler::runtime::Runtime;
 use vrl::compiler::{compile, Program, TargetValue};
 use vrl::diagnostic::Formatter;
 use vrl::prelude::{Bytes, NotNan, TimeZone};
-use vrl::value::{KeyString, Secrets, Value as VrlValue};
+use vrl::value::{KeyString, Kind, Secrets, Value as VrlValue};
 
 use crate::error::{
     BytesToUtf8Snafu, CompileVrlSnafu, Error, ExecuteVrlSnafu, FloatNaNSnafu,
-    InvalidTimestampSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu,
+    InvalidTimestampSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu, VrlReturnValueSnafu,
 };
 use crate::etl::processor::yaml_string;
 use crate::{PipelineMap, Value as PipelineValue};
@@ -49,11 +49,17 @@ impl VrlProcessor {
             .build()
         })?;
 
-        // TODO: can we check regex output here?
-        Ok(Self {
-            source,
-            program: compile_result.program,
-        })
+        let program = compile_result.program;
+
+        // check if the return value is have regex
+        let result_def = program.final_type_info().result;
+        let kind = result_def.kind();
+        if !kind.is_object() {
+            return VrlReturnValueSnafu.fail();
+        }
+        check_regex_output(&kind)?;
+
+        Ok(Self { source, program })
     }
 
     pub fn resolve(&self, m: PipelineMap) -> Result<PipelineValue> {
@@ -195,6 +201,28 @@ fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
     }
 }
 
+fn check_regex_output(output_kind: &Kind) -> Result<()> {
+    if output_kind.contains_regex() {
+        return VrlRegexValueSnafu.fail();
+    }
+
+    if let Some(arr) = output_kind.as_array() {
+        let k = arr.known();
+        for v in k.values() {
+            check_regex_output(v)?
+        }
+    }
+
+    if let Some(obj) = output_kind.as_object() {
+        let k = obj.known();
+        for v in k.values() {
+            check_regex_output(v)?
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -281,5 +309,18 @@ processors:
         let vrl = vrl.unwrap();
 
         assert_eq!(vrl.source, ".name.a = .user_info.name\n.name.b = .user_info.name\ndel(.user_info)\n.timestamp = now()\n.\n");
+    }
+
+    #[test]
+    fn test_regex() {
+        let source = r#"
+.re = r'(?i)^Hello, World!$'
+del(.re)
+.re = r'(?i)^Hello, World!$'
+.
+"#;
+
+        let v = VrlProcessor::new(source.to_string());
+        assert!(v.is_err());
     }
 }
