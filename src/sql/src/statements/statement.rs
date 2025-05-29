@@ -103,6 +103,9 @@ pub enum Statement {
     ShowCreateFlow(ShowCreateFlow),
     /// SHOW FLOWS
     ShowFlows(ShowFlows),
+    // SHOW TRIGGERS
+    #[cfg(feature = "enterprise")]
+    ShowTriggers(crate::statements::show::trigger::ShowTriggers),
     // SHOW CREATE VIEW
     ShowCreateView(ShowCreateView),
     // SHOW STATUS
@@ -165,6 +168,8 @@ impl Display for Statement {
             Statement::ShowCreateTable(s) => s.fmt(f),
             Statement::ShowCreateFlow(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::ShowTriggers(s) => s.fmt(f),
             Statement::ShowCreateDatabase(s) => s.fmt(f),
             Statement::ShowCreateView(s) => s.fmt(f),
             Statement::ShowViews(s) => s.fmt(f),

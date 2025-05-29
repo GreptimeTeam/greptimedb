@@ -550,6 +550,11 @@ pub fn check_permission(
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
         }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowTriggers(_stmt) => {
+            // The trigger is organized based on the catalog dimension, so there
+            // is no need to check the permission of the database(schema).
+        }
         Statement::ShowStatus(_stmt) => {}
         Statement::ShowSearchPath(_stmt) => {}
         Statement::DescribeTable(stmt) => {
