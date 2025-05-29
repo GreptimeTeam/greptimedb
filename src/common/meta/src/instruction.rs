@@ -199,10 +199,16 @@ pub struct DropFlow {
     pub flow_part2node_id: Vec<(FlowPartitionId, FlownodeId)>,
 }
 
-/// Flushes a batch of regions.
+/// Flushes one or more regions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FlushRegions {
+pub struct FlushRegion {
+    /// The regions to flush
     pub region_ids: Vec<RegionId>,
+    /// Whether this is a hint (async, best-effort) or enforced (sync, mandatory)
+    pub is_hint: bool,
+    /// Whether to fail fast on first error (true) or try all regions (false)
+    /// Only applies when `is_hint` is false (enforced mode)
+    pub fail_fast: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display, PartialEq)]
@@ -221,10 +227,10 @@ pub enum Instruction {
     DowngradeRegion(DowngradeRegion),
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
-    /// Flushes regions.
-    FlushRegions(FlushRegions),
-    /// Flushes a single region.
-    FlushRegion(RegionId),
+    /// Flushes one or more regions.
+    /// When `is_hint` is true, works asynchronously as a non-mandatory hint.
+    /// When `is_hint` is false, enforces a synchronous flush operation.
+    FlushRegion(FlushRegion),
 }
 
 /// The reply of [UpgradeRegion].
