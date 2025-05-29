@@ -822,6 +822,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Trigger related operations are not currently supported"))]
+    UnsupportedTrigger {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -871,6 +878,8 @@ impl ErrorExt for Error {
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
             | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
+            #[cfg(feature = "enterprise")]
+            Error::UnsupportedTrigger { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
