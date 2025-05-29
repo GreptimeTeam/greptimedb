@@ -125,6 +125,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let encoded_entry = wal_entry.encode_to_vec();
         let parts = encoded_entry

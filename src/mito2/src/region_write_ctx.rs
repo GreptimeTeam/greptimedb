@@ -15,7 +15,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, OpType, Rows, WalEntry, WriteHint};
+use api::v1::{BulkWalEntry, Mutation, OpType, Rows, WalEntry, WriteHint};
 use futures::stream::{FuturesUnordered, StreamExt};
 use snafu::ResultExt;
 use store_api::logstore::provider::Provider;
@@ -254,9 +254,12 @@ impl RegionWriteCtx {
 
     pub(crate) fn push_bulk(&mut self, sender: OptionOutputTx, mut bulk: BulkPart) {
         self.bulk_notifiers
-            .push(WriteNotify::new(sender, bulk.num_rows));
+            .push(WriteNotify::new(sender, bulk.num_rows()));
         bulk.sequence = self.next_sequence;
-        self.next_sequence += bulk.num_rows as u64;
+
+        // Add bulk wal entry
+        self.wal_entry.bulk_entries.push(BulkWalEntry::from(&bulk));
+        self.next_sequence += bulk.num_rows() as u64;
         self.bulk_parts.push(bulk);
     }
 
@@ -270,7 +273,7 @@ impl RegionWriteCtx {
 
         if self.bulk_parts.len() == 1 {
             let part = self.bulk_parts.swap_remove(0);
-            let num_rows = part.num_rows;
+            let num_rows = part.num_rows();
             if let Err(e) = self.version.memtables.mutable.write_bulk(part) {
                 self.bulk_notifiers[0].err = Some(Arc::new(e));
             } else {
@@ -283,7 +286,7 @@ impl RegionWriteCtx {
         for (i, part) in self.bulk_parts.drain(..).enumerate() {
             let mutable = self.version.memtables.mutable.clone();
             tasks.push(common_runtime::spawn_blocking_global(move || {
-                let num_rows = part.num_rows;
+                let num_rows = part.num_rows();
                 (i, mutable.write_bulk(part), num_rows)
             }));
         }

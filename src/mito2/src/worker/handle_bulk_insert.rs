@@ -41,7 +41,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .with_label_values(&["process_bulk_req"])
             .start_timer();
         let batch = request.payload;
-        let num_rows = batch.num_rows();
 
         let Some((ts_index, ts)) = batch
             .schema()
@@ -113,11 +112,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let part = BulkPart {
             batch,
-            num_rows,
             max_ts,
             min_ts,
             sequence: 0,
             timestamp_index: ts_index,
+            raw_data: Some(request.raw_data),
         };
         pending_bulk_request.push(SenderBulkRequest {
             sender,
