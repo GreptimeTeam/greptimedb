@@ -105,6 +105,7 @@ macro_rules! http_tests {
                 test_pipeline_dispatcher,
                 test_pipeline_suffix_template,
                 test_pipeline_context,
+                test_pipeline_with_vrl,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -2086,6 +2087,74 @@ table_suffix: _${type}
         &client,
         "show create table d_table_http",
         expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_with_vrl").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+  - vrl:
+      source: |
+        .log_id = .id
+        del(.id)
+        .
+
+transform:
+  - fields:
+      - log_id
+    type: int32
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id": "2436",
+    "time": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    validate_data(
+        "test_pipeline_with_vrl",
+        &client,
+        "select * from d_table",
+        "[[2436,1716668197217000000]]",
     )
     .await;
 

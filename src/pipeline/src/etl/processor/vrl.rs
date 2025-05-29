@@ -244,4 +244,42 @@ del(.user_info)
             PipelineValue::Timestamp(Timestamp::Nanosecond(_))
         ));
     }
+
+    #[test]
+    fn test_yaml_to_vrl() {
+        let yaml = r#"
+processors:
+  - vrl:
+      source: |
+        .name.a = .user_info.name
+        .name.b = .user_info.name
+        del(.user_info)
+        .timestamp = now()
+        .
+"#;
+        let y = yaml_rust::YamlLoader::load_from_str(yaml).unwrap();
+        let vrl_processor_yaml = y
+            .get(0)
+            .unwrap()
+            .as_hash()
+            .unwrap()
+            .get(&yaml_rust::Yaml::String("processors".to_string()))
+            .unwrap()
+            .as_vec()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_hash()
+            .unwrap()
+            .get(&yaml_rust::Yaml::String("vrl".to_string()))
+            .unwrap()
+            .as_hash()
+            .unwrap();
+
+        let vrl = VrlProcessor::try_from(vrl_processor_yaml);
+        assert!(vrl.is_ok());
+        let vrl = vrl.unwrap();
+
+        assert_eq!(vrl.source, ".name.a = .user_info.name\n.name.b = .user_info.name\ndel(.user_info)\n.timestamp = now()\n.\n");
+    }
 }
