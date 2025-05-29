@@ -552,8 +552,8 @@ pub fn check_permission(
         }
         #[cfg(feature = "enterprise")]
         Statement::ShowTriggers(_stmt) => {
-            // Since trigger is belong to catalog, so we not need to validate
-            // permission of database(schema).
+            // The trigger is organized based on the catalog dimension, so there
+            // is no need to check the permission of the database(schema).
         }
         Statement::ShowStatus(_stmt) => {}
         Statement::ShowSearchPath(_stmt) => {}
