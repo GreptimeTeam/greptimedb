@@ -69,6 +69,18 @@ pub enum Error {
         region_id: RegionId,
     },
 
+    #[snafu(display(
+        "The region migration procedure is completed for region: {}, target_peer: {}",
+        region_id,
+        target_peer_id
+    ))]
+    RegionMigrated {
+        #[snafu(implicit)]
+        location: Location,
+        region_id: RegionId,
+        target_peer_id: u64,
+    },
+
     #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
     MigrationAbort {
         #[snafu(implicit)]
@@ -953,7 +965,8 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
+            | Error::MigrationRunning { .. }
+            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
