@@ -37,6 +37,7 @@ use snafu::prelude::*;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
+use crate::http::PromValidationMode;
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -56,7 +57,7 @@ pub struct PromStoreState {
     pub prom_store_handler: PromStoreProtocolHandlerRef,
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
-    pub is_strict_mode: bool,
+    pub prom_validation_mode: PromValidationMode,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,7 +97,7 @@ pub async fn remote_write(
         prom_store_handler,
         pipeline_handler,
         prom_store_with_metric_engine,
-        is_strict_mode,
+        prom_validation_mode,
     } = state;
 
     if let Some(_vm_handshake) = params.get_vm_proto_version {
@@ -131,7 +132,8 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let req = decode_remote_write_request(is_zstd, body, is_strict_mode, &mut processor).await?;
+    let req =
+        decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor).await?;
 
     let mut cost = 0;
     for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
@@ -203,7 +205,7 @@ fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
 async fn decode_remote_write_request(
     is_zstd: bool,
     body: Bytes,
-    is_strict_mode: bool,
+    prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
 ) -> Result<ContextReq> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
@@ -224,7 +226,7 @@ async fn decode_remote_write_request(
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
 
     request
-        .merge(buf, is_strict_mode, processor)
+        .merge(buf, prom_validation_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
 
     if processor.use_pipeline {

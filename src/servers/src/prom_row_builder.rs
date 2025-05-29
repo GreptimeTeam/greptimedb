@@ -22,7 +22,8 @@ use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, Semanti
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use prost::DecodeError;
 
-use crate::proto::PromLabel;
+use crate::http::PromValidationMode;
+use crate::proto::{decode_string, PromLabel};
 use crate::repeated_field::Clear;
 
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
@@ -111,27 +112,13 @@ impl TableBuilder {
         &mut self,
         labels: &[PromLabel],
         samples: &[Sample],
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            let (tag_name, tag_value) = if is_strict_mode {
-                let tag_name = match String::from_utf8(name.to_vec()) {
-                    Ok(s) => s,
-                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
-                };
-                let tag_value = match String::from_utf8(value.to_vec()) {
-                    Ok(s) => s,
-                    Err(_) => return Err(DecodeError::new("invalid utf-8")),
-                };
-                (tag_name, tag_value)
-            } else {
-                let tag_name = unsafe { String::from_utf8_unchecked(name.to_vec()) };
-                let tag_value = unsafe { String::from_utf8_unchecked(value.to_vec()) };
-                (tag_name, tag_value)
-            };
-
+            let tag_name = decode_string(name, prom_validation_mode)?;
+            let tag_value = decode_string(value, prom_validation_mode)?;
             let tag_value = Some(ValueData::StringValue(tag_value));
             let tag_num = self.col_indexes.len();
 
@@ -201,12 +188,12 @@ mod tests {
     use bytes::Bytes;
     use prost::DecodeError;
 
+    use crate::http::PromValidationMode;
     use crate::prom_row_builder::TableBuilder;
     use crate::proto::PromLabel;
     #[test]
     fn test_table_builder() {
         let mut builder = TableBuilder::default();
-        let is_strict_mode = true;
         let _ = builder.add_labels_and_samples(
             &[
                 PromLabel {
@@ -222,7 +209,7 @@ mod tests {
                 value: 0.0,
                 timestamp: 0,
             }],
-            is_strict_mode,
+            PromValidationMode::Strict,
         );
 
         let _ = builder.add_labels_and_samples(
@@ -240,7 +227,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
-            is_strict_mode,
+            PromValidationMode::Strict,
         );
 
         let request = builder.as_row_insert_request("test".to_string());
@@ -296,7 +283,7 @@ mod tests {
                 value: 0.1,
                 timestamp: 1,
             }],
-            is_strict_mode,
+            PromValidationMode::Strict,
         );
         assert_eq!(res, Err(DecodeError::new("invalid utf-8")));
     }

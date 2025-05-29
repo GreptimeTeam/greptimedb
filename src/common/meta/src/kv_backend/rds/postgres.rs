@@ -549,6 +549,7 @@ mod tests {
         test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
         text_txn_multi_compare_op, unprepare_kv,
     };
+    use crate::maybe_skip_postgres_integration_test;
 
     async fn build_pg_kv_backend(table_name: &str) -> Option<PgStore> {
         let endpoints = std::env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
@@ -583,6 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_put() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("put_test").await.unwrap();
         let prefix = b"put/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -592,6 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_range() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("range_test").await.unwrap();
         let prefix = b"range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -601,6 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_range_2() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("range2_test").await.unwrap();
         let prefix = b"range2/";
         test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -609,6 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_all_range() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("simple_range_test").await.unwrap();
         let prefix = b"";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -618,6 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_batch_get() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("batch_get_test").await.unwrap();
         let prefix = b"batch_get/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -627,6 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_batch_delete() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("batch_delete_test").await.unwrap();
         let prefix = b"batch_delete/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -636,6 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_batch_delete_with_prefix() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("batch_delete_with_prefix_test")
             .await
             .unwrap();
@@ -647,6 +655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_delete_range() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("delete_range_test").await.unwrap();
         let prefix = b"delete_range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -656,6 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_compare_and_put() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("compare_and_put_test").await.unwrap();
         let prefix = b"compare_and_put/";
         let kv_backend = Arc::new(kv_backend);
@@ -664,6 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pg_txn() {
+        maybe_skip_postgres_integration_test!();
         let kv_backend = build_pg_kv_backend("txn_test").await.unwrap();
         test_txn_one_compare_op(&kv_backend).await;
         text_txn_multi_compare_op(&kv_backend).await;

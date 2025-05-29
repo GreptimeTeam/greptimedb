@@ -442,7 +442,7 @@ impl LogStore for RaftEngineLogStore {
 
     fn entry(
         &self,
-        data: &mut Vec<u8>,
+        data: Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
         provider: &Provider,
@@ -455,7 +455,7 @@ impl LogStore for RaftEngineLogStore {
             provider: provider.clone(),
             region_id,
             entry_id,
-            data: std::mem::take(data),
+            data,
         }))
     }
 

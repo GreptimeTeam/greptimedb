@@ -98,7 +98,7 @@ impl KafkaLogStore {
 }
 
 fn build_entry(
-    data: &mut Vec<u8>,
+    data: Vec<u8>,
     entry_id: EntryId,
     region_id: RegionId,
     provider: &Provider,
@@ -109,10 +109,10 @@ fn build_entry(
             provider: provider.clone(),
             region_id,
             entry_id,
-            data: std::mem::take(data),
+            data,
         })
     } else {
-        let parts = std::mem::take(data)
+        let parts = data
             .chunks(max_data_size)
             .map(|s| s.into())
             .collect::<Vec<_>>();
@@ -140,7 +140,7 @@ impl LogStore for KafkaLogStore {
     /// Creates an [Entry].
     fn entry(
         &self,
-        data: &mut Vec<u8>,
+        data: Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
         provider: &Provider,
@@ -479,7 +479,7 @@ mod tests {
     fn test_build_naive_entry() {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 120);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 120);
 
         assert_eq!(
             entry.into_naive_entry().unwrap(),
@@ -496,7 +496,7 @@ mod tests {
     fn test_build_into_multiple_part_entry() {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 50);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 50);
 
         assert_eq!(
             entry.into_multiple_part_entry().unwrap(),
@@ -510,7 +510,7 @@ mod tests {
         );
 
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 21);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 21);
 
         assert_eq!(
             entry.into_multiple_part_entry().unwrap(),
@@ -545,9 +545,9 @@ mod tests {
     ) -> Vec<Entry> {
         (0..num_entries)
             .map(|_| {
-                let mut data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
+                let data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
                 // Always set `entry_id` to 0, the real entry_id will be set during the read.
-                logstore.entry(&mut data, 0, region_id, provider).unwrap()
+                logstore.entry(data, 0, region_id, provider).unwrap()
             })
             .collect()
     }
