@@ -741,13 +741,10 @@ mod tests {
     use super::*;
     use crate::error::PostgresExecutionSnafu;
 
-    async fn create_postgres_client(table_name: Option<&str>) -> Result<Client> {
+    async fn create_postgres_client(table_name: Option<&str>) -> Result<Option<Client>> {
         let endpoint = env::var("GT_POSTGRES_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
-            return UnexpectedSnafu {
-                violated: "Postgres endpoint is empty".to_string(),
-            }
-            .fail();
+            return Ok(None);
         }
         let (client, connection) = tokio_postgres::connect(&endpoint, NoTls)
             .await
@@ -762,7 +759,7 @@ mod tests {
             );
             client.execute(&create_table_sql, &[]).await.unwrap();
         }
-        Ok(client)
+        Ok(Some(client))
     }
 
     async fn drop_table(client: &Client, table_name: &str) {
@@ -777,7 +774,13 @@ mod tests {
 
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_postgres_crud_greptime_metakv";
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let client;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
@@ -855,7 +858,13 @@ mod tests {
         store_key_prefix: String,
         table_name: String,
     ) {
-        let client = create_postgres_client(None).await.unwrap();
+        let client_result = create_postgres_client(None).await.unwrap();
+        let client;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, _) = broadcast::channel(100);
         let pg_election = PgElection {
@@ -886,7 +895,14 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_candidate_registration_greptime_metakv";
         let mut handles = vec![];
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let client;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
@@ -943,7 +959,14 @@ mod tests {
         let candidate_lease_ttl_secs = 5;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_elected_and_step_down_greptime_metakv";
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let client;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_pg_election = PgElection {
@@ -1056,7 +1079,14 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_leader_action_greptime_metakv";
         let candidate_lease_ttl_secs = 5;
-        let client = create_postgres_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let client;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_pg_election = PgElection {
@@ -1292,7 +1322,13 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_follower_action_greptime_metakv";
 
-        let follower_client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let follower_client;
+        if let Some(c) = client_result {
+            follower_client = c;
+        } else {
+            return;
+        }
         let (tx, mut rx) = broadcast::channel(100);
         let follower_pg_election = PgElection {
             leader_value: "test_follower".to_string(),
@@ -1306,7 +1342,13 @@ mod tests {
             sql_set: ElectionSqlFactory::new(28322, table_name, 2).build(),
         };
 
-        let leader_client = create_postgres_client(Some(table_name)).await.unwrap();
+        let client_result = create_postgres_client(Some(table_name)).await.unwrap();
+        let leader_client;
+        if let Some(c) = client_result {
+            leader_client = c;
+        } else {
+            return;
+        }
         let (tx, _) = broadcast::channel(100);
         let leader_pg_election = PgElection {
             leader_value: "test_leader".to_string(),

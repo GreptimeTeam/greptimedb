@@ -848,14 +848,13 @@ mod tests {
     use super::*;
     use crate::error::MySqlExecutionSnafu;
 
-    async fn create_mysql_client(table_name: Option<&str>) -> Result<Mutex<MySqlConnection>> {
+    async fn create_mysql_client(
+        table_name: Option<&str>,
+    ) -> Result<Option<Mutex<MySqlConnection>>> {
         init_default_ut_logging();
         let endpoint = env::var("GT_MYSQL_ENDPOINTS").unwrap_or_default();
         if endpoint.is_empty() {
-            return UnexpectedSnafu {
-                violated: "MySQL endpoint is empty".to_string(),
-            }
-            .fail();
+            return Ok(None);
         }
         let mut client = MySqlConnection::connect(&endpoint).await.unwrap();
         if let Some(table_name) = table_name {
@@ -870,7 +869,7 @@ mod tests {
                     sql: create_table_sql,
                 })?;
         }
-        Ok(Mutex::new(client))
+        Ok(Some(Mutex::new(client)))
     }
 
     async fn drop_table(client: &Mutex<MySqlConnection>, table_name: &str) {
@@ -890,7 +889,14 @@ mod tests {
 
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_mysql_crud_greptime_metakv";
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            // If the client creation failed, skip the test.
+            return;
+        }
 
         {
             let mut a = client.lock().await;
@@ -988,7 +994,14 @@ mod tests {
         store_key_prefix: String,
         table_name: String,
     ) {
-        let client = create_mysql_client(None).await.unwrap();
+        let client_result = create_mysql_client(None).await.unwrap();
+        let client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            // If the client creation failed, skip the test.
+            return;
+        }
 
         let (tx, _) = broadcast::channel(100);
         let mysql_election = MySqlElection {
@@ -1019,7 +1032,14 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_candidate_registration_greptime_metakv";
         let mut handles = vec![];
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         for i in 0..10 {
             let leader_value = format!("{}{}", leader_value_prefix, i);
@@ -1103,7 +1123,14 @@ mod tests {
         let candidate_lease_ttl_secs = 1;
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_elected_and_step_down_greptime_metakv";
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_mysql_election = MySqlElection {
@@ -1187,7 +1214,14 @@ mod tests {
         let table_name = "test_leader_action_greptime_metakv";
         let candidate_lease_ttl_secs = 5;
         let meta_lease_ttl_secs = 1;
-        let client = create_mysql_client(Some(table_name)).await.unwrap();
+
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            client = c;
+        } else {
+            return;
+        }
 
         let (tx, mut rx) = broadcast::channel(100);
         let leader_mysql_election = MySqlElection {
@@ -1369,7 +1403,13 @@ mod tests {
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_follower_action_greptime_metakv";
 
-        let follower_client = create_mysql_client(Some(table_name)).await.unwrap();
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let follower_client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            follower_client = c;
+        } else {
+            return;
+        }
         let (tx, mut rx) = broadcast::channel(100);
         let follower_mysql_election = MySqlElection {
             leader_value: "test_follower".to_string(),
@@ -1383,7 +1423,13 @@ mod tests {
             sql_set: ElectionSqlFactory::new(table_name, 1).build(),
         };
 
-        let leader_client = create_mysql_client(Some(table_name)).await.unwrap();
+        let client_result = create_mysql_client(Some(table_name)).await.unwrap();
+        let leader_client: Mutex<MySqlConnection>;
+        if let Some(c) = client_result {
+            leader_client = c;
+        } else {
+            return;
+        }
         let (tx, _) = broadcast::channel(100);
         let leader_mysql_election = MySqlElection {
             leader_value: "test_leader".to_string(),
