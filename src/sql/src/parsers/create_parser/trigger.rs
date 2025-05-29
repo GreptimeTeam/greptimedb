@@ -59,7 +59,8 @@ impl<'a> ParserContext<'a> {
         let mut notify_channels = vec![];
 
         loop {
-            match self.parser.peek_token().token {
+            let next_token = self.parser.peek_token();
+            match next_token.token {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ON) => {
                     self.parser.next_token();
                     let (query, interval) = self.parse_trigger_on(true)?;
@@ -87,7 +88,7 @@ impl<'a> ParserContext<'a> {
                 _ => {
                     return self.expected(
                         "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword",
-                        self.parser.peek_token(),
+                        next_token,
                     );
                 }
             }
@@ -265,7 +266,8 @@ impl<'a> ParserContext<'a> {
         let mut notify_channels = vec![];
 
         loop {
-            match self.parser.peek_token().token {
+            let next_token = self.parser.peek_token();
+            match next_token.token {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(WEBHOOK) => {
                     self.parser.next_token();
                     let notify_channel = self.parse_trigger_notify_webhook(true)?;
@@ -276,20 +278,22 @@ impl<'a> ParserContext<'a> {
                     break;
                 }
                 _ => {
-                    return self.expected("`WEBHOOK` keyword", self.parser.peek_token());
+                    return self.expected("`WEBHOOK` keyword", next_token);
                 }
             }
-            if self.parser.peek_token().token == Token::RParen {
+
+            let next_token = self.parser.peek_token();
+            if next_token.token == Token::RParen {
                 self.parser.next_token();
                 break;
-            } else if self.parser.peek_token().token == Token::Comma {
+            } else if next_token.token == Token::Comma {
                 self.parser.next_token();
                 if self.parser.peek_token().token == Token::RParen {
                     self.parser.next_token();
                     break;
                 }
             } else {
-                return self.expected("`,` or `)`", self.parser.peek_token());
+                return self.expected("`,` or `)`", next_token);
             }
         }
 
