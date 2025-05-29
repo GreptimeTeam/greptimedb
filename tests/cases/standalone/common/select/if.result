@@ -1,0 +1,5 @@
+SELECT IF(10 > 5, 'True', 'False') AS result;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Invalid function 'if'.
+Did you mean 'ln'?
+
