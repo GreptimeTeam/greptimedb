@@ -460,7 +460,7 @@ mod tests {
 
     use crate::http::PromValidationMode;
     use crate::prom_store::to_grpc_row_insert_requests;
-    use crate::proto::{PromSeriesProcessor, PromWriteRequest};
+    use crate::proto::{decode_string, PromSeriesProcessor, PromWriteRequest};
     use crate::repeated_field::Clear;
 
     fn sort_rows(rows: Rows) -> Rows {
@@ -527,5 +527,153 @@ mod tests {
                 &expected_rows,
             );
         }
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Strict);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "failed to decode Protobuf message: invalid utf-8"
+        );
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_incomplete_utf8() {
+        // Incomplete UTF-8 sequence (missing continuation bytes)
+        let incomplete_utf8 = Bytes::from(vec![0xC2]); // Start of 2-byte sequence but missing second byte
+        let result = decode_string(&incomplete_utf8, PromValidationMode::Strict);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "failed to decode Protobuf message: invalid utf-8"
+        );
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence - should be replaced with replacement character
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        // Each invalid byte should be replaced with the Unicode replacement character
+        assert_eq!(result.unwrap(), "���");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_mixed_valid_invalid() {
+        // Mix of valid and invalid UTF-8
+        let mut mixed = Vec::new();
+        mixed.extend_from_slice(b"hello");
+        mixed.push(0xFF); // Invalid byte
+        mixed.extend_from_slice(b"world");
+        let mixed_utf8 = Bytes::from(mixed);
+
+        let result = decode_string(&mixed_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello�world");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence - unchecked mode doesn't validate
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Unchecked);
+        // This should succeed but the resulting string may contain invalid UTF-8
+        assert!(result.is_ok());
+        // We can't easily test the exact content since it's invalid UTF-8,
+        // but we can verify it doesn't panic and returns something
+        let _string = result.unwrap();
+    }
+
+    #[test]
+    fn test_decode_string_all_modes_ascii() {
+        let ascii = Bytes::from("simple_ascii_123");
+
+        // All modes should handle ASCII identically
+        let strict_result = decode_string(&ascii, PromValidationMode::Strict).unwrap();
+        let lossy_result = decode_string(&ascii, PromValidationMode::Lossy).unwrap();
+        let unchecked_result = decode_string(&ascii, PromValidationMode::Unchecked).unwrap();
+
+        assert_eq!(strict_result, "simple_ascii_123");
+        assert_eq!(lossy_result, "simple_ascii_123");
+        assert_eq!(unchecked_result, "simple_ascii_123");
+        assert_eq!(strict_result, lossy_result);
+        assert_eq!(lossy_result, unchecked_result);
     }
 }

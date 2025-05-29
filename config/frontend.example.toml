@@ -37,6 +37,12 @@ enable_cors = true
 ## Customize allowed origins for HTTP CORS.
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
+## Whether to enable validation for Prometheus remote write requests.
+## Available options:
+## - strict: deny invalid UTF-8 strings.
+## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
+## - unchecked: do not valid strings.
+prom_validation_mode = "unchecked"
 
 ## The gRPC server options.
 [grpc]
