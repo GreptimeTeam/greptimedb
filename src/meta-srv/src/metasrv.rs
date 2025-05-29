@@ -29,10 +29,7 @@ use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::distributed_time_constants;
 use common_meta::key::maintenance::MaintenanceModeManagerRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::{
-    KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, DEFAULT_META_ELECTION_LOCK_ID,
-    DEFAULT_META_TABLE_NAME,
-};
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
     LeadershipChangeNotifier, LeadershipChangeNotifierCustomizerRef,
 };
@@ -244,9 +241,9 @@ impl Default for MetasrvOptions {
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
+            meta_table_name: common_meta::kv_backend::DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
-            meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
+            meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
         }
     }
