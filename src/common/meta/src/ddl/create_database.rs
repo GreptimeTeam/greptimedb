@@ -22,7 +22,7 @@ use serde_with::{serde_as, DefaultOnNull};
 use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
@@ -115,7 +115,7 @@ impl Procedure for CreateDatabaseProcedure {
             CreateDatabaseState::Prepare => self.on_prepare().await,
             CreateDatabaseState::CreateMetadata => self.on_create_metadata().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

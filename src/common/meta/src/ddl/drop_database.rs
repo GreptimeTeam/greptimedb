@@ -21,7 +21,7 @@ use std::any::Any;
 use std::fmt::Debug;
 
 use common_error::ext::BoxedError;
-use common_procedure::error::{Error as ProcedureError, ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
+use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
@@ -31,6 +31,7 @@ use snafu::ResultExt;
 use tonic::async_trait;
 
 use self::start::DropDatabaseStart;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::key::table_name::TableNameValue;
@@ -141,13 +142,7 @@ impl Procedure for DropDatabaseProcedure {
         let (next, status) = state
             .next(&self.runtime_context, &mut self.context)
             .await
-            .map_err(|e| {
-                if e.is_retry_later() {
-                    ProcedureError::retry_later(e)
-                } else {
-                    ProcedureError::external(e)
-                }
-            })?;
+            .map_err(map_to_procedure_error)?;
 
         *state = next;
         Ok(status)

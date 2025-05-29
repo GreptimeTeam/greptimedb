@@ -25,7 +25,7 @@ use table::metadata::{RawTableInfo, TableId, TableType};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
@@ -191,7 +191,7 @@ impl Procedure for DropViewProcedure {
             DropViewState::DeleteMetadata => self.on_delete_metadata().await,
             DropViewState::InvalidateViewCache => self.on_broadcast().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
