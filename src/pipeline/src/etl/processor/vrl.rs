@@ -57,7 +57,7 @@ impl VrlProcessor {
         if !kind.is_object() {
             return VrlReturnValueSnafu.fail();
         }
-        check_regex_output(&kind)?;
+        check_regex_output(kind)?;
 
         Ok(Self { source, program })
     }
@@ -202,7 +202,7 @@ fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
 }
 
 fn check_regex_output(output_kind: &Kind) -> Result<()> {
-    if output_kind.contains_regex() {
+    if output_kind.is_regex() {
         return VrlRegexValueSnafu.fail();
     }
 
@@ -287,21 +287,14 @@ processors:
 "#;
         let y = yaml_rust::YamlLoader::load_from_str(yaml).unwrap();
         let vrl_processor_yaml = y
-            .get(0)
-            .unwrap()
-            .as_hash()
-            .unwrap()
-            .get(&yaml_rust::Yaml::String("processors".to_string()))
-            .unwrap()
-            .as_vec()
-            .unwrap()
-            .get(0)
-            .unwrap()
-            .as_hash()
-            .unwrap()
-            .get(&yaml_rust::Yaml::String("vrl".to_string()))
-            .unwrap()
-            .as_hash()
+            .first()
+            .and_then(|x| x.as_hash())
+            .and_then(|x| x.get(&yaml_rust::Yaml::String("processors".to_string())))
+            .and_then(|x| x.as_vec())
+            .and_then(|x| x.first())
+            .and_then(|x| x.as_hash())
+            .and_then(|x| x.get(&yaml_rust::Yaml::String("vrl".to_string())))
+            .and_then(|x| x.as_hash())
             .unwrap();
 
         let vrl = VrlProcessor::try_from(vrl_processor_yaml);
