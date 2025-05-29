@@ -127,10 +127,10 @@ impl DirtyTimeWindows {
     /// Time window merge distance
     ///
     /// TODO(discord9): make those configurable
-    const MERGE_DIST: i32 = 3;
+    pub const MERGE_DIST: i32 = 3;
 
     /// Maximum number of filters allowed in a single query
-    const MAX_FILTER_NUM: usize = 20;
+    pub const MAX_FILTER_NUM: usize = 20;
 
     /// Add lower bounds to the dirty time windows. Upper bounds are ignored.
     ///
@@ -154,11 +154,16 @@ impl DirtyTimeWindows {
     }
 
     /// Generate all filter expressions consuming all time windows
+    ///
+    /// there is two limits:
+    /// - shouldn't return a too long time range(<=`window_size * window_cnt`), so that the query can be executed in a reasonable time
+    /// - shouldn't return too many time range exprs, so that the query can be parsed properly instead of causing parser to overflow
     pub fn gen_filter_exprs(
         &mut self,
         col_name: &str,
         expire_lower_bound: Option<Timestamp>,
         window_size: chrono::Duration,
+        window_cnt: usize,
         flow_id: FlowId,
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
@@ -196,12 +201,32 @@ impl DirtyTimeWindows {
             }
         }
 
-        // get the first `MAX_FILTER_NUM` time windows
-        let nth = self
-            .windows
-            .iter()
-            .nth(Self::MAX_FILTER_NUM)
-            .map(|(key, _)| *key);
+        // get the first `window_cnt` time windows
+        let max_time_range = window_size * window_cnt as i32;
+        let nth = {
+            let mut cur_time_range = chrono::Duration::zero();
+            let mut nth_key = None;
+            for (idx, (start, end)) in self.windows.iter().enumerate() {
+                // if time range is too long, stop
+                if cur_time_range > max_time_range {
+                    nth_key = Some(*start);
+                    break;
+                }
+
+                // if we have enough time windows, stop
+                if idx >= window_cnt {
+                    nth_key = Some(*start);
+                    break;
+                }
+
+                if let Some(end) = end {
+                    end.sub(start)
+                        .map(|cur_window_size| cur_time_range += cur_window_size);
+                }
+            }
+
+            nth_key
+        };
         let first_nth = {
             if let Some(nth) = nth {
                 let mut after = self.windows.split_off(&nth);
@@ -274,6 +299,8 @@ impl DirtyTimeWindows {
     }
 
     /// Merge time windows that overlaps or get too close
+    ///
+    /// TODO(discord9): not merge and prefer to send smaller time windows? how?
     pub fn merge_dirty_time_windows(
         &mut self,
         window_size: chrono::Duration,
@@ -472,7 +499,14 @@ mod test {
                 .unwrap();
             assert_eq!(expected, dirty.windows);
             let filter_expr = dirty
-                .gen_filter_exprs("ts", expire_lower_bound, window_size, 0, None)
+                .gen_filter_exprs(
+                    "ts",
+                    expire_lower_bound,
+                    window_size,
+                    DirtyTimeWindows::MAX_FILTER_NUM,
+                    0,
+                    None,
+                )
                 .unwrap();
 
             let unparser = datafusion::sql::unparser::Unparser::default();
