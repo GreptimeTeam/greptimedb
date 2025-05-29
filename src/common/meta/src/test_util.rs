@@ -233,3 +233,35 @@ pub async fn test_kafka_topic_pool(
 
     KafkaTopicPool::new(&config, kv_backend, topic_creator)
 }
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_postgres_integration_test {
+    () => {
+        if std::env::var("GT_POSTGRES_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
+
+#[macro_export]
+/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+///
+/// The format of the environment variable is:
+/// ```
+/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// ```
+macro_rules! maybe_skip_mysql_integration_test {
+    () => {
+        if std::env::var("GT_MYSQL_ENDPOINTS").is_err() {
+            common_telemetry::warn!("The endpoints is empty, skipping the test");
+            return;
+        }
+    };
+}
