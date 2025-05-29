@@ -99,7 +99,7 @@ impl ContextReq {
     }
 
     pub fn as_req_iter(self, ctx: QueryContextRef) -> ContextReqIter {
-        let ctx = ctx.clone_inner();
+        let ctx = (*ctx).clone();
 
         ContextReqIter {
             opt_req: self.req.into_iter(),
