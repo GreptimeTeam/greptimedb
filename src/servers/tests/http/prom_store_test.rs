@@ -29,7 +29,7 @@ use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::test_helpers::TestClient;
-use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -120,11 +120,10 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         ..Default::default()
     };
 
-    let is_strict_mode = false;
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
-        .with_prom_handler(instance, None, true, is_strict_mode)
+        .with_prom_handler(instance, None, true, PromValidationMode::Unchecked)
         .build();
     server.build(server.make_app()).unwrap()
 }

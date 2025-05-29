@@ -30,7 +30,7 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::flow_name::FlowName;
@@ -201,7 +201,7 @@ impl Procedure for DropFlowProcedure {
             DropFlowState::InvalidateFlowCache => self.on_broadcast().await,
             DropFlowState::DropFlows => self.on_flownode_drop_flows().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

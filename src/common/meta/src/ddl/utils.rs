@@ -60,11 +60,16 @@ pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error
     }
 }
 
-pub fn handle_retry_error(e: Error) -> ProcedureError {
-    if e.is_retry_later() {
-        ProcedureError::retry_later(e)
-    } else {
-        ProcedureError::external(e)
+/// Maps the error to the corresponding procedure error.
+///
+/// This function determines whether the error should be retried and if poison cleanup is needed,
+/// then maps it to the appropriate procedure error variant.
+pub fn map_to_procedure_error(e: Error) -> ProcedureError {
+    match (e.is_retry_later(), e.need_clean_poisons()) {
+        (true, true) => ProcedureError::retry_later_and_clean_poisons(e),
+        (true, false) => ProcedureError::retry_later(e),
+        (false, true) => ProcedureError::external_and_clean_poisons(e),
+        (false, false) => ProcedureError::external(e),
     }
 }
 

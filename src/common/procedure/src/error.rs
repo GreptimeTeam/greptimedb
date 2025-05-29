@@ -138,7 +138,10 @@ pub enum Error {
     },
 
     #[snafu(display("Procedure exec failed"))]
-    RetryLater { source: BoxedError },
+    RetryLater {
+        source: BoxedError,
+        clean_poisons: bool,
+    },
 
     #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
     ProcedurePanic { procedure_id: ProcedureId },
@@ -298,6 +301,15 @@ impl Error {
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::RetryLater {
             source: BoxedError::new(err),
+            clean_poisons: false,
+        }
+    }
+
+    /// Creates a new [Error::RetryLater] error from source `err` and clean poisons.
+    pub fn retry_later_and_clean_poisons<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
+        Error::RetryLater {
+            source: BoxedError::new(err),
+            clean_poisons: true,
         }
     }
 
@@ -309,6 +321,7 @@ impl Error {
     /// Determine whether it needs to clean poisons.
     pub fn need_clean_poisons(&self) -> bool {
         matches!(self, Error::External { clean_poisons, .. } if *clean_poisons)
+            || matches!(self, Error::RetryLater { clean_poisons, .. } if *clean_poisons)
     }
 
     /// Creates a new [Error::RetryLater] or [Error::External] error from source `err` according

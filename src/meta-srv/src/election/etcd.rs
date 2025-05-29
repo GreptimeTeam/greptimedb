@@ -121,7 +121,7 @@ impl Election for EtcdElection {
 
     fn in_leader_infancy(&self) -> bool {
         self.infancy
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 

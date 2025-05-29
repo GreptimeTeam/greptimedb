@@ -167,7 +167,8 @@ impl GreptimeRequestHandler {
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
                     .put_record_batch(&table_name, &mut table_id, &mut decoder, data)
-                    .await;
+                    .await
+                    .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))

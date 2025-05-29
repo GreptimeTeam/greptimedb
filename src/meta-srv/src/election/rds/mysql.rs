@@ -341,7 +341,7 @@ impl Election for MySqlElection {
 
     fn in_leader_infancy(&self) -> bool {
         self.leader_infancy
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
@@ -766,6 +766,7 @@ impl MySqlElection {
 mod tests {
     use std::env;
 
+    use common_meta::maybe_skip_mysql_integration_test;
     use common_telemetry::init_default_ut_logging;
     use sqlx::Connection;
 
@@ -809,6 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_crud() {
+        maybe_skip_mysql_integration_test!();
         let key = "test_key".to_string();
         let value = "test_value".to_string();
 
@@ -938,6 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_candidate_registration() {
+        maybe_skip_mysql_integration_test!();
         let leader_value_prefix = "test_leader".to_string();
         let candidate_lease_ttl_secs = 2;
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -1023,6 +1026,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_elected_and_step_down() {
+        maybe_skip_mysql_integration_test!();
         let leader_value = "test_leader".to_string();
         let candidate_lease_ttl_secs = 1;
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -1106,6 +1110,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_campaign() {
+        maybe_skip_mysql_integration_test!();
         let leader_value = "test_leader".to_string();
         let uuid = uuid::Uuid::new_v4().to_string();
         let table_name = "test_leader_action_greptime_metakv";
@@ -1287,6 +1292,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_follower_action() {
+        maybe_skip_mysql_integration_test!();
         common_telemetry::init_default_ut_logging();
         let candidate_lease_ttl_secs = 5;
         let meta_lease_ttl_secs = 1;

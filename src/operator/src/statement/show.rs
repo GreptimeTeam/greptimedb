@@ -226,6 +226,16 @@ impl StatementExecutor {
             .context(ExecuteStatementSnafu)
     }
 
+    #[cfg(feature = "enterprise")]
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_triggers(
+        &self,
+        _stmt: sql::statements::show::trigger::ShowTriggers,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::UnsupportedTriggerSnafu.fail()
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn show_create_flow(
         &self,

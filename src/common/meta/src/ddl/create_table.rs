@@ -34,7 +34,7 @@ use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::{
-    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, handle_retry_error,
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, map_to_procedure_error,
     region_storage_path,
 };
 use crate::ddl::{DdlContext, TableMetadata};
@@ -319,7 +319,7 @@ impl Procedure for CreateTableProcedure {
             CreateTableState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
             CreateTableState::CreateMetadata => self.on_create_metadata().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

@@ -117,6 +117,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert Schema"))]
+    ConvertSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -137,6 +144,7 @@ impl ErrorExt for Error {
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
             Error::InvalidTonicMetadataValue { .. } => StatusCode::InvalidArguments,
+            Error::ConvertSchema { source, .. } => source.status_code(),
         }
     }
 

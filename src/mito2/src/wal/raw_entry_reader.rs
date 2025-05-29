@@ -189,7 +189,7 @@ mod tests {
 
         fn entry(
             &self,
-            _data: &mut Vec<u8>,
+            _data: Vec<u8>,
             _entry_id: EntryId,
             _region_id: RegionId,
             _provider: &Provider,

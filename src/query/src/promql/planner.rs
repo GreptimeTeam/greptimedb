@@ -2722,12 +2722,26 @@ impl PromPlanner {
             right_time_index_column,
         ))
         .alias(left_time_index_column.clone());
+        // The field column in right side may not have qualifier (it may be removed by join operation),
+        // so we need to find it from the schema.
+        let right_qualifier_for_field = right
+            .schema()
+            .iter()
+            .find(|(_, f)| f.name() == right_field_col)
+            .map(|(q, _)| q)
+            .context(ColumnNotFoundSnafu {
+                col: right_field_col.to_string(),
+            })?
+            .cloned();
         // `skip（1)` to skip the time index column
         let right_proj_exprs_without_time_index = all_columns.iter().skip(1).map(|col| {
             // expr
             if col == left_field_col && left_field_col != right_field_col {
                 // alias field in right side if necessary to handle different field name
-                DfExpr::Column(Column::new(right_qualifier.clone(), right_field_col))
+                DfExpr::Column(Column::new(
+                    right_qualifier_for_field.clone(),
+                    right_field_col,
+                ))
             } else if tags_not_in_right.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
             } else {
@@ -3762,6 +3776,100 @@ mod test {
         )
         .await;
         // Should be ok
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_parse_or_operator() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let case = r#"
+        sum(rate(sysstat{tenant_name=~"tenant1",cluster_name=~"cluster1"}[120s])) by (cluster_name,tenant_name) / 
+        (sum(sysstat{tenant_name=~"tenant1",cluster_name=~"cluster1"}) by (cluster_name,tenant_name) * 100)
+            or
+        200 * sum(sysstat{tenant_name=~"tenant1",cluster_name=~"cluster1"}) by (cluster_name,tenant_name) / 
+        sum(sysstat{tenant_name=~"tenant1",cluster_name=~"cluster1"}) by (cluster_name,tenant_name)"#;
+
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "sysstat".to_string())],
+            &["tenant_name", "cluster_name"],
+        )
+        .await;
+        eval_stmt.expr = parser::parse(case).unwrap();
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+
+        let case = r#"sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) / 
+            (sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) *1000) +
+            sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) / 
+            (sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) *1000) >= 0 
+            or 
+            sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) / 
+            (sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) *1000) >= 0 
+            or 
+            sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) / 
+            (sum(delta(sysstat{tenant_name=~"sys",cluster_name=~"cluster1"}[2m])/120) by (cluster_name,tenant_name) *1000) >= 0"#;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "sysstat".to_string())],
+            &["tenant_name", "cluster_name"],
+        )
+        .await;
+        eval_stmt.expr = parser::parse(case).unwrap();
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+
+        let case = r#"(sum(background_waitevent_cnt{tenant_name=~"sys",cluster_name=~"cluster1"}) by (cluster_name,tenant_name) + 
+            sum(foreground_waitevent_cnt{tenant_name=~"sys",cluster_name=~"cluster1"}) by (cluster_name,tenant_name)) or 
+            (sum(background_waitevent_cnt{tenant_name=~"sys",cluster_name=~"cluster1"}) by (cluster_name,tenant_name)) or 
+            (sum(foreground_waitevent_cnt{tenant_name=~"sys",cluster_name=~"cluster1"}) by (cluster_name,tenant_name))"#;
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "background_waitevent_cnt".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "foreground_waitevent_cnt".to_string(),
+                ),
+            ],
+            &["tenant_name", "cluster_name"],
+        )
+        .await;
+        eval_stmt.expr = parser::parse(case).unwrap();
+        let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
+            .await
+            .unwrap();
+
+        let case = r#"avg(node_load1{cluster_name=~"cluster1"}) by (cluster_name,host_name) or max(container_cpu_load_average_10s{cluster_name=~"cluster1"}) by (cluster_name,host_name) * 100 / max(container_spec_cpu_quota{cluster_name=~"cluster1"}) by (cluster_name,host_name)"#;
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "node_load1".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "container_cpu_load_average_10s".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "container_spec_cpu_quota".to_string(),
+                ),
+            ],
+            &["cluster_name", "host_name"],
+        )
+        .await;
+        eval_stmt.expr = parser::parse(case).unwrap();
         let _ = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state())
             .await
             .unwrap();

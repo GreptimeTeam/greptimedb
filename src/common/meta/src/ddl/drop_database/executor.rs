@@ -323,6 +323,7 @@ mod tests {
                     }
                     .build(),
                 ),
+                clean_poisons: false,
             })
         }
 

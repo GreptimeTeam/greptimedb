@@ -495,6 +495,10 @@ pub fn check_permission(
             // TODO: should also validate source table name here?
             validate_param(&stmt.sink_table_name, query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::CreateTrigger(stmt) => {
+            validate_param(&stmt.trigger_name, query_ctx)?;
+        }
         Statement::CreateView(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
@@ -545,6 +549,11 @@ pub fn check_permission(
         }
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
+        }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowTriggers(_stmt) => {
+            // The trigger is organized based on the catalog dimension, so there
+            // is no need to check the permission of the database(schema).
         }
         Statement::ShowStatus(_stmt) => {}
         Statement::ShowSearchPath(_stmt) => {}

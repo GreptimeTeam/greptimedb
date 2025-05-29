@@ -146,11 +146,23 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
-    pub is_strict_mode: bool,
+    /// Validation mode while decoding Prometheus remote write requests.
+    pub prom_validation_mode: PromValidationMode,
 
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromValidationMode {
+    /// Force UTF8 validation
+    Strict,
+    /// Allow lossy UTF8 strings
+    Lossy,
+    /// Do not validate UTF8 strings.
+    Unchecked,
 }
 
 impl Default for HttpOptions {
@@ -160,9 +172,9 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            is_strict_mode: false,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
+            prom_validation_mode: PromValidationMode::Strict,
         }
     }
 }
@@ -556,13 +568,13 @@ impl HttpServerBuilder {
         handler: PromStoreProtocolHandlerRef,
         pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
             pipeline_handler,
             prom_store_with_metric_engine,
-            is_strict_mode,
+            prom_validation_mode,
         };
 
         Self {

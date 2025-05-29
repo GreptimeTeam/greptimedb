@@ -14,6 +14,7 @@
 
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -35,7 +36,7 @@ use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::RecordBatchStreamWrapper;
+use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper};
 use common_telemetry::tracing_context::W3cTrace;
 use common_telemetry::{error, warn};
 use futures::future;
@@ -49,7 +50,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu, ServerSnafu,
 };
-use crate::{from_grpc_response, Client, Result};
+use crate::{error, from_grpc_response, Client, Result};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
@@ -337,20 +338,30 @@ impl Database {
                 );
                 Ok(Output::new_with_affected_rows(rows))
             }
-            FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
+            FlightMessage::RecordBatch(_) | FlightMessage::Metrics(_) => {
                 IllegalFlightMessagesSnafu {
                     reason: "The first flight message cannot be a RecordBatch or Metrics message",
                 }
                 .fail()
             }
             FlightMessage::Schema(schema) => {
+                let schema = Arc::new(
+                    datatypes::schema::Schema::try_from(schema)
+                        .context(error::ConvertSchemaSnafu)?,
+                );
+                let schema_cloned = schema.clone();
                 let stream = Box::pin(stream!({
                     while let Some(flight_message) = flight_message_stream.next().await {
                         let flight_message = flight_message
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?;
                         match flight_message {
-                            FlightMessage::Recordbatch(record_batch) => yield Ok(record_batch),
+                            FlightMessage::RecordBatch(arrow_batch) => {
+                                yield RecordBatch::try_from_df_record_batch(
+                                    schema_cloned.clone(),
+                                    arrow_batch,
+                                )
+                            }
                             FlightMessage::Metrics(_) => {}
                             FlightMessage::AffectedRows(_) | FlightMessage::Schema(_) => {
                                 yield IllegalFlightMessagesSnafu {reason: format!("A Schema message must be succeeded exclusively by a set of RecordBatch messages, flight_message: {:?}", flight_message)}

@@ -575,6 +575,7 @@ async fn test_on_submit_alter_request_with_partial_success_retryable() {
         .await
         .unwrap_err();
     assert!(result.is_retry_later());
+    assert!(!result.need_clean_poisons());
 
     // Submits again
     let result = procedure
@@ -582,6 +583,7 @@ async fn test_on_submit_alter_request_with_partial_success_retryable() {
         .await
         .unwrap_err();
     assert!(result.is_retry_later());
+    assert!(!result.need_clean_poisons());
 }
 
 #[tokio::test]
@@ -618,12 +620,14 @@ async fn test_on_submit_alter_request_with_all_failure_retrybale() {
         .await
         .unwrap_err();
     assert!(err.is_retry_later());
+    assert!(err.need_clean_poisons());
     // submits again
     let err = procedure
         .submit_alter_region_requests(procedure_id, provider.as_ref())
         .await
         .unwrap_err();
     assert!(err.is_retry_later());
+    assert!(err.need_clean_poisons());
 }
 
 #[tokio::test]

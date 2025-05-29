@@ -159,8 +159,6 @@ impl MetasrvBuilder {
     }
 
     pub async fn build(self) -> Result<Metasrv> {
-        let started = Arc::new(AtomicBool::new(false));
-
         let MetasrvBuilder {
             election,
             meta_peer_client,
@@ -435,7 +433,7 @@ impl MetasrvBuilder {
 
         Ok(Metasrv {
             state,
-            started,
+            started: Arc::new(AtomicBool::new(false)),
             start_time_ms: common_time::util::current_time_millis() as u64,
             options,
             in_memory,

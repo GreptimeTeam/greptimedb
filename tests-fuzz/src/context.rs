@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_query::AddColumnLocation;
+use datatypes::types::cast;
 use partition::partition::PartitionDef;
 use rand::Rng;
 use snafu::{ensure, OptionExt};
@@ -22,6 +23,7 @@ use snafu::{ensure, OptionExt};
 use crate::error::{self, Result};
 use crate::generator::Random;
 use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
+use crate::ir::create_expr::ColumnOption;
 use crate::ir::{AlterTableExpr, Column, CreateTableExpr, Ident};
 
 pub type TableContextRef = Arc<TableContext>;
@@ -138,7 +140,12 @@ impl TableContext {
             }
             AlterTableOperation::ModifyDataType { column } => {
                 if let Some(idx) = self.columns.iter().position(|col| col.name == column.name) {
-                    self.columns[idx].column_type = column.column_type;
+                    self.columns[idx].column_type = column.column_type.clone();
+                    for opt in self.columns[idx].options.iter_mut() {
+                        if let ColumnOption::DefaultValue(value) = opt {
+                            *value = cast(value.clone(), &column.column_type).unwrap();
+                        }
+                    }
                 }
                 Ok(self)
             }

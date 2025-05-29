@@ -454,7 +454,10 @@ pub enum Error {
     },
 
     #[snafu(display("Retry later"))]
-    RetryLater { source: BoxedError },
+    RetryLater {
+        source: BoxedError,
+        clean_poisons: bool,
+    },
 
     #[snafu(display("Abort procedure"))]
     AbortProcedure {
@@ -812,6 +815,68 @@ pub enum Error {
         #[snafu(source)]
         error: common_time::error::Error,
     },
+    #[snafu(display("Invalid file path: {}", file_path))]
+    InvalidFilePath {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+    },
+
+    #[snafu(display("Failed to serialize flexbuffers"))]
+    SerializeFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::SerializationError,
+    },
+
+    #[snafu(display("Failed to deserialize flexbuffers"))]
+    DeserializeFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::DeserializationError,
+    },
+
+    #[snafu(display("Failed to read flexbuffers"))]
+    ReadFlexbuffers {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: flexbuffers::ReaderError,
+    },
+
+    #[snafu(display("Invalid file name: {}", reason))]
+    InvalidFileName {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
+
+    #[snafu(display("Invalid file extension: {}", reason))]
+    InvalidFileExtension {
+        #[snafu(implicit)]
+        location: Location,
+        reason: String,
+    },
+
+    #[snafu(display("Failed to write object, file path: {}", file_path))]
+    WriteObject {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
+
+    #[snafu(display("Failed to read object, file path: {}", file_path))]
+    ReadObject {
+        #[snafu(implicit)]
+        location: Location,
+        file_path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -834,6 +899,7 @@ impl ErrorExt for Error {
             ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
+            WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
 
             SerdeJson { .. }
             | ParseOption { .. }
@@ -867,7 +933,10 @@ impl ErrorExt for Error {
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
             | ParseWalOptions { .. }
-            | KafkaGetOffset { .. } => StatusCode::Unexpected,
+            | KafkaGetOffset { .. }
+            | ReadFlexbuffers { .. }
+            | SerializeFlexbuffers { .. }
+            | DeserializeFlexbuffers { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 
@@ -884,7 +953,10 @@ impl ErrorExt for Error {
             | InvalidSetDatabaseOption { .. }
             | InvalidUnsetDatabaseOption { .. }
             | InvalidTopicNamePrefix { .. }
-            | InvalidTimeZone { .. } => StatusCode::InvalidArguments,
+            | InvalidTimeZone { .. }
+            | InvalidFileExtension { .. }
+            | InvalidFileName { .. }
+            | InvalidFilePath { .. } => StatusCode::InvalidArguments,
             InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
@@ -970,6 +1042,7 @@ impl Error {
     pub fn retry_later<E: ErrorExt + Send + Sync + 'static>(err: E) -> Error {
         Error::RetryLater {
             source: BoxedError::new(err),
+            clean_poisons: false,
         }
     }
 
@@ -980,7 +1053,13 @@ impl Error {
 
     /// Determine whether it needs to clean poisons.
     pub fn need_clean_poisons(&self) -> bool {
-        matches!(self, Error::AbortProcedure { clean_poisons, .. } if *clean_poisons)
+        matches!(
+            self,
+            Error::AbortProcedure { clean_poisons, .. } if *clean_poisons
+        ) || matches!(
+            self,
+            Error::RetryLater { clean_poisons, .. } if *clean_poisons
+        )
     }
 
     /// Returns true if the response exceeds the size limit.

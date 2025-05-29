@@ -108,6 +108,44 @@ pub async fn test_kv_range(kv_backend: &impl KvBackend) {
     test_kv_range_with_prefix(kv_backend, vec![]).await;
 }
 
+pub async fn test_simple_kv_range(kvbackend: &impl KvBackend) {
+    {
+        let full_query = RangeRequest::new().with_range(vec![0], vec![0]);
+        let response = kvbackend.range(full_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 4);
+    }
+    {
+        let point_query = RangeRequest::new().with_range(b"key11".to_vec(), vec![]);
+        let response = kvbackend.range(point_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 1);
+    }
+    {
+        let left_bounded_query = RangeRequest::new().with_range(b"key1".to_vec(), vec![0]);
+        let response = kvbackend.range(left_bounded_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 4);
+    }
+    {
+        let range_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key11".to_vec());
+        let response = kvbackend.range(range_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 1);
+    }
+    {
+        let prefix_query = RangeRequest::new().with_range(b"key1".to_vec(), b"key2".to_vec());
+        let response = kvbackend.range(prefix_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 2);
+    }
+    {
+        let range_query = RangeRequest::new().with_range(b"key10".to_vec(), b"key100".to_vec());
+        let response = kvbackend.range(range_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 0);
+    }
+    {
+        let prefix_query = RangeRequest::new().with_range(b"key10".to_vec(), b"key11".to_vec());
+        let response = kvbackend.range(prefix_query).await.unwrap();
+        assert_eq!(response.kvs.len(), 0);
+    }
+}
+
 pub async fn test_kv_range_with_prefix(kv_backend: &impl KvBackend, prefix: Vec<u8>) {
     let key = [prefix.clone(), b"key1".to_vec()].concat();
     let key11 = [prefix.clone(), b"key11".to_vec()].concat();
