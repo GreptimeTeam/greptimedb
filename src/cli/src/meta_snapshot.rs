@@ -20,10 +20,9 @@ use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
-use common_meta::kv_backend::rds::{MySqlStore, PgStore};
-use common_meta::kv_backend::{KvBackendRef, DEFAULT_META_TABLE_NAME};
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::snapshot::MetadataSnapshotManager;
-use meta_srv::bootstrap::{create_etcd_client, create_mysql_pool, create_postgres_pool};
+use meta_srv::bootstrap::create_etcd_client;
 use meta_srv::metasrv::BackendImpl;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
@@ -41,7 +40,8 @@ struct MetaConnection {
     backend: Option<BackendImpl>,
     #[clap(long, default_value = "")]
     store_key_prefix: String,
-    #[clap(long,default_value = DEFAULT_META_TABLE_NAME)]
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[clap(long,default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
     meta_table_name: String,
     #[clap(long, default_value = "128")]
     max_txn_ops: usize,
@@ -50,7 +50,6 @@ struct MetaConnection {
 impl MetaConnection {
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
         let max_txn_ops = self.max_txn_ops;
-        let table_name = &self.meta_table_name;
         let store_addrs = &self.store_addrs;
         if store_addrs.is_empty() {
             KvBackendNotSetSnafu { backend: "all" }
@@ -64,21 +63,33 @@ impl MetaConnection {
                         .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
                 }
+                #[cfg(feature = "pg_kvbackend")]
                 Some(BackendImpl::PostgresStore) => {
-                    let pool = create_postgres_pool(store_addrs)
+                    let table_name = &self.meta_table_name;
+                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs)
                         .await
                         .map_err(BoxedError::new)?;
-                    Ok(PgStore::with_pg_pool(pool, table_name, max_txn_ops)
-                        .await
-                        .map_err(BoxedError::new)?)
+                    Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
+                        pool,
+                        table_name,
+                        max_txn_ops,
+                    )
+                    .await
+                    .map_err(BoxedError::new)?)
                 }
+                #[cfg(feature = "mysql_kvbackend")]
                 Some(BackendImpl::MysqlStore) => {
-                    let pool = create_mysql_pool(store_addrs)
+                    let table_name = &self.meta_table_name;
+                    let pool = meta_srv::bootstrap::create_mysql_pool(store_addrs)
                         .await
                         .map_err(BoxedError::new)?;
-                    Ok(MySqlStore::with_mysql_pool(pool, table_name, max_txn_ops)
-                        .await
-                        .map_err(BoxedError::new)?)
+                    Ok(common_meta::kv_backend::rds::MySqlStore::with_mysql_pool(
+                        pool,
+                        table_name,
+                        max_txn_ops,
+                    )
+                    .await
+                    .map_err(BoxedError::new)?)
                 }
                 _ => KvBackendNotSetSnafu { backend: "all" }
                     .fail()
