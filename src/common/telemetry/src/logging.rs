@@ -38,7 +38,7 @@ use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 /// The default logs directory.
-pub const DEFAULT_LOGGING_DIR: &str = "logs/";
+pub const DEFAULT_LOGGING_DIR: &str = "logs";
 
 // Handle for reloading log level
 pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =

@@ -27,7 +27,7 @@ pub fn metadata_store_dir(store_dir: &str) -> String {
 }
 
 /// The default data home directory.
-pub const DEFAULT_DATA_HOME: &str = "./greptimedb_data/";
+pub const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]

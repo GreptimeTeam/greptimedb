@@ -73,7 +73,7 @@ use crate::state::{become_follower, become_leader, StateRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
-pub const METASRV_DATA_DIR: &str = "metasrv/";
+pub const METASRV_DATA_DIR: &str = "metasrv";
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]

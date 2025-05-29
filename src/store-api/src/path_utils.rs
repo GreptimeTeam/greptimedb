@@ -18,7 +18,7 @@
 use crate::storage::{RegionId, RegionNumber, TableId};
 
 /// WAL dir for local file storage
-pub const WAL_DIR: &str = "wal/";
+pub const WAL_DIR: &str = "wal";
 
 /// Data dir for table engines
 pub const DATA_DIR: &str = "data/";
