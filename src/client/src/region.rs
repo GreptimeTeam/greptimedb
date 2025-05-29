@@ -55,6 +55,7 @@ impl Datanode for RegionRequester {
             if err.should_retry() {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
+                    clean_poisons: false,
                 }
             } else {
                 meta_error::Error::External {

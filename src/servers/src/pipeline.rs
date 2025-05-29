@@ -20,8 +20,9 @@ use api::v1::{RowInsertRequest, Rows};
 use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, PipelineMap, TransformedOutput,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
@@ -130,17 +131,26 @@ async fn run_custom_pipeline(
             .context(PipelineSnafu)?;
 
         match r {
-            PipelineExecOutput::Transformed((opt, row, table_suffix, _val)) => {
+            PipelineExecOutput::Transformed(TransformedOutput {
+                opt,
+                row,
+                table_suffix,
+                pipeline_map: _val,
+            }) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
                 push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
             }
-            PipelineExecOutput::AutoTransform(table_suffix, ts_keys, val) => {
+            PipelineExecOutput::AutoTransform(AutoTransformOutput {
+                table_suffix,
+                ts_unit_map,
+                pipeline_map,
+            }) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(auto_map, act_table_name.clone(), val, arr_len);
+                push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
                 auto_map_ts_keys
                     .entry(act_table_name)
                     .or_insert_with(HashMap::new)
-                    .extend(ts_keys);
+                    .extend(ts_unit_map);
             }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);

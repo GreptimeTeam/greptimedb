@@ -26,6 +26,9 @@ excludes = [
     "src/common/base/src/secrets.rs",
     "src/servers/src/repeated_field.rs",
     "src/servers/src/http/test_helpers.rs",
+    # enterprise
+    "src/sql/src/statements/create/trigger.rs",
+    "src/sql/src/parsers/create_parser/trigger.rs",
 ]
 
 [properties]

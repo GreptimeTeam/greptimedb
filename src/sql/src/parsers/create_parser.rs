@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
@@ -96,6 +99,12 @@ impl<'a> ParserContext<'a> {
                 Keyword::VIEW => {
                     let _ = self.parser.next_token();
                     self.parse_create_view(false)
+                }
+
+                #[cfg(feature = "enterprise")]
+                Keyword::TRIGGER => {
+                    let _ = self.parser.next_token();
+                    self.parse_create_trigger()
                 }
 
                 Keyword::NoKeyword => {
@@ -281,25 +290,7 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            let expire_after_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
-            let expire_after_lit =
-                utils::parser_expr_to_scalar_value_literal(expire_after_expr.clone())?
-                    .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
-                    .ok()
-                    .with_context(|| InvalidIntervalSnafu {
-                        reason: format!("cannot cast {} to interval type", expire_after_expr),
-                    })?;
-            if let ScalarValue::IntervalMonthDayNano(Some(interval)) = expire_after_lit {
-                Some(
-                    interval.nanoseconds / 1_000_000_000
-                        + interval.days as i64 * 60 * 60 * 24
-                        + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                               // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                               // which we use in database to parse i.e. ttl interval and many other intervals
-                )
-            } else {
-                unreachable!()
-            }
+            Some(self.parse_interval()?)
         } else {
             None
         };
@@ -351,6 +342,28 @@ impl<'a> ParserContext<'a> {
             comment,
             query,
         }))
+    }
+
+    /// Parse the interval expr to duration in seconds.
+    fn parse_interval(&mut self) -> Result<i64> {
+        let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
+            .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+            .ok()
+            .with_context(|| InvalidIntervalSnafu {
+                reason: format!("cannot cast {} to interval type", interval_expr),
+            })?;
+        if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
+            Ok(
+                interval.nanoseconds / 1_000_000_000
+                    + interval.days as i64 * 60 * 60 * 24
+                    + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
+                                                                           // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                           // which we use in database to parse i.e. ttl interval and many other intervals
+            )
+        } else {
+            unreachable!()
+        }
     }
 
     fn parse_if_not_exist(&mut self) -> Result<bool> {

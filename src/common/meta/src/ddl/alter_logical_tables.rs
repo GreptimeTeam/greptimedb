@@ -32,9 +32,11 @@ use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use crate::ddl::utils::{add_peer_context_if_needed, sync_follower_regions};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, map_to_procedure_error, sync_follower_regions,
+};
 use crate::ddl::DdlContext;
-use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
+use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
@@ -217,14 +219,6 @@ impl Procedure for AlterLogicalTablesProcedure {
     }
 
     async fn execute(&mut self, _ctx: &Context) -> ProcedureResult<Status> {
-        let error_handler = |e: Error| {
-            if e.is_retry_later() {
-                common_procedure::Error::retry_later(e)
-            } else {
-                common_procedure::Error::external(e)
-            }
-        };
-
         let state = &self.data.state;
 
         let step = state.as_ref();
@@ -241,7 +235,7 @@ impl Procedure for AlterLogicalTablesProcedure {
             AlterTablesState::UpdateMetadata => self.on_update_metadata().await,
             AlterTablesState::InvalidateTableCache => self.on_invalidate_table_cache().await,
         }
-        .map_err(error_handler)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

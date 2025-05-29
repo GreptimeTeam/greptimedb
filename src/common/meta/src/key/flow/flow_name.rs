@@ -205,7 +205,7 @@ impl FlowNameManager {
         catalog: &str,
     ) -> BoxStream<'static, Result<(String, FlowNameValue)>> {
         let start_key = FlowNameKey::range_start_key(catalog);
-        common_telemetry::debug!("flow_names: start_key: {:?}", start_key);
+        common_telemetry::trace!("flow_names: start_key: {:?}", start_key);
         let req = RangeRequest::new().with_prefix(start_key);
 
         let stream = PaginationStream::new(

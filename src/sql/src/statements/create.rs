@@ -57,6 +57,9 @@ macro_rules! format_list_comma {
     };
 }
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 fn format_table_constraint(constraints: &[TableConstraint]) -> String {
     constraints.iter().map(|c| format_indent!(c)).join(LINE_SEP)
 }

@@ -21,8 +21,8 @@ use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
-use opendal::layers::LoggingLayer;
-use opendal::{services, Operator};
+use object_store::layers::LoggingLayer;
+use object_store::{services, ObjectStore};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::Semaphore;
@@ -470,7 +470,7 @@ impl Export {
         Ok(())
     }
 
-    async fn build_operator(&self) -> Result<Operator> {
+    async fn build_operator(&self) -> Result<ObjectStore> {
         if self.s3 {
             self.build_s3_operator().await
         } else {
@@ -479,11 +479,11 @@ impl Export {
     }
 
     /// build operator with preference for file system
-    async fn build_prefer_fs_operator(&self) -> Result<Operator> {
+    async fn build_prefer_fs_operator(&self) -> Result<ObjectStore> {
         // is under s3 mode and s3_ddl_dir is set, use it as root
         if self.s3 && self.s3_ddl_local_dir.is_some() {
             let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
-            let op = Operator::new(services::Fs::default().root(&root))
+            let op = ObjectStore::new(services::Fs::default().root(&root))
                 .context(OpenDalSnafu)?
                 .layer(LoggingLayer::default())
                 .finish();
@@ -495,7 +495,7 @@ impl Export {
         }
     }
 
-    async fn build_s3_operator(&self) -> Result<Operator> {
+    async fn build_s3_operator(&self) -> Result<ObjectStore> {
         let mut builder = services::S3::default().bucket(
             self.s3_bucket
                 .as_ref()
@@ -522,20 +522,20 @@ impl Export {
             builder = builder.secret_access_key(secret_key);
         }
 
-        let op = Operator::new(builder)
+        let op = ObjectStore::new(builder)
             .context(OpenDalSnafu)?
             .layer(LoggingLayer::default())
             .finish();
         Ok(op)
     }
 
-    async fn build_fs_operator(&self) -> Result<Operator> {
+    async fn build_fs_operator(&self) -> Result<ObjectStore> {
         let root = self
             .output_dir
             .as_ref()
             .context(OutputDirNotSetSnafu)?
             .clone();
-        let op = Operator::new(services::Fs::default().root(&root))
+        let op = ObjectStore::new(services::Fs::default().root(&root))
             .context(OpenDalSnafu)?
             .layer(LoggingLayer::default())
             .finish();
@@ -642,11 +642,14 @@ impl Export {
 
     async fn write_to_storage(
         &self,
-        op: &Operator,
+        op: &ObjectStore,
         file_path: &str,
         content: Vec<u8>,
     ) -> Result<()> {
-        op.write(file_path, content).await.context(OpenDalSnafu)
+        op.write(file_path, content)
+            .await
+            .context(OpenDalSnafu)
+            .map(|_| ())
     }
 
     fn get_storage_params(&self, schema: &str) -> (String, String) {

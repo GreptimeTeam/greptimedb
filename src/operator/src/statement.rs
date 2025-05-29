@@ -224,6 +224,8 @@ impl StatementExecutor {
                 Ok(Output::new_with_affected_rows(0))
             }
             Statement::CreateFlow(stmt) => self.create_flow(stmt, query_ctx).await,
+            #[cfg(feature = "enterprise")]
+            Statement::CreateTrigger(stmt) => self.create_trigger(stmt, query_ctx).await,
             Statement::DropFlow(stmt) => {
                 self.drop_flow(
                     query_ctx.current_catalog().to_string(),
@@ -378,10 +380,13 @@ impl StatementExecutor {
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
+
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
 
-            "TIMEZONE" | "TIME_ZONE" => set_timezone(set_var.value, query_ctx)?,
+            "@@TIME_ZONE" | "@@SESSION.TIME_ZONE" | "TIMEZONE" | "TIME_ZONE" => {
+                set_timezone(set_var.value, query_ctx)?
+            }
 
             "BYTEA_OUTPUT" => set_bytea_output(set_var.value, query_ctx)?,
 
@@ -391,7 +396,7 @@ impl StatementExecutor {
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
-            "MAX_EXECUTION_TIME" => match query_ctx.channel() {
+            "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
                 Channel::Mysql => set_query_timeout(set_var.value, query_ctx)?,
                 Channel::Postgres => {
                     query_ctx.set_warning(format!("Unsupported set variable {}", var_name))
@@ -429,6 +434,9 @@ impl StatementExecutor {
                 //  of connection establishment
                 //
                 if query_ctx.channel() == Channel::Postgres {
+                    query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
+                } else if query_ctx.channel() == Channel::Mysql && var_name.starts_with("@@") {
+                    // Just ignore `SET @@` commands for MySQL
                     query_ctx.set_warning(format!("Unsupported set variable {}", var_name));
                 } else {
                     return NotSupportedSnafu {

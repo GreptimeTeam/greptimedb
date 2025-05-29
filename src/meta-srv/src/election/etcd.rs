@@ -121,7 +121,7 @@ impl Election for EtcdElection {
 
     fn in_leader_infancy(&self) -> bool {
         self.infancy
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
@@ -249,7 +249,7 @@ impl Election for EtcdElection {
 
             if self
                 .is_leader
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 if let Err(e) = self
@@ -307,10 +307,10 @@ impl EtcdElection {
             // Only after a successful `keep_alive` is the leader considered official.
             if self
                 .is_leader
-                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                self.infancy.store(true, Ordering::Relaxed);
+                self.infancy.store(true, Ordering::Release);
 
                 if let Err(e) = self
                     .leader_watcher

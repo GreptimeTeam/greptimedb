@@ -40,10 +40,11 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::{
-    add_peer_context_if_needed, handle_multiple_results, sync_follower_regions, MultipleResults,
+    add_peer_context_if_needed, handle_multiple_results, map_to_procedure_error,
+    sync_follower_regions, MultipleResults,
 };
 use crate::ddl::DdlContext;
-use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
+use crate::error::{AbortProcedureSnafu, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -195,7 +196,10 @@ impl AlterTableProcedure {
             }
             MultipleResults::AllRetryable(error) => {
                 // Just returns the error, and wait for the next try.
-                Err(error)
+                let err = BoxedError::new(error);
+                Err(err).context(RetryLaterSnafu {
+                    clean_poisons: true,
+                })
             }
             MultipleResults::Ok(results) => {
                 self.submit_sync_region_requests(results, &physical_table_route.region_routes)
@@ -323,16 +327,6 @@ impl Procedure for AlterTableProcedure {
     }
 
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e: Error| {
-            if e.is_retry_later() {
-                ProcedureError::retry_later(e)
-            } else if e.need_clean_poisons() {
-                ProcedureError::external_and_clean_poisons(e)
-            } else {
-                ProcedureError::external(e)
-            }
-        };
-
         let state = &self.data.state;
 
         let step = state.as_ref();
@@ -350,7 +344,7 @@ impl Procedure for AlterTableProcedure {
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
         }
-        .map_err(error_handler)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

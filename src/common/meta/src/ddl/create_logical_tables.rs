@@ -33,7 +33,9 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error, sync_follower_regions};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, map_to_procedure_error, sync_follower_regions,
+};
 use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
 use crate::key::table_route::TableRouteValue;
@@ -238,7 +240,7 @@ impl Procedure for CreateLogicalTablesProcedure {
             CreateTablesState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
             CreateTablesState::CreateMetadata => self.on_create_metadata().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

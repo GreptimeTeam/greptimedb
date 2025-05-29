@@ -288,7 +288,7 @@ impl Election for PgElection {
 
     fn in_leader_infancy(&self) -> bool {
         self.leader_infancy
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
@@ -660,7 +660,7 @@ impl PgElection {
         };
         if self
             .is_leader
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             self.delete_value(&key).await?;
@@ -688,7 +688,7 @@ impl PgElection {
         };
         if self
             .is_leader
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             if let Err(e) = self
@@ -716,10 +716,10 @@ impl PgElection {
 
         if self
             .is_leader
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            self.leader_infancy.store(true, Ordering::Relaxed);
+            self.leader_infancy.store(true, Ordering::Release);
 
             if let Err(e) = self
                 .leader_watcher

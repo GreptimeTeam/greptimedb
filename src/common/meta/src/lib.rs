@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 #![feature(btree_extract_if)]
 #![feature(let_chains)]
+#![feature(duration_millis_float)]
 
 pub mod cache;
 pub mod cache_invalidator;
@@ -41,6 +42,7 @@ pub mod region_keeper;
 pub mod region_registry;
 pub mod rpc;
 pub mod sequence;
+pub mod snapshot;
 pub mod state_store;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

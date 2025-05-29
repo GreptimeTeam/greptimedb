@@ -495,6 +495,10 @@ pub fn check_permission(
             // TODO: should also validate source table name here?
             validate_param(&stmt.sink_table_name, query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::CreateTrigger(stmt) => {
+            validate_param(&stmt.trigger_name, query_ctx)?;
+        }
         Statement::CreateView(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }

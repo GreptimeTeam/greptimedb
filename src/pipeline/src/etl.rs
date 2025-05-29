@@ -154,16 +154,34 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    Transformed((String, Row, Option<String>, PipelineMap)),
-    // table_suffix, ts_key -> unit
-    AutoTransform(Option<String>, HashMap<String, TimeUnit>, PipelineMap),
+    Transformed(TransformedOutput),
+    AutoTransform(AutoTransformOutput),
     DispatchedTo(DispatchedTo, PipelineMap),
+}
+
+#[derive(Debug)]
+pub struct TransformedOutput {
+    pub opt: String,
+    pub row: Row,
+    pub table_suffix: Option<String>,
+    pub pipeline_map: PipelineMap,
+}
+
+#[derive(Debug)]
+pub struct AutoTransformOutput {
+    pub table_suffix: Option<String>,
+    // ts_column_name -> unit
+    pub ts_unit_map: HashMap<String, TimeUnit>,
+    pub pipeline_map: PipelineMap,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
     pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
-        if let Self::Transformed((_, row, table_suffix, _)) = self {
+        if let Self::Transformed(TransformedOutput {
+            row, table_suffix, ..
+        }) = self
+        {
             Some((row, table_suffix))
         } else {
             None
@@ -229,12 +247,12 @@ impl Pipeline {
         if let Some(transformer) = self.transformer() {
             let (opt, row) = transformer.transform_mut(&mut val)?;
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
-            Ok(PipelineExecOutput::Transformed((
+            Ok(PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
                 row,
                 table_suffix,
-                val,
-            )))
+                pipeline_map: val,
+            }))
         } else {
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
             let mut ts_unit_map = HashMap::with_capacity(4);
@@ -246,11 +264,11 @@ impl Pipeline {
                     }
                 }
             }
-            Ok(PipelineExecOutput::AutoTransform(
+            Ok(PipelineExecOutput::AutoTransform(AutoTransformOutput {
                 table_suffix,
                 ts_unit_map,
-                val,
-            ))
+                pipeline_map: val,
+            }))
         }
     }
 

@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
+enterprise = ["operator/enterprise", "sql/enterprise"]
 
 [lints]
 workspace = true

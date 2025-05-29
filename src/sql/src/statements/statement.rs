@@ -62,6 +62,9 @@ pub enum Statement {
     CreateFlow(CreateFlow),
     // CREATE VIEW ... AS
     CreateView(CreateView),
+    // CREATE TRIGGER
+    #[cfg(feature = "enterprise")]
+    CreateTrigger(crate::statements::create::trigger::CreateTrigger),
     // DROP TABLE
     DropTable(DropTable),
     // DROP DATABASE
@@ -144,6 +147,8 @@ impl Display for Statement {
             Statement::CreateExternalTable(s) => s.fmt(f),
             Statement::CreateTableLike(s) => s.fmt(f),
             Statement::CreateFlow(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::CreateTrigger(s) => s.fmt(f),
             Statement::DropFlow(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
