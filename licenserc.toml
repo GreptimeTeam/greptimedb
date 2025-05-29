@@ -29,6 +29,7 @@ excludes = [
     # enterprise
     "src/sql/src/statements/create/trigger.rs",
     "src/sql/src/parsers/create_parser/trigger.rs",
+    "src/sql/src/parsers/show_parser/trigger.rs",
 ]
 
 [properties]

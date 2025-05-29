@@ -50,6 +50,7 @@ mod tests {
         };
         assert_eq!(like.value, "test_trigger");
 
+        // Valid, sql: `SHOW TRIGGERS WHERE name = 'test_trigger'`.
         let sql = "WHERE name = 'test_trigger'";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let statement = ctx.parse_show_triggers().unwrap();
@@ -64,7 +65,6 @@ mod tests {
         // Invalid, since uncorrect keyword `LI`.
         let sql = "LI 'test_trigger'";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
-        let ret = ctx.parse_show_triggers();
-        assert!(ret.is_err());
+        assert!(ctx.parse_show_triggers().is_err());
     }
 }
