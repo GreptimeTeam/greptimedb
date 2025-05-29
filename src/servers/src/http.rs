@@ -174,7 +174,7 @@ impl Default for HttpOptions {
             body_limit: DEFAULT_BODY_LIMIT,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
-            prom_validation_mode: PromValidationMode::Unchecked,
+            prom_validation_mode: PromValidationMode::Strict,
         }
     }
 }
