@@ -46,6 +46,9 @@ macro_rules! format_kind {
     };
 }
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 /// SQL structure for `SHOW DATABASES`.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct ShowDatabases {

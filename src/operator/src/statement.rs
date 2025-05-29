@@ -170,6 +170,9 @@ impl StatementExecutor {
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
 
+            #[cfg(feature = "enterprise")]
+            Statement::ShowTriggers(stmt) => self.show_triggers(stmt, query_ctx).await,
+
             Statement::Copy(sql::statements::copy::Copy::CopyQueryTo(stmt)) => {
                 let query_output = self
                     .plan_exec(QueryStatement::Sql(*stmt.query), query_ctx)
