@@ -43,7 +43,7 @@ use object_store::ObjectStore;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
-use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::postgres::PostgresServer;
@@ -533,7 +533,6 @@ pub async fn setup_test_prom_app_with_frontend(
         ..Default::default()
     };
     let frontend_ref = instance.fe_instance().clone();
-    let is_strict_mode = true;
     let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
         .with_logs_handler(instance.fe_instance().clone())
@@ -541,7 +540,7 @@ pub async fn setup_test_prom_app_with_frontend(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
             true,
-            is_strict_mode,
+            PromValidationMode::Strict,
         )
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())

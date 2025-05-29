@@ -21,6 +21,7 @@ use api::prom_store::remote::Sample;
 use api::v1::RowInsertRequests;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_telemetry::debug;
 use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
@@ -30,6 +31,7 @@ use snafu::OptionExt;
 
 use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
+use crate::http::PromValidationMode;
 use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::METRIC_NAME_LABEL_BYTES;
@@ -160,7 +162,7 @@ impl PromTimeSeries {
         tag: u32,
         wire_type: WireType,
         buf: &mut Bytes,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
         match tag {
@@ -186,15 +188,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
                 if label.name.deref() == METRIC_NAME_LABEL_BYTES {
-                    let table_name = if is_strict_mode {
-                        match String::from_utf8(label.value.to_vec()) {
-                            Ok(s) => s,
-                            Err(_) => return Err(DecodeError::new("invalid utf-8")),
-                        }
-                    } else {
-                        unsafe { String::from_utf8_unchecked(label.value.to_vec()) }
-                    };
-                    self.table_name = table_name;
+                    self.table_name = decode_string(&label.value, prom_validation_mode)?;
                     self.labels.truncate(self.labels.len() - 1); // remove last label
                 }
                 Ok(())
@@ -218,7 +212,7 @@ impl PromTimeSeries {
     fn add_to_table_data(
         &mut self,
         table_builders: &mut TablesBuilder,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
@@ -230,11 +224,34 @@ impl PromTimeSeries {
         table_data.add_labels_and_samples(
             self.labels.as_slice(),
             self.samples.as_slice(),
-            is_strict_mode,
+            prom_validation_mode,
         )?;
 
         Ok(())
     }
+}
+
+/// Decodes bytes into String values according provided validation mode.
+pub(crate) fn decode_string(
+    bytes: &Bytes,
+    mode: PromValidationMode,
+) -> Result<String, DecodeError> {
+    let result = match mode {
+        PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(
+                    "Invalid UTF-8 string value: {:?}, error: {:?}",
+                    &bytes[..],
+                    e
+                );
+                return Err(DecodeError::new("invalid utf-8"));
+            }
+        },
+        PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
+        PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
+    };
+    Ok(result)
 }
 
 #[derive(Default, Debug)]
@@ -258,7 +275,7 @@ impl PromWriteRequest {
     pub fn merge(
         &mut self,
         mut buf: Bytes,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
@@ -281,7 +298,7 @@ impl PromWriteRequest {
                     while buf.remaining() > limit {
                         let (tag, wire_type) = decode_key(&mut buf)?;
                         self.series
-                            .merge_field(tag, wire_type, &mut buf, is_strict_mode)?;
+                            .merge_field(tag, wire_type, &mut buf, prom_validation_mode)?;
                     }
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
@@ -291,7 +308,7 @@ impl PromWriteRequest {
                         processor.consume_series_to_pipeline_map(&mut self.series)?;
                     } else {
                         self.series
-                            .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+                            .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
                     }
 
                     // clear state
@@ -441,6 +458,7 @@ mod tests {
     use bytes::Bytes;
     use prost::Message;
 
+    use crate::http::PromValidationMode;
     use crate::prom_store::to_grpc_row_insert_requests;
     use crate::proto::{PromSeriesProcessor, PromWriteRequest};
     use crate::repeated_field::Clear;
@@ -469,7 +487,7 @@ mod tests {
         let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
         prom_write_request
-            .merge(data.clone(), true, &mut p)
+            .merge(data.clone(), PromValidationMode::Strict, &mut p)
             .unwrap();
         let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
 
