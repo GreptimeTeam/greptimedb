@@ -37,6 +37,7 @@ use crate::ddl::utils::{
 };
 use crate::ddl::DdlContext;
 use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
@@ -68,6 +69,7 @@ impl AlterLogicalTablesProcedure {
                 physical_table_info: None,
                 physical_table_route: None,
                 physical_columns: vec![],
+                table_cache_keys_to_invalidate: vec![],
             },
         }
     }
@@ -197,16 +199,19 @@ impl AlterLogicalTablesProcedure {
         self.update_physical_table_metadata().await?;
         self.update_logical_tables_metadata().await?;
 
+        self.data.build_cache_keys_to_invalidate();
+        self.data.clear_metadata_fields();
+
         self.data.state = AlterTablesState::InvalidateTableCache;
         Ok(Status::executing(true))
     }
 
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
-        let to_invalidate = self.build_table_cache_keys_to_invalidate();
+        let to_invalidate = &self.data.table_cache_keys_to_invalidate;
 
         self.context
             .cache_invalidator
-            .invalidate(&Default::default(), &to_invalidate)
+            .invalidate(&Default::default(), to_invalidate)
             .await?;
         Ok(Status::done())
     }
@@ -274,6 +279,20 @@ pub struct AlterTablesData {
     physical_table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
     physical_table_route: Option<PhysicalTableRouteValue>,
     physical_columns: Vec<ColumnMetadata>,
+    table_cache_keys_to_invalidate: Vec<CacheIdent>,
+}
+
+impl AlterTablesData {
+    /// Clears all data fields except `state` and `table_cache_keys_to_invalidate` after metadata update.
+    /// This is done to avoid persisting unnecessary data after the update metadata step.
+    fn clear_metadata_fields(&mut self) {
+        self.tasks.clear();
+        self.table_info_values.clear();
+        self.physical_table_id = 0;
+        self.physical_table_info = None;
+        self.physical_table_route = None;
+        self.physical_columns.clear();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, AsRefStr)]
