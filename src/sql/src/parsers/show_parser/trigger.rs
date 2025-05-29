@@ -62,7 +62,7 @@ mod tests {
         };
         assert_eq!(expr.to_string(), "name = 'test_trigger'");
 
-        // Invalid, since uncorrect keyword `LI`.
+        // Invalid, since incorrect keyword `LI`.
         let sql = "LI 'test_trigger'";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         assert!(ctx.parse_show_triggers().is_err());
