@@ -42,7 +42,7 @@ cors_allowed_origins = ["https://example.com"]
 ## - strict: deny invalid UTF-8 strings (default).
 ## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
 ## - unchecked: do not valid strings.
-prom_validation_mode = "unchecked"
+prom_validation_mode = "strict"
 
 ## The gRPC server options.
 [grpc]

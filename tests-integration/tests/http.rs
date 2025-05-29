@@ -1011,7 +1011,7 @@ init_regions_parallelism = 16
 addr = "127.0.0.1:4000"
 timeout = "0s"
 body_limit = "64MiB"
-prom_validation_mode = "unchecked"
+prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
 
