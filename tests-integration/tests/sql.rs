@@ -373,6 +373,19 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
         "2022-11-03T11:39:57.450Z"
     );
 
+    let _ = conn
+        .execute("SET @@SESSION.TIME_ZONE = '-7:00'")
+        .await
+        .unwrap();
+    let rows2 = conn.fetch_all("select ts from demo").await.unwrap();
+    // we use Utc here for format only
+    assert_eq!(
+        rows2[0]
+            .get::<chrono::DateTime<Utc>, usize>(0)
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        "2022-11-02T20:39:57.450Z"
+    );
+
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
 }
