@@ -220,8 +220,14 @@ impl DirtyTimeWindows {
                 }
 
                 if let Some(end) = end {
-                    end.sub(start)
-                        .map(|cur_window_size| cur_time_range += cur_window_size);
+                    {
+                        let this = end.sub(start);
+                        if let Some(x) = this {
+                            Some((|cur_window_size| cur_time_range += cur_window_size)(x))
+                        } else {
+                            None
+                        }
+                    };
                 }
             }
 
