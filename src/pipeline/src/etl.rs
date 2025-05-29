@@ -154,16 +154,32 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    Transformed((String, Row, Option<String>)),
-    // table_suffix, ts_key -> unit
-    AutoTransform(Option<String>, HashMap<String, TimeUnit>),
+    Transformed(TransformedOutput),
+    AutoTransform(AutoTransformOutput),
     DispatchedTo(DispatchedTo),
+}
+
+#[derive(Debug)]
+pub struct TransformedOutput {
+    pub opt: String,
+    pub row: Row,
+    pub table_suffix: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct AutoTransformOutput {
+    pub table_suffix: Option<String>,
+    // ts_column_name -> unit
+    pub ts_unit_map: HashMap<String, TimeUnit>,
 }
 
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
     pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
-        if let Self::Transformed((_, row, table_suffix)) = self {
+        if let Self::Transformed(TransformedOutput {
+            row, table_suffix, ..
+        }) = self
+        {
             Some((row, table_suffix))
         } else {
             None
@@ -229,7 +245,11 @@ impl Pipeline {
         if let Some(transformer) = self.transformer() {
             let (opt, row) = transformer.transform_mut(val)?;
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
-            Ok(PipelineExecOutput::Transformed((opt, row, table_suffix)))
+            Ok(PipelineExecOutput::Transformed(TransformedOutput {
+                opt,
+                row,
+                table_suffix,
+            }))
         } else {
             let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(val));
             let mut ts_unit_map = HashMap::with_capacity(4);
@@ -241,7 +261,10 @@ impl Pipeline {
                     }
                 }
             }
-            Ok(PipelineExecOutput::AutoTransform(table_suffix, ts_unit_map))
+            Ok(PipelineExecOutput::AutoTransform(AutoTransformOutput {
+                table_suffix,
+                ts_unit_map,
+            }))
         }
     }
 
