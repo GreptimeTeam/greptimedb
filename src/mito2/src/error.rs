@@ -25,7 +25,7 @@ use common_time::Timestamp;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
-use prost::{DecodeError, EncodeError};
+use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
@@ -253,15 +253,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
-    },
-
-    #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
-    EncodeWal {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: EncodeError,
     },
 
     #[snafu(display("Failed to write WAL"))]
@@ -1105,7 +1096,6 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | EncodeWal { .. }
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }

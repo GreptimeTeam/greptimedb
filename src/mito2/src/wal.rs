@@ -35,7 +35,7 @@ use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore, WalIndex};
 use store_api::storage::RegionId;
 
-use crate::error::{BuildEntrySnafu, DeleteWalSnafu, EncodeWalSnafu, Result, WriteWalSnafu};
+use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WriteWalSnafu};
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
@@ -78,7 +78,6 @@ impl<S: LogStore> Wal<S> {
         WalWriter {
             store: self.store.clone(),
             entries: Vec::new(),
-            entry_encode_buf: Vec::new(),
             providers: HashMap::new(),
         }
     }
@@ -176,8 +175,6 @@ pub struct WalWriter<S: LogStore> {
     store: Arc<S>,
     /// Entries to write.
     entries: Vec<Entry>,
-    /// Buffer to encode WAL entry.
-    entry_encode_buf: Vec<u8>,
     /// Providers of regions being written into.
     providers: HashMap<RegionId, Provider>,
 }
@@ -197,19 +194,10 @@ impl<S: LogStore> WalWriter<S> {
             .entry(region_id)
             .or_insert_with(|| provider.clone());
 
-        // Encode wal entry to log store entry.
-        self.entry_encode_buf.clear();
-        wal_entry
-            .encode(&mut self.entry_encode_buf)
-            .context(EncodeWalSnafu { region_id })?;
+        let data = wal_entry.encode_to_vec();
         let entry = self
             .store
-            .entry(
-                mem::take(&mut self.entry_encode_buf),
-                entry_id,
-                region_id,
-                provider,
-            )
+            .entry(data, entry_id, region_id, provider)
             .map_err(BoxedError::new)
             .context(BuildEntrySnafu { region_id })?;
 
