@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -55,7 +56,7 @@ use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
-    SelectorContext, SelectorRef, FLOW_ID_SEQ, TABLE_ID_SEQ,
+    SelectorContext, SelectorRef, FLOW_ID_SEQ, METASRV_DATA_DIR, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
@@ -429,7 +430,10 @@ impl MetasrvBuilder {
         };
 
         let enable_telemetry = options.enable_telemetry;
-        let metasrv_home = options.data_home.to_string();
+        let metasrv_home = Path::new(&options.data_home)
+            .join(METASRV_DATA_DIR)
+            .to_string_lossy()
+            .to_string();
 
         Ok(Metasrv {
             state,
