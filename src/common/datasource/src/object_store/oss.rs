@@ -36,7 +36,7 @@ pub fn is_supported_in_oss(key: &str) -> bool {
         ACCESS_KEY_ID,
         ACCESS_KEY_SECRET,
     ]
-        .contains(&key)
+    .contains(&key)
 }
 
 pub fn build_oss_backend(
@@ -66,7 +66,7 @@ pub fn build_oss_backend(
                     ALLOW_ANONYMOUS, allow_anonymous, e
                 ),
             }
-                .build()
+            .build()
         })?;
         if allow {
             builder = builder.allow_anonymous();
