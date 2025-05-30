@@ -419,10 +419,10 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
-    let mut stats = json_to_map(input_value).unwrap();
+    let stats = json_to_map(input_value).unwrap();
 
     let row = pipeline
-        .exec_mut(&mut stats)
+        .exec_mut(stats)
         .expect("failed to exec pipeline")
         .into_transformed()
         .expect("expect transformed result ");
@@ -488,9 +488,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -597,9 +597,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -663,9 +663,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -703,10 +703,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
-
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -763,9 +762,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -804,9 +803,9 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
+    let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -866,18 +865,18 @@ transform:
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value1).unwrap();
+    let status = json_to_map(input_value1).unwrap();
     let dispatched_to = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_dispatched()
         .expect("expect dispatched result ");
     assert_eq!(dispatched_to.table_suffix, "http");
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
-    let mut status = json_to_map(input_value2).unwrap();
+    let status = json_to_map(input_value2).unwrap();
     let row = pipeline
-        .exec_mut(&mut status)
+        .exec_mut(status)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -930,8 +929,8 @@ table_suffix: _${logger}
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
 
-    let mut status = json_to_map(input_value).unwrap();
-    let exec_re = pipeline.exec_mut(&mut status).unwrap();
+    let status = json_to_map(input_value).unwrap();
+    let exec_re = pipeline.exec_mut(status).unwrap();
 
     let (row, table_name) = exec_re.into_transformed().unwrap();
     let values = row.values;

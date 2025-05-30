@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use chrono::{DateTime, Utc};
 use common_time::timestamp::TimeUnit;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +104,19 @@ impl Timestamp {
             Timestamp::Millisecond(_) => TimeUnit::Millisecond,
             Timestamp::Second(_) => TimeUnit::Second,
         }
+    }
+
+    pub fn to_datetime(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Timestamp::Nanosecond(v) => Some(DateTime::from_timestamp_nanos(*v)),
+            Timestamp::Microsecond(v) => DateTime::from_timestamp_micros(*v),
+            Timestamp::Millisecond(v) => DateTime::from_timestamp_millis(*v),
+            Timestamp::Second(v) => DateTime::from_timestamp(*v, 0),
+        }
+    }
+
+    pub fn from_datetime(dt: DateTime<Utc>) -> Option<Self> {
+        dt.timestamp_nanos_opt().map(Timestamp::Nanosecond)
     }
 }
 
