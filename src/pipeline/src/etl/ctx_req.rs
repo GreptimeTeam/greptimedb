@@ -21,34 +21,57 @@ use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use itertools::Itertools;
 use session::context::{QueryContext, QueryContextRef};
 
+use crate::tablesuffix::TableSuffixTemplate;
 use crate::PipelineMap;
 
 const DEFAULT_OPT: &str = "";
 
-pub const PIPELINE_HINT_KEYS: [&str; 6] = [
+pub const PIPELINE_HINT_KEYS: [&str; 7] = [
     "greptime_auto_create_table",
     "greptime_ttl",
     "greptime_append_mode",
     "greptime_merge_mode",
     "greptime_physical_table",
     "greptime_skip_wal",
+    "greptime_table_suffix",
 ];
 
 const PIPELINE_HINT_PREFIX: &str = "greptime_";
+pub const TABLE_SUFFIX_KEY: &str = "table_suffix";
 
-// Remove hints from the pipeline context and form a option string
-// e.g: skip_wal=true,ttl=1d
-pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> String {
-    let mut btreemap = BTreeMap::new();
-    for k in PIPELINE_HINT_KEYS {
-        if let Some(v) = pipeline_map.remove(k) {
-            btreemap.insert(k, v.to_str_value());
+#[derive(Debug)]
+pub struct ContextOptMap(BTreeMap<String, String>);
+
+impl ContextOptMap {
+    // Remove hints from the pipeline context and form a option string
+    // e.g: skip_wal=true,ttl=1d
+    pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> Self {
+        let mut btreemap = BTreeMap::new();
+        for k in PIPELINE_HINT_KEYS {
+            if let Some(v) = pipeline_map.remove(k) {
+                btreemap.insert(k.replace(PIPELINE_HINT_PREFIX, ""), v.to_str_value());
+            }
         }
+
+        Self(btreemap)
     }
-    btreemap
-        .into_iter()
-        .map(|(k, v)| format!("{}={}", k.replace(PIPELINE_HINT_PREFIX, ""), v))
-        .join(",")
+
+    pub(crate) fn resolve_table_suffix(
+        &mut self,
+        table_suffix: Option<&TableSuffixTemplate>,
+        pipeline_map: &PipelineMap,
+    ) -> Option<String> {
+        self.0
+            .remove(TABLE_SUFFIX_KEY)
+            .or_else(|| table_suffix.and_then(|s| s.apply(pipeline_map)))
+    }
+
+    pub fn to_opt_string(self) -> String {
+        self.0
+            .into_iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .join(",")
+    }
 }
 
 // split the option string back to a map

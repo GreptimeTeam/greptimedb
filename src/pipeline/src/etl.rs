@@ -33,6 +33,7 @@ use crate::error::{
     AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
     YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::etl::processor::ProcessorKind;
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::GreptimeTransformer;
@@ -244,16 +245,22 @@ impl Pipeline {
 
         // do transform
         if let Some(transformer) = self.transformer() {
-            let (opt, row) = transformer.transform_mut(&mut val)?;
-            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
+            let (mut opt_map, row) = transformer.transform_mut(&mut val)?;
+            let table_suffix = opt_map.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
+
             Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                opt,
+                opt: opt_map.to_opt_string(),
                 row,
                 table_suffix,
                 pipeline_map: val,
             }))
         } else {
-            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
+            // check table suffix var
+            let table_suffix = val
+                .remove(TABLE_SUFFIX_KEY)
+                .map(|f| f.to_str_value())
+                .or_else(|| self.tablesuffix.as_ref().and_then(|t| t.apply(&val)));
+
             let mut ts_unit_map = HashMap::with_capacity(4);
             // get all ts values
             for (k, v) in val.iter() {

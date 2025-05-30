@@ -40,7 +40,7 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::{from_pipeline_map_to_opt, PipelineContext};
+use crate::{ContextOptMap, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -185,8 +185,8 @@ impl GreptimeTransformer {
         }
     }
 
-    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(String, Row)> {
-        let opt = from_pipeline_map_to_opt(pipeline_map);
+    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(ContextOptMap, Row)> {
+        let opt_map = ContextOptMap::from_pipeline_map_to_opt(pipeline_map);
 
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
@@ -219,7 +219,7 @@ impl GreptimeTransformer {
                 output_index += 1;
             }
         }
-        Ok((opt, Row { values }))
+        Ok((opt_map, Row { values }))
     }
 
     pub fn transforms(&self) -> &Transforms {
@@ -544,7 +544,7 @@ fn identity_pipeline_inner(
     let len = pipeline_maps.len();
 
     for mut pipeline_map in pipeline_maps {
-        let opt = from_pipeline_map_to_opt(&mut pipeline_map);
+        let opt = ContextOptMap::from_pipeline_map_to_opt(&mut pipeline_map).to_opt_string();
         let row = values_to_row(&mut schema_info, pipeline_map, pipeline_ctx)?;
 
         opt_map
