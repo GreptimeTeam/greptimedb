@@ -80,7 +80,7 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
             protocol: schema,
             url,
         }
-            .fail(),
+        .fail(),
     }
 }
 
