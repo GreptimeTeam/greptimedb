@@ -163,6 +163,10 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
+    pub(crate) fn target_count(&self) -> usize {
+        self.fields.len()
+    }
+
     fn parse(&self, val: &str) -> Result<Timestamp> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
