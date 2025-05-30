@@ -19,7 +19,7 @@ mod manager;
 mod metrics;
 mod tablesuffix;
 
-pub use etl::ctx_req::{from_pipeline_map_to_opt, ContextReq};
+pub use etl::ctx_req::{ContextOptMap, ContextReq};
 pub use etl::processor::Processor;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
 pub use etl::transform::transformer::identity_pipeline;
