@@ -18,8 +18,11 @@ use std::sync::Arc;
 use api::v1::column::Values;
 use api::v1::greptime_request::Request;
 use api::v1::value::ValueData;
-use api::v1::{Decimal128, InsertRequests, IntervalMonthDayNano, RowInsertRequests};
+use api::v1::{
+    Decimal128, InsertRequests, IntervalMonthDayNano, RowInsertRequest, RowInsertRequests,
+};
 use common_telemetry::{debug, warn};
+use pipeline::ContextReq;
 
 pub(crate) type LimiterRef = Arc<Limiter>;
 
@@ -75,7 +78,9 @@ impl Limiter {
     pub fn limit_request(&self, request: &Request) -> Option<InFlightWriteBytesCounter> {
         let size = match request {
             Request::Inserts(requests) => self.insert_requests_data_size(requests),
-            Request::RowInserts(requests) => self.rows_insert_requests_data_size(requests),
+            Request::RowInserts(requests) => {
+                self.rows_insert_requests_data_size(requests.inserts.iter())
+            }
             _ => 0,
         };
         self.limit_in_flight_write_bytes(size as u64)
@@ -85,7 +90,12 @@ impl Limiter {
         &self,
         requests: &RowInsertRequests,
     ) -> Option<InFlightWriteBytesCounter> {
-        let size = self.rows_insert_requests_data_size(requests);
+        let size = self.rows_insert_requests_data_size(requests.inserts.iter());
+        self.limit_in_flight_write_bytes(size as u64)
+    }
+
+    pub fn limit_ctx_req(&self, opt_req: &ContextReq) -> Option<InFlightWriteBytesCounter> {
+        let size = self.rows_insert_requests_data_size(opt_req.ref_all_req());
         self.limit_in_flight_write_bytes(size as u64)
     }
 
@@ -137,9 +147,12 @@ impl Limiter {
         size
     }
 
-    fn rows_insert_requests_data_size(&self, request: &RowInsertRequests) -> usize {
+    fn rows_insert_requests_data_size<'a>(
+        &self,
+        inserts: impl Iterator<Item = &'a RowInsertRequest>,
+    ) -> usize {
         let mut size: usize = 0;
-        for insert in &request.inserts {
+        for insert in inserts {
             if let Some(rows) = &insert.rows {
                 for row in &rows.rows {
                     for value in &row.values {

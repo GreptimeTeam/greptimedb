@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod context;
+pub mod hints;
 pub mod session_config;
 pub mod table_name;
 

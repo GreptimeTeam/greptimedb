@@ -40,7 +40,7 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::PipelineContext;
+use crate::{from_pipeline_map_to_opt, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -185,13 +185,15 @@ impl GreptimeTransformer {
         }
     }
 
-    pub fn transform_mut(&self, val: &mut PipelineMap) -> Result<Row> {
+    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(String, Row)> {
+        let opt = from_pipeline_map_to_opt(pipeline_map);
+
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
                 let index = field.input_field();
-                match val.get(index) {
+                match pipeline_map.get(index) {
                     Some(v) => {
                         let value_data = coerce_value(v, transform)?;
                         // every transform fields has only one output field
@@ -217,7 +219,7 @@ impl GreptimeTransformer {
                 output_index += 1;
             }
         }
-        Ok(Row { values })
+        Ok((opt, Row { values }))
     }
 
     pub fn transforms(&self) -> &Transforms {
@@ -517,8 +519,7 @@ fn resolve_value(
 fn identity_pipeline_inner(
     pipeline_maps: Vec<PipelineMap>,
     pipeline_ctx: &PipelineContext<'_>,
-) -> Result<(SchemaInfo, Vec<Row>)> {
-    let mut rows = Vec::with_capacity(pipeline_maps.len());
+) -> Result<(SchemaInfo, HashMap<String, Vec<Row>>)> {
     let mut schema_info = SchemaInfo::default();
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
@@ -539,20 +540,30 @@ fn identity_pipeline_inner(
         options: None,
     });
 
-    for values in pipeline_maps {
-        let row = values_to_row(&mut schema_info, values, pipeline_ctx)?;
-        rows.push(row);
+    let mut opt_map = HashMap::new();
+    let len = pipeline_maps.len();
+
+    for mut pipeline_map in pipeline_maps {
+        let opt = from_pipeline_map_to_opt(&mut pipeline_map);
+        let row = values_to_row(&mut schema_info, pipeline_map, pipeline_ctx)?;
+
+        opt_map
+            .entry(opt)
+            .or_insert_with(|| Vec::with_capacity(len))
+            .push(row);
     }
 
     let column_count = schema_info.schema.len();
-    for row in rows.iter_mut() {
-        let diff = column_count - row.values.len();
-        for _ in 0..diff {
-            row.values.push(GreptimeValue { value_data: None });
+    for (_, row) in opt_map.iter_mut() {
+        for row in row.iter_mut() {
+            let diff = column_count - row.values.len();
+            for _ in 0..diff {
+                row.values.push(GreptimeValue { value_data: None });
+            }
         }
     }
 
-    Ok((schema_info, rows))
+    Ok((schema_info, opt_map))
 }
 
 /// Identity pipeline for Greptime
@@ -567,7 +578,7 @@ pub fn identity_pipeline(
     array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
-) -> Result<Rows> {
+) -> Result<HashMap<String, Rows>> {
     let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
         array
             .into_iter()
@@ -577,7 +588,7 @@ pub fn identity_pipeline(
         array
     };
 
-    identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, rows)| {
+    identity_pipeline_inner(input, pipeline_ctx).map(|(mut schema, opt_map)| {
         if let Some(table) = table {
             let table_info = table.table_info();
             for tag_name in table_info.meta.row_key_column_names() {
@@ -586,10 +597,19 @@ pub fn identity_pipeline(
                 }
             }
         }
-        Rows {
-            schema: schema.schema,
-            rows,
-        }
+
+        opt_map
+            .into_iter()
+            .map(|(opt, rows)| {
+                (
+                    opt,
+                    Rows {
+                        schema: schema.schema.clone(),
+                        rows,
+                    },
+                )
+            })
+            .collect::<HashMap<String, Rows>>()
     })
 }
 
@@ -739,7 +759,9 @@ mod tests {
             ];
             let rows = identity_pipeline(json_array_to_map(array).unwrap(), None, &pipeline_ctx);
             assert!(rows.is_ok());
-            let rows = rows.unwrap();
+            let mut rows = rows.unwrap();
+            assert!(rows.len() == 1);
+            let rows = rows.remove("").unwrap();
             assert_eq!(rows.schema.len(), 8);
             assert_eq!(rows.rows.len(), 2);
             assert_eq!(8, rows.rows[0].values.len());
@@ -769,12 +791,16 @@ mod tests {
             let tag_column_names = ["name".to_string(), "address".to_string()];
 
             let rows = identity_pipeline_inner(json_array_to_map(array).unwrap(), &pipeline_ctx)
-                .map(|(mut schema, rows)| {
+                .map(|(mut schema, mut rows)| {
                     for name in tag_column_names {
                         if let Some(index) = schema.index.get(&name) {
                             schema.schema[*index].semantic_type = SemanticType::Tag as i32;
                         }
                     }
+
+                    assert!(rows.len() == 1);
+                    let rows = rows.remove("").unwrap();
+
                     Rows {
                         schema: schema.schema,
                         rows,
