@@ -339,6 +339,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
 
     let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
     assert_eq!(timezone[0].get::<String, usize>(0), "Asia/Shanghai");
+    let timezone = conn.fetch_all("SELECT @@session.time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "Asia/Shanghai");
     let timezone = conn.fetch_all("SELECT @@system_time_zone").await.unwrap();
     assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
     let _ = conn.execute("SET time_zone = 'UTC'").await.unwrap();
@@ -367,6 +369,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
     let _ = conn.execute("SET time_zone = '+08:00'").await.unwrap();
     let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
     assert_eq!(timezone[0].get::<String, usize>(0), "+08:00");
+    let timezone = conn.fetch_all("SELECT @@session.time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "+08:00");
 
     let rows2 = conn.fetch_all("select ts from demo").await.unwrap();
     // we use Utc here for format only
@@ -390,6 +394,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
         "2022-11-02T20:39:57.450Z"
     );
     let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "-07:00");
+    let timezone = conn.fetch_all("SELECT @@session.time_zone").await.unwrap();
     assert_eq!(timezone[0].get::<String, usize>(0), "-07:00");
 
     let _ = fe_mysql_server.shutdown().await;

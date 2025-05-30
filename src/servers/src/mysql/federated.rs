@@ -183,7 +183,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 
         // get value of variables from known sources or fallback to defaults
         let value = match var_as[0] {
-            "time_zone" => query_context.timezone().to_string(),
+            "session.time_zone" | "time_zone" => query_context.timezone().to_string(),
             "system_time_zone" => system_timezone_name(),
             _ => VAR_VALUES
                 .get(var_as[0])
