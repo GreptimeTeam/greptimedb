@@ -650,6 +650,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. schemas: {}",
+        schemas
+    ))]
+    MultiPipelineWithDiffSchema {
+        schemas: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The return value's length of the record batch does not match, see debug log for details"
+    ))]
+    RecordBatchLenNotMatch {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         #[snafu(implicit)]
@@ -750,7 +768,8 @@ impl ErrorExt for Error {
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
-            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            MultiPipelineWithDiffSchema { .. } => StatusCode::IllegalState,
+            BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),

@@ -29,6 +29,7 @@ use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RES
 use crate::table::PipelineTable;
 use crate::{GreptimePipelineParams, Pipeline, Value};
 
+mod pipeline_cache;
 pub mod pipeline_operator;
 pub mod table;
 pub mod util;

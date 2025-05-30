@@ -236,7 +236,7 @@ impl PipelineOperator {
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .insert_and_compile(&query_ctx.current_schema(), name, content_type, pipeline)
+            .insert_and_compile(name, content_type, pipeline)
             .inspect(|re| {
                 METRIC_PIPELINE_CREATE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])
@@ -259,7 +259,7 @@ impl PipelineOperator {
         let timer = Instant::now();
         self.get_pipeline_table_from_cache(query_ctx.current_catalog())
             .context(PipelineTableNotFoundSnafu)?
-            .delete_pipeline(&query_ctx.current_schema(), name, version)
+            .delete_pipeline(name, version)
             .inspect(|re| {
                 METRIC_PIPELINE_DELETE_HISTOGRAM
                     .with_label_values(&[&re.is_ok().to_string()])
