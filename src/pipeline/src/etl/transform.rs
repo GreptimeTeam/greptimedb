@@ -88,9 +88,10 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
     type Error = Error;
 
     fn try_from(docs: &Vec<yaml_rust::Yaml>) -> Result<Self> {
-        let mut transforms = Vec::with_capacity(100);
-        let mut all_output_keys: Vec<String> = Vec::with_capacity(100);
-        let mut all_required_keys = Vec::with_capacity(100);
+        let mut transforms = Vec::with_capacity(32);
+        let mut all_output_keys: Vec<String> = Vec::with_capacity(32);
+        let mut all_required_keys = Vec::with_capacity(32);
+
         for doc in docs {
             let transform_builder: Transform = doc
                 .as_hash()
@@ -123,15 +124,10 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 #[derive(Debug, Clone)]
 pub struct Transform {
     pub fields: Fields,
-
     pub type_: Value,
-
     pub default: Option<Value>,
-
     pub index: Option<Index>,
-
     pub tag: bool,
-
     pub on_failure: Option<OnFailure>,
 }
 
