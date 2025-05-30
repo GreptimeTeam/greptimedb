@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["__mock_MockExternalTempFileProvider","__mock_MockExternalTempFileProvider_ExternalTempFileProvider"],"struct":["MockExternalTempFileProvider","MockExternalTempFileProvider_ExternalTempFileProvider"],"trait":["ExternalTempFileProvider"],"type":["Reader","Writer"]};

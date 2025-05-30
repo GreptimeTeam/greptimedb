@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_recovered_region","get_object_store","new_manifest_dir","replay_memtable"],"struct":["RegionMetadataLoader","RegionOpener"]};

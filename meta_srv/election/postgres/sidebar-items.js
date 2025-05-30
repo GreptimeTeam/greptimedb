@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LEASE_SEP"],"fn":["parse_value_and_expire_time"],"struct":["ElectionSqlFactory","ElectionSqlSet","PgElection","PgLeaderKey"]};

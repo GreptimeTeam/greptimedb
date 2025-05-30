@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_BATCH_SIZE"],"fn":["build_csv_opener","build_json_opener","build_orc_opener","build_record_batch_stream","create_stream","new_csv_stream","new_json_stream","new_orc_stream","new_parquet_stream_with_exec_plan"],"struct":["CreateScanPlanContext","ScanPlanConfig"]};

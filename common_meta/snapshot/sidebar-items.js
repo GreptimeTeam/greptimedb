@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_REQUEST_SIZE"],"enum":["DataType","FileFormat"],"mod":["file"],"struct":["FileExtension","FileName","MetadataSnapshotManager"]};
