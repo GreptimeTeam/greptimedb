@@ -9,17 +9,6 @@ bind_addr = "127.0.0.1:3002"
 ## on the host, with the same port number as the one specified in `bind_addr`.
 server_addr = "127.0.0.1:3002"
 
-## The HTTP server options.
-[http]
-## The address to bind the HTTP server.
-addr = "127.0.0.1:4000"
-## HTTP request timeout. Set to 0 to disable timeout.
-timeout = "0s"
-## HTTP request body limit.
-## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
-## Set to 0 to disable limit.
-body_limit = "64MB"
-
 ## Store server address default to etcd store.
 ## For postgres store, the format is:
 ## "password=password dbname=postgres user=postgres host=localhost port=5432"
@@ -77,6 +66,17 @@ node_max_idle_time = "24hours"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
 
 ## Procedure storage options.
 [procedure]
