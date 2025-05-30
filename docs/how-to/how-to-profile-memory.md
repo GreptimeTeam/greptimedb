@@ -1,6 +1,6 @@
 # Profile memory usage of GreptimeDB
 
-This crate provides an easy approach to dump memory profiling info. A set of ready to use scripts is provided in [docs/how-to/memory-profile-scripts](./memory-profile-scripts).
+This crate provides an easy approach to dump memory profiling info. A set of ready to use scripts is provided in [docs/how-to/memory-profile-scripts](./memory-profile-scripts/scripts).
 
 ## Prerequisites
 ### jemalloc
