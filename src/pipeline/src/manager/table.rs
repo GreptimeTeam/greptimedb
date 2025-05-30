@@ -41,7 +41,7 @@ use table::TableRef;
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
-    MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, Result,
+    MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::pipeline_cache::PipelineCache;
@@ -539,17 +539,19 @@ impl PipelineTable {
             );
 
             ensure!(
-                pipeline_content.len() == 1
-                    && pipeline_schema.len() == 1
-                    && pipeline_created_at.len() == 1,
-                PipelineNotFoundSnafu { name, version }
+                pipeline_content.len() == pipeline_schema.len()
+                    && pipeline_schema.len() == pipeline_created_at.len(),
+                RecordBatchLenNotMatchSnafu
             );
 
-            re.push((
-                pipeline_content.get_data(0).unwrap().to_string(),
-                pipeline_schema.get_data(0).unwrap().to_string(),
-                pipeline_created_at.get_data(0).unwrap(),
-            ));
+            let len = pipeline_content.len();
+            for i in 0..len {
+                re.push((
+                    pipeline_content.get_data(i).unwrap().to_string(),
+                    pipeline_schema.get_data(i).unwrap().to_string(),
+                    pipeline_created_at.get_data(i).unwrap(),
+                ));
+            }
         }
 
         Ok(re)
