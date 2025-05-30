@@ -29,9 +29,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         serde_json::Value::Array(array) => {
             for value in array {
-                let mut intermediate_status = json_to_map(value).unwrap();
+                let intermediate_status = json_to_map(value).unwrap();
                 let row = pipeline
-                    .exec_mut(&mut intermediate_status)
+                    .exec_mut(intermediate_status)
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
@@ -39,9 +39,9 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
             }
         }
         serde_json::Value::Object(_) => {
-            let mut intermediate_status = json_to_map(input_value).unwrap();
+            let intermediate_status = json_to_map(input_value).unwrap();
             let row = pipeline
-                .exec_mut(&mut intermediate_status)
+                .exec_mut(intermediate_status)
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");

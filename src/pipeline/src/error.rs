@@ -412,13 +412,6 @@ pub enum Error {
         location: Location,
     },
     #[snafu(display(
-        "At least one timestamp-related processor is required to use auto transform"
-    ))]
-    TransformNoTimestampProcessor {
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display(
         "Illegal to set multiple timestamp Index columns, please set only one: {columns}"
     ))]
     TransformMultipleTimestampIndex {
@@ -433,7 +426,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Exactly one timestamp value is required to use auto transform"))]
+    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform"))]
     AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
@@ -686,6 +679,54 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to compile VRL, {}", msg))]
+    CompileVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute VRL, {}", msg))]
+    ExecuteVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Float is not a number: {}", input_float))]
+    FloatNaN {
+        input_float: f64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid timestamp value: {}", input))]
+    InvalidTimestamp {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert bytes to utf8"))]
+    BytesToUtf8 {
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Please don't use regex in Vrl script"))]
+    VrlRegexValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Vrl script should return `.` in the end"))]
+    VrlReturnValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType {
         msg: String,
@@ -832,7 +873,6 @@ impl ErrorExt for Error {
             | TransformTypeMustBeSet { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
-            | TransformNoTimestampProcessor { .. }
             | TransformTimestampIndexCount { .. }
             | AutoTransformOneTimestamp { .. }
             | CoerceUnsupportedNullType { .. }
@@ -866,6 +906,13 @@ impl ErrorExt for Error {
             | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
+            | CompileVrl { .. }
+            | ExecuteVrl { .. }
+            | FloatNaN { .. }
+            | BytesToUtf8 { .. }
+            | InvalidTimestamp { .. }
+            | VrlRegexValue { .. }
+            | VrlReturnValue { .. }
             | PipelineMissing { .. } => StatusCode::InvalidArguments,
         }
     }

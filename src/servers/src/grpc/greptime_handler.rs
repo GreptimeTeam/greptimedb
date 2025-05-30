@@ -38,6 +38,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 use tokio::sync::mpsc;
@@ -49,7 +50,6 @@ use crate::error::{
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
 use crate::grpc::TonicResult;
-use crate::hint_headers::READ_PREFERENCE_HINT;
 use crate::metrics;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;

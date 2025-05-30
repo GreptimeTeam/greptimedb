@@ -24,9 +24,9 @@ fn processor_mut(
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        let mut payload = json_to_map(v).unwrap();
+        let payload = json_to_map(v).unwrap();
         let r = pipeline
-            .exec_mut(&mut payload)?
+            .exec_mut(payload)?
             .into_transformed()
             .expect("expect transformed result ");
         result.push(r.0);

@@ -125,7 +125,7 @@ impl Processor for JsonPathProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
+    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -145,7 +145,7 @@ impl Processor for JsonPathProcessor {
                 }
             }
         }
-        Ok(())
+        Ok(val)
     }
 }
 

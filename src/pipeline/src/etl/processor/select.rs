@@ -96,7 +96,7 @@ impl Processor for SelectProcessor {
         true
     }
 
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
+    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
         match self.select_type {
             SelectType::Include => {
                 let mut include_key_set = HashSet::with_capacity(val.len());
@@ -121,7 +121,7 @@ impl Processor for SelectProcessor {
             }
         }
 
-        Ok(())
+        Ok(val)
     }
 }
 
@@ -142,8 +142,9 @@ mod test {
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(&mut p);
+        let result = processor.exec_mut(p);
         assert!(result.is_ok());
+        let p = result.unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello"), Some(&Value::String("world".to_string())));
     }
@@ -159,8 +160,9 @@ mod test {
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(&mut p);
+        let result = processor.exec_mut(p);
         assert!(result.is_ok());
+        let p = result.unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello3"), Some(&Value::String("world".to_string())));
     }
@@ -176,8 +178,9 @@ mod test {
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(&mut p);
+        let result = processor.exec_mut(p);
         assert!(result.is_ok());
+        let p = result.unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello"), None);
         assert_eq!(p.get("hello2"), Some(&Value::String("world2".to_string())));
