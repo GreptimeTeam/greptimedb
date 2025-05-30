@@ -22,6 +22,7 @@ use clap::{Parser, ValueEnum};
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use object_store::layers::LoggingLayer;
+use object_store::services::Oss;
 use object_store::{services, ObjectStore};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -149,20 +150,44 @@ pub struct ExportCommand {
     /// if s3 is set, this is required
     #[clap(long)]
     s3_region: Option<String>,
+
+    /// if export data to oss
+    #[clap(long)]
+    oss: bool,
+
+    /// The oss bucket name
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_bucket: Option<String>,
+
+    /// The oss endpoint
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_endpoint: Option<String>,
+
+    /// The oss access key id
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_access_key_id: Option<String>,
+
+    /// The oss access key secret
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_access_key_secret: Option<String>,
 }
 
 impl ExportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         if self.s3
             && (self.s3_bucket.is_none()
-                || self.s3_endpoint.is_none()
-                || self.s3_access_key.is_none()
-                || self.s3_secret_key.is_none()
-                || self.s3_region.is_none())
+            || self.s3_endpoint.is_none()
+            || self.s3_access_key.is_none()
+            || self.s3_secret_key.is_none()
+            || self.s3_region.is_none())
         {
             return Err(BoxedError::new(S3ConfigNotSetSnafu {}.build()));
         }
-        if !self.s3 && self.output_dir.is_none() {
+        if !self.s3 && !self.oss && self.output_dir.is_none() {
             return Err(BoxedError::new(OutputDirNotSetSnafu {}.build()));
         }
         let (catalog, schema) =
@@ -194,6 +219,11 @@ impl ExportCommand {
             s3_access_key: self.s3_access_key.clone(),
             s3_secret_key: self.s3_secret_key.clone(),
             s3_region: self.s3_region.clone(),
+            oss: self.oss,
+            oss_bucket: self.oss_bucket.clone(),
+            oss_endpoint: self.oss_endpoint.clone(),
+            oss_access_key_id: self.oss_access_key_id.clone(),
+            oss_access_key_secret: self.oss_access_key_secret.clone(),
         }))
     }
 }
@@ -216,6 +246,11 @@ pub struct Export {
     s3_access_key: Option<String>,
     s3_secret_key: Option<String>,
     s3_region: Option<String>,
+    oss: bool,
+    oss_bucket: Option<String>,
+    oss_endpoint: Option<String>,
+    oss_access_key_id: Option<String>,
+    oss_access_key_secret: Option<String>,
 }
 
 impl Export {
@@ -473,6 +508,8 @@ impl Export {
     async fn build_operator(&self) -> Result<ObjectStore> {
         if self.s3 {
             self.build_s3_operator().await
+        } else if self.oss {
+            self.build_oss_operator().await
         } else {
             self.build_fs_operator().await
         }
@@ -480,7 +517,6 @@ impl Export {
 
     /// build operator with preference for file system
     async fn build_prefer_fs_operator(&self) -> Result<ObjectStore> {
-        // is under s3 mode and s3_ddl_dir is set, use it as root
         if self.s3 && self.s3_ddl_local_dir.is_some() {
             let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
             let op = ObjectStore::new(services::Fs::default().root(&root))
@@ -490,6 +526,8 @@ impl Export {
             Ok(op)
         } else if self.s3 {
             self.build_s3_operator().await
+        } else if self.oss {
+            self.build_oss_operator().await
         } else {
             self.build_fs_operator().await
         }
@@ -520,6 +558,29 @@ impl Export {
 
         if let Some(secret_key) = self.s3_secret_key.as_ref() {
             builder = builder.secret_access_key(secret_key);
+        }
+
+        let op = ObjectStore::new(builder)
+            .context(OpenDalSnafu)?
+            .layer(LoggingLayer::default())
+            .finish();
+        Ok(op)
+    }
+
+    async fn build_oss_operator(&self) -> Result<ObjectStore> {
+        let mut builder = Oss::default()
+            .bucket(self.oss_bucket.as_ref().expect("oss_bucket must be set"))
+            .endpoint(
+                self.oss_endpoint
+                    .as_ref()
+                    .expect("oss_endpoint must be set"),
+            );
+
+        if let Some(key_id) = self.oss_access_key_id.as_ref() {
+            builder = builder.access_key_id(key_id);
+        }
+        if let Some(secret_key) = self.oss_access_key_secret.as_ref() {
+            builder = builder.access_key_secret(secret_key);
         }
 
         let op = ObjectStore::new(builder)
@@ -631,6 +692,13 @@ impl Export {
                 },
                 file_path
             )
+        } else if self.oss {
+            format!(
+                "oss://{}/{}/{}",
+                self.oss_bucket.as_ref().unwrap_or(&String::new()),
+                self.catalog,
+                file_path
+            )
         } else {
             format!(
                 "{}/{}",
@@ -684,6 +752,25 @@ impl Export {
             );
 
             (s3_path, format!(" CONNECTION ({})", connection_options))
+        } else if self.oss {
+            let oss_path = format!(
+                "oss://{}/{}/{}/",
+                self.oss_bucket.as_ref().unwrap(),
+                self.catalog,
+                schema
+            );
+            let endpoint_option = if let Some(endpoint) = self.oss_endpoint.as_ref() {
+                format!(", ENDPOINT='{}'", endpoint)
+            } else {
+                String::new()
+            };
+            let connection_options = format!(
+                "ACCESS_KEY_ID='{}', ACCESS_KEY_SECRET='{}'{}",
+                self.oss_access_key_id.as_ref().unwrap(),
+                self.oss_access_key_secret.as_ref().unwrap(),
+                endpoint_option
+            );
+            (oss_path, format!(" CONNECTION ({})", connection_options))
         } else {
             (
                 self.catalog_path()
