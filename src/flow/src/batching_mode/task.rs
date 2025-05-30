@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -40,20 +41,22 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use tokio::select;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::TaskState;
+use crate::batching_mode::state::{DirtyTimeWindows, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
     FindGroupByFinalName,
 };
 use crate::batching_mode::{
-    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD,
+    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MAX_PARALLEL_QUERIES_PER_FLOW, MIN_REFRESH_DURATION,
+    SLOW_QUERY_THRESHOLD,
 };
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
@@ -112,6 +115,7 @@ enum QueryType {
 pub struct BatchingTask {
     pub config: Arc<TaskConfig>,
     pub state: Arc<RwLock<TaskState>>,
+    pub running_query_cnt: Arc<AtomicUsize>,
 }
 
 impl BatchingTask {
@@ -141,6 +145,7 @@ impl BatchingTask {
                 query_type: determine_query_type(query, &query_ctx)?,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
+            running_query_cnt: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -429,16 +434,63 @@ impl BatchingTask {
                 }
             }
 
-            let mut new_query = None;
-            let mut gen_and_exec = async || {
-                new_query = self.gen_insert_plan(&engine).await?;
-                if let Some(new_query) = &new_query {
-                    self.execute_logical_plan(&frontend_client, new_query).await
+            let query_cnt = self
+                .running_query_cnt
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if query_cnt >= MAX_PARALLEL_QUERIES_PER_FLOW {
+                warn!(
+                    "Flow id = {:?} has too many running queries: {}, skip this round",
+                    self.config.flow_id, query_cnt
+                );
+                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                continue;
+            }
+
+            let new_query = match self.gen_insert_plan(&engine).await {
+                Ok(new_query) => new_query,
+                Err(err) => {
+                    common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
+                    // also sleep for a little while before try again to prevent flooding logs
+                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    continue;
+                }
+            };
+            let new_query_inner = new_query.clone();
+            let zelf = self.clone();
+            let fe_client = frontend_client.clone();
+            let gen_and_exec = async move || {
+                if let Some(new_query) = &new_query_inner {
+                    zelf.running_query_cnt
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let res = zelf.execute_logical_plan(&fe_client, new_query).await;
+                    zelf.running_query_cnt
+                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    res
                 } else {
                     Ok(None)
                 }
             };
-            match gen_and_exec().await {
+            let handle = tokio::task::spawn(async move {
+                // TODO(discord9): should we use tokio::time::timeout here?
+                gen_and_exec().await
+            });
+            let timeout = tokio::time::sleep(SLOW_QUERY_THRESHOLD);
+
+            let res = select! {
+                res = handle => res.unwrap(),
+                _ = timeout => {
+                    // if timeout, just warn and continue to next query
+                    // TODO(discord9): put it into some kind of slow query pool?
+                    warn!(
+                        "Flow id = {:?} query execution timeout after {:?}, query: {}",
+                        self.config.flow_id, SLOW_QUERY_THRESHOLD, new_query.as_ref().map(|q| q.to_string()).unwrap_or_default()
+                    );
+                    continue;
+                }
+            };
+
+            // TODO: try execute, if too slow, put it in a pool if the pool is not full, and continue to next query?
+            match res {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     let sleep_until = {
@@ -583,6 +635,7 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
+                DirtyTimeWindows::MAX_FILTER_NUM,
                 self.config.flow_id,
                 Some(self),
             )?;
