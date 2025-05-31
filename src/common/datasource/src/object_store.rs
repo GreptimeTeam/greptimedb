@@ -13,7 +13,9 @@
 // limitations under the License.
 
 pub mod fs;
+pub mod oss;
 pub mod s3;
+
 use std::collections::HashMap;
 
 use lazy_static::lazy_static;
@@ -25,10 +27,12 @@ use url::{ParseError, Url};
 use self::fs::build_fs_backend;
 use self::s3::build_s3_backend;
 use crate::error::{self, Result};
+use crate::object_store::oss::build_oss_backend;
 use crate::util::find_dir_and_filename;
 
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
+pub const OSS_SCHEMA: &str = "OSS";
 
 /// Returns `(schema, Option<host>, path)`
 pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
@@ -63,6 +67,12 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
                 url: url.to_string(),
             })?;
             Ok(build_s3_backend(&host, &root, connection)?)
+        }
+        OSS_SCHEMA => {
+            let host = host.context(error::EmptyHostPathSnafu {
+                url: url.to_string(),
+            })?;
+            Ok(build_oss_backend(&host, &root, connection)?)
         }
         FS_SCHEMA => Ok(build_fs_backend(&root)?),
 
