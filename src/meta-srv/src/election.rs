@@ -117,13 +117,11 @@ fn send_leader_change_and_set_flags(
     tx: &Sender<LeaderChangeMessage>,
     msg: LeaderChangeMessage,
 ) {
-    let is_elected = match msg {
-        LeaderChangeMessage::Elected(_) => true,
-        LeaderChangeMessage::StepDown(_) => false,
-    };
-    let ret =
-        is_leader.compare_exchange(!is_elected, is_elected, Ordering::AcqRel, Ordering::Acquire);
-    if ret.is_ok() {
+    let is_elected = matches!(msg, LeaderChangeMessage::Elected(_));
+    if is_leader
+        .compare_exchange(!is_elected, is_elected, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         if is_elected {
             leader_infancy.store(true, Ordering::Relaxed);
         }
