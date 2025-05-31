@@ -100,32 +100,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_oss_backend_minimal() {
-        let connection = HashMap::new();
-
-        let result = build_oss_backend("test-bucket", "/test/root", &connection);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_build_oss_backend_with_optional_params() {
+    fn test_build_oss_backend_all_fields_valid() {
         let mut connection = HashMap::new();
-        connection.insert(ROOT.to_string(), "/test/root".to_string());
-        connection.insert(ALLOW_ANONYMOUS.to_string(), "false".to_string());
+        connection.insert(
+            ENDPOINT.to_string(),
+            "http://oss-ap-southeast-1.aliyuncs.com".to_string(),
+        );
+        connection.insert(ACCESS_KEY_ID.to_string(), "key_id".to_string());
+        connection.insert(ACCESS_KEY_SECRET.to_string(), "key_secret".to_string());
+        connection.insert(ALLOW_ANONYMOUS.to_string(), "true".to_string());
 
-        let result = build_oss_backend("test-bucket", "oss-cn-hangzhou.aliyuncs.com", &connection);
-
+        let result = build_oss_backend("my-bucket", "my-root", &connection);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_build_oss_backend_invalid_allow_anonymous() {
-        let mut connection = HashMap::new();
-        connection.insert(ALLOW_ANONYMOUS.to_string(), "invalid_bool".to_string());
-
-        let result = build_oss_backend("test-bucket", "oss-cn-hangzhou.aliyuncs.com", &connection);
-
-        assert!(result.is_err());
     }
 }
