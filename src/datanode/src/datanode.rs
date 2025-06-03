@@ -559,6 +559,7 @@ async fn open_all_regions(
     init_regions_parallelism: usize,
 ) -> Result<()> {
     let mut regions = vec![];
+    #[cfg(feature = "enterprise")]
     let mut follower_regions = vec![];
     for table_value in table_values {
         for region_number in table_value.regions {
@@ -578,6 +579,7 @@ async fn open_all_regions(
             ));
         }
 
+        #[cfg(feature = "enterprise")]
         for region_number in table_value.follower_regions {
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();
@@ -636,6 +638,7 @@ async fn open_all_regions(
         }
     }
 
+    #[cfg(feature = "enterprise")]
     if !follower_regions.is_empty() {
         info!(
             "going to open {} follower region(s)",
