@@ -118,7 +118,6 @@ impl StatementExecutor {
         &self,
         table_name: TableName,
         table: TableRef,
-        query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let table_info = table.table_info();
         if table_info.table_type != TableType::Base {
@@ -150,7 +149,7 @@ impl StatementExecutor {
 
         let partitions = create_partitions_stmt(partitions)?;
 
-        query::sql::show_create_table(table, schema_options, partitions, query_ctx)
+        query::sql::show_create_table(table, schema_options, partitions)
             .context(ExecuteStatementSnafu)
     }
 
@@ -159,7 +158,6 @@ impl StatementExecutor {
         &self,
         table_name: TableName,
         table: TableRef,
-        query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let table_info = table.table_info();
         if table_info.table_type != TableType::Base {
@@ -170,8 +168,7 @@ impl StatementExecutor {
             .fail();
         }
 
-        query::sql::show_create_foreign_table_for_pg(table, query_ctx)
-            .context(ExecuteStatementSnafu)
+        query::sql::show_create_foreign_table_for_pg(table).context(ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

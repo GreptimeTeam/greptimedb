@@ -784,12 +784,11 @@ pub fn show_create_table(
     table: TableRef,
     schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
-    _query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
 
-    // Always use backquotes for identifiers in SHOW CREATE TABLE, regardless of dialect
+    // Always use backquotes for identifiers in SHOW CREATE TABLE for better compatibility, regardless of dialect
     let quote_style = '`';
 
     let mut stmt = create_table_stmt(&table_info, schema_options, quote_style)?;
@@ -808,10 +807,7 @@ pub fn show_create_table(
     Ok(Output::new_with_record_batches(records))
 }
 
-pub fn show_create_foreign_table_for_pg(
-    table: TableRef,
-    _query_ctx: QueryContextRef,
-) -> Result<Output> {
+pub fn show_create_foreign_table_for_pg(table: TableRef) -> Result<Output> {
     let table_info = table.table_info();
 
     let table_meta = &table_info.meta;

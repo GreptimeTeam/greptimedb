@@ -341,12 +341,10 @@ impl StatementExecutor {
 
                 match show.variant {
                     ShowCreateTableVariant::Original => {
-                        self.show_create_table(table_name, table_ref, query_ctx)
-                            .await
+                        self.show_create_table(table_name, table_ref).await
                     }
                     ShowCreateTableVariant::PostgresForeignTable => {
-                        self.show_create_table_for_pg(table_name, table_ref, query_ctx)
-                            .await
+                        self.show_create_table_for_pg(table_name, table_ref).await
                     }
                 }
             }
