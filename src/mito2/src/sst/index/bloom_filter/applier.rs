@@ -72,7 +72,7 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    predicates: Arc<BTreeMap<ColumnId, InListPredicate>>,
 
     /// Predicate key. Used to identify the predicate and fetch result from cache.
     predicate_key: PredicateKey,
@@ -87,7 +87,7 @@ impl BloomFilterIndexApplier {
         region_id: RegionId,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+        predicates: BTreeMap<ColumnId, InListPredicate>,
     ) -> Self {
         let predicates = Arc::new(predicates);
         Self {
@@ -310,7 +310,7 @@ impl BloomFilterIndexApplier {
     async fn apply_predicates<R: BloomFilterReader + Send + 'static>(
         &self,
         reader: R,
-        predicates: &[InListPredicate],
+        predicates: &InListPredicate,
         output: &mut [(usize, Vec<Range<usize>>)],
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
@@ -321,7 +321,7 @@ impl BloomFilterIndexApplier {
                 continue;
             }
 
-            *row_group_output = applier.search(predicates, row_group_output).await?;
+            *row_group_output = applier.search(&[predicates], row_group_output).await?;
         }
 
         Ok(())

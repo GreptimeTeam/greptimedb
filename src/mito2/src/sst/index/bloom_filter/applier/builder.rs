@@ -44,7 +44,7 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+    predicates: BTreeMap<ColumnId, InListPredicate>,
 }
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
@@ -115,13 +115,12 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     fn traverse_and_collect(&mut self, expr: &Expr) {
         let res = match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
-                Operator::And => {
+                Operator::And | Operator::Or => {
                     self.traverse_and_collect(left);
                     self.traverse_and_collect(right);
                     Ok(())
                 }
                 Operator::Eq => self.collect_eq(left, right),
-                Operator::Or => self.collect_or_eq_list(left, right),
                 _ => Ok(()),
             },
             Expr::InList(in_list) => self.collect_in_list(in_list),
@@ -152,6 +151,10 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     }
 
     /// Collects an equality expression (column = value)
+    ///
+    /// Notice that scenarios like `A = 'a' AND A = 'b'` is short-circuited by the optimizer,
+    /// we can assume they don't exist at this level. So always push them into `InList` predicates
+    /// is safe here.
     fn collect_eq(&mut self, left: &Expr, right: &Expr) -> Result<()> {
         let Some((col, lit)) = Self::eq_expr_col_lit(left, right)? else {
             return Ok(());
@@ -166,9 +169,8 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         self.predicates
             .entry(column_id)
             .or_default()
-            .push(InListPredicate {
-                list: BTreeSet::from([value]),
-            });
+            .list
+            .insert(value);
 
         Ok(())
     }
@@ -209,89 +211,11 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             self.predicates
                 .entry(column_id)
                 .or_default()
-                .push(InListPredicate {
-                    list: valid_predicates,
-                });
+                .list
+                .extend(valid_predicates);
         }
 
         Ok(())
-    }
-
-    /// Collects an or expression in the form of `column = lit OR column = lit OR ...`.
-    fn collect_or_eq_list(&mut self, left: &Expr, right: &Expr) -> Result<()> {
-        let (eq_left, eq_right, or_list) = if let Expr::BinaryExpr(BinaryExpr {
-            left: l,
-            op: Operator::Eq,
-            right: r,
-        }) = left
-        {
-            (l, r, right)
-        } else if let Expr::BinaryExpr(BinaryExpr {
-            left: l,
-            op: Operator::Eq,
-            right: r,
-        }) = right
-        {
-            (l, r, left)
-        } else {
-            return Ok(());
-        };
-
-        let Some((col, lit)) = Self::eq_expr_col_lit(eq_left, eq_right)? else {
-            return Ok(());
-        };
-        if lit.is_null() {
-            return Ok(());
-        }
-        let Some((column_id, data_type)) = self.column_id_and_type(&col.name)? else {
-            return Ok(());
-        };
-
-        let mut inlist = BTreeSet::new();
-        inlist.insert(encode_lit(lit, data_type.clone())?);
-        if Self::collect_or_eq_list_rec(&col.name, &data_type, or_list, &mut inlist)? {
-            self.predicates
-                .entry(column_id)
-                .or_default()
-                .push(InListPredicate { list: inlist });
-        }
-
-        Ok(())
-    }
-
-    fn collect_or_eq_list_rec(
-        column_name: &str,
-        data_type: &ConcreteDataType,
-        expr: &Expr,
-        inlist: &mut BTreeSet<Bytes>,
-    ) -> Result<bool> {
-        if let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr {
-            match op {
-                Operator::Or => {
-                    let r = Self::collect_or_eq_list_rec(column_name, data_type, left, inlist)?
-                        .then(|| {
-                            Self::collect_or_eq_list_rec(column_name, data_type, right, inlist)
-                        })
-                        .transpose()?
-                        .unwrap_or(false);
-                    return Ok(r);
-                }
-                Operator::Eq => {
-                    let Some((col, lit)) = Self::eq_expr_col_lit(left, right)? else {
-                        return Ok(false);
-                    };
-                    if lit.is_null() || column_name != col.name {
-                        return Ok(false);
-                    }
-                    let bytes = encode_lit(lit, data_type.clone())?;
-                    inlist.insert(bytes);
-                    return Ok(true);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(false)
     }
 
     /// Helper function to get non-null literal value
@@ -406,14 +330,14 @@ mod tests {
         assert_eq!(predicates.len(), 1);
 
         let column_predicates = predicates.get(&1).unwrap();
-        assert_eq!(column_predicates.len(), 1);
+        assert_eq!(column_predicates.list.len(), 1);
 
         let expected = encode_lit(
             &ScalarValue::Utf8(Some("value1".to_string())),
             ConcreteDataType::string_datatype(),
         )
         .unwrap();
-        assert_eq!(column_predicates[0].list, BTreeSet::from([expected]));
+        assert_eq!(column_predicates.list, BTreeSet::from([expected]));
     }
 
     fn int64_lit(i: i64) -> Expr {
@@ -442,8 +366,7 @@ mod tests {
 
         let predicates = result.unwrap().predicates;
         let column_predicates = predicates.get(&2).unwrap();
-        assert_eq!(column_predicates.len(), 1);
-        assert_eq!(column_predicates[0].list.len(), 3);
+        assert_eq!(column_predicates.list.len(), 3);
     }
 
     #[test]
@@ -471,9 +394,8 @@ mod tests {
 
         let predicates = result.unwrap().predicates;
         let column_predicates = predicates.get(&1).unwrap();
-        assert_eq!(column_predicates.len(), 1);
-        assert_eq!(column_predicates[0].list.len(), 4);
-        let or_chain_predicates = &column_predicates[0].list;
+        assert_eq!(column_predicates.list.len(), 4);
+        let or_chain_predicates = &column_predicates.list;
         let encode_str = |s: &str| {
             encode_lit(
                 &ScalarValue::Utf8(Some(s.to_string())),
@@ -495,15 +417,17 @@ mod tests {
         let expr = col("column1")
             .eq(lit("value1"))
             .or(col("column2").eq(lit("value2")));
-        let result = builder().build(&[expr]).unwrap();
-        assert!(result.is_none());
+        let result = builder().build(&[expr]).unwrap().unwrap();
+        assert_eq!(result.predicates.len(), 1); // column2's datatype doesn't match
+        assert_eq!(result.predicates.get(&1).unwrap().list.len(), 1);
 
         // Test with non or chain
         let expr = col("column1")
             .eq(lit("value1"))
             .or(col("column1").gt_eq(lit("value2")));
-        let result = builder().build(&[expr]).unwrap();
-        assert!(result.is_none());
+        let result = builder().build(&[expr]).unwrap().unwrap();
+        assert_eq!(result.predicates.len(), 1);
+        assert_eq!(result.predicates.get(&1).unwrap().list.len(), 1); // gt_eq is not supported
     }
 
     #[test]
@@ -572,7 +496,7 @@ mod tests {
         let predicates = result.unwrap().predicates;
         assert!(!predicates.contains_key(&1)); // Null equality should be ignored
         let column2_predicates = predicates.get(&2).unwrap();
-        assert_eq!(column2_predicates[0].list.len(), 2);
+        assert_eq!(column2_predicates.list.len(), 2);
     }
 
     #[test]
@@ -638,6 +562,6 @@ mod tests {
 
         let predicates = result.unwrap().predicates;
         let column_predicates = predicates.get(&1).unwrap();
-        assert_eq!(column_predicates.len(), 2);
+        assert_eq!(column_predicates.list.len(), 3);
     }
 }
