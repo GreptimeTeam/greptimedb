@@ -37,10 +37,10 @@ SHOW CREATE TABLE fox;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" (  |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   "fox" STRING NULL INVERTED INDEX, |
-|       |   TIME INDEX ("ts")                 |
+| fox   | CREATE TABLE IF NOT EXISTS `fox` (  |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   `fox` STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX (`ts`)                 |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -53,10 +53,10 @@ SHOW CREATE TABLE fox;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" (  |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   "fox" STRING NULL INVERTED INDEX, |
-|       |   TIME INDEX ("ts")                 |
+| fox   | CREATE TABLE IF NOT EXISTS `fox` (  |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   `fox` STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX (`ts`)                 |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -81,10 +81,10 @@ SHOW CREATE TABLE fox;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "fox" STRING NULL,               |
-|       |   TIME INDEX ("ts")                |
+| fox   | CREATE TABLE IF NOT EXISTS `fox` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `fox` STRING NULL,               |
+|       |   TIME INDEX (`ts`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -97,10 +97,10 @@ SHOW CREATE TABLE fox;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| fox   | CREATE TABLE IF NOT EXISTS "fox" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "fox" STRING NULL,               |
-|       |   TIME INDEX ("ts")                |
+| fox   | CREATE TABLE IF NOT EXISTS `fox` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `fox` STRING NULL,               |
+|       |   TIME INDEX (`ts`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |

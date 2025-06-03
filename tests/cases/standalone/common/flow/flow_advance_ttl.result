@@ -33,11 +33,11 @@ SHOW CREATE TABLE distinct_basic;
 +----------------+-----------------------------------------------------------+
 | Table          | Create Table                                              |
 +----------------+-----------------------------------------------------------+
-| distinct_basic | CREATE TABLE IF NOT EXISTS "distinct_basic" (             |
-|                |   "number" INT NULL,                                      |
-|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX ("ts"),                                      |
-|                |   PRIMARY KEY ("number")                                  |
+| distinct_basic | CREATE TABLE IF NOT EXISTS `distinct_basic` (             |
+|                |   `number` INT NULL,                                      |
+|                |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX (`ts`),                                      |
+|                |   PRIMARY KEY (`number`)                                  |
 |                | )                                                         |
 |                |                                                           |
 |                | ENGINE=mito                                               |
@@ -51,12 +51,12 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | Table              | Create Table                                      |
 +--------------------+---------------------------------------------------+
-| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
-|                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
-|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
-|                    |   TIME INDEX ("__ts_placeholder"),                |
-|                    |   PRIMARY KEY ("dis")                             |
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS `out_distinct_basic` ( |
+|                    |   `dis` INT NULL,                                 |
+|                    |   `update_at` TIMESTAMP(3) NULL,                  |
+|                    |   `__ts_placeholder` TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX (`__ts_placeholder`),                |
+|                    |   PRIMARY KEY (`dis`)                             |
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
@@ -215,11 +215,11 @@ SHOW CREATE TABLE distinct_basic;
 +----------------+-----------------------------------------------------------+
 | Table          | Create Table                                              |
 +----------------+-----------------------------------------------------------+
-| distinct_basic | CREATE TABLE IF NOT EXISTS "distinct_basic" (             |
-|                |   "number" INT NULL,                                      |
-|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX ("ts"),                                      |
-|                |   PRIMARY KEY ("number")                                  |
+| distinct_basic | CREATE TABLE IF NOT EXISTS `distinct_basic` (             |
+|                |   `number` INT NULL,                                      |
+|                |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX (`ts`),                                      |
+|                |   PRIMARY KEY (`number`)                                  |
 |                | )                                                         |
 |                |                                                           |
 |                | ENGINE=mito                                               |
@@ -233,12 +233,12 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | Table              | Create Table                                      |
 +--------------------+---------------------------------------------------+
-| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
-|                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
-|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
-|                    |   TIME INDEX ("__ts_placeholder"),                |
-|                    |   PRIMARY KEY ("dis")                             |
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS `out_distinct_basic` ( |
+|                    |   `dis` INT NULL,                                 |
+|                    |   `update_at` TIMESTAMP(3) NULL,                  |
+|                    |   `__ts_placeholder` TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX (`__ts_placeholder`),                |
+|                    |   PRIMARY KEY (`dis`)                             |
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |

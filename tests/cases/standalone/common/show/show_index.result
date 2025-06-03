@@ -41,13 +41,13 @@ show create table test_no_inverted_index;
 +------------------------+-------------------------------------------------------------------------------+
 | Table                  | Create Table                                                                  |
 +------------------------+-------------------------------------------------------------------------------+
-| test_no_inverted_index | CREATE TABLE IF NOT EXISTS "test_no_inverted_index" (                         |
-|                        |   "a" STRING NULL,                                                            |
-|                        |   "b" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'), |
-|                        |   "c" DOUBLE NULL,                                                            |
-|                        |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),                     |
-|                        |   TIME INDEX ("ts"),                                                          |
-|                        |   PRIMARY KEY ("a", "b")                                                      |
+| test_no_inverted_index | CREATE TABLE IF NOT EXISTS `test_no_inverted_index` (                         |
+|                        |   `a` STRING NULL,                                                            |
+|                        |   `b` STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'), |
+|                        |   `c` DOUBLE NULL,                                                            |
+|                        |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),                     |
+|                        |   TIME INDEX (`ts`),                                                          |
+|                        |   PRIMARY KEY (`a`, `b`)                                                      |
 |                        | )                                                                             |
 |                        |                                                                               |
 |                        | ENGINE=mito                                                                   |

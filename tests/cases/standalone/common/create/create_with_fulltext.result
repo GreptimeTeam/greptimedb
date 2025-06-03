@@ -10,10 +10,10 @@ SHOW CREATE TABLE log;
 +-------+-------------------------------------------------------------------------------------------------------------+
 | Table | Create Table                                                                                                |
 +-------+-------------------------------------------------------------------------------------------------------------+
-| log   | CREATE TABLE IF NOT EXISTS "log" (                                                                          |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                               |
-|       |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'), |
-|       |   TIME INDEX ("ts")                                                                                         |
+| log   | CREATE TABLE IF NOT EXISTS `log` (                                                                          |
+|       |   `ts` TIMESTAMP(3) NOT NULL,                                                                               |
+|       |   `msg` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'), |
+|       |   TIME INDEX (`ts`)                                                                                         |
 |       | )                                                                                                           |
 |       |                                                                                                             |
 |       | ENGINE=mito                                                                                                 |
@@ -36,10 +36,10 @@ SHOW CREATE TABLE log_with_opts;
 +---------------+------------------------------------------------------------------------------------------------------------+
 | Table         | Create Table                                                                                               |
 +---------------+------------------------------------------------------------------------------------------------------------+
-| log_with_opts | CREATE TABLE IF NOT EXISTS "log_with_opts" (                                                               |
-|               |   "ts" TIMESTAMP(3) NOT NULL,                                                                              |
-|               |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'true'), |
-|               |   TIME INDEX ("ts")                                                                                        |
+| log_with_opts | CREATE TABLE IF NOT EXISTS `log_with_opts` (                                                               |
+|               |   `ts` TIMESTAMP(3) NOT NULL,                                                                              |
+|               |   `msg` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'true'), |
+|               |   TIME INDEX (`ts`)                                                                                        |
 |               | )                                                                                                          |
 |               |                                                                                                            |
 |               | ENGINE=mito                                                                                                |
@@ -63,11 +63,11 @@ SHOW CREATE TABLE log_multi_fulltext_cols;
 +-------------------------+--------------------------------------------------------------------------------------------------------------+
 | Table                   | Create Table                                                                                                 |
 +-------------------------+--------------------------------------------------------------------------------------------------------------+
-| log_multi_fulltext_cols | CREATE TABLE IF NOT EXISTS "log_multi_fulltext_cols" (                                                       |
-|                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                |
-|                         |   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),  |
-|                         |   "msg2" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'), |
-|                         |   TIME INDEX ("ts")                                                                                          |
+| log_multi_fulltext_cols | CREATE TABLE IF NOT EXISTS `log_multi_fulltext_cols` (                                                       |
+|                         |   `ts` TIMESTAMP(3) NOT NULL,                                                                                |
+|                         |   `msg` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),  |
+|                         |   `msg2` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'), |
+|                         |   TIME INDEX (`ts`)                                                                                          |
 |                         | )                                                                                                            |
 |                         |                                                                                                              |
 |                         | ENGINE=mito                                                                                                  |

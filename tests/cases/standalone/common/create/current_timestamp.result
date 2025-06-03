@@ -7,9 +7,9 @@ show create table t1;
 +-------+-----------------------------------------------------------+
 | Table | Create Table                                              |
 +-------+-----------------------------------------------------------+
-| t1    | CREATE TABLE IF NOT EXISTS "t1" (                         |
-|       |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|       |   TIME INDEX ("ts")                                       |
+| t1    | CREATE TABLE IF NOT EXISTS `t1` (                         |
+|       |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|       |   TIME INDEX (`ts`)                                       |
 |       | )                                                         |
 |       |                                                           |
 |       | ENGINE=mito                                               |
@@ -25,9 +25,9 @@ show create table t2;
 +-------+-----------------------------------------------------------+
 | Table | Create Table                                              |
 +-------+-----------------------------------------------------------+
-| t2    | CREATE TABLE IF NOT EXISTS "t2" (                         |
-|       |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|       |   TIME INDEX ("ts")                                       |
+| t2    | CREATE TABLE IF NOT EXISTS `t2` (                         |
+|       |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|       |   TIME INDEX (`ts`)                                       |
 |       | )                                                         |
 |       |                                                           |
 |       | ENGINE=mito                                               |
@@ -43,9 +43,9 @@ show create table t3;
 +-------+---------------------------------------------+
 | Table | Create Table                                |
 +-------+---------------------------------------------+
-| t3    | CREATE TABLE IF NOT EXISTS "t3" (           |
-|       |   "ts" TIMESTAMP(3) NOT NULL DEFAULT now(), |
-|       |   TIME INDEX ("ts")                         |
+| t3    | CREATE TABLE IF NOT EXISTS `t3` (           |
+|       |   `ts` TIMESTAMP(3) NOT NULL DEFAULT now(), |
+|       |   TIME INDEX (`ts`)                         |
 |       | )                                           |
 |       |                                             |
 |       | ENGINE=mito                                 |

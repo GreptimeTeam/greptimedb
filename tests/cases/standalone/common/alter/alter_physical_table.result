@@ -19,12 +19,12 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "a_label" STRING NULL,           |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("a_label")          |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   `a_label` STRING NULL,           |
+|       |   TIME INDEX (`ts`),               |
+|       |   PRIMARY KEY (`a_label`)          |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -43,12 +43,12 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "a_label" STRING NULL,           |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("a_label")          |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   `a_label` STRING NULL,           |
+|       |   TIME INDEX (`ts`),               |
+|       |   PRIMARY KEY (`a_label`)          |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -66,12 +66,12 @@ SHOW CREATE TABLE phy;
 +-------+-----------------------------------------+
 | Table | Create Table                            |
 +-------+-----------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" (      |
-|       |   "ts" TIMESTAMP(3) NOT NULL,           |
-|       |   "val" DOUBLE NULL,                    |
-|       |   "a_label" STRING NULL INVERTED INDEX, |
-|       |   TIME INDEX ("ts"),                    |
-|       |   PRIMARY KEY ("a_label")               |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` (      |
+|       |   `ts` TIMESTAMP(3) NOT NULL,           |
+|       |   `val` DOUBLE NULL,                    |
+|       |   `a_label` STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX (`ts`),                    |
+|       |   PRIMARY KEY (`a_label`)               |
 |       | )                                       |
 |       |                                         |
 |       | ENGINE=metric                           |
@@ -89,12 +89,12 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "a_label" STRING NULL,           |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("a_label")          |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   `a_label` STRING NULL,           |
+|       |   TIME INDEX (`ts`),               |
+|       |   PRIMARY KEY (`a_label`)          |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |

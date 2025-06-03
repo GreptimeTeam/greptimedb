@@ -165,9 +165,9 @@ mod tests {
             .join("cli.export.create_table")
             .join("create_tables.sql");
         let res = std::fs::read_to_string(output_file).unwrap();
-        let expect = r#"CREATE TABLE IF NOT EXISTS "a.b.c" (
-  "ts" TIMESTAMP(3) NOT NULL,
-  TIME INDEX ("ts")
+        let expect = r#"CREATE TABLE IF NOT EXISTS `a.b.c` (
+  `ts` TIMESTAMP(3) NOT NULL,
+  TIME INDEX (`ts`)
 )
 
 ENGINE=mito

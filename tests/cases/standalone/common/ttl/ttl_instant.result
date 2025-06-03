@@ -11,11 +11,11 @@ SHOW CREATE TABLE test_ttl;
 +----------+-----------------------------------------+
 | Table    | Create Table                            |
 +----------+-----------------------------------------+
-| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
-|          |   "ts" TIMESTAMP(3) NOT NULL,           |
-|          |   "val" INT NULL,                       |
-|          |   TIME INDEX ("ts"),                    |
-|          |   PRIMARY KEY ("val")                   |
+| test_ttl | CREATE TABLE IF NOT EXISTS `test_ttl` ( |
+|          |   `ts` TIMESTAMP(3) NOT NULL,           |
+|          |   `val` INT NULL,                       |
+|          |   TIME INDEX (`ts`),                    |
+|          |   PRIMARY KEY (`val`)                   |
 |          | )                                       |
 |          |                                         |
 |          | ENGINE=mito                             |
@@ -116,11 +116,11 @@ SHOW CREATE TABLE test_ttl;
 +----------+-----------------------------------------+
 | Table    | Create Table                            |
 +----------+-----------------------------------------+
-| test_ttl | CREATE TABLE IF NOT EXISTS "test_ttl" ( |
-|          |   "ts" TIMESTAMP(3) NOT NULL,           |
-|          |   "val" INT NULL,                       |
-|          |   TIME INDEX ("ts"),                    |
-|          |   PRIMARY KEY ("val")                   |
+| test_ttl | CREATE TABLE IF NOT EXISTS `test_ttl` ( |
+|          |   `ts` TIMESTAMP(3) NOT NULL,           |
+|          |   `val` INT NULL,                       |
+|          |   TIME INDEX (`ts`),                    |
+|          |   PRIMARY KEY (`val`)                   |
 |          | )                                       |
 |          |                                         |
 |          | ENGINE=mito                             |

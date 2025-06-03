@@ -435,13 +435,13 @@ async fn insert_with_hints_and_assert(db: &Database) {
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS \"demo\" ( |
-|       |   \"host\" STRING NULL,               |
-|       |   \"cpu\" DOUBLE NULL,                |
-|       |   \"memory\" DOUBLE NULL,             |
-|       |   \"ts\" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX (\"ts\"),                |
-|       |   PRIMARY KEY (\"host\")              |
+| demo  | CREATE TABLE IF NOT EXISTS `demo` ( |
+|       |   `host` STRING NULL,               |
+|       |   `cpu` DOUBLE NULL,                |
+|       |   `memory` DOUBLE NULL,             |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`ts`),                |
+|       |   PRIMARY KEY (`host`)              |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |

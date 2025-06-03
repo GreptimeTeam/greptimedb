@@ -33,11 +33,11 @@ SHOW CREATE TABLE ato;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
-|       |   "i" INT NULL,                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j"),                |
-|       |   PRIMARY KEY ("i")                |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` ( |
+|       |   `i` INT NULL,                    |
+|       |   `j` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`j`),                |
+|       |   PRIMARY KEY (`i`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -64,11 +64,11 @@ SHOW CREATE TABLE ato;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
-|       |   "i" INT NULL,                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j"),                |
-|       |   PRIMARY KEY ("i")                |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` ( |
+|       |   `i` INT NULL,                    |
+|       |   `j` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`j`),                |
+|       |   PRIMARY KEY (`i`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -95,11 +95,11 @@ SHOW CREATE TABLE ato;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
-|       |   "i" INT NULL,                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j"),                |
-|       |   PRIMARY KEY ("i")                |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` ( |
+|       |   `i` INT NULL,                    |
+|       |   `j` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`j`),                |
+|       |   PRIMARY KEY (`i`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -117,11 +117,11 @@ SHOW CREATE TABLE ato;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" ( |
-|       |   "i" INT NULL,                    |
-|       |   "j" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("j"),                |
-|       |   PRIMARY KEY ("i")                |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` ( |
+|       |   `i` INT NULL,                    |
+|       |   `j` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`j`),                |
+|       |   PRIMARY KEY (`i`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=mito                        |
@@ -164,11 +164,11 @@ SHOW CREATE TABLE ato;
 +-------+-----------------------------------------------------+
 | Table | Create Table                                        |
 +-------+-----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                  |
-|       |   "i" INT NULL,                                     |
-|       |   "j" TIMESTAMP(3) NOT NULL,                        |
-|       |   TIME INDEX ("j"),                                 |
-|       |   PRIMARY KEY ("i")                                 |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` (                  |
+|       |   `i` INT NULL,                                     |
+|       |   `j` TIMESTAMP(3) NOT NULL,                        |
+|       |   TIME INDEX (`j`),                                 |
+|       |   PRIMARY KEY (`i`)                                 |
 |       | )                                                   |
 |       |                                                     |
 |       | ENGINE=mito                                         |
@@ -194,11 +194,11 @@ SHOW CREATE TABLE ato;
 +-------+-----------------------------------------------------+
 | Table | Create Table                                        |
 +-------+-----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                  |
-|       |   "i" INT NULL,                                     |
-|       |   "j" TIMESTAMP(3) NOT NULL,                        |
-|       |   TIME INDEX ("j"),                                 |
-|       |   PRIMARY KEY ("i")                                 |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` (                  |
+|       |   `i` INT NULL,                                     |
+|       |   `j` TIMESTAMP(3) NOT NULL,                        |
+|       |   TIME INDEX (`j`),                                 |
+|       |   PRIMARY KEY (`i`)                                 |
 |       | )                                                   |
 |       |                                                     |
 |       | ENGINE=mito                                         |
@@ -219,11 +219,11 @@ SHOW CREATE TABLE ato;
 +-------+-----------------------------------------------------+
 | Table | Create Table                                        |
 +-------+-----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                  |
-|       |   "i" INT NULL,                                     |
-|       |   "j" TIMESTAMP(3) NOT NULL,                        |
-|       |   TIME INDEX ("j"),                                 |
-|       |   PRIMARY KEY ("i")                                 |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` (                  |
+|       |   `i` INT NULL,                                     |
+|       |   `j` TIMESTAMP(3) NOT NULL,                        |
+|       |   TIME INDEX (`j`),                                 |
+|       |   PRIMARY KEY (`i`)                                 |
 |       | )                                                   |
 |       |                                                     |
 |       | ENGINE=mito                                         |
@@ -240,11 +240,11 @@ SHOW CREATE TABLE ato;
 +-------+-----------------------------------------------------+
 | Table | Create Table                                        |
 +-------+-----------------------------------------------------+
-| ato   | CREATE TABLE IF NOT EXISTS "ato" (                  |
-|       |   "i" INT NULL,                                     |
-|       |   "j" TIMESTAMP(3) NOT NULL,                        |
-|       |   TIME INDEX ("j"),                                 |
-|       |   PRIMARY KEY ("i")                                 |
+| ato   | CREATE TABLE IF NOT EXISTS `ato` (                  |
+|       |   `i` INT NULL,                                     |
+|       |   `j` TIMESTAMP(3) NOT NULL,                        |
+|       |   TIME INDEX (`j`),                                 |
+|       |   PRIMARY KEY (`i`)                                 |
 |       | )                                                   |
 |       |                                                     |
 |       | ENGINE=mito                                         |
@@ -272,10 +272,10 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   TIME INDEX ("ts")                |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   TIME INDEX (`ts`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -294,10 +294,10 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   TIME INDEX ("ts")                |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   TIME INDEX (`ts`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |

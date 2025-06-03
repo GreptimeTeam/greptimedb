@@ -48,11 +48,11 @@ SHOW CREATE TABLE test;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "host" STRING NULL,               |
-|       |   "cpu" DOUBLE NULL,                |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("ts")                 |
+| test  | CREATE TABLE IF NOT EXISTS `test` ( |
+|       |   `host` STRING NULL,               |
+|       |   `cpu` DOUBLE NULL,                |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`ts`)                 |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |

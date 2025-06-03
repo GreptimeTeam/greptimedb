@@ -81,13 +81,13 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "host" STRING NULL,              |
-|       |   "job" STRING NULL,               |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host", "job")      |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   `host` STRING NULL,              |
+|       |   `job` STRING NULL,               |
+|       |   TIME INDEX (`ts`),               |
+|       |   PRIMARY KEY (`host`, `job`)      |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -253,10 +253,10 @@ SHOW CREATE TABLE phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   TIME INDEX ("ts")                |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   TIME INDEX (`ts`)                |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -276,12 +276,12 @@ SHOW CREATE TABLE phy;
 +-------+---------------------------------------------------------------------------------+
 | Table | Create Table                                                                    |
 +-------+---------------------------------------------------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" (                                              |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   "val" DOUBLE NULL,                                                            |
-|       |   "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
-|       |   TIME INDEX ("ts"),                                                            |
-|       |   PRIMARY KEY ("host")                                                          |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` (                                              |
+|       |   `ts` TIMESTAMP(3) NOT NULL,                                                   |
+|       |   `val` DOUBLE NULL,                                                            |
+|       |   `host` STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
+|       |   TIME INDEX (`ts`),                                                            |
+|       |   PRIMARY KEY (`host`)                                                          |
 |       | )                                                                               |
 |       |                                                                                 |
 |       | ENGINE=metric                                                                   |

@@ -120,13 +120,13 @@ PARTITION ON COLUMNS (n) (
         r#"+-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS "demo" ( |
-|       |   "n" INT NULL,                     |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("ts"),                |
-|       |   PRIMARY KEY ("n")                 |
+| demo  | CREATE TABLE IF NOT EXISTS `demo` ( |
+|       |   `n` INT NULL,                     |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`ts`),                |
+|       |   PRIMARY KEY (`n`)                 |
 |       | )                                   |
-|       | PARTITION ON COLUMNS ("n") (        |
+|       | PARTITION ON COLUMNS (`n`) (        |
 |       |   n < 1,                            |
 |       |   n >= 100,                         |
 |       |   n >= 1 AND n < 10,                |
@@ -139,12 +139,12 @@ PARTITION ON COLUMNS (n) (
         r#"+-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS "demo" ( |
-|       |   "host" STRING NULL,               |
-|       |   "cpu" DOUBLE NULL,                |
-|       |   "memory" DOUBLE NULL,             |
-|       |   "ts" TIMESTAMP(3) NOT NULL,       |
-|       |   TIME INDEX ("ts")                 |
+| demo  | CREATE TABLE IF NOT EXISTS `demo` ( |
+|       |   `host` STRING NULL,               |
+|       |   `cpu` DOUBLE NULL,                |
+|       |   `memory` DOUBLE NULL,             |
+|       |   `ts` TIMESTAMP(3) NOT NULL,       |
+|       |   TIME INDEX (`ts`)                 |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -209,15 +209,15 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     let column = record_batches[0].column_by_name("Create Table").unwrap();
     let actual = column.get(0);
     let expect = format!(
-        r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
-  "c_int" BIGINT NULL,
-  "c_float" DOUBLE NULL,
-  "c_string" DOUBLE NULL,
-  "c_bool" BOOLEAN NULL,
-  "c_date" DATE NULL,
-  "c_datetime" TIMESTAMP(0) NULL,
-  "greptime_timestamp" TIMESTAMP(3) NOT NULL DEFAULT '1970-01-01 00:00:00+0000',
-  TIME INDEX ("greptime_timestamp")
+        r#"CREATE EXTERNAL TABLE IF NOT EXISTS `various_type_csv` (
+  `c_int` BIGINT NULL,
+  `c_float` DOUBLE NULL,
+  `c_string` DOUBLE NULL,
+  `c_bool` BOOLEAN NULL,
+  `c_date` DATE NULL,
+  `c_datetime` TIMESTAMP(0) NULL,
+  `greptime_timestamp` TIMESTAMP(3) NOT NULL DEFAULT '1970-01-01 00:00:00+0000',
+  TIME INDEX (`greptime_timestamp`)
 )
 
 ENGINE=file

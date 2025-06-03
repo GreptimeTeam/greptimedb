@@ -25,16 +25,16 @@ SHOW CREATE TABLE system_metrics;
 +----------------+-----------------------------------------------------------+
 | Table          | Create Table                                              |
 +----------------+-----------------------------------------------------------+
-| system_metrics | CREATE TABLE IF NOT EXISTS "system_metrics" (             |
-|                |   "id" INT UNSIGNED NULL,                                 |
-|                |   "host" STRING NULL,                                     |
-|                |   "cpu" DOUBLE NULL,                                      |
-|                |   "disk" FLOAT NULL COMMENT 'comment',                    |
-|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                |   TIME INDEX ("ts"),                                      |
-|                |   PRIMARY KEY ("id", "host")                              |
+| system_metrics | CREATE TABLE IF NOT EXISTS `system_metrics` (             |
+|                |   `id` INT UNSIGNED NULL,                                 |
+|                |   `host` STRING NULL,                                     |
+|                |   `cpu` DOUBLE NULL,                                      |
+|                |   `disk` FLOAT NULL COMMENT 'comment',                    |
+|                |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX (`ts`),                                      |
+|                |   PRIMARY KEY (`id`, `host`)                              |
 |                | )                                                         |
-|                | PARTITION ON COLUMNS ("id") (                             |
+|                | PARTITION ON COLUMNS (`id`) (                             |
 |                |   id < 5,                                                 |
 |                |   id >= 9,                                                |
 |                |   id >= 5 AND id < 9                                      |
@@ -77,9 +77,9 @@ show create table table_without_partition;
 +-------------------------+-----------------------------------------------------------+
 | Table                   | Create Table                                              |
 +-------------------------+-----------------------------------------------------------+
-| table_without_partition | CREATE TABLE IF NOT EXISTS "table_without_partition" (    |
-|                         |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
-|                         |   TIME INDEX ("ts")                                       |
+| table_without_partition | CREATE TABLE IF NOT EXISTS `table_without_partition` (    |
+|                         |   `ts` TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                         |   TIME INDEX (`ts`)                                       |
 |                         | )                                                         |
 |                         |                                                           |
 |                         | ENGINE=mito                                               |
@@ -124,12 +124,12 @@ show create table phy;
 +-------+------------------------------------+
 | Table | Create Table                       |
 +-------+------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
-|       |   "ts" TIMESTAMP(3) NOT NULL,      |
-|       |   "val" DOUBLE NULL,               |
-|       |   "host" STRING NULL,              |
-|       |   TIME INDEX ("ts"),               |
-|       |   PRIMARY KEY ("host")             |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` ( |
+|       |   `ts` TIMESTAMP(3) NOT NULL,      |
+|       |   `val` DOUBLE NULL,               |
+|       |   `host` STRING NULL,              |
+|       |   TIME INDEX (`ts`),               |
+|       |   PRIMARY KEY (`host`)             |
 |       | )                                  |
 |       |                                    |
 |       | ENGINE=metric                      |
@@ -143,12 +143,12 @@ show create table t1;
 +-------+-----------------------------------+
 | Table | Create Table                      |
 +-------+-----------------------------------+
-| t1    | CREATE TABLE IF NOT EXISTS "t1" ( |
-|       |   "host" STRING NULL,             |
-|       |   "ts" TIMESTAMP(3) NOT NULL,     |
-|       |   "val" DOUBLE NULL,              |
-|       |   TIME INDEX ("ts"),              |
-|       |   PRIMARY KEY ("host")            |
+| t1    | CREATE TABLE IF NOT EXISTS `t1` ( |
+|       |   `host` STRING NULL,             |
+|       |   `ts` TIMESTAMP(3) NOT NULL,     |
+|       |   `val` DOUBLE NULL,              |
+|       |   TIME INDEX (`ts`),              |
+|       |   PRIMARY KEY (`host`)            |
 |       | )                                 |
 |       |                                   |
 |       | ENGINE=metric                     |
@@ -201,15 +201,15 @@ show create table phy;
 +-------+-------------------------------------------------------+
 | Table | Create Table                                          |
 +-------+-------------------------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" (                    |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                         |
-|       |   "val" DOUBLE NULL,                                  |
-|       |   "__table_id" INT UNSIGNED NOT NULL,                 |
-|       |   "__tsid" BIGINT UNSIGNED NOT NULL,                  |
-|       |   "host" STRING NULL,                                 |
-|       |   "job" STRING NULL,                                  |
-|       |   TIME INDEX ("ts"),                                  |
-|       |   PRIMARY KEY ("__table_id", "__tsid", "host", "job") |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` (                    |
+|       |   `ts` TIMESTAMP(3) NOT NULL,                         |
+|       |   `val` DOUBLE NULL,                                  |
+|       |   `__table_id` INT UNSIGNED NOT NULL,                 |
+|       |   `__tsid` BIGINT UNSIGNED NOT NULL,                  |
+|       |   `host` STRING NULL,                                 |
+|       |   `job` STRING NULL,                                  |
+|       |   TIME INDEX (`ts`),                                  |
+|       |   PRIMARY KEY (`__table_id`, `__tsid`, `host`, `job`) |
 |       | )                                                     |
 |       |                                                       |
 |       | ENGINE=mito                                           |
@@ -243,12 +243,12 @@ show create table phy;
 +-------+---------------------------------------------------------------------------------+
 | Table | Create Table                                                                    |
 +-------+---------------------------------------------------------------------------------+
-| phy   | CREATE TABLE IF NOT EXISTS "phy" (                                              |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   "val" DOUBLE NULL,                                                            |
-|       |   "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
-|       |   TIME INDEX ("ts"),                                                            |
-|       |   PRIMARY KEY ("host")                                                          |
+| phy   | CREATE TABLE IF NOT EXISTS `phy` (                                              |
+|       |   `ts` TIMESTAMP(3) NOT NULL,                                                   |
+|       |   `val` DOUBLE NULL,                                                            |
+|       |   `host` STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
+|       |   TIME INDEX (`ts`),                                                            |
+|       |   PRIMARY KEY (`host`)                                                          |
 |       | )                                                                               |
 |       |                                                                                 |
 |       | ENGINE=metric                                                                   |
@@ -313,13 +313,13 @@ show create table specify_invereted_index_cols;
 +------------------------------+-------------------------------------------------------------+
 | Table                        | Create Table                                                |
 +------------------------------+-------------------------------------------------------------+
-| specify_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_invereted_index_cols" ( |
-|                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
-|                              |   "val" DOUBLE NULL,                                        |
-|                              |   "host" STRING NULL,                                       |
-|                              |   "job" STRING NULL INVERTED INDEX,                         |
-|                              |   TIME INDEX ("ts"),                                        |
-|                              |   PRIMARY KEY ("host", "job")                               |
+| specify_invereted_index_cols | CREATE TABLE IF NOT EXISTS `specify_invereted_index_cols` ( |
+|                              |   `ts` TIMESTAMP(3) NOT NULL,                               |
+|                              |   `val` DOUBLE NULL,                                        |
+|                              |   `host` STRING NULL,                                       |
+|                              |   `job` STRING NULL INVERTED INDEX,                         |
+|                              |   TIME INDEX (`ts`),                                        |
+|                              |   PRIMARY KEY (`host`, `job`)                               |
 |                              | )                                                           |
 |                              |                                                             |
 |                              | ENGINE=mito                                                 |
@@ -346,13 +346,13 @@ show create table specify_empty_invereted_index_cols;
 +------------------------------------+-------------------------------------------------------------------+
 | Table                              | Create Table                                                      |
 +------------------------------------+-------------------------------------------------------------------+
-| specify_empty_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_empty_invereted_index_cols" ( |
-|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
-|                                    |   "val" DOUBLE NULL,                                              |
-|                                    |   "host" STRING NULL,                                             |
-|                                    |   "job" STRING NULL,                                              |
-|                                    |   TIME INDEX ("ts"),                                              |
-|                                    |   PRIMARY KEY ("host", "job")                                     |
+| specify_empty_invereted_index_cols | CREATE TABLE IF NOT EXISTS `specify_empty_invereted_index_cols` ( |
+|                                    |   `ts` TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   `val` DOUBLE NULL,                                              |
+|                                    |   `host` STRING NULL,                                             |
+|                                    |   `job` STRING NULL,                                              |
+|                                    |   TIME INDEX (`ts`),                                              |
+|                                    |   PRIMARY KEY (`host`, `job`)                                     |
 |                                    | )                                                                 |
 |                                    |                                                                   |
 |                                    | ENGINE=mito                                                       |
@@ -376,12 +376,12 @@ show create table test_column_constrain_composite_indexes;
 +-----------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | Table                                   | Create Table                                                                                                                                                                           |
 +-----------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_column_constrain_composite_indexes" (                                                                                                                 |
-|                                         |   "id" INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                                             |
-|                                         |   "host" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
-|                                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                                          |
-|                                         |   TIME INDEX ("ts"),                                                                                                                                                                   |
-|                                         |   PRIMARY KEY ("host")                                                                                                                                                                 |
+| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS `test_column_constrain_composite_indexes` (                                                                                                                 |
+|                                         |   `id` INT NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                                             |
+|                                         |   `host` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false') SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
+|                                         |   `ts` TIMESTAMP(3) NOT NULL,                                                                                                                                                          |
+|                                         |   TIME INDEX (`ts`),                                                                                                                                                                   |
+|                                         |   PRIMARY KEY (`host`)                                                                                                                                                                 |
 |                                         | )                                                                                                                                                                                      |
 |                                         |                                                                                                                                                                                        |
 |                                         | ENGINE=mito                                                                                                                                                                            |
@@ -405,10 +405,10 @@ show create table table_comment_in_cjk;
 +----------------------+-----------------------------------------------------+
 | Table                | Create Table                                        |
 +----------------------+-----------------------------------------------------+
-| table_comment_in_cjk | CREATE TABLE IF NOT EXISTS "table_comment_in_cjk" ( |
-|                      |   "ts" TIMESTAMP(3) NOT NULL COMMENT '时间戳',      |
-|                      |   "val" DOUBLE NULL COMMENT '值',                   |
-|                      |   TIME INDEX ("ts")                                 |
+| table_comment_in_cjk | CREATE TABLE IF NOT EXISTS `table_comment_in_cjk` ( |
+|                      |   `ts` TIMESTAMP(3) NOT NULL COMMENT '时间戳',      |
+|                      |   `val` DOUBLE NULL COMMENT '值',                   |
+|                      |   TIME INDEX (`ts`)                                 |
 |                      | )                                                   |
 |                      |                                                     |
 |                      | ENGINE=mito                                         |

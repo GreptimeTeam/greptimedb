@@ -12,10 +12,10 @@ SHOW CREATE TABLE test;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "message" STRING NULL,            |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
+| test  | CREATE TABLE IF NOT EXISTS `test` ( |
+|       |   `message` STRING NULL,            |
+|       |   `time` TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX (`time`)               |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -82,10 +82,10 @@ SHOW CREATE TABLE test;
 +-------+----------------------------------------------------------------------------------------------------------------+
 | Table | Create Table                                                                                                   |
 +-------+----------------------------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
-|       |   TIME INDEX ("time")                                                                                          |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                                                            |
+|       |   `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX (`time`)                                                                                          |
 |       | )                                                                                                              |
 |       |                                                                                                                |
 |       | ENGINE=mito                                                                                                    |
@@ -112,10 +112,10 @@ SHOW CREATE TABLE test;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "message" STRING NULL,            |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
+| test  | CREATE TABLE IF NOT EXISTS `test` ( |
+|       |   `message` STRING NULL,            |
+|       |   `time` TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX (`time`)               |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -141,10 +141,10 @@ SHOW CREATE TABLE test;
 +-------+----------------------------------------------------------------------------------------------------------------+
 | Table | Create Table                                                                                                   |
 +-------+----------------------------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
-|       |   TIME INDEX ("time")                                                                                          |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                                                            |
+|       |   `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX (`time`)                                                                                          |
 |       | )                                                                                                              |
 |       |                                                                                                                |
 |       | ENGINE=mito                                                                                                    |
@@ -175,10 +175,10 @@ SHOW CREATE TABLE test;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "message" STRING NULL,            |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
+| test  | CREATE TABLE IF NOT EXISTS `test` ( |
+|       |   `message` STRING NULL,            |
+|       |   `time` TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX (`time`)               |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -204,10 +204,10 @@ SHOW CREATE TABLE test;
 +-------+----------------------------------------------------------------------------------------------------------------+
 | Table | Create Table                                                                                                   |
 +-------+----------------------------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                            |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                |
-|       |   TIME INDEX ("time")                                                                                          |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                                                            |
+|       |   `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'bloom', case_sensitive = 'true'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                                                |
+|       |   TIME INDEX (`time`)                                                                                          |
 |       | )                                                                                                              |
 |       |                                                                                                                |
 |       | ENGINE=mito                                                                                                    |
@@ -234,10 +234,10 @@ SHOW CREATE TABLE test;
 +-------+------------------------------------------------------------------------------------------------------------------+
 | Table | Create Table                                                                                                     |
 +-------+------------------------------------------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                              |
-|       |   "message" STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'tantivy', case_sensitive = 'true'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                  |
-|       |   TIME INDEX ("time")                                                                                            |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                                                              |
+|       |   `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'Chinese', backend = 'tantivy', case_sensitive = 'true'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                                                  |
+|       |   TIME INDEX (`time`)                                                                                            |
 |       | )                                                                                                                |
 |       |                                                                                                                  |
 |       | ENGINE=mito                                                                                                      |

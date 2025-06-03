@@ -13,12 +13,12 @@ SHOW CREATE TABLE test;
 +-------+-------------------------------------+
 | Table | Create Table                        |
 +-------+-------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" ( |
-|       |   "value" DOUBLE NULL,              |
-|       |   "category" STRING NULL,           |
-|       |   "metric" BIGINT NULL,             |
-|       |   "time" TIMESTAMP(3) NOT NULL,     |
-|       |   TIME INDEX ("time")               |
+| test  | CREATE TABLE IF NOT EXISTS `test` ( |
+|       |   `value` DOUBLE NULL,              |
+|       |   `category` STRING NULL,           |
+|       |   `metric` BIGINT NULL,             |
+|       |   `time` TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX (`time`)               |
 |       | )                                   |
 |       |                                     |
 |       | ENGINE=mito                         |
@@ -127,12 +127,12 @@ SHOW CREATE TABLE test;
 +-------+-----------------------------------------------------------------------------------+
 | Table | Create Table                                                                      |
 +-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                               |
+|       |   `value` DOUBLE NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'),  |
+|       |   `category` STRING NULL,                                                         |
+|       |   `metric` BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX (`time`)                                                             |
 |       | )                                                                                 |
 |       |                                                                                   |
 |       | ENGINE=mito                                                                       |
@@ -159,12 +159,12 @@ SHOW CREATE TABLE test;
 +-------+-----------------------------------------------------------------------------------+
 | Table | Create Table                                                                      |
 +-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                               |
+|       |   `value` DOUBLE NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),  |
+|       |   `category` STRING NULL,                                                         |
+|       |   `metric` BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX (`time`)                                                             |
 |       | )                                                                                 |
 |       |                                                                                   |
 |       | ENGINE=mito                                                                       |
@@ -195,12 +195,12 @@ SHOW CREATE TABLE test;
 +-------+-----------------------------------------------------------------------------------+
 | Table | Create Table                                                                      |
 +-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '2048', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
+| test  | CREATE TABLE IF NOT EXISTS `test` (                                               |
+|       |   `value` DOUBLE NULL SKIPPING INDEX WITH(granularity = '2048', type = 'BLOOM'),  |
+|       |   `category` STRING NULL,                                                         |
+|       |   `metric` BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
+|       |   `time` TIMESTAMP(3) NOT NULL,                                                   |
+|       |   TIME INDEX (`time`)                                                             |
 |       | )                                                                                 |
 |       |                                                                                   |
 |       | ENGINE=mito                                                                       |

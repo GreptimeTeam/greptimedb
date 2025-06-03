@@ -34,11 +34,11 @@ SHOW CREATE TABLE approx_rate;
 +-------------+--------------------------------------------+
 | Table       | Create Table                               |
 +-------------+--------------------------------------------+
-| approx_rate | CREATE TABLE IF NOT EXISTS "approx_rate" ( |
-|             |   "rate" DOUBLE NULL,                      |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window")               |
+| approx_rate | CREATE TABLE IF NOT EXISTS `approx_rate` ( |
+|             |   `rate` DOUBLE NULL,                      |
+|             |   `time_window` TIMESTAMP(3) NOT NULL,     |
+|             |   `update_at` TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX (`time_window`)               |
 |             | )                                          |
 |             |                                            |
 |             | ENGINE=mito                                |

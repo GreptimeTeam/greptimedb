@@ -251,13 +251,13 @@ SHOW CREATE TABLE monitor;
 +---------+-----------------------------------------------------------+
 | Table   | Create Table                                              |
 +---------+-----------------------------------------------------------+
-| monitor | CREATE TABLE IF NOT EXISTS "monitor" (                    |
-|         |   "host" STRING NULL,                                     |
-|         |   "ts" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
-|         |   "cpu" DOUBLE NULL DEFAULT 0,                            |
-|         |   "memory" DOUBLE NULL,                                   |
-|         |   TIME INDEX ("ts"),                                      |
-|         |   PRIMARY KEY ("host")                                    |
+| monitor | CREATE TABLE IF NOT EXISTS `monitor` (                    |
+|         |   `host` STRING NULL,                                     |
+|         |   `ts` TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
+|         |   `cpu` DOUBLE NULL DEFAULT 0,                            |
+|         |   `memory` DOUBLE NULL,                                   |
+|         |   TIME INDEX (`ts`),                                      |
+|         |   PRIMARY KEY (`host`)                                    |
 |         | )                                                         |
 |         |                                                           |
 |         | ENGINE=mito                                               |

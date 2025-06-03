@@ -23,11 +23,11 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | Table             | Create Table                                     |
 +-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS `out_num_cnt_basic` ( |
+|                   |   `sum(numbers_input_basic.number)` BIGINT NULL, |
+|                   |   `time_window` TIMESTAMP(9) NOT NULL,           |
+|                   |   `update_at` TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX (`time_window`)                     |
 |                   | )                                                |
 |                   |                                                  |
 |                   | ENGINE=mito                                      |
@@ -50,11 +50,11 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | Table             | Create Table                                     |
 +-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "sum(numbers_input_basic.number)" BIGINT NULL, |
-|                   |   "time_window" TIMESTAMP(9) NOT NULL,           |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   TIME INDEX ("time_window")                     |
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS `out_num_cnt_basic` ( |
+|                   |   `sum(numbers_input_basic.number)` BIGINT NULL, |
+|                   |   `time_window` TIMESTAMP(9) NOT NULL,           |
+|                   |   `update_at` TIMESTAMP(3) NULL,                 |
+|                   |   TIME INDEX (`time_window`)                     |
 |                   | )                                                |
 |                   |                                                  |
 |                   | ENGINE=mito                                      |
@@ -175,11 +175,11 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | Table     | Create Table                                |
 +-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
+| out_basic | CREATE TABLE IF NOT EXISTS `out_basic` (    |
+|           |   `wildcard` BIGINT NULL,                   |
+|           |   `update_at` TIMESTAMP(3) NULL,            |
+|           |   `__ts_placeholder` TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX (`__ts_placeholder`)           |
 |           | )                                           |
 |           |                                             |
 |           | ENGINE=mito                                 |
@@ -203,11 +203,11 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | Table     | Create Table                                |
 +-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
+| out_basic | CREATE TABLE IF NOT EXISTS `out_basic` (    |
+|           |   `wildcard` BIGINT NULL,                   |
+|           |   `update_at` TIMESTAMP(3) NULL,            |
+|           |   `__ts_placeholder` TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX (`__ts_placeholder`)           |
 |           | )                                           |
 |           |                                             |
 |           | ENGINE=mito                                 |
@@ -246,11 +246,11 @@ SHOW CREATE TABLE out_basic;
 +-----------+---------------------------------------------+
 | Table     | Create Table                                |
 +-----------+---------------------------------------------+
-| out_basic | CREATE TABLE IF NOT EXISTS "out_basic" (    |
-|           |   "wildcard" BIGINT NULL,                   |
-|           |   "update_at" TIMESTAMP(3) NULL,            |
-|           |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|           |   TIME INDEX ("__ts_placeholder")           |
+| out_basic | CREATE TABLE IF NOT EXISTS `out_basic` (    |
+|           |   `wildcard` BIGINT NULL,                   |
+|           |   `update_at` TIMESTAMP(3) NULL,            |
+|           |   `__ts_placeholder` TIMESTAMP(3) NOT NULL, |
+|           |   TIME INDEX (`__ts_placeholder`)           |
 |           | )                                           |
 |           |                                             |
 |           | ENGINE=mito                                 |
@@ -300,12 +300,12 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | Table              | Create Table                                      |
 +--------------------+---------------------------------------------------+
-| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
-|                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
-|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
-|                    |   TIME INDEX ("__ts_placeholder"),                |
-|                    |   PRIMARY KEY ("dis")                             |
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS `out_distinct_basic` ( |
+|                    |   `dis` INT NULL,                                 |
+|                    |   `update_at` TIMESTAMP(3) NULL,                  |
+|                    |   `__ts_placeholder` TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX (`__ts_placeholder`),                |
+|                    |   PRIMARY KEY (`dis`)                             |
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
@@ -356,12 +356,12 @@ SHOW CREATE TABLE out_distinct_basic;
 +--------------------+---------------------------------------------------+
 | Table              | Create Table                                      |
 +--------------------+---------------------------------------------------+
-| out_distinct_basic | CREATE TABLE IF NOT EXISTS "out_distinct_basic" ( |
-|                    |   "dis" INT NULL,                                 |
-|                    |   "update_at" TIMESTAMP(3) NULL,                  |
-|                    |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,       |
-|                    |   TIME INDEX ("__ts_placeholder"),                |
-|                    |   PRIMARY KEY ("dis")                             |
+| out_distinct_basic | CREATE TABLE IF NOT EXISTS `out_distinct_basic` ( |
+|                    |   `dis` INT NULL,                                 |
+|                    |   `update_at` TIMESTAMP(3) NULL,                  |
+|                    |   `__ts_placeholder` TIMESTAMP(3) NOT NULL,       |
+|                    |   TIME INDEX (`__ts_placeholder`),                |
+|                    |   PRIMARY KEY (`dis`)                             |
 |                    | )                                                 |
 |                    |                                                   |
 |                    | ENGINE=mito                                       |
@@ -468,11 +468,11 @@ SHOW CREATE TABLE approx_rate;
 +-------------+--------------------------------------------+
 | Table       | Create Table                               |
 +-------------+--------------------------------------------+
-| approx_rate | CREATE TABLE IF NOT EXISTS "approx_rate" ( |
-|             |   "rate" DOUBLE NULL,                      |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window")               |
+| approx_rate | CREATE TABLE IF NOT EXISTS `approx_rate` ( |
+|             |   `rate` DOUBLE NULL,                      |
+|             |   `time_window` TIMESTAMP(3) NOT NULL,     |
+|             |   `update_at` TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX (`time_window`)               |
 |             | )                                          |
 |             |                                            |
 |             | ENGINE=mito                                |
@@ -636,12 +636,12 @@ SHOW CREATE TABLE ngx_country;
 +-------------+---------------------------------------------+
 | Table       | Create Table                                |
 +-------------+---------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
-|             |   "country" STRING NULL,                    |
-|             |   "update_at" TIMESTAMP(3) NULL,            |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|             |   TIME INDEX ("__ts_placeholder"),          |
-|             |   PRIMARY KEY ("country")                   |
+| ngx_country | CREATE TABLE IF NOT EXISTS `ngx_country` (  |
+|             |   `country` STRING NULL,                    |
+|             |   `update_at` TIMESTAMP(3) NULL,            |
+|             |   `__ts_placeholder` TIMESTAMP(3) NOT NULL, |
+|             |   TIME INDEX (`__ts_placeholder`),          |
+|             |   PRIMARY KEY (`country`)                   |
 |             | )                                           |
 |             |                                             |
 |             | ENGINE=mito                                 |
@@ -669,12 +669,12 @@ SHOW CREATE TABLE ngx_country;
 +-------------+---------------------------------------------+
 | Table       | Create Table                                |
 +-------------+---------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" (  |
-|             |   "country" STRING NULL,                    |
-|             |   "update_at" TIMESTAMP(3) NULL,            |
-|             |   "__ts_placeholder" TIMESTAMP(3) NOT NULL, |
-|             |   TIME INDEX ("__ts_placeholder"),          |
-|             |   PRIMARY KEY ("country")                   |
+| ngx_country | CREATE TABLE IF NOT EXISTS `ngx_country` (  |
+|             |   `country` STRING NULL,                    |
+|             |   `update_at` TIMESTAMP(3) NULL,            |
+|             |   `__ts_placeholder` TIMESTAMP(3) NOT NULL, |
+|             |   TIME INDEX (`__ts_placeholder`),          |
+|             |   PRIMARY KEY (`country`)                   |
 |             | )                                           |
 |             |                                             |
 |             | ENGINE=mito                                 |
@@ -786,12 +786,12 @@ SHOW CREATE TABLE ngx_country;
 +-------------+--------------------------------------------+
 | Table       | Create Table                               |
 +-------------+--------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
-|             |   "country" STRING NULL,                   |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window"),              |
-|             |   PRIMARY KEY ("country")                  |
+| ngx_country | CREATE TABLE IF NOT EXISTS `ngx_country` ( |
+|             |   `country` STRING NULL,                   |
+|             |   `time_window` TIMESTAMP(3) NOT NULL,     |
+|             |   `update_at` TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX (`time_window`),              |
+|             |   PRIMARY KEY (`country`)                  |
 |             | )                                          |
 |             |                                            |
 |             | ENGINE=mito                                |
@@ -819,12 +819,12 @@ SHOW CREATE TABLE ngx_country;
 +-------------+--------------------------------------------+
 | Table       | Create Table                               |
 +-------------+--------------------------------------------+
-| ngx_country | CREATE TABLE IF NOT EXISTS "ngx_country" ( |
-|             |   "country" STRING NULL,                   |
-|             |   "time_window" TIMESTAMP(3) NOT NULL,     |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("time_window"),              |
-|             |   PRIMARY KEY ("country")                  |
+| ngx_country | CREATE TABLE IF NOT EXISTS `ngx_country` ( |
+|             |   `country` STRING NULL,                   |
+|             |   `time_window` TIMESTAMP(3) NOT NULL,     |
+|             |   `update_at` TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX (`time_window`),              |
+|             |   PRIMARY KEY (`country`)                  |
 |             | )                                          |
 |             |                                            |
 |             | ENGINE=mito                                |
@@ -955,13 +955,13 @@ SHOW CREATE TABLE temp_alerts;
 +-------------+--------------------------------------------+
 | Table       | Create Table                               |
 +-------------+--------------------------------------------+
-| temp_alerts | CREATE TABLE IF NOT EXISTS "temp_alerts" ( |
-|             |   "sensor_id" INT NULL,                    |
-|             |   "loc" STRING NULL,                       |
-|             |   "max_temp" DOUBLE NULL,                  |
-|             |   "event_ts" TIMESTAMP(3) NOT NULL,        |
-|             |   "update_at" TIMESTAMP(3) NULL,           |
-|             |   TIME INDEX ("event_ts")                  |
+| temp_alerts | CREATE TABLE IF NOT EXISTS `temp_alerts` ( |
+|             |   `sensor_id` INT NULL,                    |
+|             |   `loc` STRING NULL,                       |
+|             |   `max_temp` DOUBLE NULL,                  |
+|             |   `event_ts` TIMESTAMP(3) NOT NULL,        |
+|             |   `update_at` TIMESTAMP(3) NULL,           |
+|             |   TIME INDEX (`event_ts`)                  |
 |             | )                                          |
 |             |                                            |
 |             | ENGINE=mito                                |
@@ -1116,14 +1116,14 @@ SHOW CREATE TABLE ngx_distribution;
 +------------------+-------------------------------------------------+
 | Table            | Create Table                                    |
 +------------------+-------------------------------------------------+
-| ngx_distribution | CREATE TABLE IF NOT EXISTS "ngx_distribution" ( |
-|                  |   "stat" INT NULL,                              |
-|                  |   "bucket_size" INT NULL,                       |
-|                  |   "total_logs" BIGINT NULL,                     |
-|                  |   "time_window" TIMESTAMP(3) NOT NULL,          |
-|                  |   "update_at" TIMESTAMP(3) NULL,                |
-|                  |   TIME INDEX ("time_window"),                   |
-|                  |   PRIMARY KEY ("stat", "bucket_size")           |
+| ngx_distribution | CREATE TABLE IF NOT EXISTS `ngx_distribution` ( |
+|                  |   `stat` INT NULL,                              |
+|                  |   `bucket_size` INT NULL,                       |
+|                  |   `total_logs` BIGINT NULL,                     |
+|                  |   `time_window` TIMESTAMP(3) NOT NULL,          |
+|                  |   `update_at` TIMESTAMP(3) NULL,                |
+|                  |   TIME INDEX (`time_window`),                   |
+|                  |   PRIMARY KEY (`stat`, `bucket_size`)           |
 |                  | )                                               |
 |                  |                                                 |
 |                  | ENGINE=mito                                     |
@@ -1244,12 +1244,12 @@ SHOW CREATE TABLE requests_without_ip;
 +---------------------+----------------------------------------------------+
 | Table               | Create Table                                       |
 +---------------------+----------------------------------------------------+
-| requests_without_ip | CREATE TABLE IF NOT EXISTS "requests_without_ip" ( |
-|                     |   "service_name" STRING NULL,                      |
-|                     |   "val" INT NULL,                                  |
-|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
-|                     |   TIME INDEX ("ts"),                               |
-|                     |   PRIMARY KEY ("service_name")                     |
+| requests_without_ip | CREATE TABLE IF NOT EXISTS `requests_without_ip` ( |
+|                     |   `service_name` STRING NULL,                      |
+|                     |   `val` INT NULL,                                  |
+|                     |   `ts` TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX (`ts`),                               |
+|                     |   PRIMARY KEY (`service_name`)                     |
 |                     | )                                                  |
 |                     |                                                    |
 |                     | ENGINE=mito                                        |
@@ -1462,14 +1462,14 @@ SHOW CREATE TABLE android_log_abnormal;
 +----------------------+-----------------------------------------------------+
 | Table                | Create Table                                        |
 +----------------------+-----------------------------------------------------+
-| android_log_abnormal | CREATE TABLE IF NOT EXISTS "android_log_abnormal" ( |
-|                      |   "crash" BIGINT NULL,                              |
-|                      |   "fatal" BIGINT NULL,                              |
-|                      |   "backtrace" BIGINT NULL,                          |
-|                      |   "anr" BIGINT NULL,                                |
-|                      |   "time_window" TIMESTAMP(9) NOT NULL,              |
-|                      |   "update_at" TIMESTAMP(3) NULL,                    |
-|                      |   TIME INDEX ("time_window")                        |
+| android_log_abnormal | CREATE TABLE IF NOT EXISTS `android_log_abnormal` ( |
+|                      |   `crash` BIGINT NULL,                              |
+|                      |   `fatal` BIGINT NULL,                              |
+|                      |   `backtrace` BIGINT NULL,                          |
+|                      |   `anr` BIGINT NULL,                                |
+|                      |   `time_window` TIMESTAMP(9) NOT NULL,              |
+|                      |   `update_at` TIMESTAMP(3) NULL,                    |
+|                      |   TIME INDEX (`time_window`)                        |
 |                      | )                                                   |
 |                      |                                                     |
 |                      | ENGINE=mito                                         |
@@ -1575,14 +1575,14 @@ SHOW CREATE TABLE android_log_abnormal;
 +----------------------+-----------------------------------------------------+
 | Table                | Create Table                                        |
 +----------------------+-----------------------------------------------------+
-| android_log_abnormal | CREATE TABLE IF NOT EXISTS "android_log_abnormal" ( |
-|                      |   "crash" BIGINT NULL,                              |
-|                      |   "fatal" BIGINT NULL,                              |
-|                      |   "backtrace" BIGINT NULL,                          |
-|                      |   "anr" BIGINT NULL,                                |
-|                      |   "time_window" TIMESTAMP(9) NOT NULL,              |
-|                      |   "update_at" TIMESTAMP(3) NULL,                    |
-|                      |   TIME INDEX ("time_window")                        |
+| android_log_abnormal | CREATE TABLE IF NOT EXISTS `android_log_abnormal` ( |
+|                      |   `crash` BIGINT NULL,                              |
+|                      |   `fatal` BIGINT NULL,                              |
+|                      |   `backtrace` BIGINT NULL,                          |
+|                      |   `anr` BIGINT NULL,                                |
+|                      |   `time_window` TIMESTAMP(9) NOT NULL,              |
+|                      |   `update_at` TIMESTAMP(3) NULL,                    |
+|                      |   TIME INDEX (`time_window`)                        |
 |                      | )                                                   |
 |                      |                                                     |
 |                      | ENGINE=mito                                         |
@@ -1669,11 +1669,11 @@ SHOW CREATE TABLE out_num_cnt_basic;
 +-------------------+--------------------------------------------------+
 | Table             | Create Table                                     |
 +-------------------+--------------------------------------------------+
-| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS "out_num_cnt_basic" ( |
-|                   |   "avg_after_filter_num" BIGINT NULL,            |
-|                   |   "update_at" TIMESTAMP(3) NULL,                 |
-|                   |   "__ts_placeholder" TIMESTAMP(3) NOT NULL,      |
-|                   |   TIME INDEX ("__ts_placeholder")                |
+| out_num_cnt_basic | CREATE TABLE IF NOT EXISTS `out_num_cnt_basic` ( |
+|                   |   `avg_after_filter_num` BIGINT NULL,            |
+|                   |   `update_at` TIMESTAMP(3) NULL,                 |
+|                   |   `__ts_placeholder` TIMESTAMP(3) NOT NULL,      |
+|                   |   TIME INDEX (`__ts_placeholder`)                |
 |                   | )                                                |
 |                   |                                                  |
 |                   | ENGINE=mito                                      |

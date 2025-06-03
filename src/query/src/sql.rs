@@ -784,12 +784,13 @@ pub fn show_create_table(
     table: TableRef,
     schema_options: Option<SchemaOptions>,
     partitions: Option<Partitions>,
-    query_ctx: QueryContextRef,
+    _query_ctx: QueryContextRef,
 ) -> Result<Output> {
     let table_info = table.table_info();
     let table_name = &table_info.name;
 
-    let quote_style = query_ctx.quote_style();
+    // Always use backquotes for identifiers in SHOW CREATE TABLE, regardless of dialect
+    let quote_style = '`';
 
     let mut stmt = create_table_stmt(&table_info, schema_options, quote_style)?;
     stmt.partitions = partitions.map(|mut p| {

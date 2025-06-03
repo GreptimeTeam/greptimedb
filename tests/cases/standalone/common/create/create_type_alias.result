@@ -24,25 +24,25 @@ SHOW CREATE TABLE data_types;
 +------------+------------------------------------------------------------+
 | Table      | Create Table                                               |
 +------------+------------------------------------------------------------+
-| data_types | CREATE TABLE IF NOT EXISTS "data_types" (                  |
-|            |   "s" STRING NULL,                                         |
-|            |   "tint" TINYINT NULL,                                     |
-|            |   "sint" SMALLINT NULL,                                    |
-|            |   "i" INT NULL,                                            |
-|            |   "bint" BIGINT NULL,                                      |
-|            |   "v" STRING NULL,                                         |
-|            |   "f" FLOAT NULL,                                          |
-|            |   "d" DOUBLE NULL,                                         |
-|            |   "b" BOOLEAN NULL,                                        |
-|            |   "vb" VARBINARY NULL,                                     |
-|            |   "dt" DATE NULL,                                          |
-|            |   "dtt" TIMESTAMP(6) NULL,                                 |
-|            |   "ts0" TIMESTAMP(0) NULL,                                 |
-|            |   "ts3" TIMESTAMP(3) NULL,                                 |
-|            |   "ts6" TIMESTAMP(6) NULL,                                 |
-|            |   "ts9" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
-|            |   TIME INDEX ("ts9"),                                      |
-|            |   PRIMARY KEY ("s")                                        |
+| data_types | CREATE TABLE IF NOT EXISTS `data_types` (                  |
+|            |   `s` STRING NULL,                                         |
+|            |   `tint` TINYINT NULL,                                     |
+|            |   `sint` SMALLINT NULL,                                    |
+|            |   `i` INT NULL,                                            |
+|            |   `bint` BIGINT NULL,                                      |
+|            |   `v` STRING NULL,                                         |
+|            |   `f` FLOAT NULL,                                          |
+|            |   `d` DOUBLE NULL,                                         |
+|            |   `b` BOOLEAN NULL,                                        |
+|            |   `vb` VARBINARY NULL,                                     |
+|            |   `dt` DATE NULL,                                          |
+|            |   `dtt` TIMESTAMP(6) NULL,                                 |
+|            |   `ts0` TIMESTAMP(0) NULL,                                 |
+|            |   `ts3` TIMESTAMP(3) NULL,                                 |
+|            |   `ts6` TIMESTAMP(6) NULL,                                 |
+|            |   `ts9` TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
+|            |   TIME INDEX (`ts9`),                                      |
+|            |   PRIMARY KEY (`s`)                                        |
 |            | )                                                          |
 |            |                                                            |
 |            | ENGINE=mito                                                |

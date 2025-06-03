@@ -18,13 +18,13 @@ SHOW CREATE TABLE cnt_reqs;
 +----------+-------------------------------------------+
 | Table    | Create Table                              |
 +----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" BIGINT NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" BIGINT NULL,              |
-|          |   "update_at" TIMESTAMP(3) NULL,          |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
+| cnt_reqs | CREATE TABLE IF NOT EXISTS `cnt_reqs` (   |
+|          |   `count(http_requests.val)` BIGINT NULL, |
+|          |   `ts` TIMESTAMP(3) NOT NULL,             |
+|          |   `status_code` BIGINT NULL,              |
+|          |   `update_at` TIMESTAMP(3) NULL,          |
+|          |   TIME INDEX (`ts`),                      |
+|          |   PRIMARY KEY (`status_code`)             |
 |          | )                                         |
 |          |                                           |
 |          | ENGINE=mito                               |
@@ -101,13 +101,13 @@ SHOW CREATE TABLE cnt_reqs;
 +----------+-------------------------------------------+
 | Table    | Create Table                              |
 +----------+-------------------------------------------+
-| cnt_reqs | CREATE TABLE IF NOT EXISTS "cnt_reqs" (   |
-|          |   "count(http_requests.val)" BIGINT NULL, |
-|          |   "ts" TIMESTAMP(3) NOT NULL,             |
-|          |   "status_code" BIGINT NULL,              |
-|          |   "update_at" TIMESTAMP(3) NULL,          |
-|          |   TIME INDEX ("ts"),                      |
-|          |   PRIMARY KEY ("status_code")             |
+| cnt_reqs | CREATE TABLE IF NOT EXISTS `cnt_reqs` (   |
+|          |   `count(http_requests.val)` BIGINT NULL, |
+|          |   `ts` TIMESTAMP(3) NOT NULL,             |
+|          |   `status_code` BIGINT NULL,              |
+|          |   `update_at` TIMESTAMP(3) NULL,          |
+|          |   TIME INDEX (`ts`),                      |
+|          |   PRIMARY KEY (`status_code`)             |
 |          | )                                         |
 |          |                                           |
 |          | ENGINE=mito                               |
