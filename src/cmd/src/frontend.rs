@@ -42,6 +42,8 @@ use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
+#[cfg(target_os = "linux")]
+use crate::create_resource_limit_metrics;
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -271,6 +273,9 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
         log_versions(version(), short_version(), APP_NAME);
+
+        #[cfg(target_os = "linux")]
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);

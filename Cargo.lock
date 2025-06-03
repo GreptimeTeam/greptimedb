@@ -1992,6 +1992,7 @@ dependencies = [
  "session",
  "similar-asserts",
  "snafu 0.8.5",
+ "stat",
  "store-api",
  "substrait 0.15.0",
  "table",
@@ -11383,10 +11384,7 @@ dependencies = [
 name = "stat"
 version = "0.15.0"
 dependencies = [
- "common-error",
- "common-macro",
  "nix 0.30.1",
- "snafu 0.8.5",
 ]
 
 [[package]]

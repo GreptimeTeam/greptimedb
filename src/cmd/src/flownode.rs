@@ -40,6 +40,8 @@ use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
+#[cfg(target_os = "linux")]
+use crate::create_resource_limit_metrics;
 use crate::error::{
     BuildCacheRegistrySnafu, InitMetadataSnafu, LoadLayeredConfigSnafu, MetaClientInitSnafu,
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
@@ -247,6 +249,9 @@ impl StartCommand {
             None,
         );
         log_versions(version(), short_version(), APP_NAME);
+
+        #[cfg(target_os = "linux")]
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);

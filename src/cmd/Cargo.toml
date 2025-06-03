@@ -74,6 +74,7 @@ servers.workspace = true
 session.workspace = true
 similar-asserts.workspace = true
 snafu.workspace = true
+stat.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true

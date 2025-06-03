@@ -27,6 +27,8 @@ use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
+#[cfg(target_os = "linux")]
+use crate::create_resource_limit_metrics;
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{log_versions, App};
@@ -303,6 +305,9 @@ impl StartCommand {
             None,
         );
         log_versions(version(), short_version(), APP_NAME);
+
+        #[cfg(target_os = "linux")]
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);
 
