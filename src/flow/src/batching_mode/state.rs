@@ -30,6 +30,9 @@ use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
+use crate::metrics::{
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT,
+};
 use crate::{Error, FlowId};
 
 /// The state of the [`BatchingTask`].
@@ -238,6 +241,24 @@ impl DirtyTimeWindows {
                 std::mem::take(&mut self.windows)
             }
         };
+
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(first_nth.len() as f64);
+
+        let full_time_range = first_nth
+            .iter()
+            .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                if let Some(end) = end {
+                    acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+                } else {
+                    acc
+                }
+            })
+            .num_seconds() as f64;
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(full_time_range);
 
         let mut expr_lst = vec![];
         for (start, end) in first_nth.into_iter() {

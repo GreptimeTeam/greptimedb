@@ -387,7 +387,6 @@ impl BatchingTask {
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
                 .with_label_values(&[
                     flow_id.to_string().as_str(),
-                    &plan.to_string(),
                     &peer_desc.unwrap_or_default().to_string(),
                 ])
                 .observe(elapsed.as_secs_f64());
