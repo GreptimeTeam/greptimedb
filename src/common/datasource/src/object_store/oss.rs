@@ -27,6 +27,7 @@ const ACCESS_KEY_SECRET: &str = "access_key_secret";
 const ROOT: &str = "root";
 const ALLOW_ANONYMOUS: &str = "allow_anonymous";
 
+/// Check if the key is supported in OSS configuration.
 pub fn is_supported_in_oss(key: &str) -> bool {
     [
         ROOT,
@@ -39,6 +40,7 @@ pub fn is_supported_in_oss(key: &str) -> bool {
     .contains(&key)
 }
 
+/// Build an OSS backend using the provided bucket, root, and connection parameters.
 pub fn build_oss_backend(
     bucket: &str,
     root: &str,
