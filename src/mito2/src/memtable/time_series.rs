@@ -60,7 +60,7 @@ use crate::region::options::MergeMode;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 16;
+const INITIAL_BUILDER_CAPACITY: usize = 4;
 
 /// Vector builder capacity.
 const BUILDER_CAPACITY: usize = 512;
