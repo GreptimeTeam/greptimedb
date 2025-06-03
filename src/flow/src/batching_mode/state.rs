@@ -15,7 +15,6 @@
 //! Batching mode task state, which changes frequently
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -24,7 +23,7 @@ use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::batching_mode::task::BatchingTask;
@@ -122,14 +121,6 @@ pub struct DirtyTimeWindows {
     /// windows's `start -> end` and non-overlapping
     /// `end` is exclusive(and optional)
     windows: BTreeMap<Timestamp, Option<Timestamp>>,
-    /// Time ranges that are currently running queries, if the rwlock is held, it means
-    /// the time range is being queried and should not be modified.
-    /// if not held, the kv pair can be removed from `locked` and this time range can be
-    /// modified.
-    /// This is used to prevent concurrent queries on the same time range.
-    /// The key is the start time of the time range, and the value is a tuple of
-    /// (optional end time, RwLock).
-    locked: BTreeMap<Timestamp, (Option<Timestamp>, Arc<RwLock<()>>)>,
 }
 
 impl DirtyTimeWindows {

@@ -30,9 +30,6 @@ pub const DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(
 /// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
 pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
 
-/// The maximum number of parallel queries that can be executed by one batching mode task
-pub const MAX_PARALLEL_QUERIES_PER_FLOW: usize = 3;
-
 /// The minimum duration between two queries execution by batching mode task
 pub const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
 
