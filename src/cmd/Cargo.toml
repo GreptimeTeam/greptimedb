@@ -10,7 +10,12 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-default = ["servers/pprof", "servers/mem-prof", "meta-srv/pg_kvbackend", "meta-srv/mysql_kvbackend"]
+default = [
+    "servers/pprof",
+    "servers/mem-prof",
+    "meta-srv/pg_kvbackend",
+    "meta-srv/mysql_kvbackend",
+]
 tokio-console = ["common-telemetry/tokio-console"]
 
 [lints]
