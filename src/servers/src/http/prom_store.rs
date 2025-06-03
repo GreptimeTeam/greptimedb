@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
-use api::v1::RowInsertRequests;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -29,7 +28,7 @@ use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use pipeline::util::to_pipeline_version;
-use pipeline::PipelineDefinition;
+use pipeline::{ContextReq, PipelineDefinition};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
@@ -133,18 +132,24 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let (request, samples) =
+    let req =
         decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor).await?;
 
-    let output = prom_store_handler
-        .write(request, query_ctx, prom_store_with_metric_engine)
-        .await?;
-    crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
-    Ok((
-        StatusCode::NO_CONTENT,
-        write_cost_header_map(output.meta.cost),
-    )
-        .into_response())
+    let mut cost = 0;
+    for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
+        let cnt: u64 = reqs
+            .inserts
+            .iter()
+            .filter_map(|s| s.rows.as_ref().map(|r| r.rows.len() as u64))
+            .sum();
+        let output = prom_store_handler
+            .write(reqs, temp_ctx, prom_store_with_metric_engine)
+            .await?;
+        crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(cnt);
+        cost += output.meta.cost;
+    }
+
+    Ok((StatusCode::NO_CONTENT, write_cost_header_map(cost)).into_response())
 }
 
 impl IntoResponse for PromStoreResponse {
@@ -202,7 +207,7 @@ async fn decode_remote_write_request(
     body: Bytes,
     prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
-) -> Result<(RowInsertRequests, usize)> {
+) -> Result<ContextReq> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
 
     // due to vmagent's limitation, there is a chance that vmagent is
@@ -227,7 +232,8 @@ async fn decode_remote_write_request(
     if processor.use_pipeline {
         processor.exec_pipeline().await
     } else {
-        Ok(request.as_row_insert_requests())
+        let reqs = request.as_row_insert_requests();
+        Ok(ContextReq::default_opt_with_reqs(reqs))
     }
 }
 
