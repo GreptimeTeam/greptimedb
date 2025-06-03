@@ -15,6 +15,7 @@
 //! Batching mode task state, which changes frequently
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -128,7 +129,7 @@ pub struct DirtyTimeWindows {
     /// This is used to prevent concurrent queries on the same time range.
     /// The key is the start time of the time range, and the value is a tuple of
     /// (optional end time, RwLock).
-    locked: BTreeMap<Timestamp, (Option<Timestamp>, RwLock<()>)>,
+    locked: BTreeMap<Timestamp, (Option<Timestamp>, Arc<RwLock<()>>)>,
 }
 
 impl DirtyTimeWindows {
