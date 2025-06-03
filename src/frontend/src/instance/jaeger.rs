@@ -130,7 +130,13 @@ impl JaegerQueryHandler for Instance {
         .await?)
     }
 
-    async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> ServerResult<Output> {
+    async fn get_trace(
+        &self,
+        ctx: QueryContextRef,
+        trace_id: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> ServerResult<Output> {
         // It's equivalent to
         //
         // ```
@@ -139,13 +145,25 @@ impl JaegerQueryHandler for Instance {
         // FROM
         //   {db}.{trace_table}
         // WHERE
-        //   trace_id = '{trace_id}'
+        //   trace_id = '{trace_id}' AND
+        //   timestamp >= {start_time} AND
+        //   timestamp <= {end_time}
         // ORDER BY
         //   timestamp DESC
         // ```.
         let selects = vec![wildcard()];
 
-        let filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
+        let mut filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
+
+        if let Some(start_time) = start_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time * 1_000)));
+        }
+
+        if let Some(end_time) = end_time {
+            // Microseconds to nanoseconds.
+            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
+        }
 
         Ok(query_trace_table(
             ctx,
