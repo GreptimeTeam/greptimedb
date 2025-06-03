@@ -399,13 +399,7 @@ impl ScalarExpr {
                     .iter()
                     .map(|v| v.eval(values))
                     .collect::<Result<Vec<_>, _>>()?;
-                let mut found = false;
-                for item in eval_list {
-                    if item == eval_expr {
-                        found = true;
-                        break;
-                    }
-                }
+                let found = eval_list.iter().any(|item| *item == eval_expr);
                 Ok(Value::Boolean(found))
             }
         }
