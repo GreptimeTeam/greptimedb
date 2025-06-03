@@ -450,12 +450,14 @@ mod tests {
     fn test_build_with_or_chain() {
         let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_or_chain_");
         let metadata = test_region_metadata();
-        let builder = BloomFilterIndexApplierBuilder::new(
-            "test".to_string(),
-            test_object_store(),
-            &metadata,
-            factory,
-        );
+        let builder = || {
+            BloomFilterIndexApplierBuilder::new(
+                "test".to_string(),
+                test_object_store(),
+                &metadata,
+                factory.clone(),
+            )
+        };
 
         let expr = col("column1")
             .eq(lit("value1"))
@@ -464,7 +466,7 @@ mod tests {
                 .or(col("column1").eq(lit("value4"))))
             .or(col("column1").eq(lit("value3")));
 
-        let result = builder.build(&[expr]).unwrap();
+        let result = builder().build(&[expr]).unwrap();
         assert!(result.is_some());
 
         let predicates = result.unwrap().predicates;
@@ -483,6 +485,25 @@ mod tests {
         assert!(or_chain_predicates.contains(&encode_str("value2")));
         assert!(or_chain_predicates.contains(&encode_str("value3")));
         assert!(or_chain_predicates.contains(&encode_str("value4")));
+
+        // Test with null value
+        let expr = col("column1").eq(Expr::Literal(ScalarValue::Utf8(None)));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_none());
+
+        // Test with different column
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .or(col("column2").eq(lit("value2")));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_none());
+
+        // Test with non or chain
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .or(col("column1").gt_eq(lit("value2")));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
