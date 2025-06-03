@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use object_store::layers::LoggingLayer;
@@ -216,14 +217,28 @@ impl ExportCommand {
             s3_bucket: self.s3_bucket.clone(),
             s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
-            s3_access_key: self.s3_access_key.clone(),
-            s3_secret_key: self.s3_secret_key.clone(),
+            // Wrap sensitive values in SecretString
+            s3_access_key: self
+                .s3_access_key
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
+            s3_secret_key: self
+                .s3_secret_key
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
             s3_region: self.s3_region.clone(),
             oss: self.oss,
             oss_bucket: self.oss_bucket.clone(),
             oss_endpoint: self.oss_endpoint.clone(),
-            oss_access_key_id: self.oss_access_key_id.clone(),
-            oss_access_key_secret: self.oss_access_key_secret.clone(),
+            // Wrap sensitive values in SecretString
+            oss_access_key_id: self
+                .oss_access_key_id
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
+            oss_access_key_secret: self
+                .oss_access_key_secret
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
         }))
     }
 }
@@ -243,14 +258,16 @@ pub struct Export {
     s3_bucket: Option<String>,
     s3_root: Option<String>,
     s3_endpoint: Option<String>,
-    s3_access_key: Option<String>,
-    s3_secret_key: Option<String>,
+    // Changed to SecretString for sensitive data
+    s3_access_key: Option<SecretString>,
+    s3_secret_key: Option<SecretString>,
     s3_region: Option<String>,
     oss: bool,
     oss_bucket: Option<String>,
     oss_endpoint: Option<String>,
-    oss_access_key_id: Option<String>,
-    oss_access_key_secret: Option<String>,
+    // Changed to SecretString for sensitive data
+    oss_access_key_id: Option<SecretString>,
+    oss_access_key_secret: Option<SecretString>,
 }
 
 impl Export {
@@ -553,11 +570,11 @@ impl Export {
         }
 
         if let Some(key_id) = self.s3_access_key.as_ref() {
-            builder = builder.access_key_id(key_id);
+            builder = builder.access_key_id(key_id.expose_secret());
         }
 
         if let Some(secret_key) = self.s3_secret_key.as_ref() {
-            builder = builder.secret_access_key(secret_key);
+            builder = builder.secret_access_key(secret_key.expose_secret());
         }
 
         let op = ObjectStore::new(builder)
@@ -576,11 +593,12 @@ impl Export {
                     .expect("oss_endpoint must be set"),
             );
 
+        // Use expose_secret() to access the actual secret value
         if let Some(key_id) = self.oss_access_key_id.as_ref() {
-            builder = builder.access_key_id(key_id);
+            builder = builder.access_key_id(key_id.expose_secret());
         }
         if let Some(secret_key) = self.oss_access_key_secret.as_ref() {
-            builder = builder.access_key_secret(secret_key);
+            builder = builder.access_key_secret(secret_key.expose_secret());
         }
 
         let op = ObjectStore::new(builder)
@@ -636,7 +654,11 @@ impl Export {
                     r#"COPY DATABASE "{}"."{}" TO '{}' WITH ({}){};"#,
                     export_self.catalog, schema, path, with_options_clone, connection_part
                 );
-                info!("Executing sql: {sql}");
+
+                // Log SQL command but mask sensitive information
+                let safe_sql = export_self.mask_sensitive_sql(&sql);
+                info!("Executing sql: {}", safe_sql);
+
                 export_self.database_client.sql_in_public(&sql).await?;
                 info!(
                     "Finished exporting {}.{} data to {}",
@@ -674,6 +696,29 @@ impl Export {
         info!("Success {success}/{db_count} jobs, costs: {elapsed:?}");
 
         Ok(())
+    }
+
+    /// Mask sensitive information in SQL commands for safe logging
+    fn mask_sensitive_sql(&self, sql: &str) -> String {
+        let mut masked_sql = sql.to_string();
+
+        // Mask S3 credentials
+        if let Some(access_key) = &self.s3_access_key {
+            masked_sql = masked_sql.replace(access_key.expose_secret(), "[REDACTED]");
+        }
+        if let Some(secret_key) = &self.s3_secret_key {
+            masked_sql = masked_sql.replace(secret_key.expose_secret(), "[REDACTED]");
+        }
+
+        // Mask OSS credentials
+        if let Some(access_key_id) = &self.oss_access_key_id {
+            masked_sql = masked_sql.replace(access_key_id.expose_secret(), "[REDACTED]");
+        }
+        if let Some(access_key_secret) = &self.oss_access_key_secret {
+            masked_sql = masked_sql.replace(access_key_secret.expose_secret(), "[REDACTED]");
+        }
+
+        masked_sql
     }
 
     fn get_file_path(&self, schema: &str, file_name: &str) -> String {
@@ -743,10 +788,11 @@ impl Export {
             };
 
             // Safety: All s3 options are required
+            // Use expose_secret() to access the actual secret values
             let connection_options = format!(
                 "ACCESS_KEY_ID='{}', SECRET_ACCESS_KEY='{}', REGION='{}'{}",
-                self.s3_access_key.as_ref().unwrap(),
-                self.s3_secret_key.as_ref().unwrap(),
+                self.s3_access_key.as_ref().unwrap().expose_secret(),
+                self.s3_secret_key.as_ref().unwrap().expose_secret(),
                 self.s3_region.as_ref().unwrap(),
                 endpoint_option
             );
@@ -764,10 +810,11 @@ impl Export {
             } else {
                 String::new()
             };
+
             let connection_options = format!(
                 "ACCESS_KEY_ID='{}', ACCESS_KEY_SECRET='{}'{}",
-                self.oss_access_key_id.as_ref().unwrap(),
-                self.oss_access_key_secret.as_ref().unwrap(),
+                self.oss_access_key_id.as_ref().unwrap().expose_secret(),
+                self.oss_access_key_secret.as_ref().unwrap().expose_secret(),
                 endpoint_option
             );
             (oss_path, format!(" CONNECTION ({})", connection_options))
