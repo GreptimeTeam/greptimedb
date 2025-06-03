@@ -476,11 +476,24 @@ impl TypedExpr {
                 let substrait_expr = s.value.as_ref().with_context(|| InvalidQuerySnafu {
                     reason: "SingularOrList expression without value",
                 })?;
+                let typed_expr =
+                    TypedExpr::from_substrait_rex(substrait_expr, input_schema, extensions).await?;
                 // Note that we didn't impl support to in list expr
                 if !s.options.is_empty() {
-                    return not_impl_err!("In list expression is not supported");
+                    let mut list = Vec::with_capacity(s.options.len());
+                    for opt in s.options.iter() {
+                        let opt_expr =
+                            TypedExpr::from_substrait_rex(opt, input_schema, extensions).await?;
+                        list.push(opt_expr.expr);
+                    }
+                    let in_list_expr = ScalarExpr::InList {
+                        expr: Box::new(typed_expr.expr),
+                        list,
+                    };
+                    Ok(TypedExpr::new(in_list_expr, typed_expr.typ))
+                } else {
+                    Ok(typed_expr)
                 }
-                TypedExpr::from_substrait_rex(substrait_expr, input_schema, extensions).await
             }
             Some(RexType::Selection(field_ref)) => match &field_ref.reference_type {
                 Some(DirectReference(direct)) => match &direct.reference_type.as_ref() {
