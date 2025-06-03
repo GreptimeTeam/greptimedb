@@ -2025,7 +2025,7 @@ table_suffix: _${type}
     "type": "http",
     "time": "2024-05-25 20:16:37.217",
     "log": "ClusterAdapter:enter sendTextDataToCluster\\n",
-    "x-greptime-hint-ttl": "1d"
+    "greptime_ttl": "1d"
   },
   {
     "id1": "2436",
