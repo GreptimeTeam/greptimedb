@@ -147,7 +147,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let row_inserts = ColumnToRow::convert(requests)?;
-        self.handle_row_inserts(row_inserts, ctx, statement_executor, false)
+        self.handle_row_inserts(row_inserts, ctx, statement_executor, false, false)
             .await
     }
 
@@ -158,6 +158,7 @@ impl Inserter {
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<Output> {
         preprocess_row_insert_requests(&mut requests.inserts)?;
         self.handle_row_inserts_with_create_type(
@@ -166,6 +167,7 @@ impl Inserter {
             statement_executor,
             AutoCreateTableType::Physical,
             accommodate_existing_schema,
+            is_single_value,
         )
         .await
     }
@@ -183,6 +185,7 @@ impl Inserter {
             statement_executor,
             AutoCreateTableType::Log,
             false,
+            false,
         )
         .await
     }
@@ -199,6 +202,7 @@ impl Inserter {
             statement_executor,
             AutoCreateTableType::Trace,
             false,
+            false,
         )
         .await
     }
@@ -210,6 +214,7 @@ impl Inserter {
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<Output> {
         self.handle_row_inserts_with_create_type(
             requests,
@@ -217,6 +222,7 @@ impl Inserter {
             statement_executor,
             AutoCreateTableType::LastNonNull,
             accommodate_existing_schema,
+            is_single_value,
         )
         .await
     }
@@ -229,6 +235,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         create_type: AutoCreateTableType,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<Output> {
         // remove empty requests
         requests.inserts.retain(|req| {
@@ -249,6 +256,7 @@ impl Inserter {
                 create_type,
                 statement_executor,
                 accommodate_existing_schema,
+                is_single_value,
             )
             .await?;
 
@@ -298,6 +306,7 @@ impl Inserter {
                 &ctx,
                 AutoCreateTableType::Logical(physical_table.to_string()),
                 statement_executor,
+                true,
                 true,
             )
             .await?;
@@ -464,9 +473,10 @@ impl Inserter {
     /// This mapping is used in the conversion of RowToRegion.
     ///
     /// `accommodate_existing_schema` is used to determine if the existing schema should override the new schema.
-    /// It only works for TIME_INDEX and VALUE columns. This is for the case where the user creates a table with
+    /// It only works for TIME_INDEX and single VALUE columns. This is for the case where the user creates a table with
     /// custom schema, and then inserts data with endpoints that have default schema setting, like prometheus
     /// remote write. This will modify the `RowInsertRequests` in place.
+    /// `is_single_value` indicates whether the default schema only contains single value column so we can accommodate it.
     async fn create_or_alter_tables_on_demand(
         &self,
         requests: &mut RowInsertRequests,
@@ -474,6 +484,7 @@ impl Inserter {
         auto_create_table_type: AutoCreateTableType,
         statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<CreateAlterTableResult> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
@@ -537,6 +548,7 @@ impl Inserter {
                         &table,
                         ctx,
                         accommodate_existing_schema,
+                        is_single_value,
                     )? {
                         alter_tables.push(alter_expr);
                     }
@@ -815,12 +827,15 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true, it may modify the input `req` to
     /// accommodate it with existing schema. See [`create_or_alter_tables_on_demand`](Self::create_or_alter_tables_on_demand)
     /// for more details.
+    /// When `accommodate_existing_schema` is true and `is_single_value` is true, it also consider fields when modifying the
+    /// input `req`.
     fn get_alter_table_expr_on_demand(
         &self,
         req: &mut RowInsertRequest,
         table: &TableRef,
         ctx: &QueryContextRef,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<Option<AlterTableExpr>> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
@@ -838,18 +853,20 @@ impl Inserter {
             let table_schema = table.schema();
             // Find timestamp column name
             let ts_col_name = table_schema.timestamp_column().map(|c| c.name.clone());
-            // Find field column name if there is only one
+            // Find field column name if there is only one and `is_single_value` is true.
             let mut field_col_name = None;
-            let mut multiple_field_cols = false;
-            table.field_columns().for_each(|col| {
-                if field_col_name.is_none() {
-                    field_col_name = Some(col.name.clone());
-                } else {
-                    multiple_field_cols = true;
+            if is_single_value {
+                let mut multiple_field_cols = false;
+                table.field_columns().for_each(|col| {
+                    if field_col_name.is_none() {
+                        field_col_name = Some(col.name.clone());
+                    } else {
+                        multiple_field_cols = true;
+                    }
+                });
+                if multiple_field_cols {
+                    field_col_name = None;
                 }
-            });
-            if multiple_field_cols {
-                field_col_name = None;
             }
 
             // Update column name in request schema for Timestamp/Field columns
@@ -875,11 +892,11 @@ impl Inserter {
                 }
             }
 
-            // Remove from add_columns any column that is timestamp or field (if there is only one field column)
+            // Only keep columns that are tags or non-single field.
             add_columns.add_columns.retain(|col| {
                 let def = col.column_def.as_ref().unwrap();
-                def.semantic_type != SemanticType::Timestamp as i32
-                    && (def.semantic_type != SemanticType::Field as i32 && field_col_name.is_some())
+                def.semantic_type == SemanticType::Tag as i32
+                    || (def.semantic_type == SemanticType::Field as i32 && field_col_name.is_none())
             });
 
             if add_columns.add_columns.is_empty() {
@@ -1231,7 +1248,7 @@ mod tests {
             )),
         );
         let alter_expr = inserter
-            .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true)
+            .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)
             .unwrap();
         assert!(alter_expr.is_none());
 

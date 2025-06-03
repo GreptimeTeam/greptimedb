@@ -596,7 +596,7 @@ impl FrontendInvoker {
             .start_timer();
 
         self.inserter
-            .handle_row_inserts(requests, ctx, &self.statement_executor, false)
+            .handle_row_inserts(requests, ctx, &self.statement_executor, false, false)
             .await
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)
