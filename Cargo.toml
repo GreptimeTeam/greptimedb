@@ -30,6 +30,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/session",
+    "src/common/stat",
     "src/common/substrait",
     "src/common/telemetry",
     "src/common/test-util",
@@ -148,6 +149,7 @@ meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev =
 mockall = "0.13"
 moka = "0.12"
 nalgebra = "0.33"
+nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
 object_store_opendal = "0.50"
@@ -287,6 +289,7 @@ query = { path = "src/query" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
+stat = { path = "src/common/stat" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
