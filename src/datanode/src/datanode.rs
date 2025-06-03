@@ -559,6 +559,7 @@ async fn open_all_regions(
     init_regions_parallelism: usize,
 ) -> Result<()> {
     let mut regions = vec![];
+    let mut follower_regions = vec![];
     for table_value in table_values {
         for region_number in table_value.regions {
             // Augments region options with wal options if a wal options is provided.
@@ -570,6 +571,23 @@ async fn open_all_regions(
             );
 
             regions.push((
+                RegionId::new(table_value.table_id, region_number),
+                table_value.region_info.engine.clone(),
+                table_value.region_info.region_storage_path.clone(),
+                region_options,
+            ));
+        }
+
+        for region_number in table_value.follower_regions {
+            // Augments region options with wal options if a wal options is provided.
+            let mut region_options = table_value.region_info.region_options.clone();
+            prepare_wal_options(
+                &mut region_options,
+                RegionId::new(table_value.table_id, region_number),
+                &table_value.region_info.region_wal_options,
+            );
+
+            follower_regions.push((
                 RegionId::new(table_value.table_id, region_number),
                 table_value.region_info.engine.clone(),
                 table_value.region_info.region_storage_path.clone(),
@@ -617,6 +635,42 @@ async fn open_all_regions(
             }
         }
     }
+
+    if !follower_regions.is_empty() {
+        info!(
+            "going to open {} follower region(s)",
+            follower_regions.len()
+        );
+        let mut region_requests = Vec::with_capacity(follower_regions.len());
+        for (region_id, engine, store_path, options) in follower_regions {
+            let region_dir = region_dir(&store_path, region_id);
+            region_requests.push((
+                region_id,
+                RegionOpenRequest {
+                    engine,
+                    region_dir,
+                    options,
+                    skip_wal_replay: true,
+                },
+            ));
+        }
+
+        let open_regions = region_server
+            .handle_batch_open_requests(init_regions_parallelism, region_requests)
+            .await?;
+
+        ensure!(
+            open_regions.len() == num_regions,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Expected to open {} of follower regions, only {} of regions has opened",
+                    num_regions,
+                    open_regions.len()
+                )
+            }
+        );
+    }
+
     info!("all regions are opened");
 
     Ok(())
