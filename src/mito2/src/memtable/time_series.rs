@@ -57,7 +57,7 @@ use crate::region::options::MergeMode;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
-const INITIAL_BUILDER_CAPACITY: usize = 16;
+const INITIAL_BUILDER_CAPACITY: usize = 4;
 
 /// Vector builder capacity.
 const BUILDER_CAPACITY: usize = 512;
@@ -645,13 +645,17 @@ struct Series {
 }
 
 impl Series {
-    fn new(region_metadata: &RegionMetadataRef) -> Self {
+    pub(crate) fn with_capacity(region_metadata: &RegionMetadataRef, builder_cap: usize) -> Self {
         Self {
             pk_cache: None,
-            active: ValueBuilder::new(region_metadata, INITIAL_BUILDER_CAPACITY),
+            active: ValueBuilder::new(region_metadata, builder_cap),
             frozen: vec![],
             region_metadata: region_metadata.clone(),
         }
+    }
+
+    pub(crate) fn new(region_metadata: &RegionMetadataRef) -> Self {
+        Self::with_capacity(region_metadata, INITIAL_BUILDER_CAPACITY)
     }
 
     /// Pushes a row of values into Series. Return the size of values.
