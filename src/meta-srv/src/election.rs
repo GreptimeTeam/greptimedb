@@ -123,7 +123,7 @@ fn send_leader_change_and_set_flags(
         .is_ok()
     {
         if is_elected {
-            leader_infancy.store(true, Ordering::Relaxed);
+            leader_infancy.store(true, Ordering::Release);
         }
         if let Err(e) = tx.send(msg) {
             error!(e; "Failed to send leader change message");
