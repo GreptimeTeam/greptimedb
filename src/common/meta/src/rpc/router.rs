@@ -40,17 +40,23 @@ pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution 
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         if let Some(peer) = route.leader_peer.as_ref() {
-            let region_id = route.region.id.region_number();
-            regions_id_map.entry(peer.id).or_default().push(region_id);
+            let region_number = route.region.id.region_number();
+            regions_id_map
+                .entry(peer.id)
+                .or_default()
+                .add_leader_region(region_number);
         }
         for peer in route.follower_peers.iter() {
-            let region_id = route.region.id.region_number();
-            regions_id_map.entry(peer.id).or_default().push(region_id);
+            let region_number = route.region.id.region_number();
+            regions_id_map
+                .entry(peer.id)
+                .or_default()
+                .add_follower_region(region_number);
         }
     }
-    for (_, regions) in regions_id_map.iter_mut() {
-        // id asc
-        regions.sort()
+    for (_, region_role_set) in regions_id_map.iter_mut() {
+        // Sort the regions in ascending order.
+        region_role_set.sort()
     }
     regions_id_map
 }
@@ -455,6 +461,7 @@ impl From<PbPartition> for Partition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::RegionRoleSet;
 
     #[test]
     fn test_leader_is_downgraded() {
@@ -611,8 +618,8 @@ mod tests {
 
         let distribution = region_distribution(&region_routes);
         assert_eq!(distribution.len(), 3);
-        assert_eq!(distribution[&1], vec![1, 2]);
-        assert_eq!(distribution[&2], vec![1, 2]);
-        assert_eq!(distribution[&3], vec![1, 2]);
+        assert_eq!(distribution[&1], RegionRoleSet::new(vec![1], vec![2]));
+        assert_eq!(distribution[&2], RegionRoleSet::new(vec![2], vec![1]));
+        assert_eq!(distribution[&3], RegionRoleSet::new(vec![], vec![1, 2]));
     }
 }

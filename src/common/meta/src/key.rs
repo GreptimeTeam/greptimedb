@@ -188,7 +188,45 @@ pub const CACHE_KEY_PREFIXES: [&str; 5] = [
     NODE_ADDRESS_PREFIX,
 ];
 
-pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
+/// A set of regions with the same role.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RegionRoleSet {
+    /// Leader regions.
+    pub leader_regions: Vec<RegionNumber>,
+    /// Follower regions.
+    pub follower_regions: Vec<RegionNumber>,
+}
+
+impl RegionRoleSet {
+    /// Create a new region role set.
+    pub fn new(leader_regions: Vec<RegionNumber>, follower_regions: Vec<RegionNumber>) -> Self {
+        Self {
+            leader_regions,
+            follower_regions,
+        }
+    }
+
+    /// Add a leader region to the set.
+    pub fn add_leader_region(&mut self, region_number: RegionNumber) {
+        self.leader_regions.push(region_number);
+    }
+
+    /// Add a follower region to the set.
+    pub fn add_follower_region(&mut self, region_number: RegionNumber) {
+        self.follower_regions.push(region_number);
+    }
+
+    /// Sort the regions.
+    pub fn sort(&mut self) {
+        self.follower_regions.sort();
+        self.leader_regions.sort();
+    }
+}
+
+/// The distribution of regions.
+///
+/// The key is the datanode id, the value is the region role set.
+pub type RegionDistribution = BTreeMap<DatanodeId, RegionRoleSet>;
 
 /// The id of flow.
 pub type FlowId = u32;
@@ -1995,7 +2033,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            assert_eq!(got.regions, regions)
+            assert_eq!(got.regions, regions.leader_regions);
+            assert_eq!(got.follower_regions, regions.follower_regions);
         }
     }
 

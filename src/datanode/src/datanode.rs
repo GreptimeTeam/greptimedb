@@ -632,6 +632,7 @@ mod tests {
     use common_base::Plugins;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::datanode_table::DatanodeTableManager;
+    use common_meta::key::RegionRoleSet;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
     use mito2::engine::MITO_ENGINE_NAME;
@@ -651,7 +652,7 @@ mod tests {
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
                 HashMap::default(),
-                BTreeMap::from([(0, vec![0, 1, 2])]),
+                BTreeMap::from([(0, RegionRoleSet::new(vec![0, 1, 2], vec![]))]),
             )
             .unwrap();
 
