@@ -40,6 +40,9 @@ use crate::memtable::key_values::KeyValue;
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
+/// Initial time window if not specified.
+const INITIAL_TIME_WINDOW: Duration = Duration::from_days(1);
+
 /// A partition holds rows with timestamps between `[min, max)`.
 #[derive(Debug, Clone)]
 pub struct TimePartition {
@@ -304,7 +307,7 @@ impl TimePartitions {
         part_start: Timestamp,
         inner: &mut MutexGuard<PartitionsInner>,
     ) -> Result<TimePartition> {
-        let part_duration = self.part_duration.unwrap_or(Duration::from_days(1));
+        let part_duration = self.part_duration.unwrap_or(INITIAL_TIME_WINDOW);
         let part_pos = match inner
             .parts
             .iter()
@@ -392,18 +395,17 @@ impl TimePartitions {
 
         let old_stats = old_part.memtable.stats();
         // Use the max timestamp to compute the new time range for the memtable.
-        // If `part_duration` is None, the new range will be None.
         let partitions_inner = old_stats
             .time_range()
             .and_then(|(_, old_stats_end_timestamp)| {
                 partition_start_timestamp(
                     old_stats_end_timestamp,
-                    part_duration.unwrap_or(Duration::from_days(1)),
+                    part_duration.unwrap_or(INITIAL_TIME_WINDOW),
                 )
                 .and_then(|start| {
                     PartTimeRange::from_start_duration(
                         start,
-                        part_duration.unwrap_or(Duration::from_days(1)),
+                        part_duration.unwrap_or(INITIAL_TIME_WINDOW),
                     )
                 })
             })
@@ -601,7 +603,7 @@ impl TimePartitions {
 
     /// Returns partition duration, or use default 1day duration is not present.
     fn part_duration_or_default(&self) -> Duration {
-        self.part_duration.unwrap_or(Duration::from_days(1))
+        self.part_duration.unwrap_or(INITIAL_TIME_WINDOW)
     }
 
     /// Write to multiple partitions.
