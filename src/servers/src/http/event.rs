@@ -178,7 +178,7 @@ pub async fn query_pipeline(
         pipeline_name,
         query_params
             .version
-            .unwrap_or(pipeline_version.0.to_iso8601_string()),
+            .unwrap_or(pipeline_version.0.to_timezone_aware_string(None)),
         start.elapsed().as_millis() as u64,
         Some(pipeline),
     ))

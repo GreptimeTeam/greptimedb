@@ -15,13 +15,12 @@
 use table::metadata::RawTableInfo;
 use table::table_name::TableName;
 
-use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
+use crate::ddl::alter_logical_tables::AlterTablesData;
 use crate::instruction::CacheIdent;
 
-impl AlterLogicalTablesProcedure {
-    pub(crate) fn build_table_cache_keys_to_invalidate(&self) -> Vec<CacheIdent> {
+impl AlterTablesData {
+    pub(crate) fn build_cache_keys_to_invalidate(&mut self) {
         let mut cache_keys = self
-            .data
             .table_info_values
             .iter()
             .flat_map(|table| {
@@ -31,14 +30,14 @@ impl AlterLogicalTablesProcedure {
                 ]
             })
             .collect::<Vec<_>>();
-        cache_keys.push(CacheIdent::TableId(self.data.physical_table_id));
+        cache_keys.push(CacheIdent::TableId(self.physical_table_id));
         // Safety: physical_table_info already filled in previous steps
-        let physical_table_info = &self.data.physical_table_info.as_ref().unwrap().table_info;
+        let physical_table_info = &self.physical_table_info.as_ref().unwrap().table_info;
         cache_keys.push(CacheIdent::TableName(extract_table_name(
             physical_table_info,
         )));
 
-        cache_keys
+        self.table_cache_keys_to_invalidate = cache_keys;
     }
 }
 

@@ -326,7 +326,11 @@ impl RegionMigrationManager {
 
         if self.has_migrated(&region_route, &task)? {
             info!("Skipping region migration task: {task}");
-            return Ok(None);
+            return error::RegionMigratedSnafu {
+                region_id,
+                target_peer_id: task.to_peer.id,
+            }
+            .fail();
         }
 
         self.verify_region_leader_peer(&region_route, &task)?;
@@ -567,7 +571,8 @@ mod test {
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
-        manager.submit_procedure(task).await.unwrap();
+        let err = manager.submit_procedure(task).await.unwrap_err();
+        assert_matches!(err, error::Error::RegionMigrated { .. });
     }
 
     #[tokio::test]

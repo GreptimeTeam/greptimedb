@@ -20,24 +20,34 @@ use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use itertools::Itertools;
 use session::context::{QueryContext, QueryContextRef};
-use session::hints::{HINTS_KEY_PREFIX, HINT_KEYS};
 
 use crate::PipelineMap;
 
 const DEFAULT_OPT: &str = "";
 
+pub const PIPELINE_HINT_KEYS: [&str; 6] = [
+    "greptime_auto_create_table",
+    "greptime_ttl",
+    "greptime_append_mode",
+    "greptime_merge_mode",
+    "greptime_physical_table",
+    "greptime_skip_wal",
+];
+
+const PIPELINE_HINT_PREFIX: &str = "greptime_";
+
 // Remove hints from the pipeline context and form a option string
 // e.g: skip_wal=true,ttl=1d
 pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> String {
     let mut btreemap = BTreeMap::new();
-    for k in HINT_KEYS {
+    for k in PIPELINE_HINT_KEYS {
         if let Some(v) = pipeline_map.remove(k) {
             btreemap.insert(k, v.to_str_value());
         }
     }
     btreemap
         .into_iter()
-        .map(|(k, v)| format!("{}={}", k.replace(HINTS_KEY_PREFIX, ""), v))
+        .map(|(k, v)| format!("{}={}", k.replace(PIPELINE_HINT_PREFIX, ""), v))
         .join(",")
 }
 

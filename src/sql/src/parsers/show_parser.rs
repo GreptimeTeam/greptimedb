@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
@@ -32,6 +35,10 @@ impl ParserContext<'_> {
     /// Parses SHOW statements
     /// todo(hl) support `show settings`/`show create`/`show users` etc.
     pub(crate) fn parse_show(&mut self) -> Result<Statement> {
+        #[cfg(feature = "enterprise")]
+        if self.consume_token("TRIGGERS") {
+            return self.parse_show_triggers();
+        }
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases(false)
         } else if self.matches_keyword(Keyword::TABLES) {
@@ -530,7 +537,7 @@ impl ParserContext<'_> {
                 }));
             }
 
-            // SHOW FLOWS [in | FROM] [DATABASE]
+            // SHOW VIEWS [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => self.parse_db_name()?,
                 _ => None,

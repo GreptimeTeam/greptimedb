@@ -32,6 +32,7 @@ use datatypes::vectors::{Helper, UInt64Vector};
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::future::BoxFuture;
+use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::RegionMigrationProcedureTask;
@@ -213,7 +214,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     assert_values(cluster.fe_instance()).await;
 
     // Triggers again.
-    let procedure = region_migration_manager
+    let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
             region_id,
             peer_factory(from_peer_id),
@@ -221,8 +222,8 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             Duration::from_millis(1000),
         ))
         .await
-        .unwrap();
-    assert!(procedure.is_none());
+        .unwrap_err();
+    assert!(matches!(err, error::Error::RegionMigrated { .. }));
 }
 
 /// A naive metric table region migration test by SQL function
@@ -471,7 +472,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
     assert_values(cluster.fe_instance()).await;
 
     // Triggers again.
-    let procedure = region_migration_manager
+    let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
             region_id,
             peer_factory(from_peer_id),
@@ -479,8 +480,8 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
             Duration::from_millis(1000),
         ))
         .await
-        .unwrap();
-    assert!(procedure.is_none());
+        .unwrap_err();
+    assert!(matches!(err, error::Error::RegionMigrated { .. }));
 
     let new_distribution = find_region_distribution_by_sql(&cluster, TEST_TABLE_NAME).await;
 
@@ -621,7 +622,7 @@ pub async fn test_region_migration_multiple_regions(
     assert_values(cluster.fe_instance()).await;
 
     // Triggers again.
-    let procedure = region_migration_manager
+    let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
             region_id,
             peer_factory(from_peer_id),
@@ -629,8 +630,8 @@ pub async fn test_region_migration_multiple_regions(
             Duration::from_millis(1000),
         ))
         .await
-        .unwrap();
-    assert!(procedure.is_none());
+        .unwrap_err();
+    assert!(matches!(err, error::Error::RegionMigrated { .. }));
 }
 
 /// A region migration test for a region server contains all regions of the table.
@@ -757,7 +758,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     assert_values(cluster.fe_instance()).await;
 
     // Triggers again.
-    let procedure = region_migration_manager
+    let err = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
             region_id,
             peer_factory(from_peer_id),
@@ -765,8 +766,8 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             Duration::from_millis(1000),
         ))
         .await
-        .unwrap();
-    assert!(procedure.is_none());
+        .unwrap_err();
+    assert!(matches!(err, error::Error::RegionMigrated { .. }));
 }
 
 pub async fn test_region_migration_incorrect_from_peer(
