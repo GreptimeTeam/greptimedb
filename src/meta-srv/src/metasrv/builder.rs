@@ -25,6 +25,8 @@ use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
 use common_meta::ddl_manager::DdlManager;
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::TriggerDdlManagerRef;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -280,7 +282,7 @@ impl MetasrvBuilder {
             ensure!(
                 options.allow_region_failover_on_local_wal,
                 error::UnexpectedSnafu {
-                    violated: "Region failover is not supported in the local WAL implementation! 
+                    violated: "Region failover is not supported in the local WAL implementation!
                     If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
                 }
             );
@@ -351,6 +353,11 @@ impl MetasrvBuilder {
         };
 
         let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
+
+        #[cfg(feature = "enterprise")]
+        let trigger_ddl_manager = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<TriggerDdlManagerRef>());
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -366,6 +373,8 @@ impl MetasrvBuilder {
                 },
                 procedure_manager.clone(),
                 true,
+                #[cfg(feature = "enterprise")]
+                trigger_ddl_manager,
             )
             .context(error::InitDdlManagerSnafu)?,
         );

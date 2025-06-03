@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::{HashMap, HashSet};
 use std::result;
 
@@ -68,12 +71,20 @@ pub enum DdlTask {
     DropFlow(DropFlowTask),
     CreateView(CreateViewTask),
     DropView(DropViewTask),
+    #[cfg(feature = "enterprise")]
+    CreateTrigger(trigger::CreateTriggerTask),
 }
 
 impl DdlTask {
     /// Creates a [`DdlTask`] to create a flow.
     pub fn new_create_flow(expr: CreateFlowTask) -> Self {
         DdlTask::CreateFlow(expr)
+    }
+
+    /// Creates a [`DdlTask`] to create a trigger.
+    #[cfg(feature = "enterprise")]
+    pub fn new_create_trigger(expr: trigger::CreateTriggerTask) -> Self {
+        DdlTask::CreateTrigger(expr)
     }
 
     /// Creates a [`DdlTask`] to drop a flow.
@@ -242,6 +253,18 @@ impl TryFrom<Task> for DdlTask {
             Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
             Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
             Task::DropViewTask(drop_view) => Ok(DdlTask::DropView(drop_view.try_into()?)),
+            Task::CreateTriggerTask(create_trigger) => {
+                #[cfg(feature = "enterprise")]
+                return Ok(DdlTask::CreateTrigger(create_trigger.try_into()?));
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    let _ = create_trigger;
+                    crate::error::UnsupportedSnafu {
+                        operation: "create trigger",
+                    }
+                    .fail()
+                }
+            }
         }
     }
 }
@@ -292,6 +315,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
+            #[cfg(feature = "enterprise")]
+            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
         };
 
         Ok(Self {
