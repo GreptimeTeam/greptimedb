@@ -189,12 +189,38 @@ pub const CACHE_KEY_PREFIXES: [&str; 5] = [
 ];
 
 /// A set of regions with the same role.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct RegionRoleSet {
     /// Leader regions.
     pub leader_regions: Vec<RegionNumber>,
     /// Follower regions.
     pub follower_regions: Vec<RegionNumber>,
+}
+
+impl<'de> Deserialize<'de> for RegionRoleSet {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RegionRoleSetOrLeaderOnly {
+            Full {
+                leader_regions: Vec<RegionNumber>,
+                follower_regions: Vec<RegionNumber>,
+            },
+            LeaderOnly(Vec<RegionNumber>),
+        }
+        match RegionRoleSetOrLeaderOnly::deserialize(deserializer)? {
+            RegionRoleSetOrLeaderOnly::Full {
+                leader_regions,
+                follower_regions,
+            } => Ok(RegionRoleSet::new(leader_regions, follower_regions)),
+            RegionRoleSetOrLeaderOnly::LeaderOnly(leader_regions) => {
+                Ok(RegionRoleSet::new(leader_regions, vec![]))
+            }
+        }
+    }
 }
 
 impl RegionRoleSet {
@@ -1406,7 +1432,8 @@ mod tests {
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
     use crate::key::{
-        DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue, TOPIC_REGION_PREFIX,
+        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TableMetadataManager,
+        ViewInfoValue, TOPIC_REGION_PREFIX,
     };
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
@@ -2450,5 +2477,29 @@ mod tests {
         assert_eq!(current_view_info.definition, new_definition);
         assert_eq!(current_view_info.columns, new_columns);
         assert_eq!(current_view_info.plan_columns, new_plan_columns);
+    }
+
+    #[test]
+    fn test_region_role_set_deserialize() {
+        let s = r#"{"leader_regions": [1, 2, 3], "follower_regions": [4, 5, 6]}"#;
+        let region_role_set: RegionRoleSet = serde_json::from_str(s).unwrap();
+        assert_eq!(region_role_set.leader_regions, vec![1, 2, 3]);
+        assert_eq!(region_role_set.follower_regions, vec![4, 5, 6]);
+
+        let s = r#"[1, 2, 3]"#;
+        let region_role_set: RegionRoleSet = serde_json::from_str(s).unwrap();
+        assert_eq!(region_role_set.leader_regions, vec![1, 2, 3]);
+        assert!(region_role_set.follower_regions.is_empty());
+    }
+
+    #[test]
+    fn test_region_distribution_deserialize() {
+        let s = r#"{"1": [1,2,3], "2": {"leader_regions": [7, 8, 9], "follower_regions": [10, 11, 12]}}"#;
+        let region_distribution: RegionDistribution = serde_json::from_str(s).unwrap();
+        assert_eq!(region_distribution.len(), 2);
+        assert_eq!(region_distribution[&1].leader_regions, vec![1, 2, 3]);
+        assert!(region_distribution[&1].follower_regions.is_empty());
+        assert_eq!(region_distribution[&2].leader_regions, vec![7, 8, 9]);
+        assert_eq!(region_distribution[&2].follower_regions, vec![10, 11, 12]);
     }
 }
