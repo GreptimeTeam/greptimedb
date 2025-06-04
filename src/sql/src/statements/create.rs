@@ -215,8 +215,8 @@ impl ColumnExtensions {
 ///
 /// - `column_list` is the list of columns in `PARTITION ON COLUMNS` clause.
 /// - `exprs` is the list of expressions in `PARTITION ON VALUES` clause, like
-/// `host <= 'host1'`, `host > 'host1' and host <= 'host2'` or `host > 'host2'`.
-/// Each expression stands for a partition.
+///   `host <= 'host1'`, `host > 'host1' and host <= 'host2'` or `host > 'host2'`.
+///   Each expression stands for a partition.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
