@@ -179,24 +179,42 @@ impl StatementExecutor {
             }
         );
 
-        // Check if is creating logical table
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            return self
-                .create_logical_tables(std::slice::from_ref(create_table), query_ctx)
+            // Create logical tables
+            ensure!(
+                partitions.is_none(),
+                InvalidPartitionRuleSnafu {
+                    reason: "logical table in metric engine should not have partition rule, it will be inherited from physical table",
+                }
+            );
+            self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
                 .await?
                 .into_iter()
                 .next()
                 .context(error::UnexpectedSnafu {
-                    violated: "expected to create a logical table",
-                });
+                    violated: "expected to create logical tables",
+                })
+        } else {
+            // Create other normal table
+            self.create_non_logic_table(create_table, partitions, query_ctx)
+                .await
         }
+    }
 
+    #[tracing::instrument(skip_all)]
+    pub async fn create_non_logic_table(
+        &self,
+        create_table: &mut CreateTableExpr,
+        partitions: Option<Partitions>,
+        query_ctx: QueryContextRef,
+    ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
 
+        // Check if schema exists
         let schema = self
             .table_metadata_manager
             .schema_manager()
@@ -206,7 +224,6 @@ impl StatementExecutor {
             ))
             .await
             .context(TableMetadataManagerSnafu)?;
-
         ensure!(
             schema.is_some(),
             SchemaNotFoundSnafu {

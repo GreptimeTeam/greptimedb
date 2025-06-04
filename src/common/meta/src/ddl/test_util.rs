@@ -18,6 +18,7 @@ pub mod create_table;
 pub mod datanode_handler;
 pub mod flownode_handler;
 
+use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 
 use api::v1::meta::Partition;
@@ -75,8 +76,6 @@ pub async fn create_logical_table(
     physical_table_id: TableId,
     table_name: &str,
 ) -> TableId {
-    use std::assert_matches::assert_matches;
-
     let tasks = vec![test_create_logical_table_task(table_name)];
     let mut procedure = CreateLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
     let status = procedure.on_prepare().await.unwrap();
