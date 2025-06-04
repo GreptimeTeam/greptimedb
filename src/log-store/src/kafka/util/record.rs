@@ -368,8 +368,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider.clone()),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::First],
                 parts: vec![vec![1; 100]],
             })
@@ -387,8 +386,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider.clone()),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::Last],
                 parts: vec![vec![1; 100]],
             })
@@ -410,8 +408,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::Middle(0)],
                 parts: vec![vec![1; 100]],
             })
