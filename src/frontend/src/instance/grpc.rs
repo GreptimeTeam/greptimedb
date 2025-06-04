@@ -73,7 +73,7 @@ impl GrpcQueryHandler for Instance {
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::RowInserts(requests) => {
-                self.handle_row_inserts(requests, ctx.clone(), false)
+                self.handle_row_inserts(requests, ctx.clone(), false, false)
                     .await?
             }
             Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
@@ -411,6 +411,7 @@ impl Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
         accommodate_existing_schema: bool,
+        is_single_value: bool,
     ) -> Result<Output> {
         self.inserter
             .handle_row_inserts(
@@ -418,6 +419,7 @@ impl Instance {
                 ctx,
                 self.statement_executor.as_ref(),
                 accommodate_existing_schema,
+                is_single_value,
             )
             .await
             .context(TableOperationSnafu)
@@ -430,7 +432,14 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         self.inserter
-            .handle_last_non_null_inserts(requests, ctx, self.statement_executor.as_ref(), true)
+            .handle_last_non_null_inserts(
+                requests,
+                ctx,
+                self.statement_executor.as_ref(),
+                true,
+                // Influx protocol may writes multiple fields (values).
+                false,
+            )
             .await
             .context(TableOperationSnafu)
     }
