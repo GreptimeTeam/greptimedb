@@ -71,6 +71,7 @@ use frontend::service_config::{
 };
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use mito2::config::MitoConfig;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
@@ -155,6 +156,7 @@ pub struct StandaloneOptions {
     pub init_regions_parallelism: usize,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: Option<SlowQueryOptions>,
+    pub query: QueryOptions,
 }
 
 impl Default for StandaloneOptions {
@@ -187,6 +189,7 @@ impl Default for StandaloneOptions {
             init_regions_parallelism: 16,
             max_in_flight_write_bytes: None,
             slow_query: Some(SlowQueryOptions::default()),
+            query: QueryOptions::default(),
         }
     }
 }
@@ -242,6 +245,7 @@ impl StandaloneOptions {
             grpc: cloned_opts.grpc,
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
+            query: cloned_opts.query,
             ..Default::default()
         }
     }
