@@ -35,6 +35,8 @@ use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRe
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::TriggerDdlManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -579,6 +581,8 @@ impl StartCommand {
             flow_id_sequence,
         ));
 
+        #[cfg(feature = "enterprise")]
+        let trigger_ddl_manager: Option<TriggerDdlManagerRef> = plugins.get();
         let ddl_task_executor = Self::create_ddl_task_executor(
             procedure_manager.clone(),
             node_manager.clone(),
@@ -587,6 +591,8 @@ impl StartCommand {
             table_meta_allocator,
             flow_metadata_manager,
             flow_meta_allocator,
+            #[cfg(feature = "enterprise")]
+            trigger_ddl_manager,
         )
         .await?;
 
@@ -651,6 +657,7 @@ impl StartCommand {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_ddl_task_executor(
         procedure_manager: ProcedureManagerRef,
         node_manager: NodeManagerRef,
@@ -659,6 +666,7 @@ impl StartCommand {
         table_metadata_allocator: TableMetadataAllocatorRef,
         flow_metadata_manager: FlowMetadataManagerRef,
         flow_metadata_allocator: FlowMetadataAllocatorRef,
+        #[cfg(feature = "enterprise")] trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     ) -> Result<ProcedureExecutorRef> {
         let procedure_executor: ProcedureExecutorRef = Arc::new(
             DdlManager::try_new(
@@ -675,6 +683,8 @@ impl StartCommand {
                 },
                 procedure_manager,
                 true,
+                #[cfg(feature = "enterprise")]
+                trigger_ddl_manager,
             )
             .context(error::InitDdlManagerSnafu)?,
         );
