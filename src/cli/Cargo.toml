@@ -47,7 +47,7 @@ etcd-client.workspace = true
 futures.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
-meta-srv.workspace = true
+meta-srv = { workspace = true, features = ["pg_kvbackend", "mysql_kvbackend"]}
 nu-ansi-term = "0.46"
 object-store.workspace = true
 query.workspace = true
