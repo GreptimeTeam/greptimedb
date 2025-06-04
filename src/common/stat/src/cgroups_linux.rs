@@ -138,6 +138,10 @@ mod tests {
             MAX_VALUE
         );
         assert_eq!(
+            get_cgroup_v2_cpu_limit(Path::new("non_existent_file")),
+            None
+        );
+        assert_eq!(
             read_value_from_file(Path::new("testdata/memory.max")).unwrap(),
             100000
         );
@@ -145,5 +149,6 @@ mod tests {
             read_value_from_file(Path::new("testdata/memory.max.unlimited")).unwrap(),
             MAX_VALUE
         );
+        assert_eq!(read_value_from_file(Path::new("non_existent_file")), None);
     }
 }
