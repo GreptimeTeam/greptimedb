@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
 use std::mem::size_of;
 
 use crate::logstore::provider::Provider;
@@ -28,6 +29,15 @@ pub type Id = u64;
 pub enum Entry {
     Naive(NaiveEntry),
     MultiplePart(MultiplePartEntry),
+}
+
+impl Display for Entry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Entry::Naive(entry) => write!(f, "{}", entry),
+            Entry::MultiplePart(entry) => write!(f, "{}", entry),
+        }
+    }
 }
 
 impl Entry {
@@ -56,6 +66,16 @@ pub struct NaiveEntry {
     pub data: Vec<u8>,
 }
 
+impl Display for NaiveEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "NaiveEntry(provider={:?}, region_id={}, entry_id={})",
+            self.provider, self.region_id, self.entry_id,
+        )
+    }
+}
+
 impl NaiveEntry {
     /// Estimates the persisted size of the entry.
     fn estimated_size(&self) -> usize {
@@ -77,6 +97,19 @@ pub struct MultiplePartEntry {
     pub entry_id: Id,
     pub headers: Vec<MultiplePartHeader>,
     pub parts: Vec<Vec<u8>>,
+}
+
+impl Display for MultiplePartEntry {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MultiplePartEntry(provider={:?}, region_id={}, entry_id={}, len={})",
+            self.provider,
+            self.region_id,
+            self.entry_id,
+            self.parts.len()
+        )
+    }
 }
 
 impl MultiplePartEntry {

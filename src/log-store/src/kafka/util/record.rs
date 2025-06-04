@@ -169,7 +169,6 @@ fn convert_to_naive_entry(provider: Arc<KafkaProvider>, record: Record) -> Entry
     Entry::Naive(NaiveEntry {
         provider: Provider::Kafka(provider),
         region_id,
-        // TODO(weny): should be the offset in the topic
         entry_id: record.meta.entry_id,
         data: record.data,
     })
@@ -182,6 +181,7 @@ fn convert_to_multiple_entry(
 ) -> Entry {
     let mut headers = Vec::with_capacity(records.len());
     let mut parts = Vec::with_capacity(records.len());
+    let entry_id = records.last().map(|r| r.meta.entry_id).unwrap_or_default();
 
     for record in records {
         let header = match record.meta.tp {
@@ -197,8 +197,7 @@ fn convert_to_multiple_entry(
     Entry::MultiplePart(MultiplePartEntry {
         provider: Provider::Kafka(provider),
         region_id,
-        // TODO(weny): should be the offset in the topic
-        entry_id: 0,
+        entry_id,
         headers,
         parts,
     })
@@ -369,8 +368,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider.clone()),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::First],
                 parts: vec![vec![1; 100]],
             })
@@ -388,8 +386,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider.clone()),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::Last],
                 parts: vec![vec![1; 100]],
             })
@@ -411,8 +408,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider),
                 region_id,
-                // TODO(weny): always be 0.
-                entry_id: 0,
+                entry_id: 1,
                 headers: vec![MultiplePartHeader::Middle(0)],
                 parts: vec![vec![1; 100]],
             })
