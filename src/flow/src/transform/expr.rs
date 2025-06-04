@@ -490,7 +490,10 @@ impl TypedExpr {
                         expr: Box::new(typed_expr.expr),
                         list,
                     };
-                    Ok(TypedExpr::new(in_list_expr, typed_expr.typ))
+                    Ok(TypedExpr::new(
+                        in_list_expr,
+                        ColumnType::new_nullable(CDT::boolean_datatype()),
+                    ))
                 } else {
                     Ok(typed_expr)
                 }
