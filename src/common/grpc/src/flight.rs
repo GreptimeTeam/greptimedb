@@ -26,7 +26,6 @@ use datatypes::arrow;
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
-use datatypes::arrow::ipc::writer::write_message;
 use datatypes::arrow::ipc::{convert, reader, root_as_message, writer, MessageHeader};
 use flatbuffers::FlatBufferBuilder;
 use prost::bytes::Bytes as ProstBytes;
