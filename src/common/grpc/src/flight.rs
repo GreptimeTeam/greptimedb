@@ -26,6 +26,7 @@ use datatypes::arrow;
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
+use datatypes::arrow::ipc::writer::write_message;
 use datatypes::arrow::ipc::{convert, reader, root_as_message, writer, MessageHeader};
 use flatbuffers::FlatBufferBuilder;
 use prost::bytes::Bytes as ProstBytes;
@@ -64,6 +65,18 @@ impl Default for FlightEncoder {
 }
 
 impl FlightEncoder {
+    pub fn with_compression_disabled() -> Self {
+        let write_options = writer::IpcWriteOptions::default()
+            .try_with_compression(None)
+            .unwrap();
+
+        Self {
+            write_options,
+            data_gen: writer::IpcDataGenerator::default(),
+            dictionary_tracker: writer::DictionaryTracker::new(false),
+        }
+    }
+
     pub fn encode(&mut self, flight_message: FlightMessage) -> FlightData {
         match flight_message {
             FlightMessage::Schema(schema) => SchemaAsIpc::new(&schema, &self.write_options).into(),
