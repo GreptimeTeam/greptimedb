@@ -349,7 +349,8 @@ mod test {
 
         for _ in 0..2 {
             ticker.start();
-            sleep(2 * interval).await;
+            // wait a bit longer to make sure not all ticks are skipped
+            sleep(4 * interval).await;
             assert!(!rx.is_empty());
             while let Ok(event) = rx.try_recv() {
                 assert_matches!(event, Event::Tick);
