@@ -343,7 +343,7 @@ mod test {
     #[tokio::test]
     async fn test_wal_prune_ticker() {
         let (tx, mut rx) = WalPruneManager::channel();
-        let interval = Duration::from_millis(10);
+        let interval = Duration::from_millis(50);
         let ticker = WalPruneTicker::new(interval, tx);
         assert_eq!(ticker.name(), "WalPruneTicker");
 
