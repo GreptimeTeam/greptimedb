@@ -11,6 +11,7 @@ use snafu::OptionExt;
 
 use crate::error;
 use crate::error::Result;
+use crate::rpc::ddl::DdlTask;
 
 // Create trigger
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +136,13 @@ impl TryFrom<PbNotifyChannel> for NotifyChannel {
             }),
         };
         Ok(NotifyChannel { name, channel_type })
+    }
+}
+
+impl DdlTask {
+    /// Creates a [`DdlTask`] to create a trigger.
+    pub fn new_create_trigger(expr: CreateTriggerTask) -> Self {
+        DdlTask::CreateTrigger(expr)
     }
 }
 

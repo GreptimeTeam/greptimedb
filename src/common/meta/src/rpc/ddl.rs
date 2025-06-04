@@ -81,12 +81,6 @@ impl DdlTask {
         DdlTask::CreateFlow(expr)
     }
 
-    /// Creates a [`DdlTask`] to create a trigger.
-    #[cfg(feature = "enterprise")]
-    pub fn new_create_trigger(expr: trigger::CreateTriggerTask) -> Self {
-        DdlTask::CreateTrigger(expr)
-    }
-
     /// Creates a [`DdlTask`] to drop a flow.
     pub fn new_drop_flow(expr: DropFlowTask) -> Self {
         DdlTask::DropFlow(expr)

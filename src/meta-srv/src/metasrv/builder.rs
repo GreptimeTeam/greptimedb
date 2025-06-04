@@ -25,8 +25,6 @@ use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
 use common_meta::ddl_manager::DdlManager;
-#[cfg(feature = "enterprise")]
-use common_meta::ddl_manager::TriggerDdlManagerRef;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -357,7 +355,7 @@ impl MetasrvBuilder {
         #[cfg(feature = "enterprise")]
         let trigger_ddl_manager = plugins
             .as_ref()
-            .and_then(|plugins| plugins.get::<TriggerDdlManagerRef>());
+            .and_then(|plugins| plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>());
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
