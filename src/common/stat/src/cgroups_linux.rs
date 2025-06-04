@@ -36,14 +36,20 @@ const MAX_VALUE_CGROUP_V2: &str = "max";
 // For easier comparison, if the memory limit is larger than 1PB we consider it as unlimited.
 const MAX_MEMORY_IN_BYTES: i64 = 1125899906842624; // 1PB
 
-// Check whether the cgroup is v2. If not, return false.
+/// Check whether the cgroup is v2.
+///
+/// - Return `true` if the cgroup is v2, otherwise return `false`.
+/// - Return `None` if the detection fails.
 pub fn is_cgroup_v2() -> Option<bool> {
     let path = Path::new(CGROUP_UNIFIED_MOUNTPOINT);
     let fs_stat = statfs(path).ok()?;
     Some(fs_stat.filesystem_type() == statfs::CGROUP2_SUPER_MAGIC)
 }
 
-// Get the limit of memory in bytes.
+/// Get the limit of memory in bytes.
+///
+/// - If the memory is unlimited, return `-1`.
+/// - Return `None` if it fails to read the memory limit.
 pub fn get_memory_limit() -> Option<i64> {
     let memory_max_file = if is_cgroup_v2()? {
         // Read `/sys/fs/cgroup/memory.max` to get the memory limit.
@@ -65,13 +71,16 @@ pub fn get_memory_limit() -> Option<i64> {
     Some(memory_limit)
 }
 
-// Get the limit of cpu in millicores.
+/// Get the limit of cpu in millicores.
+///
+/// - If the cpu is unlimited, return `-1`.
+/// - Return `None` if it fails to read the cpu limit.
 pub fn get_cpu_limit() -> Option<i64> {
     if is_cgroup_v2()? {
-        // Read `/sys/fs/cgroup/cpu.max` to get the max cpu usage.
+        // Read `/sys/fs/cgroup/cpu.max` to get the cpu limit.
         get_cgroup_v2_cpu_limit(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_MAX_FILE_CGROUP_V2))
     } else {
-        // Read `/sys/fs/cgroup/cpu.cfs_quota_us` and `/sys/fs/cgroup/cpu.cfs_period_us` to get the max cpu usage.
+        // Read `/sys/fs/cgroup/cpu.cfs_quota_us` and `/sys/fs/cgroup/cpu.cfs_period_us` to get the cpu limit.
         let quota = read_value_from_file(
             Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_QUOTA_FILE_CGROUP_V1),
         )?;
