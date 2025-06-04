@@ -261,13 +261,15 @@ impl ScalarExpr {
             }
         );
 
+        let lhs = eval_expr.to_arrow_array();
+
         let found = eval_list
             .iter()
             .map(|v| v.to_arrow_array())
             .try_fold(
                 BooleanArray::new(BooleanBuffer::new_unset(batch.row_count()), None),
-                |result, in_list| -> Result<BooleanArray, DataFusionError> {
-                    let rhs = compare_with_eq(&eval_expr.to_arrow_array(), &in_list, false)?;
+                |result, in_list_elem| -> Result<BooleanArray, DataFusionError> {
+                    let rhs = compare_with_eq(&lhs, &in_list_elem, false)?;
 
                     Ok(or_kleene(&result, &rhs)?)
                 },
