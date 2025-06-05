@@ -26,6 +26,7 @@ use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
 use remove_region_follower::RemoveRegionFollowerFunction;
 
+use crate::adjust_flow::AdjustFlowFunction;
 use crate::flush_flow::FlushFlowFunction;
 use crate::function_registry::FunctionRegistry;
 
@@ -43,5 +44,6 @@ impl AdminFunction {
         registry.register_async(Arc::new(FlushTableFunction));
         registry.register_async(Arc::new(CompactTableFunction));
         registry.register_async(Arc::new(FlushFlowFunction));
+        registry.register_async(Arc::new(AdjustFlowFunction));
     }
 }

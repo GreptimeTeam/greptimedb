@@ -12,21 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_query::error::{
-    ExecuteSnafu, InvalidFuncArgsSnafu, MissingFlowServiceHandlerSnafu, Result,
-    UnsupportedInputDataTypeSnafu,
+    InvalidFuncArgsSnafu, MissingFlowServiceHandlerSnafu, Result, UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::Signature;
 use datafusion::logical_expr::Volatility;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
-use sql::parser::ParserContext;
+use snafu::ensure;
 use store_api::storage::ConcreteDataType;
 
 use crate::handlers::FlowServiceHandlerRef;
+use crate::helper::parse_catalog_flow;
 
 fn flush_signature() -> Signature {
     Signature::uniform(
@@ -47,20 +45,6 @@ pub(crate) async fn flush_flow(
     query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
-    let (catalog_name, flow_name) = parse_flush_flow(params, query_ctx)?;
-
-    let res = flow_service_handler
-        .flush(&catalog_name, &flow_name, query_ctx.clone())
-        .await?;
-    let affected_rows = res.affected_rows;
-
-    Ok(Value::from(affected_rows))
-}
-
-fn parse_flush_flow(
-    params: &[ValueRef<'_>],
-    query_ctx: &QueryContextRef,
-) -> Result<(String, String)> {
     ensure!(
         params.len() == 1,
         InvalidFuncArgsSnafu {
@@ -70,7 +54,6 @@ fn parse_flush_flow(
             ),
         }
     );
-
     let ValueRef::String(flow_name) = params[0] else {
         return UnsupportedInputDataTypeSnafu {
             function: "flush_flow",
@@ -78,27 +61,14 @@ fn parse_flush_flow(
         }
         .fail();
     };
-    let obj_name = ParserContext::parse_table_name(flow_name, query_ctx.sql_dialect())
-        .map_err(BoxedError::new)
-        .context(ExecuteSnafu)?;
+    let (catalog_name, flow_name) = parse_catalog_flow(flow_name, query_ctx)?;
 
-    let (catalog_name, flow_name) = match &obj_name.0[..] {
-        [flow_name] => (
-            query_ctx.current_catalog().to_string(),
-            flow_name.value.clone(),
-        ),
-        [catalog, flow_name] => (catalog.value.clone(), flow_name.value.clone()),
-        _ => {
-            return InvalidFuncArgsSnafu {
-                err_msg: format!(
-                    "expect flow name to be <catalog>.<flow-name> or <flow-name>, actual: {}",
-                    obj_name
-                ),
-            }
-            .fail()
-        }
-    };
-    Ok((catalog_name, flow_name))
+    let res = flow_service_handler
+        .flush(&catalog_name, &flow_name, query_ctx.clone())
+        .await?;
+    let affected_rows = res.affected_rows;
+
+    Ok(Value::from(affected_rows))
 }
 
 #[cfg(test)]
@@ -154,10 +124,7 @@ mod test {
             ("catalog.flow_name", ("catalog", "flow_name")),
         ];
         for (input, expected) in testcases.iter() {
-            let args = vec![*input];
-            let args = args.into_iter().map(ValueRef::String).collect::<Vec<_>>();
-
-            let result = parse_flush_flow(&args, &QueryContext::arc()).unwrap();
+            let result = parse_catalog_flow(input, &QueryContext::arc()).unwrap();
             assert_eq!(*expected, (result.0.as_str(), result.1.as_str()));
         }
     }
