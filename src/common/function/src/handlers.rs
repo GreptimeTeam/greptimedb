@@ -87,6 +87,15 @@ pub trait FlowServiceHandler: Send + Sync {
         flow: &str,
         ctx: QueryContextRef,
     ) -> Result<api::v1::flow::FlowResponse>;
+
+    async fn adjust(
+        &self,
+        catalog: &str,
+        flow: &str,
+        min_run_interval_secs: u64,
+        max_filter_num_per_query: usize,
+        ctx: QueryContextRef,
+    ) -> Result<api::v1::flow::FlowResponse>;
 }
 
 pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;
