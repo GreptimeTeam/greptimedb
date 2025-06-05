@@ -144,6 +144,12 @@ impl BatchingTask {
         })
     }
 
+    pub fn adjust(&self, min_run_interval_secs: u64, max_filter_num_per_query: usize) {
+        let mut state = self.state.write().unwrap();
+        state.min_run_interval = Some(min_run_interval_secs);
+        state.max_filter_num = Some(max_filter_num_per_query);
+    }
+
     /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
     ///
     /// useful for flush_flow to flush dirty time windows range
@@ -580,19 +586,20 @@ impl BatchingTask {
                 ),
             })?;
 
-        let expr = self
-            .state
-            .write()
-            .unwrap()
-            .dirty_time_windows
-            .gen_filter_exprs(
+        let expr = {
+            let mut state = self.state.write().unwrap();
+            let max_window_cnt = state
+                .max_filter_num
+                .unwrap_or(DirtyTimeWindows::MAX_FILTER_NUM);
+            state.dirty_time_windows.gen_filter_exprs(
                 &col_name,
                 Some(l),
                 window_size,
-                DirtyTimeWindows::MAX_FILTER_NUM,
+                max_window_cnt,
                 self.config.flow_id,
                 Some(self),
-            )?;
+            )?
+        };
 
         debug!(
             "Flow id={:?}, Generated filter expr: {:?}",

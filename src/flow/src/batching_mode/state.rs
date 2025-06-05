@@ -32,6 +32,7 @@ use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT,
 };
 use crate::{Error, FlowId};
 
@@ -52,6 +53,11 @@ pub struct TaskState {
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
     /// Task handle
     pub(crate) task_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// min run interval in seconds
+    pub(crate) min_run_interval: Option<u64>,
+    /// max filter number per query
+    pub(crate) max_filter_num: Option<usize>,
 }
 impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
@@ -63,6 +69,8 @@ impl TaskState {
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
+            min_run_interval: None,
+            max_filter_num: None,
         }
     }
 
@@ -87,20 +95,17 @@ impl TaskState {
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
-        time_window_size: &Option<Duration>,
+        _time_window_size: &Option<Duration>,
         max_timeout: Option<Duration>,
     ) -> Instant {
-        let last_duration = max_timeout
+        let next_duration = max_timeout
             .unwrap_or(self.last_query_duration)
             .min(self.last_query_duration)
-            .max(MIN_REFRESH_DURATION);
-
-        let next_duration = time_window_size
-            .map(|t| {
-                let half = t / 2;
-                half.max(last_duration)
-            })
-            .unwrap_or(last_duration);
+            .max(
+                self.min_run_interval
+                    .map(|s| Duration::from_secs(s))
+                    .unwrap_or(MIN_REFRESH_DURATION),
+            );
 
         // if have dirty time window, execute immediately to clean dirty time window
         if self.dirty_time_windows.windows.is_empty() {
@@ -245,6 +250,10 @@ impl DirtyTimeWindows {
         METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
             .with_label_values(&[flow_id.to_string().as_str()])
             .observe(first_nth.len() as f64);
+
+        METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(self.windows.len() as f64);
 
         let full_time_range = first_nth
             .iter()
