@@ -343,13 +343,14 @@ mod test {
     #[tokio::test]
     async fn test_wal_prune_ticker() {
         let (tx, mut rx) = WalPruneManager::channel();
-        let interval = Duration::from_millis(10);
+        let interval = Duration::from_millis(50);
         let ticker = WalPruneTicker::new(interval, tx);
         assert_eq!(ticker.name(), "WalPruneTicker");
 
         for _ in 0..2 {
             ticker.start();
-            sleep(2 * interval).await;
+            // wait a bit longer to make sure not all ticks are skipped
+            sleep(4 * interval).await;
             assert!(!rx.is_empty());
             while let Ok(event) = rx.try_recv() {
                 assert_matches!(event, Event::Tick);
