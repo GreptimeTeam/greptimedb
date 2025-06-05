@@ -391,13 +391,16 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
     parser.expect_token(&Token::Eq)?;
     let value = if parser.parse_keyword(Keyword::NULL) {
         "".to_string()
-    } else if let Ok(v) = parser.parse_literal_string() {
-        v
     } else {
-        return Err(ParserError::ParserError(format!(
-            "Unexpected option value for alter table statements, expect string literal or NULL, got: `{}`",
-            parser.next_token()
-        )));
+        let next_token = parser.peek_token();
+        if let Token::Number(number_as_string, _) = next_token.token {
+            parser.advance_token();
+            number_as_string
+        } else {
+            parser.parse_literal_string().map_err(|_|{
+                ParserError::ParserError(format!("Unexpected option value for alter table statements, expect string literal, numeric literal or NULL, got: `{}`", next_token))
+            })?
+        }
     };
     Ok((name, value))
 }
@@ -1087,5 +1090,39 @@ mod tests {
             ParseOptions::default(),
         )
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_parse_alter_with_numeric_value() {
+        for sql in [
+            "ALTER TABLE test SET 'compaction.twcs.trigger_file_num'=8;",
+            "ALTER TABLE test SET 'compaction.twcs.trigger_file_num'='8';",
+        ] {
+            let mut result = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(1, result.len());
+
+            let statement = result.remove(0);
+            assert_matches!(statement, Statement::AlterTable { .. });
+            match statement {
+                Statement::AlterTable(alter_table) => {
+                    let alter_operation = alter_table.alter_operation();
+                    assert_matches!(alter_operation, AlterTableOperation::SetTableOptions { .. });
+                    match alter_operation {
+                        AlterTableOperation::SetTableOptions { options } => {
+                            assert_eq!(options.len(), 1);
+                            assert_eq!(options[0].key, "compaction.twcs.trigger_file_num");
+                            assert_eq!(options[0].value, "8");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
