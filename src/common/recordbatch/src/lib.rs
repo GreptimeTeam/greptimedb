@@ -92,14 +92,20 @@ pub fn map_json_type_to_string(
     for (vector, schema) in batch.columns.iter().zip(original_schema.column_schemas()) {
         if let ConcreteDataType::Json(j) = schema.data_type {
             let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
+            let binary_vector = vector
+                .cast(&ConcreteDataType::binary_datatype())
+                .with_context(|_| error::CastVectorSnafu {
+                    from_type: schema.data_type.clone(),
+                    to_type: ConcreteDataType::string_datatype(),
+                })?;
+
             for i in 0..vector.len() {
-                let value = vector.get(i);
-                if value.is_null() {
+                if vector.is_null(i) {
                     string_vector_builder.push(None);
                 } else {
                     let string_value = json_type_value_to_string(
-                        // Safety: value is must be a binary value.
-                        value.as_value_ref().as_binary().unwrap().unwrap(),
+                        // Safety: value must be a binary value.
+                        binary_vector.get_ref(i).as_binary().unwrap().unwrap(),
                         &j.format,
                     )
                     .with_context(|_| error::CastVectorSnafu {
