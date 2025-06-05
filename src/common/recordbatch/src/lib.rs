@@ -31,15 +31,15 @@ use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::scalars::ScalarVectorBuilder;
+use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::json_type_value_to_string;
-use datatypes::vectors::StringVectorBuilder;
+use datatypes::vectors::{BinaryVector, StringVectorBuilder};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {
@@ -93,27 +93,25 @@ pub fn map_json_type_to_string(
         if let ConcreteDataType::Json(j) = schema.data_type {
             let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
             let binary_vector = vector
-                .cast(&ConcreteDataType::binary_datatype())
-                .with_context(|_| error::CastVectorSnafu {
+                .as_any()
+                .downcast_ref::<BinaryVector>()
+                .with_context(|| error::DowncastVectorSnafu {
                     from_type: schema.data_type.clone(),
-                    to_type: ConcreteDataType::string_datatype(),
+                    to_type: ConcreteDataType::binary_datatype(),
                 })?;
-
-            for i in 0..vector.len() {
-                if vector.is_null(i) {
+            for value in binary_vector.iter_data() {
+                let Some(value) = value else {
                     string_vector_builder.push(None);
-                } else {
-                    let string_value = json_type_value_to_string(
-                        // Safety: value must be a binary value.
-                        binary_vector.get_ref(i).as_binary().unwrap().unwrap(),
-                        &j.format,
-                    )
-                    .with_context(|_| error::CastVectorSnafu {
-                        from_type: schema.data_type.clone(),
-                        to_type: ConcreteDataType::string_datatype(),
+                    continue;
+                };
+                let string_value =
+                    json_type_value_to_string(value, &j.format).with_context(|_| {
+                        error::CastVectorSnafu {
+                            from_type: schema.data_type.clone(),
+                            to_type: ConcreteDataType::string_datatype(),
+                        }
                     })?;
-                    string_vector_builder.push(Some(string_value.as_str()));
-                }
+                string_vector_builder.push(Some(string_value.as_str()));
             }
 
             let string_vector = string_vector_builder.finish();
