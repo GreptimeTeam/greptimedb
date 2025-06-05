@@ -27,4 +27,7 @@ tql eval (3, 4, '1s') round(cache_hit);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3, 4, '1s') round(cache_hit, 10.0);
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 4, '1s') round(cache_hit, 5.0 + 5.0);
+
 drop table cache_hit;

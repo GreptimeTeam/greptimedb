@@ -35,6 +35,7 @@ use crate::error::{PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu};
 use crate::log_query::planner::LogQueryPlanner;
 use crate::parser::QueryStatement;
 use crate::promql::planner::PromPlanner;
+use crate::promql::rewriter::PromRewriter;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 use crate::range_select::plan_rewrite::RangePlanRewriter;
 use crate::{DfContextProviderAdapter, QueryEngineContext};
@@ -172,7 +173,9 @@ impl DfLogicalPlanner {
                 .sql_parser
                 .enable_ident_normalization,
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
+        let mut stmt = stmt.clone();
+        PromRewriter::rewrite(&mut stmt.expr);
+        PromPlanner::stmt_to_plan(table_provider, &stmt, &self.session_state)
             .await
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
