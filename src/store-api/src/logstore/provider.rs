@@ -69,10 +69,10 @@ impl Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             Provider::RaftEngine(provider) => {
-                write!(f, "region: {}", RegionId::from_u64(provider.id))
+                write!(f, "RaftEngine(region={})", RegionId::from_u64(provider.id))
             }
-            Provider::Kafka(provider) => write!(f, "topic: {}", provider.topic),
-            Provider::Noop => write!(f, "noop"),
+            Provider::Kafka(provider) => write!(f, "Kafka(topic={})", provider.topic),
+            Provider::Noop => write!(f, "Noop"),
         }
     }
 }

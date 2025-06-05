@@ -46,7 +46,7 @@ use tokio::time::Instant;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::TaskState;
+use crate::batching_mode::state::{DirtyTimeWindows, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
@@ -387,7 +387,6 @@ impl BatchingTask {
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
                 .with_label_values(&[
                     flow_id.to_string().as_str(),
-                    &plan.to_string(),
                     &peer_desc.unwrap_or_default().to_string(),
                 ])
                 .observe(elapsed.as_secs_f64());
@@ -429,16 +428,23 @@ impl BatchingTask {
                 }
             }
 
-            let mut new_query = None;
-            let mut gen_and_exec = async || {
-                new_query = self.gen_insert_plan(&engine).await?;
-                if let Some(new_query) = &new_query {
-                    self.execute_logical_plan(&frontend_client, new_query).await
-                } else {
-                    Ok(None)
+            let new_query = match self.gen_insert_plan(&engine).await {
+                Ok(new_query) => new_query,
+                Err(err) => {
+                    common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
+                    // also sleep for a little while before try again to prevent flooding logs
+                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    continue;
                 }
             };
-            match gen_and_exec().await {
+
+            let res = if let Some(new_query) = &new_query {
+                self.execute_logical_plan(&frontend_client, new_query).await
+            } else {
+                Ok(None)
+            };
+
+            match res {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     let sleep_until = {
@@ -583,6 +589,7 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
+                DirtyTimeWindows::MAX_FILTER_NUM,
                 self.config.flow_id,
                 Some(self),
             )?;

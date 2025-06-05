@@ -63,7 +63,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        self.handle_row_inserts(requests, ctx, false)
+        self.handle_row_inserts(requests, ctx, false, false)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
@@ -125,7 +125,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
-    ) -> ServerResult<Output> {
+    ) -> ServerResult<Vec<Output>> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -137,7 +137,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (requests, rows) = otlp::logs::to_grpc_insert_requests(
+        let opt_req = otlp::logs::to_grpc_insert_requests(
             request,
             pipeline,
             pipeline_params,
@@ -148,7 +148,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         .await?;
 
         let _guard = if let Some(limiter) = &self.limiter {
-            let result = limiter.limit_row_inserts(&requests);
+            let result = limiter.limit_ctx_req(&opt_req);
             if result.is_none() {
                 return InFlightWriteBytesExceededSnafu.fail();
             }
@@ -157,10 +157,24 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        self.handle_log_inserts(requests, ctx)
-            .await
-            .inspect(|_| OTLP_LOGS_ROWS.inc_by(rows as u64))
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)
+        let mut outputs = vec![];
+
+        for (temp_ctx, requests) in opt_req.as_req_iter(ctx) {
+            let cnt = requests
+                .inserts
+                .iter()
+                .filter_map(|r| r.rows.as_ref().map(|r| r.rows.len()))
+                .sum::<usize>();
+
+            let o = self
+                .handle_log_inserts(requests, temp_ctx)
+                .await
+                .inspect(|_| OTLP_LOGS_ROWS.inc_by(cnt as u64))
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+            outputs.push(o);
+        }
+
+        Ok(outputs)
     }
 }

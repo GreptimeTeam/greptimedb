@@ -236,6 +236,7 @@ impl PipelineTable {
                 Self::query_ctx(&table_info),
                 &self.statement_executor,
                 false,
+                false,
             )
             .await
             .context(InsertPipelineSnafu)?;

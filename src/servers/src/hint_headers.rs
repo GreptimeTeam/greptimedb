@@ -13,22 +13,8 @@
 // limitations under the License.
 
 use http::HeaderMap;
+use session::hints::{HINTS_KEY, HINTS_KEY_PREFIX, HINT_KEYS};
 use tonic::metadata::MetadataMap;
-
-// For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
-pub const HINTS_KEY: &str = "x-greptime-hints";
-
-pub const READ_PREFERENCE_HINT: &str = "read_preference";
-
-const HINT_KEYS: [&str; 7] = [
-    "x-greptime-hint-auto_create_table",
-    "x-greptime-hint-ttl",
-    "x-greptime-hint-append_mode",
-    "x-greptime-hint-merge_mode",
-    "x-greptime-hint-physical_table",
-    "x-greptime-hint-skip_wal",
-    "x-greptime-hint-read_preference",
-];
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
     let mut hints = Vec::new();
@@ -44,7 +30,7 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
     }
     for key in HINT_KEYS.iter() {
         if let Some(value) = headers.get(key) {
-            let new_key = key.replace("x-greptime-hint-", "");
+            let new_key = key.replace(HINTS_KEY_PREFIX, "");
             hints.push((new_key, value.trim().to_string()));
         }
     }

@@ -657,13 +657,6 @@ pub enum Error {
         unexpected_entry_id: u64,
     },
 
-    #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
-    CorruptedEntry {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Failed to download file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
@@ -1106,7 +1099,6 @@ impl ErrorExt for Error {
             | EncodeMemtable { .. }
             | CreateDir { .. }
             | ReadDataPart { .. }
-            | CorruptedEntry { .. }
             | BuildEntry { .. }
             | Metadata { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,

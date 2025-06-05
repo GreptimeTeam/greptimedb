@@ -703,6 +703,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid trigger name: {name}"))]
+    InvalidTriggerName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty {} expr", name))]
     EmptyDdlExpr {
         name: String,
@@ -872,6 +880,8 @@ impl ErrorExt for Error {
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
+            #[cfg(feature = "enterprise")]
+            Error::InvalidTriggerName { .. } => StatusCode::InvalidArguments,
             Error::TableAlreadyExists { .. } | Error::ViewAlreadyExists { .. } => {
                 StatusCode::TableAlreadyExists
             }

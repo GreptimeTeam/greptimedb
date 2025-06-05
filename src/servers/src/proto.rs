@@ -18,11 +18,13 @@ use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
-use api::v1::RowInsertRequests;
+use api::v1::RowInsertRequest;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::debug;
-use pipeline::{GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value};
+use pipeline::{
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value,
+};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
@@ -267,7 +269,7 @@ impl Clear for PromWriteRequest {
 }
 
 impl PromWriteRequest {
-    pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+    pub fn as_row_insert_requests(&mut self) -> Vec<RowInsertRequest> {
         self.table_data.as_insert_requests()
     }
 
@@ -409,9 +411,7 @@ impl PromSeriesProcessor {
         Ok(())
     }
 
-    pub(crate) async fn exec_pipeline(
-        &mut self,
-    ) -> crate::error::Result<(RowInsertRequests, usize)> {
+    pub(crate) async fn exec_pipeline(&mut self) -> crate::error::Result<ContextReq> {
         // prepare params
         let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
             err_msg: "pipeline handler is not set",
@@ -425,10 +425,9 @@ impl PromSeriesProcessor {
         })?;
 
         let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param, query_ctx.channel());
-        let mut size = 0;
 
         // run pipeline
-        let mut inserts = Vec::with_capacity(self.table_values.len());
+        let mut req = ContextReq::default();
         for (table_name, pipeline_maps) in self.table_values.iter_mut() {
             let pipeline_req = PipelineIngestRequest {
                 table: table_name.clone(),
@@ -436,16 +435,10 @@ impl PromSeriesProcessor {
             };
             let row_req =
                 run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;
-            size += row_req
-                .iter()
-                .map(|rq| rq.rows.as_ref().map(|r| r.rows.len()).unwrap_or(0))
-                .sum::<usize>();
-            inserts.extend(row_req);
+            req.merge(row_req);
         }
 
-        let row_insert_requests = RowInsertRequests { inserts };
-
-        Ok((row_insert_requests, size))
+        Ok(req)
     }
 }
 
@@ -489,7 +482,13 @@ mod tests {
         prom_write_request
             .merge(data.clone(), PromValidationMode::Strict, &mut p)
             .unwrap();
-        let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
+
+        let req = prom_write_request.as_row_insert_requests();
+        let samples = req
+            .iter()
+            .filter_map(|r| r.rows.as_ref().map(|r| r.rows.len()))
+            .sum::<usize>();
+        let prom_rows = RowInsertRequests { inserts: req };
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());

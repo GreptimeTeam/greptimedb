@@ -55,6 +55,11 @@ on:
         description: Build and push images to DockerHub and ACR
         required: false
         default: true
+      upload_artifacts_to_s3:
+        type: boolean
+        description: Whether upload artifacts to s3
+        required: false
+        default: false
       cargo_profile:
         type: choice
         description: The cargo profile to use in building GreptimeDB.
@@ -238,7 +243,7 @@ jobs:
           version: ${{ needs.allocate-runners.outputs.version }}
           push-latest-tag: false # Don't push the latest tag to registry.
           dev-mode: true # Only build the standard images.
-          
+
       - name: Echo Docker image tag to step summary
         run: |
           echo "## Docker Image Tag" >> $GITHUB_STEP_SUMMARY
@@ -281,7 +286,7 @@ jobs:
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: false
+          upload-to-s3: ${{ inputs.upload_artifacts_to_s3 }}
           dev-mode: true                     # Only build the standard images(exclude centos images).
           push-latest-tag: false             # Don't push the latest tag to registry.
           update-version-info: false         # Don't update the version info in S3.
