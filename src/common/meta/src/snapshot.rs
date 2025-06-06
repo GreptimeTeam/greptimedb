@@ -271,6 +271,46 @@ impl MetadataSnapshotManager {
 
         Ok((filename.to_string(), num_keyvalues as u64))
     }
+
+    pub async fn info(
+        object_store: &ObjectStore,
+        file_path: &str,
+        query_str: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<String>> {
+        let path = Path::new(file_path);
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context(InvalidFilePathSnafu { file_path })?;
+
+        let filename = FileName::try_from(file_name)?;
+        let data = object_store
+            .read(file_path)
+            .await
+            .context(ReadObjectSnafu { file_path })?;
+        let document = Document::from_slice(&filename.extension.format, &data.to_bytes())?;
+        let metadata_content = document.into_metadata_content()?.values();
+        let mut results = Vec::new();
+        for kv in metadata_content {
+            let key_str = String::from_utf8_lossy(&kv.key);
+            if query_str.ends_with('*') {
+                let prefix = &query_str[..query_str.len() - 1];
+                if key_str.starts_with(prefix) {
+                    let value_str = String::from_utf8_lossy(&kv.value);
+                    results.push(format!("|{}|{}|", key_str, value_str));
+                }
+            } else if key_str == query_str {
+                let value_str = String::from_utf8_lossy(&kv.value);
+                results.push(format!("|{}|{}|", key_str, value_str));
+            }
+            if results.len() == limit.unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
