@@ -7,7 +7,7 @@ INSERT INTO test1 VALUES (1, DEFAULT), (2, DEFAULT), (3, '2024-01-31 00:01:01'),
 
 Affected Rows: 4
 
-SELECT * FROM test1;
+SELECT * FROM test1 ORDER BY j;
 
 +---+---------------------+
 | i | j                   |
@@ -30,7 +30,7 @@ INSERT INTO test2 VALUES (1, DEFAULT), (2, DEFAULT), (3, '2024-01-31 00:01:01'),
 
 Affected Rows: 4
 
-SELECT * FROM test2;
+SELECT * FROM test2 ORDER BY j;
 
 +---+---------------------+
 | i | j                   |
@@ -41,7 +41,7 @@ SELECT * FROM test2;
 | 4 | 2025-01-31T16:01:01 |
 +---+---------------------+
 
-SELECT * FROM test1;
+SELECT * FROM test1 ORDER BY j;
 
 +---+---------------------+
 | i | j                   |

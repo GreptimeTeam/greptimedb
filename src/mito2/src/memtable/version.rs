@@ -76,7 +76,7 @@ impl MemtableVersion {
     ) -> Result<Option<MemtableVersion>> {
         if self.mutable.is_empty() {
             // No need to freeze the mutable memtable, but we need to check the time window.
-            if self.mutable.part_duration() == time_window {
+            if Some(self.mutable.part_duration()) == time_window {
                 // If the time window is the same, we don't need to update it.
                 return Ok(None);
             }
@@ -98,7 +98,7 @@ impl MemtableVersion {
         // soft limit.
         self.mutable.freeze()?;
         // Fork the memtable.
-        if self.mutable.part_duration() != time_window {
+        if Some(self.mutable.part_duration()) != time_window {
             common_telemetry::debug!(
                 "Fork memtable, update partition duration from {:?}, to {:?}",
                 self.mutable.part_duration(),

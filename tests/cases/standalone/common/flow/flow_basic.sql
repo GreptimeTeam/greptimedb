@@ -219,7 +219,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 INSERT INTO
     bytes_log
@@ -234,7 +235,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 INSERT INTO
     bytes_log
@@ -249,7 +251,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 INSERT INTO
     bytes_log
@@ -264,7 +267,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 DROP TABLE bytes_log;
 
@@ -610,7 +614,8 @@ ADMIN FLUSH_FLOW('requests_long_term');
 SELECT
     *
 FROM
-    requests_without_ip;
+    requests_without_ip
+ORDER BY ts ASC;
 
 -- Test if FLOWS table works, but don't care about the result since it vary from runs
 SELECT
@@ -636,7 +641,8 @@ ADMIN FLUSH_FLOW('requests_long_term');
 SELECT
     *
 FROM
-    requests_without_ip;
+    requests_without_ip
+ORDER BY ts ASC;
 
 INSERT INTO
     requests
@@ -656,7 +662,8 @@ ADMIN FLUSH_FLOW('requests_long_term');
 SELECT
     *
 FROM
-    requests_without_ip;
+    requests_without_ip
+ORDER BY ts ASC;;
 
 DROP FLOW requests_long_term;
 
