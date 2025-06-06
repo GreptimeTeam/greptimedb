@@ -36,7 +36,7 @@ use crate::error::{
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::etl::processor::ProcessorKind;
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::GreptimeTransformer;
+use crate::{ContextOpt, GreptimeTransformer};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -160,7 +160,7 @@ pub enum PipelineExecOutput {
 
 #[derive(Debug)]
 pub struct TransformedOutput {
-    pub opt: String,
+    pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
     pub pipeline_map: PipelineMap,
@@ -245,11 +245,11 @@ impl Pipeline {
 
         // do transform
         if let Some(transformer) = self.transformer() {
-            let (mut opt_map, row) = transformer.transform_mut(&mut val)?;
-            let table_suffix = opt_map.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
+            let (mut opt, row) = transformer.transform_mut(&mut val)?;
+            let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
             Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                opt: opt_map.to_opt_string(),
+                opt,
                 row,
                 table_suffix,
                 pipeline_map: val,

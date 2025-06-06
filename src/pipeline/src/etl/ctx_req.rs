@@ -13,47 +13,95 @@
 // limitations under the License.
 
 use std::collections::hash_map::IntoIter;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
-use itertools::Itertools;
 use session::context::{QueryContext, QueryContextRef};
 
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::PipelineMap;
 
-const DEFAULT_OPT: &str = "";
+const GREPTIME_AUTO_CREATE_TABLE: &str = "greptime_auto_create_table";
+const GREPTIME_TTL: &str = "greptime_ttl";
+const GREPTIME_APPEND_MODE: &str = "greptime_append_mode";
+const GREPTIME_MERGE_MODE: &str = "greptime_merge_mode";
+const GREPTIME_PHYSICAL_TABLE: &str = "greptime_physical_table";
+const GREPTIME_SKIP_WAL: &str = "greptime_skip_wal";
+const GREPTIME_TABLE_SUFFIX: &str = "greptime_table_suffix";
+
+pub(crate) const AUTO_CREATE_TABLE_KEY: &str = "auto_create_table";
+pub(crate) const TTL_KEY: &str = "ttl";
+pub(crate) const APPEND_MODE_KEY: &str = "append_mode";
+pub(crate) const MERGE_MODE_KEY: &str = "merge_mode";
+pub(crate) const PHYSICAL_TABLE_KEY: &str = "physical_table";
+pub(crate) const SKIP_WAL_KEY: &str = "skip_wal";
+pub(crate) const TABLE_SUFFIX_KEY: &str = "table_suffix";
 
 pub const PIPELINE_HINT_KEYS: [&str; 7] = [
-    "greptime_auto_create_table",
-    "greptime_ttl",
-    "greptime_append_mode",
-    "greptime_merge_mode",
-    "greptime_physical_table",
-    "greptime_skip_wal",
-    "greptime_table_suffix",
+    GREPTIME_AUTO_CREATE_TABLE,
+    GREPTIME_TTL,
+    GREPTIME_APPEND_MODE,
+    GREPTIME_MERGE_MODE,
+    GREPTIME_PHYSICAL_TABLE,
+    GREPTIME_SKIP_WAL,
+    GREPTIME_TABLE_SUFFIX,
 ];
 
 const PIPELINE_HINT_PREFIX: &str = "greptime_";
-pub const TABLE_SUFFIX_KEY: &str = "table_suffix";
 
-#[derive(Debug)]
-pub struct ContextOptMap(BTreeMap<String, String>);
+/// ContextOpt is a collection of options(including table options and pipeline options)
+/// that should be extracted during the pipeline execution.
+///
+/// The options are set in the format of hint keys. See [`PIPELINE_HINT_KEYS`].
+/// It's is used as the key in [`ContextReq`] for grouping the row insert requests.
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContextOpt {
+    // table options, that need to be set in the query context before making row insert requests
+    auto_create_table: Option<String>,
+    ttl: Option<String>,
+    append_mode: Option<String>,
+    merge_mode: Option<String>,
+    physical_table: Option<String>,
+    skip_wal: Option<String>,
 
-impl ContextOptMap {
-    // Remove hints from the pipeline context and form a option string
-    // e.g: skip_wal=true,ttl=1d
+    // pipeline options, not set in query context
+    // can be removed before the end of the pipeline execution
+    table_suffix: Option<String>,
+}
+
+impl ContextOpt {
     pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> Self {
-        let mut btreemap = BTreeMap::new();
+        let mut opt = Self::default();
         for k in PIPELINE_HINT_KEYS {
             if let Some(v) = pipeline_map.remove(k) {
-                btreemap.insert(k.replace(PIPELINE_HINT_PREFIX, ""), v.to_str_value());
+                match k {
+                    GREPTIME_AUTO_CREATE_TABLE => {
+                        opt.auto_create_table = Some(v.to_str_value());
+                    }
+                    GREPTIME_TTL => {
+                        opt.ttl = Some(v.to_str_value());
+                    }
+                    GREPTIME_APPEND_MODE => {
+                        opt.append_mode = Some(v.to_str_value());
+                    }
+                    GREPTIME_MERGE_MODE => {
+                        opt.merge_mode = Some(v.to_str_value());
+                    }
+                    GREPTIME_PHYSICAL_TABLE => {
+                        opt.physical_table = Some(v.to_str_value());
+                    }
+                    GREPTIME_SKIP_WAL => {
+                        opt.skip_wal = Some(v.to_str_value());
+                    }
+                    GREPTIME_TABLE_SUFFIX => {
+                        opt.table_suffix = Some(v.to_str_value());
+                    }
+                    _ => {}
+                }
             }
         }
-
-        Self(btreemap)
+        opt
     }
 
     pub(crate) fn resolve_table_suffix(
@@ -61,44 +109,49 @@ impl ContextOptMap {
         table_suffix: Option<&TableSuffixTemplate>,
         pipeline_map: &PipelineMap,
     ) -> Option<String> {
-        self.0
-            .remove(TABLE_SUFFIX_KEY)
+        self.table_suffix
+            .take()
             .or_else(|| table_suffix.and_then(|s| s.apply(pipeline_map)))
     }
 
-    pub fn to_opt_string(self) -> String {
-        self.0
-            .into_iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .join(",")
+    pub fn set_query_context(self, ctx: &mut QueryContext) {
+        if let Some(auto_create_table) = &self.auto_create_table {
+            ctx.set_extension(AUTO_CREATE_TABLE_KEY, auto_create_table);
+        }
+        if let Some(ttl) = &self.ttl {
+            ctx.set_extension(TTL_KEY, ttl);
+        }
+        if let Some(append_mode) = &self.append_mode {
+            ctx.set_extension(APPEND_MODE_KEY, append_mode);
+        }
+        if let Some(merge_mode) = &self.merge_mode {
+            ctx.set_extension(MERGE_MODE_KEY, merge_mode);
+        }
+        if let Some(physical_table) = &self.physical_table {
+            ctx.set_extension(PHYSICAL_TABLE_KEY, physical_table);
+        }
+        if let Some(skip_wal) = &self.skip_wal {
+            ctx.set_extension(SKIP_WAL_KEY, skip_wal);
+        }
     }
 }
 
-// split the option string back to a map
-fn from_opt_to_map(opt: &str) -> HashMap<&str, &str> {
-    opt.split(',')
-        .filter_map(|s| {
-            s.split_once("=")
-                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
-        })
-        .collect()
-}
-
-// ContextReq is a collection of row insert requests with different options.
-// The default option is empty string.
-// Because options are set in query context, we have to split them into sequential calls
-// e.g:
-// {
-//     "skip_wal=true,ttl=1d": [RowInsertRequest],
-//     "ttl=1d": [RowInsertRequest],
-// }
+/// ContextReq is a collection of row insert requests with different options.
+/// The default option is all empty.
+/// Because options are set in query context, we have to split them into sequential calls
+/// The key is a [`ContextOpt`] struct for strong type.
+/// e.g:
+/// {
+///     "skip_wal=true,ttl=1d": [RowInsertRequest],
+///     "ttl=1d": [RowInsertRequest],
+/// }
 #[derive(Debug, Default)]
 pub struct ContextReq {
-    req: HashMap<String, Vec<RowInsertRequest>>,
+    req: HashMap<ContextOpt, Vec<RowInsertRequest>>,
 }
 
 impl ContextReq {
-    pub fn from_opt_map(opt_map: HashMap<String, Rows>, table_name: String) -> Self {
+    pub fn from_opt_map(opt_map: HashMap<ContextOpt, Rows>, table_name: String) -> Self {
         Self {
             req: opt_map
                 .into_iter()
@@ -111,17 +164,17 @@ impl ContextReq {
                         }],
                     )
                 })
-                .collect::<HashMap<String, Vec<RowInsertRequest>>>(),
+                .collect::<HashMap<ContextOpt, Vec<RowInsertRequest>>>(),
         }
     }
 
     pub fn default_opt_with_reqs(reqs: Vec<RowInsertRequest>) -> Self {
         let mut req_map = HashMap::new();
-        req_map.insert(DEFAULT_OPT.to_string(), reqs);
+        req_map.insert(ContextOpt::default(), reqs);
         Self { req: req_map }
     }
 
-    pub fn add_rows(&mut self, opt: String, req: RowInsertRequest) {
+    pub fn add_rows(&mut self, opt: ContextOpt, req: RowInsertRequest) {
         self.req.entry(opt).or_default().push(req);
     }
 
@@ -154,7 +207,7 @@ impl ContextReq {
 // It will clone the query context for each option and set the options to the context.
 // Then it will return the context and the row insert requests for actual insert.
 pub struct ContextReqIter {
-    opt_req: IntoIter<String, Vec<RowInsertRequest>>,
+    opt_req: IntoIter<ContextOpt, Vec<RowInsertRequest>>,
     ctx_template: QueryContext,
 }
 
@@ -163,13 +216,8 @@ impl Iterator for ContextReqIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (opt, req_vec) = self.opt_req.next()?;
-
-        let opt_map = from_opt_to_map(&opt);
-
         let mut ctx = self.ctx_template.clone();
-        for (k, v) in opt_map {
-            ctx.set_extension(k, v);
-        }
+        opt.set_query_context(&mut ctx);
 
         Some((Arc::new(ctx), RowInsertRequests { inserts: req_vec }))
     }

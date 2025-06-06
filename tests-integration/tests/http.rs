@@ -2068,7 +2068,8 @@ table_suffix: _${type}
     "type": "http",
     "time": "2024-05-25 20:16:37.217",
     "log": "ClusterAdapter:enter sendTextDataToCluster\\n",
-    "greptime_ttl": "1d"
+    "greptime_ttl": "1d",
+    "greptime_skip_wal": "true"
   },
   {
     "id1": "2436",
@@ -2118,12 +2119,13 @@ table_suffix: _${type}
     // CREATE TABLE IF NOT EXISTS "d_table_http" (
     //     ... ignore
     //     )
-    //   ENGINE=mito
+    //     ENGINE=mito
     //   WITH(
     //     append_mode = 'true',
+    //     skip_wal = 'true',
     //     ttl = '1day'
     //     )
-    let expected = "[[\"d_table_http\",\"CREATE TABLE IF NOT EXISTS \\\"d_table_http\\\" (\\n  \\\"id1_root\\\" INT NULL,\\n  \\\"id2_root\\\" INT NULL,\\n  \\\"type\\\" STRING NULL,\\n  \\\"log\\\" STRING NULL,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true',\\n  ttl = '1day'\\n)\"]]";
+    let expected = "[[\"d_table_http\",\"CREATE TABLE IF NOT EXISTS \\\"d_table_http\\\" (\\n  \\\"id1_root\\\" INT NULL,\\n  \\\"id2_root\\\" INT NULL,\\n  \\\"type\\\" STRING NULL,\\n  \\\"log\\\" STRING NULL,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true',\\n  skip_wal = 'true',\\n  ttl = '1day'\\n)\"]]";
     validate_data(
         "test_pipeline_context_http",
         &client,
