@@ -15,8 +15,8 @@
 use std::fs::read_to_string;
 use std::path::Path;
 
-use nix::sys::statfs;
-use nix::sys::statfs::statfs;
+#[cfg(target_os = "linux")]
+use nix::sys::{statfs, statfs::statfs};
 
 /// `MAX_VALUE` is used to indicate that the resource is unlimited.
 pub const MAX_VALUE: i64 = -1;
@@ -39,11 +39,16 @@ const MAX_MEMORY_IN_BYTES: i64 = 1125899906842624; // 1PB
 /// Check whether the cgroup is v2.
 ///
 /// - Return `true` if the cgroup is v2, otherwise return `false`.
-/// - Return `None` if the detection fails.
+/// - Return `None` if the detection fails or not on linux.
 pub fn is_cgroup_v2() -> Option<bool> {
-    let path = Path::new(CGROUP_UNIFIED_MOUNTPOINT);
-    let fs_stat = statfs(path).ok()?;
-    Some(fs_stat.filesystem_type() == statfs::CGROUP2_SUPER_MAGIC)
+    #[cfg(target_os = "linux")]
+    {
+        let path = Path::new(CGROUP_UNIFIED_MOUNTPOINT);
+        let fs_stat = statfs(path).ok()?;
+        Some(fs_stat.filesystem_type() == statfs::CGROUP2_SUPER_MAGIC)
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 /// Get the limit of memory in bytes.
@@ -139,6 +144,19 @@ mod tests {
     #[test]
     fn test_read_value_from_file() {
         assert_eq!(
+            read_value_from_file(Path::new("testdata/memory.max")).unwrap(),
+            100000
+        );
+        assert_eq!(
+            read_value_from_file(Path::new("testdata/memory.max.unlimited")).unwrap(),
+            MAX_VALUE
+        );
+        assert_eq!(read_value_from_file(Path::new("non_existent_file")), None);
+    }
+
+    #[test]
+    fn test_get_cgroup_v2_cpu_limit() {
+        assert_eq!(
             get_cgroup_v2_cpu_limit(Path::new("testdata/cpu.max")).unwrap(),
             1500
         );
@@ -150,14 +168,5 @@ mod tests {
             get_cgroup_v2_cpu_limit(Path::new("non_existent_file")),
             None
         );
-        assert_eq!(
-            read_value_from_file(Path::new("testdata/memory.max")).unwrap(),
-            100000
-        );
-        assert_eq!(
-            read_value_from_file(Path::new("testdata/memory.max.unlimited")).unwrap(),
-            MAX_VALUE
-        );
-        assert_eq!(read_value_from_file(Path::new("non_existent_file")), None);
     }
 }

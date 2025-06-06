@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(target_os = "linux")]
-mod cgroups_linux;
+mod cgroups;
 
-#[cfg(target_os = "linux")]
-pub use cgroups_linux::*;
+pub use cgroups::*;

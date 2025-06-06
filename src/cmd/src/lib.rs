@@ -16,7 +16,6 @@
 
 use async_trait::async_trait;
 use common_telemetry::{error, info};
-#[cfg(target_os = "linux")]
 use stat::{get_cpu_limit, get_memory_limit};
 
 use crate::error::Result;
@@ -122,7 +121,6 @@ pub fn log_versions(version: &str, short_version: &str, app: &str) {
     log_env_flags();
 }
 
-#[cfg(target_os = "linux")]
 pub fn create_resource_limit_metrics(app: &str) {
     if let Some(cpu_limit) = get_cpu_limit() {
         info!(

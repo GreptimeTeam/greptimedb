@@ -26,11 +26,9 @@ use meta_client::MetaClientType;
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
 
-#[cfg(target_os = "linux")]
-use crate::create_resource_limit_metrics;
 use crate::datanode::{DatanodeOptions, Instance, APP_NAME};
 use crate::error::{MetaClientInitSnafu, MissingConfigSnafu, Result, StartDatanodeSnafu};
-use crate::log_versions;
+use crate::{create_resource_limit_metrics, log_versions};
 
 /// Builder for Datanode instance.
 pub struct InstanceBuilder {
@@ -70,8 +68,6 @@ impl InstanceBuilder {
         );
 
         log_versions(version(), short_version(), APP_NAME);
-
-        #[cfg(target_os = "linux")]
         create_resource_limit_metrics(APP_NAME);
 
         plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)
