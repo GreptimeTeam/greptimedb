@@ -77,7 +77,15 @@ lazy_static! {
         register_int_counter_vec!(
             "greptime_flow_batching_error_count",
             "flow batching engine error count per flow id",
-            &["flow_id"],
+            &["flow_id"]
+        )
+        .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_GUESS_FE_LOAD: HistogramVec =
+        register_histogram_vec!(
+            "greptime_flow_batching_engine_guess_fe_load",
+            "flow batching engine guessed frontend load",
+            &["fe_addr"],
+            vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
         .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
