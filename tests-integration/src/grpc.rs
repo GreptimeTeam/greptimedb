@@ -857,7 +857,7 @@ CREATE TABLE {table_name} (
                 .expect("physical table route"),
         )
         .iter()
-        .map(|(k, v)| (v[0], *k))
+        .map(|(k, v)| (v.leader_regions[0], *k))
         .collect::<HashMap<u32, u64>>();
         assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
