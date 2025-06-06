@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod date;
-pub mod expression;
-#[cfg(feature = "geo")]
-pub mod geo;
-pub mod json;
-pub mod matches;
-pub mod matches_term;
-pub mod math;
-pub mod vector;
+use crate::function_registry::FunctionRegistry;
 
-pub(crate) mod hll_count;
-pub mod ip;
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub(crate) mod uddsketch_calc;
-pub mod udf;
+mod encoding;
+mod geo_path;
+
+pub(crate) struct GeoFunction;
+
+impl GeoFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register_aggr(geo_path::GeoPathAccumulator::uadf_impl());
+        registry.register_aggr(encoding::JsonPathAccumulator::uadf_impl());
+    }
+}

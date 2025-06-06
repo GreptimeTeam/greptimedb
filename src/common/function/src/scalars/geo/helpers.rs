@@ -37,7 +37,7 @@ macro_rules! ensure_columns_len {
     };
 }
 
-pub(super) use ensure_columns_len;
+pub(crate) use ensure_columns_len;
 
 macro_rules! ensure_columns_n {
     ($columns:ident, $n:literal) => {
@@ -58,7 +58,7 @@ macro_rules! ensure_columns_n {
     };
 }
 
-pub(super) use ensure_columns_n;
+pub(crate) use ensure_columns_n;
 
 macro_rules! ensure_and_coerce {
     ($compare:expr, $coerce:expr) => {{
@@ -72,4 +72,4 @@ macro_rules! ensure_and_coerce {
     }};
 }
 
-pub(super) use ensure_and_coerce;
+pub(crate) use ensure_and_coerce;

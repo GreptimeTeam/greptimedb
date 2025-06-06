@@ -12,20 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod date;
-pub mod expression;
+pub mod approximate;
 #[cfg(feature = "geo")]
 pub mod geo;
-pub mod json;
-pub mod matches;
-pub mod matches_term;
-pub mod math;
 pub mod vector;
-
-pub(crate) mod hll_count;
-pub mod ip;
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub(crate) mod uddsketch_calc;
-pub mod udf;

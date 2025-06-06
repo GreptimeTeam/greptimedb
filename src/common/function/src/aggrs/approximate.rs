@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod geo_path;
-mod hll;
-mod uddsketch_state;
+use crate::function_registry::FunctionRegistry;
 
-pub use geo_path::{GeoPathAccumulator, GEO_PATH_NAME};
-pub(crate) use hll::HllStateType;
-pub use hll::{HllState, HLL_MERGE_NAME, HLL_NAME};
-pub use uddsketch_state::{UddSketchState, UDDSKETCH_MERGE_NAME, UDDSKETCH_STATE_NAME};
+pub(crate) mod hll;
+mod uddsketch;
+
+pub(crate) struct ApproximateFunction;
+
+impl ApproximateFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        // uddsketch
+        registry.register_aggr(uddsketch::UddSketchState::state_udf_impl());
+        registry.register_aggr(uddsketch::UddSketchState::merge_udf_impl());
+
+        // hll
+        registry.register_aggr(hll::HllState::state_udf_impl());
+        registry.register_aggr(hll::HllState::merge_udf_impl());
+    }
+}

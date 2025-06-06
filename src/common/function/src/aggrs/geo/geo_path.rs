@@ -47,7 +47,7 @@ impl GeoPathAccumulator {
         Self::default()
     }
 
-    pub fn udf_impl() -> AggregateUDF {
+    pub fn uadf_impl() -> AggregateUDF {
         create_udaf(
             GEO_PATH_NAME,
             // Input types: lat, lng, timestamp

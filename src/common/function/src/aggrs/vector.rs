@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod date;
-pub mod expression;
-#[cfg(feature = "geo")]
-pub mod geo;
-pub mod json;
-pub mod matches;
-pub mod matches_term;
-pub mod math;
-pub mod vector;
+use crate::aggrs::vector::product::VectorProduct;
+use crate::aggrs::vector::sum::VectorSum;
+use crate::function_registry::FunctionRegistry;
 
-pub(crate) mod hll_count;
-pub mod ip;
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub(crate) mod uddsketch_calc;
-pub mod udf;
+mod product;
+mod sum;
+
+pub(crate) struct VectorFunction;
+
+impl VectorFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register_aggr(VectorSum::uadf_impl());
+        registry.register_aggr(VectorProduct::uadf_impl());
+    }
+}
