@@ -1,10 +1,14 @@
-CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+CREATE TABLE demo(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 insert into 
-    demo(host, cpu, memory, ts) 
+    demo(host, cpu, memory, jsons, ts) 
 values 
-    ('host1', 66.6, 1024, 1655276557000), 
-    ('host2', 88.8,  333.3, 1655276558000),
+    ('host1', 66.6, 1024, '{"foo":"bar"}', 1655276557000), 
+    ('host2', 88.8, 333.3, '{"a":null,"foo":"bar"}', 1655276558000);
+
+insert into
+    demo(host, cpu, memory, ts)
+values
     ('host3', 99.9, 444.4, 1722077263000);
 
 Copy demo TO '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
@@ -14,6 +18,18 @@ CREATE TABLE with_filename(host string, cpu double, memory double, ts timestamp 
 Copy with_filename FROM '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json', start_time='2022-06-15 07:02:37', end_time='2022-06-15 07:02:39');
 
 select * from with_filename order by ts;
+
+CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
+
+Copy with_json FROM '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
+
+select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
+
+-- SQLNESS PROTOCOL MYSQL
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
+
+-- SQLNESS PROTOCOL POSTGRES
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
 
 CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time index);
 
@@ -42,6 +58,8 @@ select * from demo_with_less_columns order by ts;
 drop table demo;
 
 drop table with_filename;
+
+drop table with_json;
 
 drop table with_path;
 

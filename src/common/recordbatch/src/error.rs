@@ -133,6 +133,18 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to downcast vector of type '{:?}' to type '{:?}'",
+        from_type,
+        to_type
+    ))]
+    DowncastVector {
+        from_type: ConcreteDataType,
+        to_type: ConcreteDataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Error occurs when performing arrow computation"))]
     ArrowCompute {
         #[snafu(source)]
@@ -191,6 +203,8 @@ impl ErrorExt for Error {
             | Error::ProjectArrowRecordBatch { .. }
             | Error::PhysicalExpr { .. }
             | Error::RecordBatchSliceIndexOverflow { .. } => StatusCode::Internal,
+
+            Error::DowncastVector { .. } => StatusCode::Unexpected,
 
             Error::PollStream { .. } => StatusCode::EngineExecuteQuery,
 
