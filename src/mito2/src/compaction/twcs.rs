@@ -15,6 +15,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
+use std::num::NonZeroU64;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
@@ -26,7 +27,9 @@ use store_api::storage::RegionId;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::run::{find_sorted_runs, merge_seq_files, reduce_runs};
+use crate::compaction::run::{
+    find_sorted_runs, merge_seq_files, reduce_runs, FileGroup, Item, Ranged,
+};
 use crate::compaction::{get_expired_ssts, CompactionOutput};
 use crate::sst::file::{overlaps, FileHandle, Level};
 use crate::sst::version::LevelMeta;
@@ -60,7 +63,8 @@ impl TwcsPicker {
             if files.files.is_empty() {
                 continue;
             }
-            let sorted_runs = find_sorted_runs(&mut files.files);
+            let mut files_to_merge: Vec<_> = files.files().cloned().collect();
+            let sorted_runs = find_sorted_runs(&mut files_to_merge);
             let found_runs = sorted_runs.len();
             // We only remove deletion markers if we found less than 2 runs and not in append mode.
             // because after compaction there will be no overlapping files.
@@ -90,7 +94,7 @@ impl TwcsPicker {
                 );
                 output.push(CompactionOutput {
                     output_level: LEVEL_COMPACTED, // always compact to l1
-                    inputs,
+                    inputs: inputs.into_iter().flat_map(|fg| fg.into_files()).collect(),
                     filter_deleted,
                     output_time_range: None, // we do not enforce output time range in twcs compactions.
                 });
@@ -109,21 +113,21 @@ fn log_pick_result(
     file_num: usize,
     max_output_file_size: Option<u64>,
     filter_deleted: bool,
-    inputs: &[FileHandle],
+    inputs: &[FileGroup],
 ) {
     let input_file_str: Vec<String> = inputs
         .iter()
         .map(|f| {
-            let range = f.time_range();
+            let range = f.range();
             let start = range.0.to_iso8601_string();
             let end = range.1.to_iso8601_string();
             let num_rows = f.num_rows();
             format!(
-                "SST{{id: {}, range: ({}, {}), size: {}, num rows: {} }}",
-                f.file_id(),
+                "FileGroup{{id: {:?}, range: ({}, {}), size: {}, num rows: {} }}",
+                f.file_ids(),
                 start,
                 end,
-                ReadableSize(f.size()),
+                ReadableSize(f.size() as u64),
                 num_rows
             )
         })
@@ -198,7 +202,7 @@ impl Picker for TwcsPicker {
 struct Window {
     start: Timestamp,
     end: Timestamp,
-    files: Vec<FileHandle>,
+    files: HashMap<Option<NonZeroU64>, FileGroup>,
     time_window: i64,
     overlapping: bool,
 }
@@ -207,10 +211,13 @@ impl Window {
     /// Creates a new [Window] with given file.
     fn new_with_file(file: FileHandle) -> Self {
         let (start, end) = file.time_range();
+        let files = [(file.meta_ref().sequence, FileGroup::new_with_file(file))]
+            .into_iter()
+            .collect();
         Self {
             start,
             end,
-            files: vec![file],
+            files,
             time_window: 0,
             overlapping: false,
         }
@@ -226,7 +233,19 @@ impl Window {
         let (start, end) = file.time_range();
         self.start = self.start.min(start);
         self.end = self.end.max(end);
-        self.files.push(file);
+
+        match self.files.entry(file.meta_ref().sequence) {
+            Entry::Occupied(mut o) => {
+                o.get_mut().add_file(file);
+            }
+            Entry::Vacant(v) => {
+                v.insert(FileGroup::new_with_file(file));
+            }
+        }
+    }
+
+    fn files(&self) -> impl Iterator<Item = &FileGroup> {
+        self.files.values()
     }
 }
 
@@ -311,7 +330,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::compaction::test_util::new_file_handle;
+    use crate::compaction::test_util::{new_file_handle, new_file_handle_with_sequence};
     use crate::sst::file::{FileId, Level};
 
     #[test]
@@ -371,7 +390,9 @@ mod tests {
             .iter(),
             3,
         );
-        assert_eq!(5, windows.get(&0).unwrap().files.len());
+        let fgs = &windows.get(&0).unwrap().files;
+        assert_eq!(1, fgs.len());
+        assert_eq!(fgs.values().map(|f| f.files().len()).sum::<usize>(), 5);
 
         let files = [FileId::random(); 3];
         let windows = assign_to_windows(
@@ -385,15 +406,15 @@ mod tests {
         );
         assert_eq!(
             files[0],
-            windows.get(&0).unwrap().files.first().unwrap().file_id()
+            windows.get(&0).unwrap().files().next().unwrap().files()[0].file_id()
         );
         assert_eq!(
             files[1],
-            windows.get(&3).unwrap().files.first().unwrap().file_id()
+            windows.get(&3).unwrap().files().next().unwrap().files()[0].file_id()
         );
         assert_eq!(
             files[2],
-            windows.get(&12).unwrap().files.first().unwrap().file_id()
+            windows.get(&12).unwrap().files().next().unwrap().files()[0].file_id()
         );
     }
 
@@ -408,8 +429,22 @@ mod tests {
         ];
         files[0].set_compacting(true);
         files[2].set_compacting(true);
-        let windows = assign_to_windows(files.iter(), 3);
-        assert_eq!(3, windows.get(&0).unwrap().files.len());
+        let mut windows = assign_to_windows(files.iter(), 3);
+        let window0 = windows.remove(&0).unwrap();
+        assert_eq!(1, window0.files.len());
+        let candidates = window0
+            .files
+            .into_values()
+            .flat_map(|fg| fg.into_files())
+            .map(|f| f.file_id())
+            .collect::<HashSet<_>>();
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(
+            candidates,
+            [files[1].file_id(), files[3].file_id(), files[4].file_id()]
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
     }
 
     /// (Window value, overlapping, files' time ranges in window)
@@ -438,9 +473,11 @@ mod tests {
             let mut file_ranges = actual_window
                 .files
                 .iter()
-                .map(|f| {
-                    let (s, e) = f.time_range();
-                    (s.value(), e.value())
+                .flat_map(|(_, f)| {
+                    f.files().iter().map(|f| {
+                        let (s, e) = f.time_range();
+                        (s.value(), e.value())
+                    })
                 })
                 .collect::<Vec<_>>();
             file_ranges.sort_unstable_by(|l, r| l.0.cmp(&r.0).then(l.1.cmp(&r.1)));
@@ -607,10 +644,10 @@ mod tests {
         CompactionPickerTestCase {
             window_size: 3,
             input_files: [
-                new_file_handle(file_ids[0], -2000, -3, 0),
-                new_file_handle(file_ids[1], -3000, -100, 0),
-                new_file_handle(file_ids[2], 0, 2999, 0), //active windows
-                new_file_handle(file_ids[3], 50, 2998, 0), //active windows
+                new_file_handle_with_sequence(file_ids[0], -2000, -3, 0, 1),
+                new_file_handle_with_sequence(file_ids[1], -3000, -100, 0, 2),
+                new_file_handle_with_sequence(file_ids[2], 0, 2999, 0, 3), //active windows
+                new_file_handle_with_sequence(file_ids[3], 50, 2998, 0, 4), //active windows
             ]
             .to_vec(),
             expected_outputs: vec![
@@ -636,11 +673,11 @@ mod tests {
         CompactionPickerTestCase {
             window_size: 3,
             input_files: [
-                new_file_handle(file_ids[0], -2000, -3, 0),
-                new_file_handle(file_ids[1], -3000, -100, 0),
-                new_file_handle(file_ids[2], 0, 2999, 0),
-                new_file_handle(file_ids[3], 50, 2998, 0),
-                new_file_handle(file_ids[4], 11, 2990, 0),
+                new_file_handle_with_sequence(file_ids[0], -2000, -3, 0, 1),
+                new_file_handle_with_sequence(file_ids[1], -3000, -100, 0, 2),
+                new_file_handle_with_sequence(file_ids[2], 0, 2999, 0, 3),
+                new_file_handle_with_sequence(file_ids[3], 50, 2998, 0, 4),
+                new_file_handle_with_sequence(file_ids[4], 11, 2990, 0, 5),
             ]
             .to_vec(),
             expected_outputs: vec![

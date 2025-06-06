@@ -18,8 +18,9 @@
 use common_base::readable_size::ReadableSize;
 use common_base::BitVec;
 use common_time::Timestamp;
+use smallvec::{smallvec, SmallVec};
 
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 
 /// Default max compaction output file size when not specified.
 const DEFAULT_MAX_OUTPUT_SIZE: u64 = ReadableSize::gb(2).as_bytes();
@@ -125,17 +126,67 @@ pub trait Item: Ranged + Clone {
     fn size(&self) -> usize;
 }
 
-impl Ranged for FileHandle {
-    type BoundType = Timestamp;
+#[derive(Debug, Clone)]
+pub struct FileGroup {
+    files: SmallVec<[FileHandle; 2]>,
+    size: usize,
+    num_rows: usize,
+    min_timestamp: Timestamp,
+    max_timestamp: Timestamp,
+}
 
-    fn range(&self) -> (Self::BoundType, Self::BoundType) {
-        self.time_range()
+impl FileGroup {
+    pub(crate) fn new_with_file(file: FileHandle) -> Self {
+        let size = file.size() as usize;
+        let (min_timestamp, max_timestamp) = file.time_range();
+        let num_rows = file.num_rows();
+        Self {
+            files: smallvec![file],
+            size,
+            num_rows,
+            min_timestamp,
+            max_timestamp,
+        }
+    }
+
+    pub(crate) fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    pub(crate) fn add_file(&mut self, file: FileHandle) {
+        self.size += file.size() as usize;
+        self.num_rows += file.num_rows();
+        let (min_timestamp, max_timestamp) = file.time_range();
+        self.min_timestamp = self.min_timestamp.min(min_timestamp);
+        self.max_timestamp = self.max_timestamp.max(max_timestamp);
+        self.files.push(file);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn files(&self) -> &[FileHandle] {
+        &self.files[..]
+    }
+
+    pub(crate) fn file_ids(&self) -> SmallVec<[FileId; 2]> {
+        SmallVec::from_iter(self.files.iter().map(|f| f.file_id()))
+    }
+
+    pub(crate) fn into_files(self) -> impl Iterator<Item = FileHandle> {
+        self.files.into_iter()
     }
 }
 
-impl Item for FileHandle {
+impl Ranged for FileGroup {
+    type BoundType = Timestamp;
+
+    fn range(&self) -> (Self::BoundType, Self::BoundType) {
+        (self.min_timestamp, self.max_timestamp)
+    }
+}
+
+impl Item for FileGroup {
     fn size(&self) -> usize {
-        self.size() as usize
+        self.size
     }
 }
 
