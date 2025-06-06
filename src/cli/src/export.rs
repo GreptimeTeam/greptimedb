@@ -112,15 +112,15 @@ pub struct ExportCommand {
     #[clap(long)]
     s3: bool,
 
-    /// if both `s3_ddl_local_dir` and `s3` are set, `s3_ddl_local_dir` will be only used for
-    /// exported SQL files, and the data will be exported to s3.
+    /// if both `ddl_local_dir` and remote storage (s3/oss) are set, `ddl_local_dir` will be only used for
+    /// exported SQL files, and the data will be exported to remote storage.
     ///
-    /// Note that `s3_ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
-    /// direct access to s3.
+    /// Note that `ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
+    /// direct access to remote storage.
     ///
-    /// if `s3` is set but `s3_ddl_local_dir` is not set, both SQL&data will be exported to s3.
+    /// if remote storage is set but `ddl_local_dir` is not set, both SQL&data will be exported to remote storage.
     #[clap(long)]
-    s3_ddl_local_dir: Option<String>,
+    ddl_local_dir: Option<String>,
 
     /// The s3 bucket name
     /// if s3 is set, this is required
@@ -181,10 +181,10 @@ impl ExportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         if self.s3
             && (self.s3_bucket.is_none()
-                || self.s3_endpoint.is_none()
-                || self.s3_access_key.is_none()
-                || self.s3_secret_key.is_none()
-                || self.s3_region.is_none())
+            || self.s3_endpoint.is_none()
+            || self.s3_access_key.is_none()
+            || self.s3_secret_key.is_none()
+            || self.s3_region.is_none())
         {
             return Err(BoxedError::new(S3ConfigNotSetSnafu {}.build()));
         }
@@ -213,7 +213,7 @@ impl ExportCommand {
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
             s3: self.s3,
-            s3_ddl_local_dir: self.s3_ddl_local_dir.clone(),
+            ddl_local_dir: self.ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
             s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
@@ -254,7 +254,7 @@ pub struct Export {
     start_time: Option<String>,
     end_time: Option<String>,
     s3: bool,
-    s3_ddl_local_dir: Option<String>,
+    ddl_local_dir: Option<String>,
     s3_bucket: Option<String>,
     s3_root: Option<String>,
     s3_endpoint: Option<String>,
@@ -272,12 +272,12 @@ pub struct Export {
 
 impl Export {
     fn catalog_path(&self) -> PathBuf {
-        if self.s3 {
+        if self.s3 || self.oss {
             PathBuf::from(&self.catalog)
         } else if let Some(dir) = &self.output_dir {
             PathBuf::from(dir).join(&self.catalog)
         } else {
-            unreachable!("catalog_path: output_dir must be set when not using s3")
+            unreachable!("catalog_path: output_dir must be set when not using remote storage")
         }
     }
 
@@ -479,7 +479,7 @@ impl Export {
                     .await?;
 
                 // Create directory if needed for file system storage
-                if !export_self.s3 {
+                if !export_self.s3 && !export_self.oss {
                     let db_dir = format!("{}/{}/", export_self.catalog, schema);
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
@@ -534,8 +534,8 @@ impl Export {
 
     /// build operator with preference for file system
     async fn build_prefer_fs_operator(&self) -> Result<ObjectStore> {
-        if self.s3 && self.s3_ddl_local_dir.is_some() {
-            let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
+        if (self.s3 || self.oss) && self.ddl_local_dir.is_some() {
+            let root = self.ddl_local_dir.as_ref().unwrap().clone();
             let op = ObjectStore::new(services::Fs::default().root(&root))
                 .context(OpenDalSnafu)?
                 .layer(LoggingLayer::default())
@@ -641,8 +641,8 @@ impl Export {
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
 
-                // Create directory if not using S3
-                if !export_self.s3 {
+                // Create directory if not using remote storage
+                if !export_self.s3 && !export_self.oss {
                     let db_dir = format!("{}/{}/", export_self.catalog, schema);
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
