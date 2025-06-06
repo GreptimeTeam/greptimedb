@@ -111,6 +111,10 @@ impl EpochProcessor {
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
     }
+
+    pub(crate) fn target_count(&self) -> usize {
+        self.fields.len()
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for EpochProcessor {

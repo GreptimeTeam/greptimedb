@@ -30,12 +30,13 @@ use yaml_rust::YamlLoader;
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
-    TransformNoTimestampProcessorSnafu, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
+    YamlLoadSnafu, YamlParseSnafu,
 };
+use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::etl::processor::ProcessorKind;
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::GreptimeTransformer;
+use crate::{ContextOpt, GreptimeTransformer};
 
 const DESCRIPTION: &str = "description";
 const PROCESSORS: &str = "processors";
@@ -80,16 +81,14 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 // check processors have at least one timestamp-related processor
                 let cnt = processors
                     .iter()
-                    .filter(|p| {
-                        matches!(
-                            p,
-                            ProcessorKind::Date(_)
-                                | ProcessorKind::Timestamp(_)
-                                | ProcessorKind::Epoch(_)
-                        )
+                    .filter_map(|p| match p {
+                        ProcessorKind::Date(d) => Some(d.target_count()),
+                        ProcessorKind::Timestamp(t) => Some(t.target_count()),
+                        ProcessorKind::Epoch(e) => Some(e.target_count()),
+                        _ => None,
                     })
-                    .count();
-                ensure!(cnt > 0, TransformNoTimestampProcessorSnafu);
+                    .sum::<usize>();
+                ensure!(cnt == 1, AutoTransformOneTimestampSnafu);
                 None
             } else {
                 Some(GreptimeTransformer::new(transformers)?)
@@ -161,7 +160,7 @@ pub enum PipelineExecOutput {
 
 #[derive(Debug)]
 pub struct TransformedOutput {
-    pub opt: String,
+    pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
     pub pipeline_map: PipelineMap,
@@ -244,9 +243,11 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
+        // do transform
         if let Some(transformer) = self.transformer() {
-            let (opt, row) = transformer.transform_mut(&mut val)?;
-            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
+            let (mut opt, row) = transformer.transform_mut(&mut val)?;
+            let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
+
             Ok(PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
                 row,
@@ -254,7 +255,12 @@ impl Pipeline {
                 pipeline_map: val,
             }))
         } else {
-            let table_suffix = self.tablesuffix.as_ref().and_then(|t| t.apply(&val));
+            // check table suffix var
+            let table_suffix = val
+                .remove(TABLE_SUFFIX_KEY)
+                .map(|f| f.to_str_value())
+                .or_else(|| self.tablesuffix.as_ref().and_then(|t| t.apply(&val)));
+
             let mut ts_unit_map = HashMap::with_capacity(4);
             // get all ts values
             for (k, v) in val.iter() {
