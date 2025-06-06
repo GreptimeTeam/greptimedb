@@ -181,10 +181,10 @@ impl ExportCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         if self.s3
             && (self.s3_bucket.is_none()
-            || self.s3_endpoint.is_none()
-            || self.s3_access_key.is_none()
-            || self.s3_secret_key.is_none()
-            || self.s3_region.is_none())
+                || self.s3_endpoint.is_none()
+                || self.s3_access_key.is_none()
+                || self.s3_secret_key.is_none()
+                || self.s3_region.is_none())
         {
             return Err(BoxedError::new(S3ConfigNotSetSnafu {}.build()));
         }
