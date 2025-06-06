@@ -280,7 +280,7 @@ impl BatchingTask {
         let catalog = &self.config.sink_table_name[0];
         let schema = &self.config.sink_table_name[1];
         frontend_client
-            .create(expr.clone(), catalog, schema)
+            .create(expr.clone(), catalog, schema, Some(self))
             .await?;
         Ok(())
     }
@@ -361,7 +361,7 @@ impl BatchingTask {
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc)
+                .handle(req, catalog, schema, &mut peer_desc, Some(self))
                 .await
         };
 
