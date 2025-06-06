@@ -1,12 +1,16 @@
-CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+CREATE TABLE demo(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 CREATE TABLE demo_2(host string, cpu double, memory double, ts TIMESTAMP time index);
 
 insert into
+    demo(host, cpu, memory, jsons, ts)
+values
+    ('host1', 66.6, 1024, '{"foo":"bar"}', 1655276557000),
+    ('host2', 88.8, 333.3, '{"a":null,"foo":"bar"}', 1655276558000);
+
+insert into
     demo(host, cpu, memory, ts)
 values
-    ('host1', 66.6, 1024, 1655276557000),
-    ('host2', 88.8, 333.3, 1655276558000),
     ('host3', 111.1, 444.4, 1722077263000);
 
 insert into
@@ -31,6 +35,18 @@ CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time
 Copy with_path FROM '${SQLNESS_HOME}/demo/export/parquet_files/';
 
 select * from with_path order by ts;
+
+CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
+
+Copy with_json FROM '${SQLNESS_HOME}/demo/export/parquet_files/demo.parquet';
+
+select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
+
+-- SQLNESS PROTOCOL MYSQL
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
+
+-- SQLNESS PROTOCOL POSTGRES
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
 
 CREATE TABLE with_pattern(host string, cpu double, memory double, ts timestamp time index);
 
@@ -69,6 +85,8 @@ drop table demo;
 drop table demo_2;
 
 drop table with_filename;
+
+drop table with_json;
 
 drop table with_path;
 

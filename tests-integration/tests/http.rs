@@ -119,6 +119,8 @@ macro_rules! http_tests {
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
+
+                test_influxdb_write,
             );
         )*
     };
@@ -1158,6 +1160,9 @@ record_type = "system_table"
 threshold = "30s"
 sample_ratio = 1.0
 ttl = "30d"
+
+[query]
+parallelism = 0
 "#,
     )
     .trim()
@@ -4725,6 +4730,52 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_influxdb_write").await;
+
+    let client = TestClient::new(app).await;
+
+    // Only write field cpu.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // Only write field mem.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 mem=10240.0 1664370469457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // Write field cpu & mem.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 cpu=3.2,mem=20480.0 1664370479457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    let expected = r#"[["host1",1.2,1664370459457010101,null],["host1",null,1664370469457010101,10240.0],["host1",3.2,1664370479457010101,20480.0]]"#;
+    validate_data(
+        "test_influxdb_write",
+        &client,
+        "select * from test_alter order by ts;",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }

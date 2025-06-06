@@ -27,6 +27,8 @@ excludes = [
     "src/servers/src/repeated_field.rs",
     "src/servers/src/http/test_helpers.rs",
     # enterprise
+    "src/common/meta/src/rpc/ddl/trigger.rs",
+    "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/create/trigger.rs",
     "src/sql/src/statements/show/trigger.rs",
     "src/sql/src/parsers/create_parser/trigger.rs",

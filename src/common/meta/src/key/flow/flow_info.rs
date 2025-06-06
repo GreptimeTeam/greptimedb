@@ -114,37 +114,37 @@ impl<'a> MetadataKey<'a, FlowInfoKeyInner> for FlowInfoKeyInner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowInfoValue {
     /// The source tables used by the flow.
-    pub(crate) source_table_ids: Vec<TableId>,
+    pub source_table_ids: Vec<TableId>,
     /// The sink table used by the flow.
-    pub(crate) sink_table_name: TableName,
+    pub sink_table_name: TableName,
     /// Which flow nodes this flow is running on.
-    pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
+    pub flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
-    pub(crate) catalog_name: String,
+    pub catalog_name: String,
     /// The query context used when create flow.
     /// Although flow doesn't belong to any schema, this query_context is needed to remember
     /// the query context when `create_flow` is executed
     /// for recovering flow using the same sql&query_context after db restart.
     /// if none, should use default query context
     #[serde(default)]
-    pub(crate) query_context: Option<crate::rpc::ddl::QueryContext>,
+    pub query_context: Option<crate::rpc::ddl::QueryContext>,
     /// The flow name.
-    pub(crate) flow_name: String,
+    pub flow_name: String,
     /// The raw sql.
-    pub(crate) raw_sql: String,
+    pub raw_sql: String,
     /// The expr of expire.
     /// Duration in seconds as `i64`.
-    pub(crate) expire_after: Option<i64>,
+    pub expire_after: Option<i64>,
     /// The comment.
-    pub(crate) comment: String,
+    pub comment: String,
     /// The options.
-    pub(crate) options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
     /// The created time
     #[serde(default)]
-    pub(crate) created_time: DateTime<Utc>,
+    pub created_time: DateTime<Utc>,
     /// The updated time.
     #[serde(default)]
-    pub(crate) updated_time: DateTime<Utc>,
+    pub updated_time: DateTime<Utc>,
 }
 
 impl FlowInfoValue {
