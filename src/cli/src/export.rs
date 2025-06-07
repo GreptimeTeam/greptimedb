@@ -19,9 +19,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_telemetry::{debug, error, info};
 use object_store::layers::LoggingLayer;
+use object_store::services::Oss;
 use object_store::{services, ObjectStore};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
@@ -110,15 +112,15 @@ pub struct ExportCommand {
     #[clap(long)]
     s3: bool,
 
-    /// if both `s3_ddl_local_dir` and `s3` are set, `s3_ddl_local_dir` will be only used for
-    /// exported SQL files, and the data will be exported to s3.
+    /// if both `ddl_local_dir` and remote storage (s3/oss) are set, `ddl_local_dir` will be only used for
+    /// exported SQL files, and the data will be exported to remote storage.
     ///
-    /// Note that `s3_ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
-    /// direct access to s3.
+    /// Note that `ddl_local_dir` export sql files to **LOCAL** file system, this is useful if export client don't have
+    /// direct access to remote storage.
     ///
-    /// if `s3` is set but `s3_ddl_local_dir` is not set, both SQL&data will be exported to s3.
+    /// if remote storage is set but `ddl_local_dir` is not set, both SQL&data will be exported to remote storage.
     #[clap(long)]
-    s3_ddl_local_dir: Option<String>,
+    ddl_local_dir: Option<String>,
 
     /// The s3 bucket name
     /// if s3 is set, this is required
@@ -149,6 +151,30 @@ pub struct ExportCommand {
     /// if s3 is set, this is required
     #[clap(long)]
     s3_region: Option<String>,
+
+    /// if export data to oss
+    #[clap(long)]
+    oss: bool,
+
+    /// The oss bucket name
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_bucket: Option<String>,
+
+    /// The oss endpoint
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_endpoint: Option<String>,
+
+    /// The oss access key id
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_access_key_id: Option<String>,
+
+    /// The oss access key secret
+    /// if oss is set, this is required
+    #[clap(long)]
+    oss_access_key_secret: Option<String>,
 }
 
 impl ExportCommand {
@@ -162,7 +188,7 @@ impl ExportCommand {
         {
             return Err(BoxedError::new(S3ConfigNotSetSnafu {}.build()));
         }
-        if !self.s3 && self.output_dir.is_none() {
+        if !self.s3 && !self.oss && self.output_dir.is_none() {
             return Err(BoxedError::new(OutputDirNotSetSnafu {}.build()));
         }
         let (catalog, schema) =
@@ -187,13 +213,32 @@ impl ExportCommand {
             start_time: self.start_time.clone(),
             end_time: self.end_time.clone(),
             s3: self.s3,
-            s3_ddl_local_dir: self.s3_ddl_local_dir.clone(),
+            ddl_local_dir: self.ddl_local_dir.clone(),
             s3_bucket: self.s3_bucket.clone(),
             s3_root: self.s3_root.clone(),
             s3_endpoint: self.s3_endpoint.clone(),
-            s3_access_key: self.s3_access_key.clone(),
-            s3_secret_key: self.s3_secret_key.clone(),
+            // Wrap sensitive values in SecretString
+            s3_access_key: self
+                .s3_access_key
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
+            s3_secret_key: self
+                .s3_secret_key
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
             s3_region: self.s3_region.clone(),
+            oss: self.oss,
+            oss_bucket: self.oss_bucket.clone(),
+            oss_endpoint: self.oss_endpoint.clone(),
+            // Wrap sensitive values in SecretString
+            oss_access_key_id: self
+                .oss_access_key_id
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
+            oss_access_key_secret: self
+                .oss_access_key_secret
+                .as_ref()
+                .map(|k| SecretString::from(k.clone())),
         }))
     }
 }
@@ -209,23 +254,30 @@ pub struct Export {
     start_time: Option<String>,
     end_time: Option<String>,
     s3: bool,
-    s3_ddl_local_dir: Option<String>,
+    ddl_local_dir: Option<String>,
     s3_bucket: Option<String>,
     s3_root: Option<String>,
     s3_endpoint: Option<String>,
-    s3_access_key: Option<String>,
-    s3_secret_key: Option<String>,
+    // Changed to SecretString for sensitive data
+    s3_access_key: Option<SecretString>,
+    s3_secret_key: Option<SecretString>,
     s3_region: Option<String>,
+    oss: bool,
+    oss_bucket: Option<String>,
+    oss_endpoint: Option<String>,
+    // Changed to SecretString for sensitive data
+    oss_access_key_id: Option<SecretString>,
+    oss_access_key_secret: Option<SecretString>,
 }
 
 impl Export {
     fn catalog_path(&self) -> PathBuf {
-        if self.s3 {
+        if self.s3 || self.oss {
             PathBuf::from(&self.catalog)
         } else if let Some(dir) = &self.output_dir {
             PathBuf::from(dir).join(&self.catalog)
         } else {
-            unreachable!("catalog_path: output_dir must be set when not using s3")
+            unreachable!("catalog_path: output_dir must be set when not using remote storage")
         }
     }
 
@@ -427,7 +479,7 @@ impl Export {
                     .await?;
 
                 // Create directory if needed for file system storage
-                if !export_self.s3 {
+                if !export_self.s3 && !export_self.oss {
                     let db_dir = format!("{}/{}/", export_self.catalog, schema);
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
@@ -473,6 +525,8 @@ impl Export {
     async fn build_operator(&self) -> Result<ObjectStore> {
         if self.s3 {
             self.build_s3_operator().await
+        } else if self.oss {
+            self.build_oss_operator().await
         } else {
             self.build_fs_operator().await
         }
@@ -480,9 +534,8 @@ impl Export {
 
     /// build operator with preference for file system
     async fn build_prefer_fs_operator(&self) -> Result<ObjectStore> {
-        // is under s3 mode and s3_ddl_dir is set, use it as root
-        if self.s3 && self.s3_ddl_local_dir.is_some() {
-            let root = self.s3_ddl_local_dir.as_ref().unwrap().clone();
+        if (self.s3 || self.oss) && self.ddl_local_dir.is_some() {
+            let root = self.ddl_local_dir.as_ref().unwrap().clone();
             let op = ObjectStore::new(services::Fs::default().root(&root))
                 .context(OpenDalSnafu)?
                 .layer(LoggingLayer::default())
@@ -490,6 +543,8 @@ impl Export {
             Ok(op)
         } else if self.s3 {
             self.build_s3_operator().await
+        } else if self.oss {
+            self.build_oss_operator().await
         } else {
             self.build_fs_operator().await
         }
@@ -515,11 +570,35 @@ impl Export {
         }
 
         if let Some(key_id) = self.s3_access_key.as_ref() {
-            builder = builder.access_key_id(key_id);
+            builder = builder.access_key_id(key_id.expose_secret());
         }
 
         if let Some(secret_key) = self.s3_secret_key.as_ref() {
-            builder = builder.secret_access_key(secret_key);
+            builder = builder.secret_access_key(secret_key.expose_secret());
+        }
+
+        let op = ObjectStore::new(builder)
+            .context(OpenDalSnafu)?
+            .layer(LoggingLayer::default())
+            .finish();
+        Ok(op)
+    }
+
+    async fn build_oss_operator(&self) -> Result<ObjectStore> {
+        let mut builder = Oss::default()
+            .bucket(self.oss_bucket.as_ref().expect("oss_bucket must be set"))
+            .endpoint(
+                self.oss_endpoint
+                    .as_ref()
+                    .expect("oss_endpoint must be set"),
+            );
+
+        // Use expose_secret() to access the actual secret value
+        if let Some(key_id) = self.oss_access_key_id.as_ref() {
+            builder = builder.access_key_id(key_id.expose_secret());
+        }
+        if let Some(secret_key) = self.oss_access_key_secret.as_ref() {
+            builder = builder.access_key_secret(secret_key.expose_secret());
         }
 
         let op = ObjectStore::new(builder)
@@ -562,8 +641,8 @@ impl Export {
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
 
-                // Create directory if not using S3
-                if !export_self.s3 {
+                // Create directory if not using remote storage
+                if !export_self.s3 && !export_self.oss {
                     let db_dir = format!("{}/{}/", export_self.catalog, schema);
                     operator.create_dir(&db_dir).await.context(OpenDalSnafu)?;
                 }
@@ -575,7 +654,11 @@ impl Export {
                     r#"COPY DATABASE "{}"."{}" TO '{}' WITH ({}){};"#,
                     export_self.catalog, schema, path, with_options_clone, connection_part
                 );
-                info!("Executing sql: {sql}");
+
+                // Log SQL command but mask sensitive information
+                let safe_sql = export_self.mask_sensitive_sql(&sql);
+                info!("Executing sql: {}", safe_sql);
+
                 export_self.database_client.sql_in_public(&sql).await?;
                 info!(
                     "Finished exporting {}.{} data to {}",
@@ -615,6 +698,29 @@ impl Export {
         Ok(())
     }
 
+    /// Mask sensitive information in SQL commands for safe logging
+    fn mask_sensitive_sql(&self, sql: &str) -> String {
+        let mut masked_sql = sql.to_string();
+
+        // Mask S3 credentials
+        if let Some(access_key) = &self.s3_access_key {
+            masked_sql = masked_sql.replace(access_key.expose_secret(), "[REDACTED]");
+        }
+        if let Some(secret_key) = &self.s3_secret_key {
+            masked_sql = masked_sql.replace(secret_key.expose_secret(), "[REDACTED]");
+        }
+
+        // Mask OSS credentials
+        if let Some(access_key_id) = &self.oss_access_key_id {
+            masked_sql = masked_sql.replace(access_key_id.expose_secret(), "[REDACTED]");
+        }
+        if let Some(access_key_secret) = &self.oss_access_key_secret {
+            masked_sql = masked_sql.replace(access_key_secret.expose_secret(), "[REDACTED]");
+        }
+
+        masked_sql
+    }
+
     fn get_file_path(&self, schema: &str, file_name: &str) -> String {
         format!("{}/{}/{}", self.catalog, schema, file_name)
     }
@@ -629,6 +735,13 @@ impl Export {
                 } else {
                     String::new()
                 },
+                file_path
+            )
+        } else if self.oss {
+            format!(
+                "oss://{}/{}/{}",
+                self.oss_bucket.as_ref().unwrap_or(&String::new()),
+                self.catalog,
                 file_path
             )
         } else {
@@ -675,15 +788,36 @@ impl Export {
             };
 
             // Safety: All s3 options are required
+            // Use expose_secret() to access the actual secret values
             let connection_options = format!(
                 "ACCESS_KEY_ID='{}', SECRET_ACCESS_KEY='{}', REGION='{}'{}",
-                self.s3_access_key.as_ref().unwrap(),
-                self.s3_secret_key.as_ref().unwrap(),
+                self.s3_access_key.as_ref().unwrap().expose_secret(),
+                self.s3_secret_key.as_ref().unwrap().expose_secret(),
                 self.s3_region.as_ref().unwrap(),
                 endpoint_option
             );
 
             (s3_path, format!(" CONNECTION ({})", connection_options))
+        } else if self.oss {
+            let oss_path = format!(
+                "oss://{}/{}/{}/",
+                self.oss_bucket.as_ref().unwrap(),
+                self.catalog,
+                schema
+            );
+            let endpoint_option = if let Some(endpoint) = self.oss_endpoint.as_ref() {
+                format!(", ENDPOINT='{}'", endpoint)
+            } else {
+                String::new()
+            };
+
+            let connection_options = format!(
+                "ACCESS_KEY_ID='{}', ACCESS_KEY_SECRET='{}'{}",
+                self.oss_access_key_id.as_ref().unwrap().expose_secret(),
+                self.oss_access_key_secret.as_ref().unwrap().expose_secret(),
+                endpoint_option
+            );
+            (oss_path, format!(" CONNECTION ({})", connection_options))
         } else {
             (
                 self.catalog_path()
