@@ -497,7 +497,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
-            - expr: sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{}[$__rate_interval]))/sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_count{}[$__rate_interval]))
+            - expr: sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{}[$__rate_interval]))/sum by(instance, pod, stage) (rate(greptime_mito_compaction_stage_elapsed_count{}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -607,7 +607,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-P95'
-            - expr: sum by(le,instance, stage, pod) (rate(greptime_region_worker_handle_write_sum[$__rate_interval]))/sum by(le,instance, stage, pod) (rate(greptime_region_worker_handle_write_count[$__rate_interval]))
+            - expr: sum by(instance, stage, pod) (rate(greptime_region_worker_handle_write_sum[$__rate_interval]))/sum by(instance, stage, pod) (rate(greptime_region_worker_handle_write_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -741,9 +741,8 @@ groups:
     - title: Metasrv
       panels:
         - title: Region migration datanode
-          type: state-timeline
+          type: status-history
           description: Counter of region migration by source and destination
-          unit: none
           queries:
             - expr: greptime_meta_region_migration_stat{datanode_type="src"}
               datasource:
@@ -764,17 +763,127 @@ groups:
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: __auto
+              legendFormat: '{{pod}}-{{state}}-{{error_type}}'
         - title: Datanode load
           type: timeseries
           description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
-          unit: none
+          unit: binBps
           queries:
             - expr: greptime_datanode_load
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: __auto
+              legendFormat: Datanode-{{datanode_id}}-writeload
+        - title: Rate of SQL Executions (RDS)
+          type: timeseries
+          description: Displays the rate of SQL executions processed by the Meta service using the RDS backend.
+          unit: none
+          queries:
+            - expr: rate(greptime_meta_rds_pg_sql_execute_elapsed_ms_count[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}} {{op}} {{type}} {{result}} '
+        - title: SQL Execution Latency (RDS)
+          type: timeseries
+          description: 'Measures the response time of SQL executions via the RDS backend. '
+          unit: ms
+          queries:
+            - expr: histogram_quantile(0.90, sum by(pod, op, type, result, le) (rate(greptime_meta_rds_pg_sql_execute_elapsed_ms_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}} {{op}} {{type}} {{result}} p90'
+        - title: Handler Execution Latency
+          type: timeseries
+          description: |
+            Shows latency of Meta handlers by pod and handler name, useful for monitoring handler performance and detecting latency spikes.
+          unit: s
+          queries:
+            - expr: |-
+                histogram_quantile(0.90, sum by(pod, le, name) (
+                  rate(greptime_meta_handler_execute_bucket[$__rate_interval])
+                ))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}} {{name}} p90'
+        - title: Heartbeat Packet Size
+          type: timeseries
+          description: |
+            Shows p90 heartbeat message sizes, helping track network usage and identify anomalies in heartbeat payload.
+          unit: bytes
+          queries:
+            - expr: histogram_quantile(0.9, sum by(pod, le) (greptime_meta_heartbeat_stat_memory_size_bucket))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}'
+        - title: Meta Heartbeat Receive Rate
+          type: timeseries
+          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          unit: s
+          queries:
+            - expr: rate(greptime_meta_heartbeat_rate[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}'
+        - title: Meta KV Ops Latency
+          type: timeseries
+          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.99, sum by(pod, le, op, target) (greptime_meta_kv_request_elapsed_bucket))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{op}} p99'
+        - title: Rate of meta KV Ops
+          type: timeseries
+          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          unit: none
+          queries:
+            - expr: rate(greptime_meta_kv_request_elapsed_count[$__rate_interval])
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '{{pod}}-{{op}} p99'
+        - title: DDL Latency
+          type: timeseries
+          description: Gauge of load information of each datanode, collected via heartbeat between datanode and metasrv. This information is for metasrv to schedule workloads.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_tables_bucket))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: CreateLogicalTables-{{step}} p90
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_table))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: CreateTable-{{step}} p90
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_view))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: CreateView-{{step}} p90
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_create_flow))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: CreateFlow-{{step}} p90
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_drop_table))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: DropTable-{{step}} p90
+            - expr: histogram_quantile(0.9, sum by(le, pod, step) (greptime_meta_procedure_alter_table))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: AlterTable-{{step}} p90
     - title: Flownode
       panels:
         - title: Flow Ingest / Output Rate
