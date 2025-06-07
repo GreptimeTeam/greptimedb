@@ -15,3 +15,4 @@
 pub mod error;
 pub mod label_values;
 pub mod planner;
+pub mod rewriter;
