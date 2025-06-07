@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
+
 use std::fs::read_to_string;
 use std::path::Path;
 
@@ -36,51 +38,42 @@ const MAX_VALUE_CGROUP_V2: &str = "max";
 // For easier comparison, if the memory limit is larger than 1PB we consider it as unlimited.
 const MAX_MEMORY_IN_BYTES: i64 = 1125899906842624; // 1PB
 
-/// Check whether the cgroup is v2.
-///
-/// - Return `true` if the cgroup is v2, otherwise return `false`.
-/// - Return `None` if the detection fails or not on linux.
-pub fn is_cgroup_v2() -> Option<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = Path::new(CGROUP_UNIFIED_MOUNTPOINT);
-        let fs_stat = statfs(path).ok()?;
-        Some(fs_stat.filesystem_type() == statfs::CGROUP2_SUPER_MAGIC)
-    }
-    #[cfg(not(target_os = "linux"))]
-    None
-}
-
 /// Get the limit of memory in bytes.
 ///
 /// - If the memory is unlimited, return `-1`.
-/// - Return `None` if it fails to read the memory limit.
+/// - Return `None` if it fails to read the memory limit or not on linux.
 pub fn get_memory_limit() -> Option<i64> {
-    let memory_max_file = if is_cgroup_v2()? {
-        // Read `/sys/fs/cgroup/memory.max` to get the memory limit.
-        MEMORY_MAX_FILE_CGROUP_V2
-    } else {
-        // Read `/sys/fs/cgroup/memory.limit_in_bytes` to get the memory limit.
-        MEMORY_MAX_FILE_CGROUP_V1
-    };
+    #[cfg(target_os = "linux")]
+    {
+        let memory_max_file = if is_cgroup_v2()? {
+            // Read `/sys/fs/cgroup/memory.max` to get the memory limit.
+            MEMORY_MAX_FILE_CGROUP_V2
+        } else {
+            // Read `/sys/fs/cgroup/memory.limit_in_bytes` to get the memory limit.
+            MEMORY_MAX_FILE_CGROUP_V1
+        };
 
-    // For cgroup v1, it will return a very large value(different from platform) if the memory is unlimited.
-    let memory_limit =
-        read_value_from_file(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(memory_max_file))?;
+        // For cgroup v1, it will return a very large value(different from platform) if the memory is unlimited.
+        let memory_limit =
+            read_value_from_file(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(memory_max_file))?;
 
-    // If memory limit exceeds 1PB(cgroup v1), consider it as unlimited.
-    if memory_limit > MAX_MEMORY_IN_BYTES {
-        return Some(MAX_VALUE);
+        // If memory limit exceeds 1PB(cgroup v1), consider it as unlimited.
+        if memory_limit > MAX_MEMORY_IN_BYTES {
+            return Some(MAX_VALUE);
+        }
+        Some(memory_limit)
     }
 
-    Some(memory_limit)
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 /// Get the limit of cpu in millicores.
 ///
 /// - If the cpu is unlimited, return `-1`.
-/// - Return `None` if it fails to read the cpu limit.
+/// - Return `None` if it fails to read the cpu limit or not on linux.
 pub fn get_cpu_limit() -> Option<i64> {
+    #[cfg(target_os = "linux")]
     if is_cgroup_v2()? {
         // Read `/sys/fs/cgroup/cpu.max` to get the cpu limit.
         get_cgroup_v2_cpu_limit(Path::new(CGROUP_UNIFIED_MOUNTPOINT).join(CPU_MAX_FILE_CGROUP_V2))
@@ -101,6 +94,24 @@ pub fn get_cpu_limit() -> Option<i64> {
         // Return the cpu limit in millicores.
         Some(quota * 1000 / period)
     }
+
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+// Check whether the cgroup is v2.
+// - Return `true` if the cgroup is v2, otherwise return `false`.
+// - Return `None` if the detection fails or not on linux.
+fn is_cgroup_v2() -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = Path::new(CGROUP_UNIFIED_MOUNTPOINT);
+        let fs_stat = statfs(path).ok()?;
+        Some(fs_stat.filesystem_type() == statfs::CGROUP2_SUPER_MAGIC)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 fn read_value_from_file<P: AsRef<Path>>(path: P) -> Option<i64> {
@@ -144,11 +155,11 @@ mod tests {
     #[test]
     fn test_read_value_from_file() {
         assert_eq!(
-            read_value_from_file(Path::new("testdata/memory.max")).unwrap(),
+            read_value_from_file(Path::new("testdata").join("memory.max")).unwrap(),
             100000
         );
         assert_eq!(
-            read_value_from_file(Path::new("testdata/memory.max.unlimited")).unwrap(),
+            read_value_from_file(Path::new("testdata").join("memory.max.unlimited")).unwrap(),
             MAX_VALUE
         );
         assert_eq!(read_value_from_file(Path::new("non_existent_file")), None);
@@ -157,11 +168,11 @@ mod tests {
     #[test]
     fn test_get_cgroup_v2_cpu_limit() {
         assert_eq!(
-            get_cgroup_v2_cpu_limit(Path::new("testdata/cpu.max")).unwrap(),
+            get_cgroup_v2_cpu_limit(Path::new("testdata").join("cpu.max")).unwrap(),
             1500
         );
         assert_eq!(
-            get_cgroup_v2_cpu_limit(Path::new("testdata/cpu.max.unlimited")).unwrap(),
+            get_cgroup_v2_cpu_limit(Path::new("testdata").join("cpu.max.unlimited")).unwrap(),
             MAX_VALUE
         );
         assert_eq!(
