@@ -58,6 +58,7 @@ where
     info!("{desc}, average operation cost: {cost:.2} ms");
 }
 
+/// Command to benchmark table metadata operations.
 #[derive(Debug, Default, Parser)]
 pub struct BenchTableMetadataCommand {
     #[clap(long)]

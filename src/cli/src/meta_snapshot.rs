@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::usize;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -30,6 +31,25 @@ use snafu::ResultExt;
 
 use crate::error::{KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
 use crate::Tool;
+
+/// Subcommand for metadata snapshot management.
+#[derive(Subcommand)]
+pub enum MetaCommand {
+    Snapshot(MetaSnapshotCommand),
+    Restore(MetaRestoreCommand),
+    Info(MetaInfoCommand),
+}
+
+impl MetaCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            MetaCommand::Snapshot(cmd) => cmd.build().await,
+            MetaCommand::Restore(cmd) => cmd.build().await,
+            MetaCommand::Info(cmd) => cmd.build().await,
+        }
+    }
+}
+
 #[derive(Debug, Default, Parser)]
 struct MetaConnection {
     /// The endpoint of store. one of etcd, pg or mysql.
@@ -324,6 +344,72 @@ impl Tool for MetaRestoreTool {
                 .await
                 .map_err(BoxedError::new)?;
             Ok(())
+        }
+    }
+}
+
+/// Explore metadata from metadata snapshot.
+#[derive(Debug, Default, Parser)]
+pub struct MetaInfoCommand {
+    /// The s3 config.
+    #[clap(flatten)]
+    s3_config: S3Config,
+    /// The name of the target snapshot file. we will add the file extension automatically.
+    #[clap(long, default_value = "metadata_snapshot")]
+    file_name: String,
+    /// The query string to filter the metadata.
+    #[clap(long, default_value = "*")]
+    query_str: String,
+    /// The limit of the metadata to query.
+    #[clap(long)]
+    limit: Option<usize>,
+}
+
+pub struct MetaInfoTool {
+    inner: ObjectStore,
+    source_file: String,
+    query_str: String,
+    limit: Option<usize>,
+}
+
+#[async_trait]
+impl Tool for MetaInfoTool {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        let result = MetadataSnapshotManager::info(
+            &self.inner,
+            &self.source_file,
+            &self.query_str,
+            self.limit,
+        )
+        .await
+        .map_err(BoxedError::new)?;
+        for item in result {
+            println!("{}", item);
+        }
+        Ok(())
+    }
+}
+
+impl MetaInfoCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        let object_store = self.s3_config.build("").map_err(BoxedError::new)?;
+        if let Some(store) = object_store {
+            let tool = MetaInfoTool {
+                inner: store,
+                source_file: self.file_name.clone(),
+                query_str: self.query_str.clone(),
+                limit: self.limit,
+            };
+            Ok(Box::new(tool))
+        } else {
+            let object_store = create_local_file_object_store(".")?;
+            let tool = MetaInfoTool {
+                inner: object_store,
+                source_file: self.file_name.clone(),
+                query_str: self.query_str.clone(),
+                limit: self.limit,
+            };
+            Ok(Box::new(tool))
         }
     }
 }

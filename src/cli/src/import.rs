@@ -40,6 +40,7 @@ enum ImportTarget {
     All,
 }
 
+/// Command to import data from a directory into a GreptimeDB instance.
 #[derive(Debug, Default, Parser)]
 pub struct ImportCommand {
     /// Server address to connect
