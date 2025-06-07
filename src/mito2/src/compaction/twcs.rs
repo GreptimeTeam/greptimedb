@@ -419,6 +419,47 @@ mod tests {
     }
 
     #[test]
+    fn test_assign_file_groups_to_windows() {
+        let files = [
+            FileId::random(),
+            FileId::random(),
+            FileId::random(),
+            FileId::random(),
+        ];
+        let windows = assign_to_windows(
+            [
+                new_file_handle_with_sequence(files[0], 0, 999, 0, 1),
+                new_file_handle_with_sequence(files[1], 0, 999, 0, 1),
+                new_file_handle_with_sequence(files[2], 0, 999, 0, 2),
+                new_file_handle_with_sequence(files[3], 0, 999, 0, 2),
+            ]
+            .iter(),
+            3,
+        );
+        assert_eq!(windows.len(), 1);
+        let fgs = &windows.get(&0).unwrap().files;
+        assert_eq!(2, fgs.len());
+        assert_eq!(
+            fgs.get(&NonZeroU64::new(1))
+                .unwrap()
+                .files()
+                .iter()
+                .map(|f| f.file_id())
+                .collect::<HashSet<_>>(),
+            [files[0], files[1]].into_iter().collect()
+        );
+        assert_eq!(
+            fgs.get(&NonZeroU64::new(2))
+                .unwrap()
+                .files()
+                .iter()
+                .map(|f| f.file_id())
+                .collect::<HashSet<_>>(),
+            [files[2], files[3]].into_iter().collect()
+        );
+    }
+
+    #[test]
     fn test_assign_compacting_to_windows() {
         let files = [
             new_file_handle(FileId::random(), 0, 999, 0),
@@ -690,6 +731,27 @@ mod tests {
                     output_level: 1,
                 },
             ],
+        }
+        .check();
+
+        // Case 3:
+        // A compaction may split output into several files that have overlapping time ranges and same sequence,
+        // we should treat these files as one FileGroup.
+        let file_ids = (0..6).map(|_| FileId::random()).collect::<Vec<_>>();
+        CompactionPickerTestCase {
+            window_size: 3,
+            input_files: [
+                new_file_handle_with_sequence(file_ids[0], 0, 2999, 1, 1),
+                new_file_handle_with_sequence(file_ids[1], 0, 2998, 1, 1),
+                new_file_handle_with_sequence(file_ids[2], 3000, 5999, 1, 2),
+                new_file_handle_with_sequence(file_ids[3], 3000, 5000, 1, 2),
+                new_file_handle_with_sequence(file_ids[4], 11, 2990, 0, 3),
+            ]
+            .to_vec(),
+            expected_outputs: vec![ExpectedOutput {
+                input_files: vec![0, 1, 4],
+                output_level: 1,
+            }],
         }
         .check();
     }
