@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["define_time_with_unit"],"struct":["TimeMicrosecond","TimeMillisecond","TimeNanosecond","TimeSecond"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["binary_array_to_dictionary","mutations_to_record_batch","timestamp_array_to_iter"],"struct":["ArraysSorter","BulkPart","BulkPartEncoder","BulkPartMeta","EncodedBulkPart"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_local_file_object_store"],"struct":["MetaConnection","MetaRestoreCommand","MetaRestoreTool","MetaSnapshotCommand","MetaSnapshotTool","S3Config"]};

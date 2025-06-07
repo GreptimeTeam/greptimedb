@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["array_iter_helper","downcast_ts_array"],"mod":["analyze","dataframe","datafusion","dist_plan","dummy_catalog","error","executor","log_query","metrics","optimizer","options","parser","part_sort","physical_wrapper","plan","planner","promql","query_engine","range_select","region_query","sql","window_sort"]};

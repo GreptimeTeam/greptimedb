@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_cache_layer","build_http_client","clean_temp_dir","new_object_store","new_object_store_without_cache","new_raw_object_store","with_retry_layers"],"mod":["azblob","fs","gcs","oss","s3"],"struct":["PrintDetailedError"]};

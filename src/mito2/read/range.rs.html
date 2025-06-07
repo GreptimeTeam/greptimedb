@@ -1,0 +1,868 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/mito2/src/read/range.rs`."><title>range.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0ce1a80b.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (4d051fb30 2025-05-18)" data-channel="nightly" data-search-js="search-f7877310.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="../../../static.files/src-script-63605ae7.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-7ef8a74a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">mito2/read/</div>range.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="doccomment">//! Structs for partition ranges.
+<a href=#16 id=16 data-nosnippet>16</a>
+<a href=#17 id=17 data-nosnippet>17</a></span><span class="kw">use </span>std::sync::{Arc, Mutex};
+<a href=#18 id=18 data-nosnippet>18</a>
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span>common_time::Timestamp;
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span>smallvec::{smallvec, SmallVec};
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span>store_api::region_engine::PartitionRange;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span>store_api::storage::TimeSeriesDistribution;
+<a href=#23 id=23 data-nosnippet>23</a>
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span><span class="kw">crate</span>::cache::CacheStrategy;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span><span class="kw">crate</span>::error::Result;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">use </span><span class="kw">crate</span>::memtable::{MemtableRange, MemtableRanges, MemtableStats};
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span><span class="kw">crate</span>::read::scan_region::ScanInput;
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">use </span><span class="kw">crate</span>::sst::file::{overlaps, FileHandle, FileTimeRange};
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">use </span><span class="kw">crate</span>::sst::parquet::file_range::{FileRange, FileRangeContextRef};
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">use </span><span class="kw">crate</span>::sst::parquet::format::parquet_row_group_time_range;
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">use </span><span class="kw">crate</span>::sst::parquet::reader::ReaderMetrics;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use </span><span class="kw">crate</span>::sst::parquet::row_selection::RowGroupSelection;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">use </span><span class="kw">crate</span>::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">const </span>ALL_ROW_GROUPS: i64 = -<span class="number">1</span>;
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// Index and metadata for a memtable or file.
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq)]
+<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>SourceIndex {
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="doccomment">/// Index of the memtable and file.
+<a href=#41 id=41 data-nosnippet>41</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index: usize,
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="doccomment">/// Total number of row groups in this source. 0 if the metadata
+<a href=#43 id=43 data-nosnippet>43</a>    /// is unavailable. We use this to split files.
+<a href=#44 id=44 data-nosnippet>44</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) num_row_groups: u64,
+<a href=#45 id=45 data-nosnippet>45</a>}
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="doccomment">/// Index to access a row group.
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq)]
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>RowGroupIndex {
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="doccomment">/// Index to the memtable/file.
+<a href=#51 id=51 data-nosnippet>51</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index: usize,
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// Row group index in the file.
+<a href=#53 id=53 data-nosnippet>53</a>    /// Negative index indicates all row groups.
+<a href=#54 id=54 data-nosnippet>54</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) row_group_index: i64,
+<a href=#55 id=55 data-nosnippet>55</a>}
+<a href=#56 id=56 data-nosnippet>56</a>
+<a href=#57 id=57 data-nosnippet>57</a><span class="doccomment">/// Meta data of a partition range.
+<a href=#58 id=58 data-nosnippet>58</a>/// If the scanner is [UnorderedScan], each meta only has one row group or memtable.
+<a href=#59 id=59 data-nosnippet>59</a>/// If the scanner is [SeqScan], each meta may have multiple row groups and memtables.
+<a href=#60 id=60 data-nosnippet>60</a></span><span class="attr">#[derive(Debug, PartialEq)]
+<a href=#61 id=61 data-nosnippet>61</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>RangeMeta {
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// The time range of the range.
+<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) time_range: FileTimeRange,
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="doccomment">/// Indices to memtables or files.
+<a href=#65 id=65 data-nosnippet>65</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) indices: SmallVec&lt;[SourceIndex; <span class="number">2</span>]&gt;,
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// Indices to memtable/file row groups that this range scans.
+<a href=#67 id=67 data-nosnippet>67</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) row_group_indices: SmallVec&lt;[RowGroupIndex; <span class="number">2</span>]&gt;,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="doccomment">/// Estimated number of rows in the range. This can be 0 if the statistics are not available.
+<a href=#69 id=69 data-nosnippet>69</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) num_rows: usize,
+<a href=#70 id=70 data-nosnippet>70</a>}
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a><span class="kw">impl </span>RangeMeta {
+<a href=#73 id=73 data-nosnippet>73</a>    <span class="doccomment">/// Creates a [PartitionRange] with specific identifier.
+<a href=#74 id=74 data-nosnippet>74</a>    /// It converts the inclusive max timestamp to exclusive end timestamp.
+<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new_partition_range(<span class="kw-2">&amp;</span><span class="self">self</span>, identifier: usize) -&gt; PartitionRange {
+<a href=#76 id=76 data-nosnippet>76</a>        PartitionRange {
+<a href=#77 id=77 data-nosnippet>77</a>            start: <span class="self">self</span>.time_range.<span class="number">0</span>,
+<a href=#78 id=78 data-nosnippet>78</a>            end: Timestamp::new(
+<a href=#79 id=79 data-nosnippet>79</a>                <span class="comment">// The i64::MAX timestamp may be invisible but we don't guarantee to support this
+<a href=#80 id=80 data-nosnippet>80</a>                // value now.
+<a href=#81 id=81 data-nosnippet>81</a>                </span><span class="self">self</span>.time_range
+<a href=#82 id=82 data-nosnippet>82</a>                    .<span class="number">1
+<a href=#83 id=83 data-nosnippet>83</a>                    </span>.value()
+<a href=#84 id=84 data-nosnippet>84</a>                    .checked_add(<span class="number">1</span>)
+<a href=#85 id=85 data-nosnippet>85</a>                    .unwrap_or(<span class="self">self</span>.time_range.<span class="number">1</span>.value()),
+<a href=#86 id=86 data-nosnippet>86</a>                <span class="self">self</span>.time_range.<span class="number">1</span>.unit(),
+<a href=#87 id=87 data-nosnippet>87</a>            ),
+<a href=#88 id=88 data-nosnippet>88</a>            num_rows: <span class="self">self</span>.num_rows,
+<a href=#89 id=89 data-nosnippet>89</a>            identifier,
+<a href=#90 id=90 data-nosnippet>90</a>        }
+<a href=#91 id=91 data-nosnippet>91</a>    }
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a>    <span class="doccomment">/// Creates a list of ranges from the `input` for seq scan.
+<a href=#94 id=94 data-nosnippet>94</a>    /// If `compaction` is true, it doesn't split the ranges.
+<a href=#95 id=95 data-nosnippet>95</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>seq_scan_ranges(input: <span class="kw-2">&amp;</span>ScanInput, compaction: bool) -&gt; Vec&lt;RangeMeta&gt; {
+<a href=#96 id=96 data-nosnippet>96</a>        <span class="kw">let </span><span class="kw-2">mut </span>ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
+<a href=#97 id=97 data-nosnippet>97</a>        <span class="self">Self</span>::push_seq_mem_ranges(<span class="kw-2">&amp;</span>input.memtables, <span class="kw-2">&amp;mut </span>ranges);
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="self">Self</span>::push_seq_file_ranges(input.memtables.len(), <span class="kw-2">&amp;</span>input.files, <span class="kw-2">&amp;mut </span>ranges);
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="kw">let </span>ranges = group_ranges_for_seq_scan(ranges);
+<a href=#101 id=101 data-nosnippet>101</a>        <span class="kw">if </span>compaction || input.distribution == <span class="prelude-val">Some</span>(TimeSeriesDistribution::PerSeries) {
+<a href=#102 id=102 data-nosnippet>102</a>            <span class="comment">// We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
+<a href=#103 id=103 data-nosnippet>103</a>            </span><span class="kw">return </span>ranges;
+<a href=#104 id=104 data-nosnippet>104</a>        }
+<a href=#105 id=105 data-nosnippet>105</a>        maybe_split_ranges_for_seq_scan(ranges)
+<a href=#106 id=106 data-nosnippet>106</a>    }
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a>    <span class="doccomment">/// Creates a list of ranges from the `input` for unordered scan.
+<a href=#109 id=109 data-nosnippet>109</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>unordered_scan_ranges(input: <span class="kw-2">&amp;</span>ScanInput) -&gt; Vec&lt;RangeMeta&gt; {
+<a href=#110 id=110 data-nosnippet>110</a>        <span class="kw">let </span><span class="kw-2">mut </span>ranges = Vec::with_capacity(input.memtables.len() + input.files.len());
+<a href=#111 id=111 data-nosnippet>111</a>        <span class="self">Self</span>::push_unordered_mem_ranges(<span class="kw-2">&amp;</span>input.memtables, <span class="kw-2">&amp;mut </span>ranges);
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="self">Self</span>::push_unordered_file_ranges(
+<a href=#113 id=113 data-nosnippet>113</a>            input.memtables.len(),
+<a href=#114 id=114 data-nosnippet>114</a>            <span class="kw-2">&amp;</span>input.files,
+<a href=#115 id=115 data-nosnippet>115</a>            <span class="kw-2">&amp;</span>input.cache_strategy,
+<a href=#116 id=116 data-nosnippet>116</a>            <span class="kw-2">&amp;mut </span>ranges,
+<a href=#117 id=117 data-nosnippet>117</a>        );
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a>        ranges
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="doccomment">/// Returns true if the time range of given `meta` overlaps with the time range of this meta.
+<a href=#123 id=123 data-nosnippet>123</a>    </span><span class="kw">fn </span>overlaps(<span class="kw-2">&amp;</span><span class="self">self</span>, meta: <span class="kw-2">&amp;</span>RangeMeta) -&gt; bool {
+<a href=#124 id=124 data-nosnippet>124</a>        overlaps(<span class="kw-2">&amp;</span><span class="self">self</span>.time_range, <span class="kw-2">&amp;</span>meta.time_range)
+<a href=#125 id=125 data-nosnippet>125</a>    }
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a>    <span class="doccomment">/// Merges given `meta` to this meta.
+<a href=#128 id=128 data-nosnippet>128</a>    /// It assumes that the time ranges overlap and they don't have the same file or memtable index.
+<a href=#129 id=129 data-nosnippet>129</a>    </span><span class="kw">fn </span>merge(<span class="kw-2">&amp;mut </span><span class="self">self</span>, <span class="kw-2">mut </span>other: RangeMeta) {
+<a href=#130 id=130 data-nosnippet>130</a>        <span class="macro">debug_assert!</span>(<span class="self">self</span>.overlaps(<span class="kw-2">&amp;</span>other));
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="macro">debug_assert!</span>(<span class="self">self</span>.indices.iter().all(|idx| !other.indices.contains(idx)));
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="macro">debug_assert!</span>(<span class="self">self
+<a href=#133 id=133 data-nosnippet>133</a>            </span>.row_group_indices
+<a href=#134 id=134 data-nosnippet>134</a>            .iter()
+<a href=#135 id=135 data-nosnippet>135</a>            .all(|idx| !other.row_group_indices.contains(idx)));
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="self">self</span>.time_range = (
+<a href=#138 id=138 data-nosnippet>138</a>            <span class="self">self</span>.time_range.<span class="number">0</span>.min(other.time_range.<span class="number">0</span>),
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="self">self</span>.time_range.<span class="number">1</span>.max(other.time_range.<span class="number">1</span>),
+<a href=#140 id=140 data-nosnippet>140</a>        );
+<a href=#141 id=141 data-nosnippet>141</a>        <span class="self">self</span>.indices.append(<span class="kw-2">&amp;mut </span>other.indices);
+<a href=#142 id=142 data-nosnippet>142</a>        <span class="self">self</span>.row_group_indices.append(<span class="kw-2">&amp;mut </span>other.row_group_indices);
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="self">self</span>.num_rows += other.num_rows;
+<a href=#144 id=144 data-nosnippet>144</a>    }
+<a href=#145 id=145 data-nosnippet>145</a>
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="doccomment">/// Returns true if we can split the range into multiple smaller ranges and
+<a href=#147 id=147 data-nosnippet>147</a>    /// still preserve the order for [SeqScan].
+<a href=#148 id=148 data-nosnippet>148</a>    </span><span class="kw">fn </span>can_split_preserve_order(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bool {
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="self">self</span>.indices.len() == <span class="number">1 </span>&amp;&amp; <span class="self">self</span>.indices[<span class="number">0</span>].num_row_groups &gt; <span class="number">1
+<a href=#150 id=150 data-nosnippet>150</a>    </span>}
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="doccomment">/// Splits the range if it can preserve the order.
+<a href=#153 id=153 data-nosnippet>153</a>    </span><span class="kw">fn </span>maybe_split(<span class="self">self</span>, output: <span class="kw-2">&amp;mut </span>Vec&lt;RangeMeta&gt;) {
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="kw">if </span><span class="self">self</span>.can_split_preserve_order() {
+<a href=#155 id=155 data-nosnippet>155</a>            <span class="kw">let </span>num_row_groups = <span class="self">self</span>.indices[<span class="number">0</span>].num_row_groups;
+<a href=#156 id=156 data-nosnippet>156</a>            <span class="macro">debug_assert_eq!</span>(<span class="number">1</span>, <span class="self">self</span>.row_group_indices.len());
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="macro">debug_assert_eq!</span>(ALL_ROW_GROUPS, <span class="self">self</span>.row_group_indices[<span class="number">0</span>].row_group_index);
+<a href=#158 id=158 data-nosnippet>158</a>
+<a href=#159 id=159 data-nosnippet>159</a>            output.reserve(<span class="self">self</span>.row_group_indices.len());
+<a href=#160 id=160 data-nosnippet>160</a>            <span class="kw">let </span>num_rows = <span class="self">self</span>.num_rows / num_row_groups <span class="kw">as </span>usize;
+<a href=#161 id=161 data-nosnippet>161</a>            <span class="comment">// Splits by row group.
+<a href=#162 id=162 data-nosnippet>162</a>            </span><span class="kw">for </span>row_group_index <span class="kw">in </span><span class="number">0</span>..num_row_groups {
+<a href=#163 id=163 data-nosnippet>163</a>                output.push(RangeMeta {
+<a href=#164 id=164 data-nosnippet>164</a>                    time_range: <span class="self">self</span>.time_range,
+<a href=#165 id=165 data-nosnippet>165</a>                    indices: <span class="self">self</span>.indices.clone(),
+<a href=#166 id=166 data-nosnippet>166</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#167 id=167 data-nosnippet>167</a>                        index: <span class="self">self</span>.indices[<span class="number">0</span>].index,
+<a href=#168 id=168 data-nosnippet>168</a>                        row_group_index: row_group_index <span class="kw">as </span>i64,
+<a href=#169 id=169 data-nosnippet>169</a>                    }],
+<a href=#170 id=170 data-nosnippet>170</a>                    num_rows,
+<a href=#171 id=171 data-nosnippet>171</a>                });
+<a href=#172 id=172 data-nosnippet>172</a>            }
+<a href=#173 id=173 data-nosnippet>173</a>        } <span class="kw">else </span>{
+<a href=#174 id=174 data-nosnippet>174</a>            output.push(<span class="self">self</span>);
+<a href=#175 id=175 data-nosnippet>175</a>        }
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="kw">fn </span>push_unordered_mem_ranges(memtables: <span class="kw-2">&amp;</span>[MemRangeBuilder], ranges: <span class="kw-2">&amp;mut </span>Vec&lt;RangeMeta&gt;) {
+<a href=#179 id=179 data-nosnippet>179</a>        <span class="comment">// For append mode, we can parallelize reading memtables.
+<a href=#180 id=180 data-nosnippet>180</a>        </span><span class="kw">for </span>(memtable_index, memtable) <span class="kw">in </span>memtables.iter().enumerate() {
+<a href=#181 id=181 data-nosnippet>181</a>            <span class="kw">let </span>stats = memtable.stats();
+<a href=#182 id=182 data-nosnippet>182</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(time_range) = stats.time_range() <span class="kw">else </span>{
+<a href=#183 id=183 data-nosnippet>183</a>                <span class="kw">continue</span>;
+<a href=#184 id=184 data-nosnippet>184</a>            };
+<a href=#185 id=185 data-nosnippet>185</a>            <span class="kw">for </span>row_group_index <span class="kw">in </span><span class="number">0</span>..stats.num_ranges() {
+<a href=#186 id=186 data-nosnippet>186</a>                <span class="kw">let </span>num_rows = stats.num_rows() / stats.num_ranges();
+<a href=#187 id=187 data-nosnippet>187</a>                ranges.push(RangeMeta {
+<a href=#188 id=188 data-nosnippet>188</a>                    time_range,
+<a href=#189 id=189 data-nosnippet>189</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#190 id=190 data-nosnippet>190</a>                        index: memtable_index,
+<a href=#191 id=191 data-nosnippet>191</a>                        num_row_groups: stats.num_ranges() <span class="kw">as </span>u64,
+<a href=#192 id=192 data-nosnippet>192</a>                    }],
+<a href=#193 id=193 data-nosnippet>193</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#194 id=194 data-nosnippet>194</a>                        index: memtable_index,
+<a href=#195 id=195 data-nosnippet>195</a>                        row_group_index: row_group_index <span class="kw">as </span>i64,
+<a href=#196 id=196 data-nosnippet>196</a>                    }],
+<a href=#197 id=197 data-nosnippet>197</a>                    num_rows,
+<a href=#198 id=198 data-nosnippet>198</a>                });
+<a href=#199 id=199 data-nosnippet>199</a>            }
+<a href=#200 id=200 data-nosnippet>200</a>        }
+<a href=#201 id=201 data-nosnippet>201</a>    }
+<a href=#202 id=202 data-nosnippet>202</a>
+<a href=#203 id=203 data-nosnippet>203</a>    <span class="kw">fn </span>push_unordered_file_ranges(
+<a href=#204 id=204 data-nosnippet>204</a>        num_memtables: usize,
+<a href=#205 id=205 data-nosnippet>205</a>        files: <span class="kw-2">&amp;</span>[FileHandle],
+<a href=#206 id=206 data-nosnippet>206</a>        cache: <span class="kw-2">&amp;</span>CacheStrategy,
+<a href=#207 id=207 data-nosnippet>207</a>        ranges: <span class="kw-2">&amp;mut </span>Vec&lt;RangeMeta&gt;,
+<a href=#208 id=208 data-nosnippet>208</a>    ) {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="comment">// For append mode, we can parallelize reading row groups.
+<a href=#210 id=210 data-nosnippet>210</a>        </span><span class="kw">for </span>(i, file) <span class="kw">in </span>files.iter().enumerate() {
+<a href=#211 id=211 data-nosnippet>211</a>            <span class="kw">let </span>file_index = num_memtables + i;
+<a href=#212 id=212 data-nosnippet>212</a>            <span class="comment">// Get parquet meta from the cache.
+<a href=#213 id=213 data-nosnippet>213</a>            </span><span class="kw">let </span>parquet_meta =
+<a href=#214 id=214 data-nosnippet>214</a>                cache.get_parquet_meta_data_from_mem_cache(file.region_id(), file.file_id());
+<a href=#215 id=215 data-nosnippet>215</a>            <span class="kw">if let </span><span class="prelude-val">Some</span>(parquet_meta) = parquet_meta {
+<a href=#216 id=216 data-nosnippet>216</a>                <span class="comment">// Scans each row group.
+<a href=#217 id=217 data-nosnippet>217</a>                </span><span class="kw">for </span>row_group_index <span class="kw">in </span><span class="number">0</span>..file.meta_ref().num_row_groups {
+<a href=#218 id=218 data-nosnippet>218</a>                    <span class="kw">let </span>time_range = parquet_row_group_time_range(
+<a href=#219 id=219 data-nosnippet>219</a>                        file.meta_ref(),
+<a href=#220 id=220 data-nosnippet>220</a>                        <span class="kw-2">&amp;</span>parquet_meta,
+<a href=#221 id=221 data-nosnippet>221</a>                        row_group_index <span class="kw">as </span>usize,
+<a href=#222 id=222 data-nosnippet>222</a>                    );
+<a href=#223 id=223 data-nosnippet>223</a>                    <span class="kw">let </span>num_rows = parquet_meta.row_group(row_group_index <span class="kw">as </span>usize).num_rows();
+<a href=#224 id=224 data-nosnippet>224</a>                    ranges.push(RangeMeta {
+<a href=#225 id=225 data-nosnippet>225</a>                        time_range: time_range.unwrap_or_else(|| file.time_range()),
+<a href=#226 id=226 data-nosnippet>226</a>                        indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#227 id=227 data-nosnippet>227</a>                            index: file_index,
+<a href=#228 id=228 data-nosnippet>228</a>                            num_row_groups: file.meta_ref().num_row_groups,
+<a href=#229 id=229 data-nosnippet>229</a>                        }],
+<a href=#230 id=230 data-nosnippet>230</a>                        row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#231 id=231 data-nosnippet>231</a>                            index: file_index,
+<a href=#232 id=232 data-nosnippet>232</a>                            row_group_index: row_group_index <span class="kw">as </span>i64,
+<a href=#233 id=233 data-nosnippet>233</a>                        }],
+<a href=#234 id=234 data-nosnippet>234</a>                        num_rows: num_rows <span class="kw">as </span>usize,
+<a href=#235 id=235 data-nosnippet>235</a>                    });
+<a href=#236 id=236 data-nosnippet>236</a>                }
+<a href=#237 id=237 data-nosnippet>237</a>            } <span class="kw">else if </span>file.meta_ref().num_row_groups &gt; <span class="number">0 </span>{
+<a href=#238 id=238 data-nosnippet>238</a>                <span class="comment">// Scans each row group.
+<a href=#239 id=239 data-nosnippet>239</a>                </span><span class="kw">for </span>row_group_index <span class="kw">in </span><span class="number">0</span>..file.meta_ref().num_row_groups {
+<a href=#240 id=240 data-nosnippet>240</a>                    ranges.push(RangeMeta {
+<a href=#241 id=241 data-nosnippet>241</a>                        time_range: file.time_range(),
+<a href=#242 id=242 data-nosnippet>242</a>                        indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#243 id=243 data-nosnippet>243</a>                            index: file_index,
+<a href=#244 id=244 data-nosnippet>244</a>                            num_row_groups: file.meta_ref().num_row_groups,
+<a href=#245 id=245 data-nosnippet>245</a>                        }],
+<a href=#246 id=246 data-nosnippet>246</a>                        row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#247 id=247 data-nosnippet>247</a>                            index: file_index,
+<a href=#248 id=248 data-nosnippet>248</a>                            row_group_index: row_group_index <span class="kw">as </span>i64,
+<a href=#249 id=249 data-nosnippet>249</a>                        }],
+<a href=#250 id=250 data-nosnippet>250</a>                        num_rows: DEFAULT_ROW_GROUP_SIZE,
+<a href=#251 id=251 data-nosnippet>251</a>                    });
+<a href=#252 id=252 data-nosnippet>252</a>                }
+<a href=#253 id=253 data-nosnippet>253</a>            } <span class="kw">else </span>{
+<a href=#254 id=254 data-nosnippet>254</a>                <span class="comment">// If we don't known the number of row groups in advance, scan all row groups.
+<a href=#255 id=255 data-nosnippet>255</a>                </span>ranges.push(RangeMeta {
+<a href=#256 id=256 data-nosnippet>256</a>                    time_range: file.time_range(),
+<a href=#257 id=257 data-nosnippet>257</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#258 id=258 data-nosnippet>258</a>                        index: file_index,
+<a href=#259 id=259 data-nosnippet>259</a>                        num_row_groups: <span class="number">0</span>,
+<a href=#260 id=260 data-nosnippet>260</a>                    }],
+<a href=#261 id=261 data-nosnippet>261</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#262 id=262 data-nosnippet>262</a>                        index: file_index,
+<a href=#263 id=263 data-nosnippet>263</a>                        row_group_index: ALL_ROW_GROUPS,
+<a href=#264 id=264 data-nosnippet>264</a>                    }],
+<a href=#265 id=265 data-nosnippet>265</a>                    <span class="comment">// This may be 0.
+<a href=#266 id=266 data-nosnippet>266</a>                    </span>num_rows: file.meta_ref().num_rows <span class="kw">as </span>usize,
+<a href=#267 id=267 data-nosnippet>267</a>                });
+<a href=#268 id=268 data-nosnippet>268</a>            }
+<a href=#269 id=269 data-nosnippet>269</a>        }
+<a href=#270 id=270 data-nosnippet>270</a>    }
+<a href=#271 id=271 data-nosnippet>271</a>
+<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">fn </span>push_seq_mem_ranges(memtables: <span class="kw-2">&amp;</span>[MemRangeBuilder], ranges: <span class="kw-2">&amp;mut </span>Vec&lt;RangeMeta&gt;) {
+<a href=#273 id=273 data-nosnippet>273</a>        <span class="comment">// For non append-only mode, each range only contains one memtable by default.
+<a href=#274 id=274 data-nosnippet>274</a>        </span><span class="kw">for </span>(i, memtable) <span class="kw">in </span>memtables.iter().enumerate() {
+<a href=#275 id=275 data-nosnippet>275</a>            <span class="kw">let </span>stats = memtable.stats();
+<a href=#276 id=276 data-nosnippet>276</a>            <span class="kw">let </span><span class="prelude-val">Some</span>(time_range) = stats.time_range() <span class="kw">else </span>{
+<a href=#277 id=277 data-nosnippet>277</a>                <span class="kw">continue</span>;
+<a href=#278 id=278 data-nosnippet>278</a>            };
+<a href=#279 id=279 data-nosnippet>279</a>            ranges.push(RangeMeta {
+<a href=#280 id=280 data-nosnippet>280</a>                time_range,
+<a href=#281 id=281 data-nosnippet>281</a>                indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#282 id=282 data-nosnippet>282</a>                    index: i,
+<a href=#283 id=283 data-nosnippet>283</a>                    num_row_groups: stats.num_ranges() <span class="kw">as </span>u64,
+<a href=#284 id=284 data-nosnippet>284</a>                }],
+<a href=#285 id=285 data-nosnippet>285</a>                row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#286 id=286 data-nosnippet>286</a>                    index: i,
+<a href=#287 id=287 data-nosnippet>287</a>                    row_group_index: ALL_ROW_GROUPS,
+<a href=#288 id=288 data-nosnippet>288</a>                }],
+<a href=#289 id=289 data-nosnippet>289</a>                num_rows: stats.num_rows(),
+<a href=#290 id=290 data-nosnippet>290</a>            });
+<a href=#291 id=291 data-nosnippet>291</a>        }
+<a href=#292 id=292 data-nosnippet>292</a>    }
+<a href=#293 id=293 data-nosnippet>293</a>
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">fn </span>push_seq_file_ranges(
+<a href=#295 id=295 data-nosnippet>295</a>        num_memtables: usize,
+<a href=#296 id=296 data-nosnippet>296</a>        files: <span class="kw-2">&amp;</span>[FileHandle],
+<a href=#297 id=297 data-nosnippet>297</a>        ranges: <span class="kw-2">&amp;mut </span>Vec&lt;RangeMeta&gt;,
+<a href=#298 id=298 data-nosnippet>298</a>    ) {
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="comment">// For non append-only mode, each range only contains one file.
+<a href=#300 id=300 data-nosnippet>300</a>        </span><span class="kw">for </span>(i, file) <span class="kw">in </span>files.iter().enumerate() {
+<a href=#301 id=301 data-nosnippet>301</a>            <span class="kw">let </span>file_index = num_memtables + i;
+<a href=#302 id=302 data-nosnippet>302</a>            ranges.push(RangeMeta {
+<a href=#303 id=303 data-nosnippet>303</a>                time_range: file.time_range(),
+<a href=#304 id=304 data-nosnippet>304</a>                indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#305 id=305 data-nosnippet>305</a>                    index: file_index,
+<a href=#306 id=306 data-nosnippet>306</a>                    num_row_groups: file.meta_ref().num_row_groups,
+<a href=#307 id=307 data-nosnippet>307</a>                }],
+<a href=#308 id=308 data-nosnippet>308</a>                row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#309 id=309 data-nosnippet>309</a>                    index: file_index,
+<a href=#310 id=310 data-nosnippet>310</a>                    row_group_index: ALL_ROW_GROUPS,
+<a href=#311 id=311 data-nosnippet>311</a>                }],
+<a href=#312 id=312 data-nosnippet>312</a>                num_rows: file.meta_ref().num_rows <span class="kw">as </span>usize,
+<a href=#313 id=313 data-nosnippet>313</a>            });
+<a href=#314 id=314 data-nosnippet>314</a>        }
+<a href=#315 id=315 data-nosnippet>315</a>    }
+<a href=#316 id=316 data-nosnippet>316</a>}
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a><span class="doccomment">/// Groups ranges by time range.
+<a href=#319 id=319 data-nosnippet>319</a>/// It assumes each input range only contains a file or a memtable.
+<a href=#320 id=320 data-nosnippet>320</a></span><span class="kw">fn </span>group_ranges_for_seq_scan(<span class="kw-2">mut </span>ranges: Vec&lt;RangeMeta&gt;) -&gt; Vec&lt;RangeMeta&gt; {
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="kw">if </span>ranges.is_empty() {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="kw">return </span>ranges;
+<a href=#323 id=323 data-nosnippet>323</a>    }
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a>    <span class="comment">// Sorts ranges by time range (start asc, end desc).
+<a href=#326 id=326 data-nosnippet>326</a>    </span>ranges.sort_unstable_by(|a, b| {
+<a href=#327 id=327 data-nosnippet>327</a>        <span class="kw">let </span>l = a.time_range;
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">let </span>r = b.time_range;
+<a href=#329 id=329 data-nosnippet>329</a>        l.<span class="number">0</span>.cmp(<span class="kw-2">&amp;</span>r.<span class="number">0</span>).then_with(|| r.<span class="number">1</span>.cmp(<span class="kw-2">&amp;</span>l.<span class="number">1</span>))
+<a href=#330 id=330 data-nosnippet>330</a>    });
+<a href=#331 id=331 data-nosnippet>331</a>    <span class="kw">let </span><span class="kw-2">mut </span>range_in_progress = <span class="prelude-val">None</span>;
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="comment">// Parts with exclusive time ranges.
+<a href=#333 id=333 data-nosnippet>333</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>exclusive_ranges = Vec::with_capacity(ranges.len());
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="kw">for </span>range <span class="kw">in </span>ranges {
+<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(<span class="kw-2">mut </span>prev_range) = range_in_progress.take() <span class="kw">else </span>{
+<a href=#336 id=336 data-nosnippet>336</a>            <span class="comment">// This is the new range to process.
+<a href=#337 id=337 data-nosnippet>337</a>            </span>range_in_progress = <span class="prelude-val">Some</span>(range);
+<a href=#338 id=338 data-nosnippet>338</a>            <span class="kw">continue</span>;
+<a href=#339 id=339 data-nosnippet>339</a>        };
+<a href=#340 id=340 data-nosnippet>340</a>
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="kw">if </span>prev_range.overlaps(<span class="kw-2">&amp;</span>range) {
+<a href=#342 id=342 data-nosnippet>342</a>            prev_range.merge(range);
+<a href=#343 id=343 data-nosnippet>343</a>            range_in_progress = <span class="prelude-val">Some</span>(prev_range);
+<a href=#344 id=344 data-nosnippet>344</a>        } <span class="kw">else </span>{
+<a href=#345 id=345 data-nosnippet>345</a>            exclusive_ranges.push(prev_range);
+<a href=#346 id=346 data-nosnippet>346</a>            range_in_progress = <span class="prelude-val">Some</span>(range);
+<a href=#347 id=347 data-nosnippet>347</a>        }
+<a href=#348 id=348 data-nosnippet>348</a>    }
+<a href=#349 id=349 data-nosnippet>349</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(range) = range_in_progress {
+<a href=#350 id=350 data-nosnippet>350</a>        exclusive_ranges.push(range);
+<a href=#351 id=351 data-nosnippet>351</a>    }
+<a href=#352 id=352 data-nosnippet>352</a>
+<a href=#353 id=353 data-nosnippet>353</a>    exclusive_ranges
+<a href=#354 id=354 data-nosnippet>354</a>}
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a><span class="doccomment">/// Splits the range into multiple smaller ranges.
+<a href=#357 id=357 data-nosnippet>357</a>/// It assumes the input `ranges` list is created by [group_ranges_for_seq_scan()].
+<a href=#358 id=358 data-nosnippet>358</a></span><span class="kw">fn </span>maybe_split_ranges_for_seq_scan(ranges: Vec&lt;RangeMeta&gt;) -&gt; Vec&lt;RangeMeta&gt; {
+<a href=#359 id=359 data-nosnippet>359</a>    <span class="kw">let </span><span class="kw-2">mut </span>new_ranges = Vec::with_capacity(ranges.len());
+<a href=#360 id=360 data-nosnippet>360</a>    <span class="kw">for </span>range <span class="kw">in </span>ranges {
+<a href=#361 id=361 data-nosnippet>361</a>        range.maybe_split(<span class="kw-2">&amp;mut </span>new_ranges);
+<a href=#362 id=362 data-nosnippet>362</a>    }
+<a href=#363 id=363 data-nosnippet>363</a>
+<a href=#364 id=364 data-nosnippet>364</a>    new_ranges
+<a href=#365 id=365 data-nosnippet>365</a>}
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a><span class="doccomment">/// Builder to create file ranges.
+<a href=#368 id=368 data-nosnippet>368</a></span><span class="attr">#[derive(Default)]
+<a href=#369 id=369 data-nosnippet>369</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>FileRangeBuilder {
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="doccomment">/// Context for the file.
+<a href=#371 id=371 data-nosnippet>371</a>    /// None indicates nothing to read.
+<a href=#372 id=372 data-nosnippet>372</a>    </span>context: <span class="prelude-ty">Option</span>&lt;FileRangeContextRef&gt;,
+<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// Row group selection for the file to read.
+<a href=#374 id=374 data-nosnippet>374</a>    </span>selection: RowGroupSelection,
+<a href=#375 id=375 data-nosnippet>375</a>}
+<a href=#376 id=376 data-nosnippet>376</a>
+<a href=#377 id=377 data-nosnippet>377</a><span class="kw">impl </span>FileRangeBuilder {
+<a href=#378 id=378 data-nosnippet>378</a>    <span class="doccomment">/// Builds a file range builder from context and row groups.
+<a href=#379 id=379 data-nosnippet>379</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(context: FileRangeContextRef, selection: RowGroupSelection) -&gt; <span class="self">Self </span>{
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="self">Self </span>{
+<a href=#381 id=381 data-nosnippet>381</a>            context: <span class="prelude-val">Some</span>(context),
+<a href=#382 id=382 data-nosnippet>382</a>            selection,
+<a href=#383 id=383 data-nosnippet>383</a>        }
+<a href=#384 id=384 data-nosnippet>384</a>    }
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a>    <span class="doccomment">/// Builds file ranges to read.
+<a href=#387 id=387 data-nosnippet>387</a>    /// Negative `row_group_index` indicates all row groups.
+<a href=#388 id=388 data-nosnippet>388</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>build_ranges(<span class="kw-2">&amp;</span><span class="self">self</span>, row_group_index: i64, ranges: <span class="kw-2">&amp;mut </span>SmallVec&lt;[FileRange; <span class="number">2</span>]&gt;) {
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(context) = <span class="self">self</span>.context.clone() <span class="kw">else </span>{
+<a href=#390 id=390 data-nosnippet>390</a>            <span class="kw">return</span>;
+<a href=#391 id=391 data-nosnippet>391</a>        };
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="kw">if </span>row_group_index &gt;= <span class="number">0 </span>{
+<a href=#393 id=393 data-nosnippet>393</a>            <span class="kw">let </span>row_group_index = row_group_index <span class="kw">as </span>usize;
+<a href=#394 id=394 data-nosnippet>394</a>            <span class="comment">// Scans one row group.
+<a href=#395 id=395 data-nosnippet>395</a>            </span><span class="kw">let </span><span class="prelude-val">Some</span>(row_selection) = <span class="self">self</span>.selection.get(row_group_index) <span class="kw">else </span>{
+<a href=#396 id=396 data-nosnippet>396</a>                <span class="kw">return</span>;
+<a href=#397 id=397 data-nosnippet>397</a>            };
+<a href=#398 id=398 data-nosnippet>398</a>            ranges.push(FileRange::new(
+<a href=#399 id=399 data-nosnippet>399</a>                context,
+<a href=#400 id=400 data-nosnippet>400</a>                row_group_index,
+<a href=#401 id=401 data-nosnippet>401</a>                <span class="prelude-val">Some</span>(row_selection.clone()),
+<a href=#402 id=402 data-nosnippet>402</a>            ));
+<a href=#403 id=403 data-nosnippet>403</a>        } <span class="kw">else </span>{
+<a href=#404 id=404 data-nosnippet>404</a>            <span class="comment">// Scans all row groups.
+<a href=#405 id=405 data-nosnippet>405</a>            </span>ranges.extend(
+<a href=#406 id=406 data-nosnippet>406</a>                <span class="self">self</span>.selection
+<a href=#407 id=407 data-nosnippet>407</a>                    .iter()
+<a href=#408 id=408 data-nosnippet>408</a>                    .map(|(row_group_index, row_selection)| {
+<a href=#409 id=409 data-nosnippet>409</a>                        FileRange::new(
+<a href=#410 id=410 data-nosnippet>410</a>                            context.clone(),
+<a href=#411 id=411 data-nosnippet>411</a>                            <span class="kw-2">*</span>row_group_index,
+<a href=#412 id=412 data-nosnippet>412</a>                            <span class="prelude-val">Some</span>(row_selection.clone()),
+<a href=#413 id=413 data-nosnippet>413</a>                        )
+<a href=#414 id=414 data-nosnippet>414</a>                    }),
+<a href=#415 id=415 data-nosnippet>415</a>            );
+<a href=#416 id=416 data-nosnippet>416</a>        }
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>}
+<a href=#419 id=419 data-nosnippet>419</a>
+<a href=#420 id=420 data-nosnippet>420</a><span class="doccomment">/// Builder to create mem ranges.
+<a href=#421 id=421 data-nosnippet>421</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>MemRangeBuilder {
+<a href=#422 id=422 data-nosnippet>422</a>    <span class="doccomment">/// Ranges of a memtable.
+<a href=#423 id=423 data-nosnippet>423</a>    </span>ranges: MemtableRanges,
+<a href=#424 id=424 data-nosnippet>424</a>}
+<a href=#425 id=425 data-nosnippet>425</a>
+<a href=#426 id=426 data-nosnippet>426</a><span class="kw">impl </span>MemRangeBuilder {
+<a href=#427 id=427 data-nosnippet>427</a>    <span class="doccomment">/// Builds a mem range builder from row groups.
+<a href=#428 id=428 data-nosnippet>428</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(ranges: MemtableRanges) -&gt; <span class="self">Self </span>{
+<a href=#429 id=429 data-nosnippet>429</a>        <span class="self">Self </span>{ ranges }
+<a href=#430 id=430 data-nosnippet>430</a>    }
+<a href=#431 id=431 data-nosnippet>431</a>
+<a href=#432 id=432 data-nosnippet>432</a>    <span class="doccomment">/// Builds mem ranges to read in the memtable.
+<a href=#433 id=433 data-nosnippet>433</a>    /// Negative `row_group_index` indicates all row groups.
+<a href=#434 id=434 data-nosnippet>434</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>build_ranges(
+<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#436 id=436 data-nosnippet>436</a>        row_group_index: i64,
+<a href=#437 id=437 data-nosnippet>437</a>        ranges: <span class="kw-2">&amp;mut </span>SmallVec&lt;[MemtableRange; <span class="number">2</span>]&gt;,
+<a href=#438 id=438 data-nosnippet>438</a>    ) {
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">if </span>row_group_index &gt;= <span class="number">0 </span>{
+<a href=#440 id=440 data-nosnippet>440</a>            <span class="kw">let </span>row_group_index = row_group_index <span class="kw">as </span>usize;
+<a href=#441 id=441 data-nosnippet>441</a>            <span class="comment">// Scans one row group.
+<a href=#442 id=442 data-nosnippet>442</a>            </span><span class="kw">let </span><span class="prelude-val">Some</span>(range) = <span class="self">self</span>.ranges.ranges.get(<span class="kw-2">&amp;</span>row_group_index) <span class="kw">else </span>{
+<a href=#443 id=443 data-nosnippet>443</a>                <span class="kw">return</span>;
+<a href=#444 id=444 data-nosnippet>444</a>            };
+<a href=#445 id=445 data-nosnippet>445</a>            ranges.push(range.clone());
+<a href=#446 id=446 data-nosnippet>446</a>        } <span class="kw">else </span>{
+<a href=#447 id=447 data-nosnippet>447</a>            ranges.extend(<span class="self">self</span>.ranges.ranges.values().cloned());
+<a href=#448 id=448 data-nosnippet>448</a>        }
+<a href=#449 id=449 data-nosnippet>449</a>    }
+<a href=#450 id=450 data-nosnippet>450</a>
+<a href=#451 id=451 data-nosnippet>451</a>    <span class="doccomment">/// Returns the statistics of the memtable.
+<a href=#452 id=452 data-nosnippet>452</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>stats(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>MemtableStats {
+<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.ranges.stats
+<a href=#454 id=454 data-nosnippet>454</a>    }
+<a href=#455 id=455 data-nosnippet>455</a>}
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a><span class="doccomment">/// List to manages the builders to create file ranges.
+<a href=#458 id=458 data-nosnippet>458</a>/// Each scan partition should have its own list. Mutex inside this list is used to allow moving
+<a href=#459 id=459 data-nosnippet>459</a>/// the list to different streams in the same partition.
+<a href=#460 id=460 data-nosnippet>460</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>RangeBuilderList {
+<a href=#461 id=461 data-nosnippet>461</a>    num_memtables: usize,
+<a href=#462 id=462 data-nosnippet>462</a>    file_builders: Mutex&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;Arc&lt;FileRangeBuilder&gt;&gt;&gt;&gt;,
+<a href=#463 id=463 data-nosnippet>463</a>}
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a><span class="kw">impl </span>RangeBuilderList {
+<a href=#466 id=466 data-nosnippet>466</a>    <span class="doccomment">/// Creates a new [ReaderBuilderList] with the given number of memtables and files.
+<a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">fn </span>new(num_memtables: usize, num_files: usize) -&gt; <span class="self">Self </span>{
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span>file_builders = (<span class="number">0</span>..num_files).map(|<span class="kw">_</span>| <span class="prelude-val">None</span>).collect();
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="self">Self </span>{
+<a href=#470 id=470 data-nosnippet>470</a>            num_memtables,
+<a href=#471 id=471 data-nosnippet>471</a>            file_builders: Mutex::new(file_builders),
+<a href=#472 id=472 data-nosnippet>472</a>        }
+<a href=#473 id=473 data-nosnippet>473</a>    }
+<a href=#474 id=474 data-nosnippet>474</a>
+<a href=#475 id=475 data-nosnippet>475</a>    <span class="doccomment">/// Builds file ranges to read the row group at `index`.
+<a href=#476 id=476 data-nosnippet>476</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">async fn </span>build_file_ranges(
+<a href=#477 id=477 data-nosnippet>477</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#478 id=478 data-nosnippet>478</a>        input: <span class="kw-2">&amp;</span>ScanInput,
+<a href=#479 id=479 data-nosnippet>479</a>        index: RowGroupIndex,
+<a href=#480 id=480 data-nosnippet>480</a>        reader_metrics: <span class="kw-2">&amp;mut </span>ReaderMetrics,
+<a href=#481 id=481 data-nosnippet>481</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SmallVec&lt;[FileRange; <span class="number">2</span>]&gt;&gt; {
+<a href=#482 id=482 data-nosnippet>482</a>        <span class="kw">let </span><span class="kw-2">mut </span>ranges = SmallVec::new();
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="kw">let </span>file_index = index.index - <span class="self">self</span>.num_memtables;
+<a href=#484 id=484 data-nosnippet>484</a>        <span class="kw">let </span>builder_opt = <span class="self">self</span>.get_file_builder(file_index);
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">match </span>builder_opt {
+<a href=#486 id=486 data-nosnippet>486</a>            <span class="prelude-val">Some</span>(builder) =&gt; builder.build_ranges(index.row_group_index, <span class="kw-2">&amp;mut </span>ranges),
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="prelude-val">None </span>=&gt; {
+<a href=#488 id=488 data-nosnippet>488</a>                <span class="kw">let </span>builder = input.prune_file(file_index, reader_metrics).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#489 id=489 data-nosnippet>489</a>                builder.build_ranges(index.row_group_index, <span class="kw-2">&amp;mut </span>ranges);
+<a href=#490 id=490 data-nosnippet>490</a>                <span class="self">self</span>.set_file_builder(file_index, Arc::new(builder));
+<a href=#491 id=491 data-nosnippet>491</a>            }
+<a href=#492 id=492 data-nosnippet>492</a>        }
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="prelude-val">Ok</span>(ranges)
+<a href=#494 id=494 data-nosnippet>494</a>    }
+<a href=#495 id=495 data-nosnippet>495</a>
+<a href=#496 id=496 data-nosnippet>496</a>    <span class="kw">fn </span>get_file_builder(<span class="kw-2">&amp;</span><span class="self">self</span>, index: usize) -&gt; <span class="prelude-ty">Option</span>&lt;Arc&lt;FileRangeBuilder&gt;&gt; {
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>file_builders = <span class="self">self</span>.file_builders.lock().unwrap();
+<a href=#498 id=498 data-nosnippet>498</a>        file_builders[index].clone()
+<a href=#499 id=499 data-nosnippet>499</a>    }
+<a href=#500 id=500 data-nosnippet>500</a>
+<a href=#501 id=501 data-nosnippet>501</a>    <span class="kw">fn </span>set_file_builder(<span class="kw-2">&amp;</span><span class="self">self</span>, index: usize, builder: Arc&lt;FileRangeBuilder&gt;) {
+<a href=#502 id=502 data-nosnippet>502</a>        <span class="kw">let </span><span class="kw-2">mut </span>file_builders = <span class="self">self</span>.file_builders.lock().unwrap();
+<a href=#503 id=503 data-nosnippet>503</a>        file_builders[index] = <span class="prelude-val">Some</span>(builder);
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>}
+<a href=#506 id=506 data-nosnippet>506</a>
+<a href=#507 id=507 data-nosnippet>507</a><span class="attr">#[cfg(test)]
+<a href=#508 id=508 data-nosnippet>508</a></span><span class="kw">mod </span>tests {
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="kw">use </span>common_time::timestamp::TimeUnit;
+<a href=#510 id=510 data-nosnippet>510</a>    <span class="kw">use </span>common_time::Timestamp;
+<a href=#511 id=511 data-nosnippet>511</a>
+<a href=#512 id=512 data-nosnippet>512</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#513 id=513 data-nosnippet>513</a>
+<a href=#514 id=514 data-nosnippet>514</a>    <span class="kw">type </span>Output = (Vec&lt;usize&gt;, i64, i64);
+<a href=#515 id=515 data-nosnippet>515</a>
+<a href=#516 id=516 data-nosnippet>516</a>    <span class="kw">fn </span>run_group_ranges_test(input: <span class="kw-2">&amp;</span>[(usize, i64, i64)], expect: <span class="kw-2">&amp;</span>[Output]) {
+<a href=#517 id=517 data-nosnippet>517</a>        <span class="kw">let </span>ranges = input
+<a href=#518 id=518 data-nosnippet>518</a>            .iter()
+<a href=#519 id=519 data-nosnippet>519</a>            .map(|(idx, start, end)| {
+<a href=#520 id=520 data-nosnippet>520</a>                <span class="kw">let </span>time_range = (
+<a href=#521 id=521 data-nosnippet>521</a>                    Timestamp::new(<span class="kw-2">*</span>start, TimeUnit::Second),
+<a href=#522 id=522 data-nosnippet>522</a>                    Timestamp::new(<span class="kw-2">*</span>end, TimeUnit::Second),
+<a href=#523 id=523 data-nosnippet>523</a>                );
+<a href=#524 id=524 data-nosnippet>524</a>                RangeMeta {
+<a href=#525 id=525 data-nosnippet>525</a>                    time_range,
+<a href=#526 id=526 data-nosnippet>526</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#527 id=527 data-nosnippet>527</a>                        index: <span class="kw-2">*</span>idx,
+<a href=#528 id=528 data-nosnippet>528</a>                        num_row_groups: <span class="number">0</span>,
+<a href=#529 id=529 data-nosnippet>529</a>                    }],
+<a href=#530 id=530 data-nosnippet>530</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#531 id=531 data-nosnippet>531</a>                        index: <span class="kw-2">*</span>idx,
+<a href=#532 id=532 data-nosnippet>532</a>                        row_group_index: <span class="number">0
+<a href=#533 id=533 data-nosnippet>533</a>                    </span>}],
+<a href=#534 id=534 data-nosnippet>534</a>                    num_rows: <span class="number">1</span>,
+<a href=#535 id=535 data-nosnippet>535</a>                }
+<a href=#536 id=536 data-nosnippet>536</a>            })
+<a href=#537 id=537 data-nosnippet>537</a>            .collect();
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="kw">let </span>output = group_ranges_for_seq_scan(ranges);
+<a href=#539 id=539 data-nosnippet>539</a>        <span class="kw">let </span>actual: Vec&lt;<span class="kw">_</span>&gt; = output
+<a href=#540 id=540 data-nosnippet>540</a>            .iter()
+<a href=#541 id=541 data-nosnippet>541</a>            .map(|range| {
+<a href=#542 id=542 data-nosnippet>542</a>                <span class="kw">let </span>indices = range.indices.iter().map(|index| index.index).collect();
+<a href=#543 id=543 data-nosnippet>543</a>                <span class="kw">let </span>group_indices: Vec&lt;<span class="kw">_</span>&gt; = range
+<a href=#544 id=544 data-nosnippet>544</a>                    .row_group_indices
+<a href=#545 id=545 data-nosnippet>545</a>                    .iter()
+<a href=#546 id=546 data-nosnippet>546</a>                    .map(|idx| idx.index)
+<a href=#547 id=547 data-nosnippet>547</a>                    .collect();
+<a href=#548 id=548 data-nosnippet>548</a>                <span class="macro">assert_eq!</span>(indices, group_indices);
+<a href=#549 id=549 data-nosnippet>549</a>                <span class="kw">let </span>range = range.time_range;
+<a href=#550 id=550 data-nosnippet>550</a>                (indices, range.<span class="number">0</span>.value(), range.<span class="number">1</span>.value())
+<a href=#551 id=551 data-nosnippet>551</a>            })
+<a href=#552 id=552 data-nosnippet>552</a>            .collect();
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="macro">assert_eq!</span>(expect, actual);
+<a href=#554 id=554 data-nosnippet>554</a>    }
+<a href=#555 id=555 data-nosnippet>555</a>
+<a href=#556 id=556 data-nosnippet>556</a>    <span class="attr">#[test]
+<a href=#557 id=557 data-nosnippet>557</a>    </span><span class="kw">fn </span>test_group_ranges() {
+<a href=#558 id=558 data-nosnippet>558</a>        <span class="comment">// Group 1 part.
+<a href=#559 id=559 data-nosnippet>559</a>        </span>run_group_ranges_test(<span class="kw-2">&amp;</span>[(<span class="number">1</span>, <span class="number">0</span>, <span class="number">2000</span>)], <span class="kw-2">&amp;</span>[(<span class="macro">vec!</span>[<span class="number">1</span>], <span class="number">0</span>, <span class="number">2000</span>)]);
+<a href=#560 id=560 data-nosnippet>560</a>
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="comment">// 1, 2, 3, 4 =&gt; [3, 1, 4], [2]
+<a href=#562 id=562 data-nosnippet>562</a>        </span>run_group_ranges_test(
+<a href=#563 id=563 data-nosnippet>563</a>            <span class="kw-2">&amp;</span>[
+<a href=#564 id=564 data-nosnippet>564</a>                (<span class="number">1</span>, <span class="number">1000</span>, <span class="number">2000</span>),
+<a href=#565 id=565 data-nosnippet>565</a>                (<span class="number">2</span>, <span class="number">6000</span>, <span class="number">7000</span>),
+<a href=#566 id=566 data-nosnippet>566</a>                (<span class="number">3</span>, <span class="number">0</span>, <span class="number">1500</span>),
+<a href=#567 id=567 data-nosnippet>567</a>                (<span class="number">4</span>, <span class="number">1500</span>, <span class="number">3000</span>),
+<a href=#568 id=568 data-nosnippet>568</a>            ],
+<a href=#569 id=569 data-nosnippet>569</a>            <span class="kw-2">&amp;</span>[(<span class="macro">vec!</span>[<span class="number">3</span>, <span class="number">1</span>, <span class="number">4</span>], <span class="number">0</span>, <span class="number">3000</span>), (<span class="macro">vec!</span>[<span class="number">2</span>], <span class="number">6000</span>, <span class="number">7000</span>)],
+<a href=#570 id=570 data-nosnippet>570</a>        );
+<a href=#571 id=571 data-nosnippet>571</a>
+<a href=#572 id=572 data-nosnippet>572</a>        <span class="comment">// 1, 2, 3 =&gt; [3], [1], [2],
+<a href=#573 id=573 data-nosnippet>573</a>        </span>run_group_ranges_test(
+<a href=#574 id=574 data-nosnippet>574</a>            <span class="kw-2">&amp;</span>[(<span class="number">1</span>, <span class="number">3000</span>, <span class="number">4000</span>), (<span class="number">2</span>, <span class="number">4001</span>, <span class="number">6000</span>), (<span class="number">3</span>, <span class="number">0</span>, <span class="number">1000</span>)],
+<a href=#575 id=575 data-nosnippet>575</a>            <span class="kw-2">&amp;</span>[
+<a href=#576 id=576 data-nosnippet>576</a>                (<span class="macro">vec!</span>[<span class="number">3</span>], <span class="number">0</span>, <span class="number">1000</span>),
+<a href=#577 id=577 data-nosnippet>577</a>                (<span class="macro">vec!</span>[<span class="number">1</span>], <span class="number">3000</span>, <span class="number">4000</span>),
+<a href=#578 id=578 data-nosnippet>578</a>                (<span class="macro">vec!</span>[<span class="number">2</span>], <span class="number">4001</span>, <span class="number">6000</span>),
+<a href=#579 id=579 data-nosnippet>579</a>            ],
+<a href=#580 id=580 data-nosnippet>580</a>        );
+<a href=#581 id=581 data-nosnippet>581</a>
+<a href=#582 id=582 data-nosnippet>582</a>        <span class="comment">// 1, 2, 3 =&gt; [3], [1, 2]
+<a href=#583 id=583 data-nosnippet>583</a>        </span>run_group_ranges_test(
+<a href=#584 id=584 data-nosnippet>584</a>            <span class="kw-2">&amp;</span>[(<span class="number">1</span>, <span class="number">3000</span>, <span class="number">4000</span>), (<span class="number">2</span>, <span class="number">4000</span>, <span class="number">6000</span>), (<span class="number">3</span>, <span class="number">0</span>, <span class="number">1000</span>)],
+<a href=#585 id=585 data-nosnippet>585</a>            <span class="kw-2">&amp;</span>[(<span class="macro">vec!</span>[<span class="number">3</span>], <span class="number">0</span>, <span class="number">1000</span>), (<span class="macro">vec!</span>[<span class="number">1</span>, <span class="number">2</span>], <span class="number">3000</span>, <span class="number">6000</span>)],
+<a href=#586 id=586 data-nosnippet>586</a>        );
+<a href=#587 id=587 data-nosnippet>587</a>    }
+<a href=#588 id=588 data-nosnippet>588</a>
+<a href=#589 id=589 data-nosnippet>589</a>    <span class="attr">#[test]
+<a href=#590 id=590 data-nosnippet>590</a>    </span><span class="kw">fn </span>test_merge_range() {
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">let </span><span class="kw-2">mut </span>left = RangeMeta {
+<a href=#592 id=592 data-nosnippet>592</a>            time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#593 id=593 data-nosnippet>593</a>            indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#594 id=594 data-nosnippet>594</a>                index: <span class="number">1</span>,
+<a href=#595 id=595 data-nosnippet>595</a>                num_row_groups: <span class="number">2</span>,
+<a href=#596 id=596 data-nosnippet>596</a>            }],
+<a href=#597 id=597 data-nosnippet>597</a>            row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#598 id=598 data-nosnippet>598</a>                RowGroupIndex {
+<a href=#599 id=599 data-nosnippet>599</a>                    index: <span class="number">1</span>,
+<a href=#600 id=600 data-nosnippet>600</a>                    row_group_index: <span class="number">1
+<a href=#601 id=601 data-nosnippet>601</a>                </span>},
+<a href=#602 id=602 data-nosnippet>602</a>                RowGroupIndex {
+<a href=#603 id=603 data-nosnippet>603</a>                    index: <span class="number">1</span>,
+<a href=#604 id=604 data-nosnippet>604</a>                    row_group_index: <span class="number">2
+<a href=#605 id=605 data-nosnippet>605</a>                </span>}
+<a href=#606 id=606 data-nosnippet>606</a>            ],
+<a href=#607 id=607 data-nosnippet>607</a>            num_rows: <span class="number">5</span>,
+<a href=#608 id=608 data-nosnippet>608</a>        };
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">let </span>right = RangeMeta {
+<a href=#610 id=610 data-nosnippet>610</a>            time_range: (Timestamp::new_second(<span class="number">800</span>), Timestamp::new_second(<span class="number">1200</span>)),
+<a href=#611 id=611 data-nosnippet>611</a>            indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#612 id=612 data-nosnippet>612</a>                index: <span class="number">2</span>,
+<a href=#613 id=613 data-nosnippet>613</a>                num_row_groups: <span class="number">2</span>,
+<a href=#614 id=614 data-nosnippet>614</a>            }],
+<a href=#615 id=615 data-nosnippet>615</a>            row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#616 id=616 data-nosnippet>616</a>                RowGroupIndex {
+<a href=#617 id=617 data-nosnippet>617</a>                    index: <span class="number">2</span>,
+<a href=#618 id=618 data-nosnippet>618</a>                    row_group_index: <span class="number">1
+<a href=#619 id=619 data-nosnippet>619</a>                </span>},
+<a href=#620 id=620 data-nosnippet>620</a>                RowGroupIndex {
+<a href=#621 id=621 data-nosnippet>621</a>                    index: <span class="number">2</span>,
+<a href=#622 id=622 data-nosnippet>622</a>                    row_group_index: <span class="number">2
+<a href=#623 id=623 data-nosnippet>623</a>                </span>}
+<a href=#624 id=624 data-nosnippet>624</a>            ],
+<a href=#625 id=625 data-nosnippet>625</a>            num_rows: <span class="number">4</span>,
+<a href=#626 id=626 data-nosnippet>626</a>        };
+<a href=#627 id=627 data-nosnippet>627</a>        left.merge(right);
+<a href=#628 id=628 data-nosnippet>628</a>
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">assert_eq!</span>(
+<a href=#630 id=630 data-nosnippet>630</a>            left,
+<a href=#631 id=631 data-nosnippet>631</a>            RangeMeta {
+<a href=#632 id=632 data-nosnippet>632</a>                time_range: (Timestamp::new_second(<span class="number">800</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#633 id=633 data-nosnippet>633</a>                indices: <span class="macro">smallvec!</span>[
+<a href=#634 id=634 data-nosnippet>634</a>                    SourceIndex {
+<a href=#635 id=635 data-nosnippet>635</a>                        index: <span class="number">1</span>,
+<a href=#636 id=636 data-nosnippet>636</a>                        num_row_groups: <span class="number">2
+<a href=#637 id=637 data-nosnippet>637</a>                    </span>},
+<a href=#638 id=638 data-nosnippet>638</a>                    SourceIndex {
+<a href=#639 id=639 data-nosnippet>639</a>                        index: <span class="number">2</span>,
+<a href=#640 id=640 data-nosnippet>640</a>                        num_row_groups: <span class="number">2
+<a href=#641 id=641 data-nosnippet>641</a>                    </span>}
+<a href=#642 id=642 data-nosnippet>642</a>                ],
+<a href=#643 id=643 data-nosnippet>643</a>                row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#644 id=644 data-nosnippet>644</a>                    RowGroupIndex {
+<a href=#645 id=645 data-nosnippet>645</a>                        index: <span class="number">1</span>,
+<a href=#646 id=646 data-nosnippet>646</a>                        row_group_index: <span class="number">1
+<a href=#647 id=647 data-nosnippet>647</a>                    </span>},
+<a href=#648 id=648 data-nosnippet>648</a>                    RowGroupIndex {
+<a href=#649 id=649 data-nosnippet>649</a>                        index: <span class="number">1</span>,
+<a href=#650 id=650 data-nosnippet>650</a>                        row_group_index: <span class="number">2
+<a href=#651 id=651 data-nosnippet>651</a>                    </span>},
+<a href=#652 id=652 data-nosnippet>652</a>                    RowGroupIndex {
+<a href=#653 id=653 data-nosnippet>653</a>                        index: <span class="number">2</span>,
+<a href=#654 id=654 data-nosnippet>654</a>                        row_group_index: <span class="number">1
+<a href=#655 id=655 data-nosnippet>655</a>                    </span>},
+<a href=#656 id=656 data-nosnippet>656</a>                    RowGroupIndex {
+<a href=#657 id=657 data-nosnippet>657</a>                        index: <span class="number">2</span>,
+<a href=#658 id=658 data-nosnippet>658</a>                        row_group_index: <span class="number">2
+<a href=#659 id=659 data-nosnippet>659</a>                    </span>},
+<a href=#660 id=660 data-nosnippet>660</a>                ],
+<a href=#661 id=661 data-nosnippet>661</a>                num_rows: <span class="number">9</span>,
+<a href=#662 id=662 data-nosnippet>662</a>            }
+<a href=#663 id=663 data-nosnippet>663</a>        );
+<a href=#664 id=664 data-nosnippet>664</a>    }
+<a href=#665 id=665 data-nosnippet>665</a>
+<a href=#666 id=666 data-nosnippet>666</a>    <span class="attr">#[test]
+<a href=#667 id=667 data-nosnippet>667</a>    </span><span class="kw">fn </span>test_split_range() {
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="kw">let </span>range = RangeMeta {
+<a href=#669 id=669 data-nosnippet>669</a>            time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#670 id=670 data-nosnippet>670</a>            indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#671 id=671 data-nosnippet>671</a>                index: <span class="number">1</span>,
+<a href=#672 id=672 data-nosnippet>672</a>                num_row_groups: <span class="number">2</span>,
+<a href=#673 id=673 data-nosnippet>673</a>            }],
+<a href=#674 id=674 data-nosnippet>674</a>            row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#675 id=675 data-nosnippet>675</a>                index: <span class="number">1</span>,
+<a href=#676 id=676 data-nosnippet>676</a>                row_group_index: ALL_ROW_GROUPS,
+<a href=#677 id=677 data-nosnippet>677</a>            }],
+<a href=#678 id=678 data-nosnippet>678</a>            num_rows: <span class="number">5</span>,
+<a href=#679 id=679 data-nosnippet>679</a>        };
+<a href=#680 id=680 data-nosnippet>680</a>
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="macro">assert!</span>(range.can_split_preserve_order());
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="kw">let </span><span class="kw-2">mut </span>output = Vec::new();
+<a href=#683 id=683 data-nosnippet>683</a>        range.maybe_split(<span class="kw-2">&amp;mut </span>output);
+<a href=#684 id=684 data-nosnippet>684</a>
+<a href=#685 id=685 data-nosnippet>685</a>        <span class="macro">assert_eq!</span>(
+<a href=#686 id=686 data-nosnippet>686</a>            output,
+<a href=#687 id=687 data-nosnippet>687</a>            <span class="kw-2">&amp;</span>[
+<a href=#688 id=688 data-nosnippet>688</a>                RangeMeta {
+<a href=#689 id=689 data-nosnippet>689</a>                    time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#690 id=690 data-nosnippet>690</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#691 id=691 data-nosnippet>691</a>                        index: <span class="number">1</span>,
+<a href=#692 id=692 data-nosnippet>692</a>                        num_row_groups: <span class="number">2</span>,
+<a href=#693 id=693 data-nosnippet>693</a>                    }],
+<a href=#694 id=694 data-nosnippet>694</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#695 id=695 data-nosnippet>695</a>                        index: <span class="number">1</span>,
+<a href=#696 id=696 data-nosnippet>696</a>                        row_group_index: <span class="number">0
+<a href=#697 id=697 data-nosnippet>697</a>                    </span>},],
+<a href=#698 id=698 data-nosnippet>698</a>                    num_rows: <span class="number">2</span>,
+<a href=#699 id=699 data-nosnippet>699</a>                },
+<a href=#700 id=700 data-nosnippet>700</a>                RangeMeta {
+<a href=#701 id=701 data-nosnippet>701</a>                    time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#702 id=702 data-nosnippet>702</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#703 id=703 data-nosnippet>703</a>                        index: <span class="number">1</span>,
+<a href=#704 id=704 data-nosnippet>704</a>                        num_row_groups: <span class="number">2</span>,
+<a href=#705 id=705 data-nosnippet>705</a>                    }],
+<a href=#706 id=706 data-nosnippet>706</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#707 id=707 data-nosnippet>707</a>                        index: <span class="number">1</span>,
+<a href=#708 id=708 data-nosnippet>708</a>                        row_group_index: <span class="number">1
+<a href=#709 id=709 data-nosnippet>709</a>                    </span>}],
+<a href=#710 id=710 data-nosnippet>710</a>                    num_rows: <span class="number">2</span>,
+<a href=#711 id=711 data-nosnippet>711</a>                }
+<a href=#712 id=712 data-nosnippet>712</a>            ]
+<a href=#713 id=713 data-nosnippet>713</a>        );
+<a href=#714 id=714 data-nosnippet>714</a>    }
+<a href=#715 id=715 data-nosnippet>715</a>
+<a href=#716 id=716 data-nosnippet>716</a>    <span class="attr">#[test]
+<a href=#717 id=717 data-nosnippet>717</a>    </span><span class="kw">fn </span>test_not_split_range() {
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">let </span>range = RangeMeta {
+<a href=#719 id=719 data-nosnippet>719</a>            time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#720 id=720 data-nosnippet>720</a>            indices: <span class="macro">smallvec!</span>[
+<a href=#721 id=721 data-nosnippet>721</a>                SourceIndex {
+<a href=#722 id=722 data-nosnippet>722</a>                    index: <span class="number">1</span>,
+<a href=#723 id=723 data-nosnippet>723</a>                    num_row_groups: <span class="number">1</span>,
+<a href=#724 id=724 data-nosnippet>724</a>                },
+<a href=#725 id=725 data-nosnippet>725</a>                SourceIndex {
+<a href=#726 id=726 data-nosnippet>726</a>                    index: <span class="number">2</span>,
+<a href=#727 id=727 data-nosnippet>727</a>                    num_row_groups: <span class="number">1</span>,
+<a href=#728 id=728 data-nosnippet>728</a>                }
+<a href=#729 id=729 data-nosnippet>729</a>            ],
+<a href=#730 id=730 data-nosnippet>730</a>            row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#731 id=731 data-nosnippet>731</a>                RowGroupIndex {
+<a href=#732 id=732 data-nosnippet>732</a>                    index: <span class="number">1</span>,
+<a href=#733 id=733 data-nosnippet>733</a>                    row_group_index: <span class="number">1
+<a href=#734 id=734 data-nosnippet>734</a>                </span>},
+<a href=#735 id=735 data-nosnippet>735</a>                RowGroupIndex {
+<a href=#736 id=736 data-nosnippet>736</a>                    index: <span class="number">2</span>,
+<a href=#737 id=737 data-nosnippet>737</a>                    row_group_index: <span class="number">1
+<a href=#738 id=738 data-nosnippet>738</a>                </span>}
+<a href=#739 id=739 data-nosnippet>739</a>            ],
+<a href=#740 id=740 data-nosnippet>740</a>            num_rows: <span class="number">5</span>,
+<a href=#741 id=741 data-nosnippet>741</a>        };
+<a href=#742 id=742 data-nosnippet>742</a>
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="macro">assert!</span>(!range.can_split_preserve_order());
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="kw">let </span><span class="kw-2">mut </span>output = Vec::new();
+<a href=#745 id=745 data-nosnippet>745</a>        range.maybe_split(<span class="kw-2">&amp;mut </span>output);
+<a href=#746 id=746 data-nosnippet>746</a>        <span class="macro">assert_eq!</span>(<span class="number">1</span>, output.len());
+<a href=#747 id=747 data-nosnippet>747</a>    }
+<a href=#748 id=748 data-nosnippet>748</a>
+<a href=#749 id=749 data-nosnippet>749</a>    <span class="attr">#[test]
+<a href=#750 id=750 data-nosnippet>750</a>    </span><span class="kw">fn </span>test_maybe_split_ranges() {
+<a href=#751 id=751 data-nosnippet>751</a>        <span class="kw">let </span>ranges = <span class="macro">vec!</span>[
+<a href=#752 id=752 data-nosnippet>752</a>            RangeMeta {
+<a href=#753 id=753 data-nosnippet>753</a>                time_range: (Timestamp::new_second(<span class="number">0</span>), Timestamp::new_second(<span class="number">500</span>)),
+<a href=#754 id=754 data-nosnippet>754</a>                indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#755 id=755 data-nosnippet>755</a>                    index: <span class="number">0</span>,
+<a href=#756 id=756 data-nosnippet>756</a>                    num_row_groups: <span class="number">1</span>,
+<a href=#757 id=757 data-nosnippet>757</a>                }],
+<a href=#758 id=758 data-nosnippet>758</a>                row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#759 id=759 data-nosnippet>759</a>                    index: <span class="number">0</span>,
+<a href=#760 id=760 data-nosnippet>760</a>                    row_group_index: <span class="number">0</span>,
+<a href=#761 id=761 data-nosnippet>761</a>                },],
+<a href=#762 id=762 data-nosnippet>762</a>                num_rows: <span class="number">4</span>,
+<a href=#763 id=763 data-nosnippet>763</a>            },
+<a href=#764 id=764 data-nosnippet>764</a>            RangeMeta {
+<a href=#765 id=765 data-nosnippet>765</a>                time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#766 id=766 data-nosnippet>766</a>                indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#767 id=767 data-nosnippet>767</a>                    index: <span class="number">1</span>,
+<a href=#768 id=768 data-nosnippet>768</a>                    num_row_groups: <span class="number">2</span>,
+<a href=#769 id=769 data-nosnippet>769</a>                }],
+<a href=#770 id=770 data-nosnippet>770</a>                row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#771 id=771 data-nosnippet>771</a>                    index: <span class="number">1</span>,
+<a href=#772 id=772 data-nosnippet>772</a>                    row_group_index: ALL_ROW_GROUPS,
+<a href=#773 id=773 data-nosnippet>773</a>                },],
+<a href=#774 id=774 data-nosnippet>774</a>                num_rows: <span class="number">4</span>,
+<a href=#775 id=775 data-nosnippet>775</a>            },
+<a href=#776 id=776 data-nosnippet>776</a>            RangeMeta {
+<a href=#777 id=777 data-nosnippet>777</a>                time_range: (Timestamp::new_second(<span class="number">3000</span>), Timestamp::new_second(<span class="number">4000</span>)),
+<a href=#778 id=778 data-nosnippet>778</a>                indices: <span class="macro">smallvec!</span>[
+<a href=#779 id=779 data-nosnippet>779</a>                    SourceIndex {
+<a href=#780 id=780 data-nosnippet>780</a>                        index: <span class="number">2</span>,
+<a href=#781 id=781 data-nosnippet>781</a>                        num_row_groups: <span class="number">2</span>,
+<a href=#782 id=782 data-nosnippet>782</a>                    },
+<a href=#783 id=783 data-nosnippet>783</a>                    SourceIndex {
+<a href=#784 id=784 data-nosnippet>784</a>                        index: <span class="number">3</span>,
+<a href=#785 id=785 data-nosnippet>785</a>                        num_row_groups: <span class="number">0</span>,
+<a href=#786 id=786 data-nosnippet>786</a>                    }
+<a href=#787 id=787 data-nosnippet>787</a>                ],
+<a href=#788 id=788 data-nosnippet>788</a>                row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#789 id=789 data-nosnippet>789</a>                    RowGroupIndex {
+<a href=#790 id=790 data-nosnippet>790</a>                        index: <span class="number">2</span>,
+<a href=#791 id=791 data-nosnippet>791</a>                        row_group_index: ALL_ROW_GROUPS,
+<a href=#792 id=792 data-nosnippet>792</a>                    },
+<a href=#793 id=793 data-nosnippet>793</a>                    RowGroupIndex {
+<a href=#794 id=794 data-nosnippet>794</a>                        index: <span class="number">3</span>,
+<a href=#795 id=795 data-nosnippet>795</a>                        row_group_index: ALL_ROW_GROUPS,
+<a href=#796 id=796 data-nosnippet>796</a>                    }
+<a href=#797 id=797 data-nosnippet>797</a>                ],
+<a href=#798 id=798 data-nosnippet>798</a>                num_rows: <span class="number">5</span>,
+<a href=#799 id=799 data-nosnippet>799</a>            },
+<a href=#800 id=800 data-nosnippet>800</a>        ];
+<a href=#801 id=801 data-nosnippet>801</a>        <span class="kw">let </span>output = maybe_split_ranges_for_seq_scan(ranges);
+<a href=#802 id=802 data-nosnippet>802</a>        <span class="macro">assert_eq!</span>(
+<a href=#803 id=803 data-nosnippet>803</a>            output,
+<a href=#804 id=804 data-nosnippet>804</a>            <span class="macro">vec!</span>[
+<a href=#805 id=805 data-nosnippet>805</a>                RangeMeta {
+<a href=#806 id=806 data-nosnippet>806</a>                    time_range: (Timestamp::new_second(<span class="number">0</span>), Timestamp::new_second(<span class="number">500</span>)),
+<a href=#807 id=807 data-nosnippet>807</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#808 id=808 data-nosnippet>808</a>                        index: <span class="number">0</span>,
+<a href=#809 id=809 data-nosnippet>809</a>                        num_row_groups: <span class="number">1</span>,
+<a href=#810 id=810 data-nosnippet>810</a>                    }],
+<a href=#811 id=811 data-nosnippet>811</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#812 id=812 data-nosnippet>812</a>                        index: <span class="number">0</span>,
+<a href=#813 id=813 data-nosnippet>813</a>                        row_group_index: <span class="number">0
+<a href=#814 id=814 data-nosnippet>814</a>                    </span>},],
+<a href=#815 id=815 data-nosnippet>815</a>                    num_rows: <span class="number">4</span>,
+<a href=#816 id=816 data-nosnippet>816</a>                },
+<a href=#817 id=817 data-nosnippet>817</a>                RangeMeta {
+<a href=#818 id=818 data-nosnippet>818</a>                    time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#819 id=819 data-nosnippet>819</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#820 id=820 data-nosnippet>820</a>                        index: <span class="number">1</span>,
+<a href=#821 id=821 data-nosnippet>821</a>                        num_row_groups: <span class="number">2</span>,
+<a href=#822 id=822 data-nosnippet>822</a>                    }],
+<a href=#823 id=823 data-nosnippet>823</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#824 id=824 data-nosnippet>824</a>                        index: <span class="number">1</span>,
+<a href=#825 id=825 data-nosnippet>825</a>                        row_group_index: <span class="number">0
+<a href=#826 id=826 data-nosnippet>826</a>                    </span>},],
+<a href=#827 id=827 data-nosnippet>827</a>                    num_rows: <span class="number">2</span>,
+<a href=#828 id=828 data-nosnippet>828</a>                },
+<a href=#829 id=829 data-nosnippet>829</a>                RangeMeta {
+<a href=#830 id=830 data-nosnippet>830</a>                    time_range: (Timestamp::new_second(<span class="number">1000</span>), Timestamp::new_second(<span class="number">2000</span>)),
+<a href=#831 id=831 data-nosnippet>831</a>                    indices: <span class="macro">smallvec!</span>[SourceIndex {
+<a href=#832 id=832 data-nosnippet>832</a>                        index: <span class="number">1</span>,
+<a href=#833 id=833 data-nosnippet>833</a>                        num_row_groups: <span class="number">2</span>,
+<a href=#834 id=834 data-nosnippet>834</a>                    }],
+<a href=#835 id=835 data-nosnippet>835</a>                    row_group_indices: <span class="macro">smallvec!</span>[RowGroupIndex {
+<a href=#836 id=836 data-nosnippet>836</a>                        index: <span class="number">1</span>,
+<a href=#837 id=837 data-nosnippet>837</a>                        row_group_index: <span class="number">1
+<a href=#838 id=838 data-nosnippet>838</a>                    </span>}],
+<a href=#839 id=839 data-nosnippet>839</a>                    num_rows: <span class="number">2</span>,
+<a href=#840 id=840 data-nosnippet>840</a>                },
+<a href=#841 id=841 data-nosnippet>841</a>                RangeMeta {
+<a href=#842 id=842 data-nosnippet>842</a>                    time_range: (Timestamp::new_second(<span class="number">3000</span>), Timestamp::new_second(<span class="number">4000</span>)),
+<a href=#843 id=843 data-nosnippet>843</a>                    indices: <span class="macro">smallvec!</span>[
+<a href=#844 id=844 data-nosnippet>844</a>                        SourceIndex {
+<a href=#845 id=845 data-nosnippet>845</a>                            index: <span class="number">2</span>,
+<a href=#846 id=846 data-nosnippet>846</a>                            num_row_groups: <span class="number">2
+<a href=#847 id=847 data-nosnippet>847</a>                        </span>},
+<a href=#848 id=848 data-nosnippet>848</a>                        SourceIndex {
+<a href=#849 id=849 data-nosnippet>849</a>                            index: <span class="number">3</span>,
+<a href=#850 id=850 data-nosnippet>850</a>                            num_row_groups: <span class="number">0</span>,
+<a href=#851 id=851 data-nosnippet>851</a>                        }
+<a href=#852 id=852 data-nosnippet>852</a>                    ],
+<a href=#853 id=853 data-nosnippet>853</a>                    row_group_indices: <span class="macro">smallvec!</span>[
+<a href=#854 id=854 data-nosnippet>854</a>                        RowGroupIndex {
+<a href=#855 id=855 data-nosnippet>855</a>                            index: <span class="number">2</span>,
+<a href=#856 id=856 data-nosnippet>856</a>                            row_group_index: ALL_ROW_GROUPS,
+<a href=#857 id=857 data-nosnippet>857</a>                        },
+<a href=#858 id=858 data-nosnippet>858</a>                        RowGroupIndex {
+<a href=#859 id=859 data-nosnippet>859</a>                            index: <span class="number">3</span>,
+<a href=#860 id=860 data-nosnippet>860</a>                            row_group_index: ALL_ROW_GROUPS,
+<a href=#861 id=861 data-nosnippet>861</a>                        }
+<a href=#862 id=862 data-nosnippet>862</a>                    ],
+<a href=#863 id=863 data-nosnippet>863</a>                    num_rows: <span class="number">5</span>,
+<a href=#864 id=864 data-nosnippet>864</a>                },
+<a href=#865 id=865 data-nosnippet>865</a>            ]
+<a href=#866 id=866 data-nosnippet>866</a>        )
+<a href=#867 id=867 data-nosnippet>867</a>    }
+<a href=#868 id=868 data-nosnippet>868</a>}</code></pre></div></section></main></body></html>

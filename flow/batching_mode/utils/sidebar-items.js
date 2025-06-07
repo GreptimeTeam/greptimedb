@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["df_plan_to_sql","get_table_info_df_schema","sql_to_df_plan"],"struct":["AddAutoColumnRewriter","AddFilterRewriter","FindGroupByFinalName"]};

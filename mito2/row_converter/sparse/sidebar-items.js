@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_ID_ENCODE_SIZE","RESERVED_COLUMN_ID_TABLE_ID","RESERVED_COLUMN_ID_TSID"],"struct":["SparsePrimaryKeyCodec","SparsePrimaryKeyCodecInner","SparseValues"]};

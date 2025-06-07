@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["pb_pid_to_pid","pid_to_pb_pid","procedure_details_to_pb_response","procedure_state_to_pb_response","procedure_state_to_pb_state"],"struct":["AddRegionFollowerRequest","MigrateRegionRequest","MigrateRegionResponse","ProcedureStateResponse","RemoveRegionFollowerRequest"]};

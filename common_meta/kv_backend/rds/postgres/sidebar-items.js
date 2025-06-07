@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EMPTY","PG_STORE_NAME"],"enum":["RangeTemplateType"],"fn":["is_prefix_range","key_value_from_row","pg_generate_in_placeholders","range_template"],"struct":["PgClient","PgExecutorFactory","PgSqlTemplateFactory","PgSqlTemplateSet","PgTxnClient","RangeTemplate"],"type":["PgStore"]};

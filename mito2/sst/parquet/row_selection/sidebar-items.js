@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_or_merge_selector","row_selection_from_row_ranges","row_selection_from_sorted_row_ids","selector_len"],"struct":["RowGroupSelection","RowSelectionWithCount"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PutRecordBatchRequestStreamState"],"fn":["to_flight_data_stream"],"mod":["stream"],"struct":["FlightCraftWrapper","FlightRecordBatchStream","PutRecordBatchRequest","PutRecordBatchRequestStream"],"trait":["FlightCraft"],"type":["FlightCraftRef","TonicStream"]};
