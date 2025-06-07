@@ -1,0 +1,11 @@
+[package]
+name = "stat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nix.workspace = true
+
+[lints]
+workspace = true

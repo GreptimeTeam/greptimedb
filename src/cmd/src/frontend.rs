@@ -44,7 +44,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -270,7 +270,9 @@ impl StartCommand {
             opts.component.node_id.clone(),
             opts.component.slow_query.as_ref(),
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);

@@ -2128,6 +2128,7 @@ dependencies = [
  "session",
  "similar-asserts",
  "snafu 0.8.5",
+ "stat",
  "store-api",
  "substrait 0.15.0",
  "table",
@@ -7764,6 +7765,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.9.0",
+ "cfg-if",
+ "cfg_aliases 0.2.1",
+ "libc",
+]
+
+[[package]]
 name = "nohash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11910,6 +11923,13 @@ dependencies = [
  "libc",
  "psm",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "stat"
+version = "0.15.0"
+dependencies = [
+ "nix 0.30.1",
 ]
 
 [[package]]

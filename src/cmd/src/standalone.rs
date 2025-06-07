@@ -83,7 +83,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{error, log_versions, App};
+use crate::{create_resource_limit_metrics, error, log_versions, App};
 
 pub const APP_NAME: &str = "greptime-standalone";
 
@@ -457,7 +457,9 @@ impl StartCommand {
             None,
             opts.component.slow_query.as_ref(),
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");
