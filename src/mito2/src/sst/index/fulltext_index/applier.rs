@@ -317,6 +317,7 @@ impl FulltextIndexApplier {
         let mut applier = BloomFilterApplier::new(reader)
             .await
             .context(ApplyBloomFilterIndexSnafu)?;
+        let predicate_refs: Vec<&InListPredicate> = predicates.iter().collect();
         for (_, row_group_output) in output.iter_mut() {
             // All rows are filtered out, skip the search
             if row_group_output.is_empty() {
@@ -324,7 +325,7 @@ impl FulltextIndexApplier {
             }
 
             *row_group_output = applier
-                .search(&predicates, row_group_output)
+                .search(predicate_refs.as_slice(), row_group_output)
                 .await
                 .context(ApplyBloomFilterIndexSnafu)?;
         }

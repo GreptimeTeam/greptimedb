@@ -25,7 +25,7 @@ use crate::Bytes;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InListPredicate {
     /// List of acceptable values.
     pub list: BTreeSet<Bytes>,
@@ -48,7 +48,7 @@ impl BloomFilterApplier {
     /// The logic is: (probe1 OR probe2 OR ...) AND (probe3 OR probe4 OR ...)
     pub async fn search(
         &mut self,
-        predicates: &[InListPredicate],
+        predicates: &[&InListPredicate],
         search_ranges: &[Range<usize>],
     ) -> Result<Vec<Range<usize>>> {
         if predicates.is_empty() {
@@ -118,7 +118,7 @@ impl BloomFilterApplier {
         &self,
         segment_locations: Vec<(u64, usize)>,
         bloom_filters: Vec<BloomFilter>,
-        predicates: &[InListPredicate],
+        predicates: &[&InListPredicate],
     ) -> Vec<Range<usize>> {
         let rows_per_segment = self.meta.rows_per_segment as usize;
         let mut matching_row_ranges = Vec::with_capacity(bloom_filters.len());
@@ -421,7 +421,11 @@ mod tests {
         ];
 
         for (predicates, search_range, expected) in cases {
-            let result = applier.search(&predicates, &[search_range]).await.unwrap();
+            let predicate_refs: Vec<&InListPredicate> = predicates.iter().collect();
+            let result = applier
+                .search(&predicate_refs, &[search_range])
+                .await
+                .unwrap();
             assert_eq!(
                 result, expected,
                 "Expected {:?}, got {:?}",
