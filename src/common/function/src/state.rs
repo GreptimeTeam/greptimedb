@@ -148,6 +148,17 @@ impl FunctionState {
             ) -> Result<api::v1::flow::FlowResponse> {
                 todo!()
             }
+
+            async fn adjust(
+                &self,
+                _catalog: &str,
+                _flow: &str,
+                _min_run_interval_secs: u64,
+                _max_filter_num_per_query: usize,
+                _ctx: QueryContextRef,
+            ) -> Result<api::v1::flow::FlowResponse> {
+                todo!()
+            }
         }
 
         Self {

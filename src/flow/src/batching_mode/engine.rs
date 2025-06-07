@@ -388,6 +388,20 @@ impl BatchingEngine {
     pub async fn flow_exist_inner(&self, flow_id: FlowId) -> bool {
         self.tasks.read().await.contains_key(&flow_id)
     }
+
+    pub async fn adjust_flow(
+        &self,
+        flow_id: FlowId,
+        min_run_interval_secs: u64,
+        max_filter_num_per_query: usize,
+    ) -> Result<(), Error> {
+        let task = self.tasks.read().await.get(&flow_id).cloned();
+        let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
+        debug!("Adjusting flow {flow_id} with min_run_interval_secs={} and max_filter_num_per_query={}", min_run_interval_secs, max_filter_num_per_query);
+        task.adjust(min_run_interval_secs, max_filter_num_per_query);
+
+        Ok(())
+    }
 }
 
 impl FlowEngine for BatchingEngine {

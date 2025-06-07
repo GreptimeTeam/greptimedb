@@ -15,6 +15,7 @@
 #![feature(let_chains)]
 #![feature(try_blocks)]
 
+mod adjust_flow;
 mod admin;
 mod flush_flow;
 mod macros;

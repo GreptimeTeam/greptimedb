@@ -61,6 +61,7 @@ prost.workspace = true
 query.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
 smallvec.workspace = true
