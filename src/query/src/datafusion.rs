@@ -25,8 +25,7 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_schema;
 use common_error::ext::BoxedError;
-use common_function::function::FunctionRef;
-use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
@@ -35,7 +34,9 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ResolvedTableReference;
-use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp};
+use datafusion_expr::{
+    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WriteOp,
+};
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
@@ -454,14 +455,14 @@ impl QueryEngine for DatafusionQueryEngine {
     /// `SELECT "my_UDAF"(x)` will look for an aggregate named `"my_UDAF"`
     ///
     /// So it's better to make UDAF name lowercase when creating one.
-    fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        self.state.register_aggregate_function(func);
+    fn register_aggregate_function(&self, func: AggregateUDF) {
+        self.state.register_aggr_function(func);
     }
 
-    /// Register an UDF function.
+    /// Register an scalar function.
     /// Will override if the function with same name is already registered.
-    fn register_function(&self, func: FunctionRef) {
-        self.state.register_function(func);
+    fn register_scalar_function(&self, func: ScalarFunctionFactory) {
+        self.state.register_scalar_function(func);
     }
 
     fn read_table(&self, table: TableRef) -> Result<DataFrame> {

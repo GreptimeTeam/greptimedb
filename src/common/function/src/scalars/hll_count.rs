@@ -27,7 +27,7 @@ use datatypes::vectors::{BinaryVector, MutableVector, UInt64VectorBuilder, Vecto
 use hyperloglogplus::HyperLogLog;
 use snafu::OptionExt;
 
-use crate::aggr::HllStateType;
+use crate::aggrs::approximate::hll::HllStateType;
 use crate::function::{Function, FunctionContext};
 use crate::function_registry::FunctionRegistry;
 

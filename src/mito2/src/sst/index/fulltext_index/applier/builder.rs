@@ -282,14 +282,15 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use common_function::function_registry::FUNCTION_REGISTRY;
-    use common_function::scalars::udf::create_udf;
+    use common_function::function::FunctionRef;
+    use common_function::function_factory::ScalarFunctionFactory;
+    use common_function::scalars::matches::MatchesFunction;
+    use common_function::scalars::matches_term::MatchesTermFunction;
     use datafusion::functions::string::lower;
     use datafusion_common::Column;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::ScalarUDF;
     use datatypes::schema::ColumnSchema;
-    use session::context::QueryContext;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -317,19 +318,17 @@ mod tests {
     }
 
     fn matches_func() -> Arc<ScalarUDF> {
-        Arc::new(create_udf(
-            FUNCTION_REGISTRY.get_function("matches").unwrap(),
-            QueryContext::arc(),
-            Default::default(),
-        ))
+        Arc::new(
+            ScalarFunctionFactory::from(Arc::new(MatchesFunction) as FunctionRef)
+                .provide(Default::default()),
+        )
     }
 
     fn matches_term_func() -> Arc<ScalarUDF> {
-        Arc::new(create_udf(
-            FUNCTION_REGISTRY.get_function("matches_term").unwrap(),
-            QueryContext::arc(),
-            Default::default(),
-        ))
+        Arc::new(
+            ScalarFunctionFactory::from(Arc::new(MatchesTermFunction) as FunctionRef)
+                .provide(Default::default()),
+        )
     }
 
     #[test]

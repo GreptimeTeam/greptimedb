@@ -17,10 +17,8 @@ mod distance;
 mod elem_product;
 mod elem_sum;
 pub mod impl_conv;
-pub(crate) mod product;
 mod scalar_add;
 mod scalar_mul;
-pub(crate) mod sum;
 mod vector_add;
 mod vector_dim;
 mod vector_div;
@@ -33,7 +31,6 @@ mod vector_subvector;
 use std::sync::Arc;
 
 use crate::function_registry::FunctionRegistry;
-
 pub(crate) struct VectorFunction;
 
 impl VectorFunction {

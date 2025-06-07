@@ -22,14 +22,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function::FunctionRef;
+use common_function::function_factory::ScalarFunctionFactory;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
-use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::Output;
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
 use session::context::QueryContextRef;
@@ -79,11 +78,11 @@ pub trait QueryEngine: Send + Sync {
     ///
     /// # Panics
     /// Will panic if the function with same name is already registered.
-    fn register_aggregate_function(&self, func: AggregateFunctionMetaRef);
+    fn register_aggregate_function(&self, func: AggregateUDF);
 
-    /// Register a SQL function.
+    /// Register a scalar function.
     /// Will override if the function with same name is already registered.
-    fn register_function(&self, func: FunctionRef);
+    fn register_scalar_function(&self, func: ScalarFunctionFactory);
 
     /// Create a DataFrame from a table.
     fn read_table(&self, table: TableRef) -> Result<DataFrame>;
@@ -154,8 +153,8 @@ impl QueryEngineFactory {
 
 /// Register all functions implemented by GreptimeDB
 fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
-    for func in FUNCTION_REGISTRY.functions() {
-        query_engine.register_function(func);
+    for func in FUNCTION_REGISTRY.scalar_functions() {
+        query_engine.register_scalar_function(func);
     }
 
     for accumulator in FUNCTION_REGISTRY.aggregate_functions() {

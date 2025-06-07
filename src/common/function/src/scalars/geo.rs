@@ -13,10 +13,9 @@
 // limitations under the License.
 
 use std::sync::Arc;
-pub(crate) mod encoding;
 mod geohash;
 mod h3;
-mod helpers;
+pub(crate) mod helpers;
 mod measure;
 mod relation;
 mod s2;

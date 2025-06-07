@@ -16,11 +16,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use datafusion_expr::AggregateUDF;
 use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
+use crate::aggrs::approximate::ApproximateFunction;
+use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{AsyncFunctionRef, FunctionRef};
-use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
+use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -31,14 +34,14 @@ use crate::scalars::matches_term::MatchesTermFunction;
 use crate::scalars::math::MathFunction;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
-use crate::scalars::vector::VectorFunction;
+use crate::scalars::vector::VectorFunction as VectorScalarFunction;
 use crate::system::SystemFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
-    functions: RwLock<HashMap<String, FunctionRef>>,
+    functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     async_functions: RwLock<HashMap<String, AsyncFunctionRef>>,
-    aggregate_functions: RwLock<HashMap<String, AggregateFunctionMetaRef>>,
+    aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
 }
 
 impl FunctionRegistry {
@@ -47,12 +50,20 @@ impl FunctionRegistry {
             .functions
             .write()
             .unwrap()
-            .insert(func.name().to_string(), func);
+            .insert(func.name().to_string(), func.into());
     }
 
     pub fn register_async(&self, func: AsyncFunctionRef) {
         let _ = self
             .async_functions
+            .write()
+            .unwrap()
+            .insert(func.name().to_string(), func);
+    }
+
+    pub fn register_aggr(&self, func: AggregateUDF) {
+        let _ = self
+            .aggregate_functions
             .write()
             .unwrap()
             .insert(func.name().to_string(), func);
@@ -71,27 +82,16 @@ impl FunctionRegistry {
             .collect()
     }
 
-    pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        let _ = self
-            .aggregate_functions
-            .write()
-            .unwrap()
-            .insert(func.name(), func);
-    }
-
-    pub fn get_aggr_function(&self, name: &str) -> Option<AggregateFunctionMetaRef> {
-        self.aggregate_functions.read().unwrap().get(name).cloned()
-    }
-
-    pub fn get_function(&self, name: &str) -> Option<FunctionRef> {
+    #[cfg(test)]
+    pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
         self.functions.read().unwrap().get(name).cloned()
     }
 
-    pub fn functions(&self) -> Vec<FunctionRef> {
+    pub fn scalar_functions(&self) -> Vec<ScalarFunctionFactory> {
         self.functions.read().unwrap().values().cloned().collect()
     }
 
-    pub fn aggregate_functions(&self) -> Vec<AggregateFunctionMetaRef> {
+    pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
         self.aggregate_functions
             .read()
             .unwrap()
@@ -112,9 +112,6 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     UddSketchCalcFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
 
-    // Aggregate functions
-    AggregateFunctions::register(&function_registry);
-
     // Full text search function
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
@@ -127,14 +124,20 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     JsonFunction::register(&function_registry);
 
     // Vector related functions
-    VectorFunction::register(&function_registry);
+    VectorScalarFunction::register(&function_registry);
+    VectorAggrFunction::register(&function_registry);
 
     // Geo functions
     #[cfg(feature = "geo")]
     crate::scalars::geo::GeoFunctions::register(&function_registry);
+    #[cfg(feature = "geo")]
+    crate::aggrs::geo::GeoFunction::register(&function_registry);
 
     // Ip functions
     IpFunctions::register(&function_registry);
+
+    // Approximate functions
+    ApproximateFunction::register(&function_registry);
 
     Arc::new(function_registry)
 });
@@ -150,9 +153,9 @@ mod tests {
         let func = Arc::new(TestAndFunction);
 
         assert!(registry.get_function("test_and").is_none());
-        assert!(registry.functions().is_empty());
+        assert!(registry.scalar_functions().is_empty());
         registry.register(func);
         let _ = registry.get_function("test_and").unwrap();
-        assert_eq!(1, registry.functions().len());
+        assert_eq!(1, registry.scalar_functions().len());
     }
 }
