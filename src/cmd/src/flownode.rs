@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKv
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
@@ -30,7 +31,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_version::{short_version, version};
 use flow::{
     get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
@@ -184,6 +185,14 @@ impl StartCommand {
 
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
+        }
+
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(DEFAULT_DATA_HOME)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
         }
 
         if global_options.log_level.is_some() {
