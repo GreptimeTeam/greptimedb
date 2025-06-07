@@ -203,7 +203,13 @@ pub trait JaegerQueryHandler {
     ) -> Result<Output>;
 
     /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.
-    async fn get_trace(&self, ctx: QueryContextRef, trace_id: &str) -> Result<Output>;
+    async fn get_trace(
+        &self,
+        ctx: QueryContextRef,
+        trace_id: &str,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Output>;
 
     /// Find traces by query params. It's used for `/api/traces` API.
     async fn find_traces(
