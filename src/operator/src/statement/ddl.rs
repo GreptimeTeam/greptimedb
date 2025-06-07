@@ -20,6 +20,10 @@ use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::{
     column_def, AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
 };
+#[cfg(feature = "enterprise")]
+use api::v1::{
+    meta::CreateTriggerTask as PbCreateTriggerTask, CreateTriggerExpr as PbCreateTriggerExpr,
+};
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_catalog::consts::{is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -31,6 +35,8 @@ use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
@@ -58,6 +64,8 @@ use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::alter::{AlterDatabase, AlterTable};
+#[cfg(feature = "enterprise")]
+use sql::statements::create::trigger::CreateTrigger;
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
@@ -179,24 +187,42 @@ impl StatementExecutor {
             }
         );
 
-        // Check if is creating logical table
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            return self
-                .create_logical_tables(std::slice::from_ref(create_table), query_ctx)
+            // Create logical tables
+            ensure!(
+                partitions.is_none(),
+                InvalidPartitionRuleSnafu {
+                    reason: "logical table in metric engine should not have partition rule, it will be inherited from physical table",
+                }
+            );
+            self.create_logical_tables(std::slice::from_ref(create_table), query_ctx)
                 .await?
                 .into_iter()
                 .next()
                 .context(error::UnexpectedSnafu {
-                    violated: "expected to create a logical table",
-                });
+                    violated: "expected to create logical tables",
+                })
+        } else {
+            // Create other normal table
+            self.create_non_logic_table(create_table, partitions, query_ctx)
+                .await
         }
+    }
 
+    #[tracing::instrument(skip_all)]
+    pub async fn create_non_logic_table(
+        &self,
+        create_table: &mut CreateTableExpr,
+        partitions: Option<Partitions>,
+        query_ctx: QueryContextRef,
+    ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
 
+        // Check if schema exists
         let schema = self
             .table_metadata_manager
             .schema_manager()
@@ -206,7 +232,6 @@ impl StatementExecutor {
             ))
             .await
             .context(TableMetadataManagerSnafu)?;
-
         ensure!(
             schema.is_some(),
             SchemaNotFoundSnafu {
@@ -347,10 +372,43 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub async fn create_trigger(
         &self,
-        _stmt: sql::statements::create::trigger::CreateTrigger,
-        _query_context: QueryContextRef,
+        stmt: CreateTrigger,
+        query_context: QueryContextRef,
     ) -> Result<Output> {
-        crate::error::UnsupportedTriggerSnafu {}.fail()
+        let expr = expr_helper::to_create_trigger_task_expr(stmt, &query_context)?;
+        self.create_trigger_inner(expr, query_context).await
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub async fn create_trigger_inner(
+        &self,
+        expr: PbCreateTriggerExpr,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        self.create_trigger_procedure(expr, query_context).await?;
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn create_trigger_procedure(
+        &self,
+        expr: PbCreateTriggerExpr,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let task = CreateTriggerTask::try_from(PbCreateTriggerTask {
+            create_trigger: Some(expr),
+        })
+        .context(error::InvalidExprSnafu)?;
+
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_create_trigger(task),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
     }
 
     #[tracing::instrument(skip_all)]

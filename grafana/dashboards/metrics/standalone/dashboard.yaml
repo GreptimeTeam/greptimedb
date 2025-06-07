@@ -487,7 +487,7 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{pod}}]'
-        - title: Compaction P99 per Instance by Stage
+        - title: Compaction Elapsed Time per Instance by Stage
           type: timeseries
           description: Compaction latency by stage
           unit: s
@@ -497,6 +497,11 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-p99'
+            - expr: sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_sum{}[$__rate_interval]))/sum by(instance, pod, le, stage) (rate(greptime_mito_compaction_stage_elapsed_count{}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-avg'
         - title: Compaction P99 per Instance
           type: timeseries
           description: Compaction P99 per Instance.
@@ -603,6 +608,21 @@ groups:
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-P95'
             - expr: sum by(le,instance, stage, pod) (rate(greptime_region_worker_handle_write_sum[$__rate_interval]))/sum by(le,instance, stage, pod) (rate(greptime_region_worker_handle_write_count[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG'
+        - title: Region Worker Convert Requests
+          type: timeseries
+          description: Per-stage elapsed time for region worker to decode requests.
+          unit: s
+          queries:
+            - expr: histogram_quantile(0.95, sum by(le, instance, stage, pod) (rate(greptime_datanode_convert_region_request_bucket[$__rate_interval])))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-P95'
+            - expr: sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_sum[$__rate_interval]))/sum by(le,instance, stage, pod) (rate(greptime_datanode_convert_region_request_count[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}

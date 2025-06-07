@@ -1,15 +1,21 @@
-CREATE TABLE demo(host string, cpu double, memory double, ts TIMESTAMP time index);
+CREATE TABLE demo(host string, cpu double, memory double, jsons JSON, ts TIMESTAMP time index);
 
 Affected Rows: 0
 
 insert into 
-    demo(host, cpu, memory, ts) 
+    demo(host, cpu, memory, jsons, ts) 
 values 
-    ('host1', 66.6, 1024, 1655276557000), 
-    ('host2', 88.8,  333.3, 1655276558000),
+    ('host1', 66.6, 1024, '{"foo":"bar"}', 1655276557000), 
+    ('host2', 88.8, 333.3, '{"a":null,"foo":"bar"}', 1655276558000);
+
+Affected Rows: 2
+
+insert into
+    demo(host, cpu, memory, ts)
+values
     ('host3', 99.9, 444.4, 1722077263000);
 
-Affected Rows: 3
+Affected Rows: 1
 
 Copy demo TO '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
 
@@ -31,6 +37,44 @@ select * from with_filename order by ts;
 | host1 | 66.6 | 1024.0 | 2022-06-15T07:02:37 |
 | host2 | 88.8 | 333.3  | 2022-06-15T07:02:38 |
 +-------+------+--------+---------------------+
+
+CREATE TABLE with_json(host string, cpu double, memory double, jsons JSON, ts timestamp time index);
+
+Affected Rows: 0
+
+Copy with_json FROM '${SQLNESS_HOME}/demo/export/json/demo.json' with (format='json');
+
+Affected Rows: 3
+
+select host, cpu, memory, json_to_string(jsons), ts from with_json order by ts;
+
++-------+------+--------+---------------------------------+---------------------+
+| host  | cpu  | memory | json_to_string(with_json.jsons) | ts                  |
++-------+------+--------+---------------------------------+---------------------+
+| host1 | 66.6 | 1024.0 | {"foo":"bar"}                   | 2022-06-15T07:02:37 |
+| host2 | 88.8 | 333.3  | {"a":null,"foo":"bar"}          | 2022-06-15T07:02:38 |
+| host3 | 99.9 | 444.4  |                                 | 2024-07-27T10:47:43 |
++-------+------+--------+---------------------------------+---------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
+
++-------+------+--------+------------------------+---------------------+
+| host  | cpu  | memory | jsons                  | ts                  |
++-------+------+--------+------------------------+---------------------+
+| host1 | 66.6 | 1024   | {"foo":"bar"}          | 2022-06-15 07:02:37 |
+| host2 | 88.8 | 333.3  | {"a":null,"foo":"bar"} | 2022-06-15 07:02:38 |
++-------+------+--------+------------------------+---------------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+select host, cpu, memory, jsons, ts from demo where host != 'host3';
+
++-------+------+--------+------------------------+----------------------------+
+| host  | cpu  | memory | jsons                  | ts                         |
++-------+------+--------+------------------------+----------------------------+
+| host1 | 66.6 | 1024   | {"foo":"bar"}          | 2022-06-15 07:02:37.000000 |
+| host2 | 88.8 | 333.3  | {"a":null,"foo":"bar"} | 2022-06-15 07:02:38.000000 |
++-------+------+--------+------------------------+----------------------------+
 
 CREATE TABLE with_path(host string, cpu double, memory double, ts timestamp time index);
 
@@ -107,6 +151,10 @@ drop table demo;
 Affected Rows: 0
 
 drop table with_filename;
+
+Affected Rows: 0
+
+drop table with_json;
 
 Affected Rows: 0
 

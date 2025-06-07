@@ -166,7 +166,7 @@ pub async fn logs(
             resp_body: ExportLogsServiceResponse {
                 partial_success: None,
             },
-            write_cost: o.meta.cost,
+            write_cost: o.iter().map(|o| o.meta.cost).sum(),
         })
 }
 

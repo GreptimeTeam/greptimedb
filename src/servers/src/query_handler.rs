@@ -122,7 +122,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<Vec<Output>>;
 }
 
 /// PipelineHandler is responsible for handling pipeline related requests.

@@ -65,7 +65,7 @@ impl SimpleBulkMemtable {
         } else {
             dedup
         };
-        let series = RwLock::new(Series::new(&region_metadata));
+        let series = RwLock::new(Series::with_capacity(&region_metadata, 1024));
 
         Self {
             id,

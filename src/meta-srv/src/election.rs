@@ -13,15 +13,14 @@
 // limitations under the License.
 
 pub mod etcd;
-#[cfg(feature = "mysql_kvbackend")]
-pub mod mysql;
-#[cfg(feature = "pg_kvbackend")]
-pub mod postgres;
+#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+pub mod rds;
 
 use std::fmt::{self, Debug};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 
@@ -108,6 +107,28 @@ fn listen_leader_change(leader_value: String) -> Sender<LeaderChangeMessage> {
         }
     });
     tx
+}
+
+/// Sends a leader change message to the channel and sets the `is_leader` flag.
+/// If a leader is elected, it will also set the `leader_infancy` flag to true.
+fn send_leader_change_and_set_flags(
+    is_leader: &AtomicBool,
+    leader_infancy: &AtomicBool,
+    tx: &Sender<LeaderChangeMessage>,
+    msg: LeaderChangeMessage,
+) {
+    let is_elected = matches!(msg, LeaderChangeMessage::Elected(_));
+    if is_leader
+        .compare_exchange(!is_elected, is_elected, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if is_elected {
+            leader_infancy.store(true, Ordering::Release);
+        }
+        if let Err(e) = tx.send(msg) {
+            error!(e; "Failed to send leader change message");
+        }
+    }
 }
 
 #[async_trait::async_trait]

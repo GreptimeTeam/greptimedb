@@ -25,7 +25,10 @@ use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{
+    map_json_type_to_string, map_json_type_to_string_schema, RecordBatchStream,
+    SendableRecordBatchMapper, SendableRecordBatchStream,
+};
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
@@ -57,6 +60,11 @@ impl StatementExecutor {
     ) -> Result<usize> {
         let threshold = WRITE_BUFFER_THRESHOLD.as_bytes() as usize;
 
+        let stream = Box::pin(SendableRecordBatchMapper::new(
+            stream,
+            map_json_type_to_string,
+            map_json_type_to_string_schema,
+        ));
         match format {
             Format::Csv(_) => stream_to_csv(
                 Box::pin(DfRecordBatchStreamAdapter::new(stream)),

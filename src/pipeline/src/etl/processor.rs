@@ -29,6 +29,7 @@ pub mod select;
 pub mod simple_extract;
 pub mod timestamp;
 pub mod urlencoding;
+pub mod vrl;
 
 use std::str::FromStr;
 
@@ -58,6 +59,7 @@ use crate::etl::field::{Field, Fields};
 use crate::etl::processor::json_parse::JsonParseProcessor;
 use crate::etl::processor::select::SelectProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
+use crate::etl::processor::vrl::VrlProcessor;
 use crate::etl::PipelineMap;
 
 const FIELD_NAME: &str = "field";
@@ -123,7 +125,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()>;
+    fn exec_mut(&self, val: PipelineMap) -> Result<PipelineMap>;
 }
 
 #[derive(Debug)]
@@ -146,6 +148,7 @@ pub enum ProcessorKind {
     Decolorize(DecolorizeProcessor),
     Digest(DigestProcessor),
     Select(SelectProcessor),
+    Vrl(VrlProcessor),
 }
 
 #[derive(Debug, Default)]
@@ -227,6 +230,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         json_parse::PROCESSOR_JSON_PARSE => {
             ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
+        vrl::PROCESSOR_VRL => ProcessorKind::Vrl(VrlProcessor::try_from(value)?),
         select::PROCESSOR_SELECT => ProcessorKind::Select(SelectProcessor::try_from(value)?),
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };

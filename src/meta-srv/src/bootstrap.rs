@@ -61,9 +61,9 @@ use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "mysql_kvbackend")]
-use crate::election::mysql::MySqlElection;
+use crate::election::rds::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
-use crate::election::postgres::PgElection;
+use crate::election::rds::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;

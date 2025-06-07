@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::{HashMap, HashSet};
 
 use api::helper::ColumnDataTypeWrapper;
@@ -55,6 +58,8 @@ use sql::statements::{
 use sql::util::extract_tables_from_query;
 use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use table::table_reference::TableReference;
+#[cfg(feature = "enterprise")]
+pub use trigger::to_create_trigger_task_expr;
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,

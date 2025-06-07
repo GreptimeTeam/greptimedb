@@ -1,0 +1,81 @@
+create table metric_engine_partition (
+    ts timestamp time index,
+    host string primary key,
+    cpu double,
+)
+partition on columns (host) (
+    host <= 'host1',
+    host > 'host1' and host <= 'host2',
+    host > 'host2'
+)
+engine = metric
+with (
+    physical_metric_table = "true",
+);
+
+Affected Rows: 0
+
+select count(*) from metric_engine_partition;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+create table logical_table_1 (
+    ts timestamp time index,
+    host string primary key,
+    cpu double,
+)
+partition on columns (host) ()
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
+Error: 1004(InvalidArguments), Invalid partition rule: logical table in metric engine should not have partition rule, it will be inherited from physical table
+
+create table logical_table_2 (
+    ts timestamp time index,
+    host string primary key,
+    cpu double,
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
+Affected Rows: 0
+
+show create table logical_table_2;
+
++-----------------+-------------------------------------------------+
+| Table           | Create Table                                    |
++-----------------+-------------------------------------------------+
+| logical_table_2 | CREATE TABLE IF NOT EXISTS "logical_table_2" (  |
+|                 |   "cpu" DOUBLE NULL,                            |
+|                 |   "host" STRING NULL,                           |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                 |   TIME INDEX ("ts"),                            |
+|                 |   PRIMARY KEY ("host")                          |
+|                 | )                                               |
+|                 | PARTITION ON COLUMNS ("host") (                 |
+|                 |   host <= 'host1',                              |
+|                 |   host > 'host2',                               |
+|                 |   host > 'host1' AND host <= 'host2'            |
+|                 | )                                               |
+|                 | ENGINE=metric                                   |
+|                 | WITH(                                           |
+|                 |   on_physical_table = 'metric_engine_partition' |
+|                 | )                                               |
++-----------------+-------------------------------------------------+
+
+drop table logical_table_2;
+
+Affected Rows: 0
+
+drop table metric_engine_partition;
+
+Affected Rows: 0
+

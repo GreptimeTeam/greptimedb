@@ -559,6 +559,8 @@ async fn open_all_regions(
     init_regions_parallelism: usize,
 ) -> Result<()> {
     let mut regions = vec![];
+    #[cfg(feature = "enterprise")]
+    let mut follower_regions = vec![];
     for table_value in table_values {
         for region_number in table_value.regions {
             // Augments region options with wal options if a wal options is provided.
@@ -570,6 +572,24 @@ async fn open_all_regions(
             );
 
             regions.push((
+                RegionId::new(table_value.table_id, region_number),
+                table_value.region_info.engine.clone(),
+                table_value.region_info.region_storage_path.clone(),
+                region_options,
+            ));
+        }
+
+        #[cfg(feature = "enterprise")]
+        for region_number in table_value.follower_regions {
+            // Augments region options with wal options if a wal options is provided.
+            let mut region_options = table_value.region_info.region_options.clone();
+            prepare_wal_options(
+                &mut region_options,
+                RegionId::new(table_value.table_id, region_number),
+                &table_value.region_info.region_wal_options,
+            );
+
+            follower_regions.push((
                 RegionId::new(table_value.table_id, region_number),
                 table_value.region_info.engine.clone(),
                 table_value.region_info.region_storage_path.clone(),
@@ -617,6 +637,43 @@ async fn open_all_regions(
             }
         }
     }
+
+    #[cfg(feature = "enterprise")]
+    if !follower_regions.is_empty() {
+        info!(
+            "going to open {} follower region(s)",
+            follower_regions.len()
+        );
+        let mut region_requests = Vec::with_capacity(follower_regions.len());
+        for (region_id, engine, store_path, options) in follower_regions {
+            let region_dir = region_dir(&store_path, region_id);
+            region_requests.push((
+                region_id,
+                RegionOpenRequest {
+                    engine,
+                    region_dir,
+                    options,
+                    skip_wal_replay: true,
+                },
+            ));
+        }
+
+        let open_regions = region_server
+            .handle_batch_open_requests(init_regions_parallelism, region_requests)
+            .await?;
+
+        ensure!(
+            open_regions.len() == num_regions,
+            error::UnexpectedSnafu {
+                violated: format!(
+                    "Expected to open {} of follower regions, only {} of regions has opened",
+                    num_regions,
+                    open_regions.len()
+                )
+            }
+        );
+    }
+
     info!("all regions are opened");
 
     Ok(())
@@ -632,6 +689,7 @@ mod tests {
     use common_base::Plugins;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::datanode_table::DatanodeTableManager;
+    use common_meta::key::RegionRoleSet;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
     use mito2::engine::MITO_ENGINE_NAME;
@@ -651,7 +709,7 @@ mod tests {
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
                 HashMap::default(),
-                BTreeMap::from([(0, vec![0, 1, 2])]),
+                BTreeMap::from([(0, RegionRoleSet::new(vec![0, 1, 2], vec![]))]),
             )
             .unwrap();
 

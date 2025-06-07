@@ -457,6 +457,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         ))
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
+        .with_influxdb_handler(instance.fe_instance().clone())
         .with_otlp_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());

@@ -104,6 +104,9 @@ macro_rules! http_tests {
                 test_identity_pipeline_with_custom_ts,
                 test_pipeline_dispatcher,
                 test_pipeline_suffix_template,
+                test_pipeline_context,
+                test_pipeline_with_vrl,
+                test_pipeline_with_hint_vrl,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -116,6 +119,8 @@ macro_rules! http_tests {
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
+
+                test_influxdb_write,
             );
         )*
     };
@@ -1155,6 +1160,9 @@ record_type = "system_table"
 threshold = "30s"
 sample_ratio = 1.0
 ttl = "30d"
+
+[query]
+parallelism = 0
 "#,
     )
     .trim()
@@ -2002,6 +2010,262 @@ table_suffix: _${type}
         &client,
         "select * from d_table_http",
         "[[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000],[2436,2528,\"http\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",\"INTERACT.MANAGER\",1716668197217000000]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_context(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_context").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let root_pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+
+transform:
+  - fields:
+      - id1, id1_root
+      - id2, id2_root
+    type: int32
+  - fields:
+      - type
+      - log
+      - logger
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+table_suffix: _${type}
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(root_pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "http",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n",
+    "greptime_ttl": "1d",
+    "greptime_skip_wal": "true"
+  },
+  {
+    "id1": "2436",
+    "id2": "2528",
+    "logger": "INTERACT.MANAGER",
+    "type": "db",
+    "time": "2024-05-25 20:16:37.217",
+    "log": "ClusterAdapter:enter sendTextDataToCluster\\n"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. check table list
+    validate_data(
+        "test_pipeline_context_table_list",
+        &client,
+        "show tables",
+        "[[\"d_table_db\"],[\"d_table_http\"],[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    // 4. check each table's data
+    // CREATE TABLE IF NOT EXISTS "d_table_db" (
+    //     ... ignore
+    //     )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //     )
+    let expected = "[[\"d_table_db\",\"CREATE TABLE IF NOT EXISTS \\\"d_table_db\\\" (\\n  \\\"id1_root\\\" INT NULL,\\n  \\\"id2_root\\\" INT NULL,\\n  \\\"type\\\" STRING NULL,\\n  \\\"log\\\" STRING NULL,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+
+    validate_data(
+        "test_pipeline_context_db",
+        &client,
+        "show create table d_table_db",
+        expected,
+    )
+    .await;
+
+    // CREATE TABLE IF NOT EXISTS "d_table_http" (
+    //     ... ignore
+    //     )
+    //     ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true',
+    //     skip_wal = 'true',
+    //     ttl = '1day'
+    //     )
+    let expected = "[[\"d_table_http\",\"CREATE TABLE IF NOT EXISTS \\\"d_table_http\\\" (\\n  \\\"id1_root\\\" INT NULL,\\n  \\\"id2_root\\\" INT NULL,\\n  \\\"type\\\" STRING NULL,\\n  \\\"log\\\" STRING NULL,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true',\\n  skip_wal = 'true',\\n  ttl = '1day'\\n)\"]]";
+    validate_data(
+        "test_pipeline_context_http",
+        &client,
+        "show create table d_table_http",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_with_vrl").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+  - vrl:
+      source: |
+        .log_id = .id
+        del(.id)
+        .
+
+transform:
+  - fields:
+      - log_id
+    type: int32
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id": "2436",
+    "time": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    validate_data(
+        "test_pipeline_with_vrl",
+        &client,
+        "select * from d_table",
+        "[[2436,1716668197217000000]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_with_hint_vrl(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(storage_type, "test_pipeline_with_hint_vrl").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+  - vrl:
+      source: |
+        .greptime_table_suffix, err = "_" + .id
+        .
+
+transform:
+  - fields:
+      - id
+    type: int32
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id": "2436",
+    "time": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    validate_data(
+        "test_pipeline_with_hint_vrl",
+        &client,
+        "show tables",
+        "[[\"d_table_2436\"],[\"demo\"],[\"numbers\"]]",
     )
     .await;
 
@@ -4468,6 +4732,52 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     let expected: Value = serde_json::from_str(expected).unwrap();
     assert_eq!(resp, expected);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_influxdb_write(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_influxdb_write").await;
+
+    let client = TestClient::new(app).await;
+
+    // Only write field cpu.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // Only write field mem.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 mem=10240.0 1664370469457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    // Write field cpu & mem.
+    let result = client
+        .post("/v1/influxdb/write?db=public&p=greptime&u=greptime")
+        .body("test_alter,host=host1 cpu=3.2,mem=20480.0 1664370479457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
+    let expected = r#"[["host1",1.2,1664370459457010101,null],["host1",null,1664370469457010101,10240.0],["host1",3.2,1664370479457010101,20480.0]]"#;
+    validate_data(
+        "test_influxdb_write",
+        &client,
+        "select * from test_alter order by ts;",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }
