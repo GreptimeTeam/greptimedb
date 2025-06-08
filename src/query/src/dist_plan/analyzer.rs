@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
@@ -148,12 +149,13 @@ struct PlanRewriter {
     level: usize,
     /// Simulated stack for the `rewrite` recursion
     stack: Vec<(LogicalPlan, usize)>,
-    /// Stages to be expanded
+    /// Stages to be expanded, will be added as parent node of merge scan one by one
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
     column_requirements: HashSet<Column>,
+    expand_on_next_call: bool,
 }
 
 impl PlanRewriter {
@@ -174,6 +176,10 @@ impl PlanRewriter {
         {
             return true;
         }
+        if self.expand_on_next_call {
+            self.expand_on_next_call = false;
+            return true;
+        }
         match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -190,12 +196,20 @@ impl PlanRewriter {
                     self.stage.push(plan)
                 }
             }
-            Commutativity::TransformedCommutative(transformer) => {
+            Commutativity::TransformedCommutative {
+                transformer,
+                expand_on_parent,
+            } => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan)
+                    && let Some(changed_plan) = transformer(plan)
                 {
-                    self.update_column_requirements(&plan);
-                    self.stage.push(plan)
+                    debug!("PlanRewriter: transformed plan: {changed_plan:#?} from {plan}");
+                    if let Some(last_stage) = changed_plan.last() {
+                        // update the column requirements from the last stage
+                        self.update_column_requirements(last_stage);
+                    }
+                    self.stage.extend(changed_plan.into_iter().rev());
+                    self.expand_on_next_call = expand_on_parent;
                 }
             }
             Commutativity::NonCommutative
@@ -391,10 +405,21 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(Transformed::yes(node));
         };
 
+        let parent = parent.clone();
+
         // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent.clone()) {
+        if self.should_expand(&parent) {
             // TODO(ruihang): does this work for nodes with multiple children?;
-            let node = self.expand(node)?;
+            debug!("PlanRewriter: should expand child:\n {node}\n Of Parent: {parent}");
+            let node = self.expand(node);
+            debug!(
+                "PlanRewriter: expanded plan: {}",
+                match &node {
+                    Ok(n) => n.to_string(),
+                    Err(e) => format!("Error expanding plan: {e}"),
+                }
+            );
+            let node = node?;
             self.pop_stack();
             return Ok(Transformed::yes(node));
         }

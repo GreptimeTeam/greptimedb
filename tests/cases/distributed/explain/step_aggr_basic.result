@@ -1,0 +1,80 @@
+CREATE TABLE integers(
+    host STRING,
+    i BIGINT,
+    ts TIMESTAMP TIME INDEX
+) PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A'
+    AND host < '550-W',
+    host >= '550-W'
+);
+
+Affected Rows: 0
+
+-- count
+EXPLAIN SELECT
+    count(i)
+FROM
+    integers;
+
++---------------+-------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]                         |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[count(integers.i)]]          |
+|               |   TableScan: integers]                                                                                |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[count(integers.i)]                                           |
+|               |   CoalescePartitionsExec                                                                              |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[count(integers.i)]                                     |
+|               |       MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), 4398046511106(1024, 2), ] |
+|               |                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]                |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[count(integers.i)]] |
+|               |   TableScan: integers]                                                                                  |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i)]                        |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(integers.i)]                           |
+|               |         MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), 4398046511106(1024, 2), ] |
+|               |                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    date_bin('1 hour'::INTERVAL, ts),
+    count(i)
+FROM
+    integers
+GROUP BY
+    date_bin('1 hour'::INTERVAL, ts);
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                              |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[date_bin(Utf8("1 hour"),integers.ts) AS date_bin(Utf8("1 hour"),integers.ts)]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]         |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[date_bin(CAST(Utf8("1 hour") AS Interval(MonthDayNano)), integers.ts)]], aggr=[[count(integers.i)]] |
+|               |   TableScan: integers]                                                                                                                                            |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[date_bin(Utf8("1 hour"),integers.ts)@0 as date_bin(Utf8("1 hour"),integers.ts)], aggr=[count(integers.i)]              |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                                                                                     |
+|               |     RepartitionExec: partitioning=Hash([date_bin(Utf8("1 hour"),integers.ts)@0], 20), input_partitions=20                                                         |
+|               |       AggregateExec: mode=Partial, gby=[date_bin(Utf8("1 hour"),integers.ts)@0 as date_bin(Utf8("1 hour"),integers.ts)], aggr=[count(integers.i)]                 |
+|               |         MergeScanExec: peers=[4398046511104(1024, 0), 4398046511105(1024, 1), 4398046511106(1024, 2), ]                                                           |
+|               |                                                                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE integers;
+
+Affected Rows: 0
+

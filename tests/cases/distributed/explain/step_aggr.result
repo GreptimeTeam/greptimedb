@@ -1,0 +1,409 @@
+CREATE TABLE integers(
+    host STRING,
+    i BIGINT,
+    ts TIMESTAMP TIME INDEX
+) PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A'
+    AND host < '550-W',
+    host >= '550-W'
+);
+
+Affected Rows: 0
+
+INSERT INTO integers (host, i, ts) VALUES
+    ('550-A', 1, '2023-01-01 00:00:00'),
+    ('550-A', 2, '2023-01-01 01:00:00'),
+    ('550-W', 3, '2023-01-01 02:00:00'),
+    ('550-W', 4, '2023-01-01 03:00:00');
+
+Affected Rows: 4
+
+-- count
+EXPLAIN SELECT
+    count(i)
+FROM
+    integers;
+
++---------------+-------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]                         |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[count(integers.i)]]          |
+|               |   TableScan: integers]                                                                                |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[count(integers.i)]                                           |
+|               |   CoalescePartitionsExec                                                                              |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[count(integers.i)]                                     |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]                |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[count(integers.i)]] |
+|               |   TableScan: integers]                                                                                  |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i)]                        |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(integers.i)]                           |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: count(integers.i)                                                                             |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[sum(count(integers.i)) AS count(integers.i)]]                |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[count(integers.i)]] |
+|               |   TableScan: integers]                                                                                    |
+| physical_plan | ProjectionExec: expr=[count(integers.i)@1 as count(integers.i)]                                           |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i)]                        |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[count(integers.i)]                           |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
+
+-- sum
+EXPLAIN SELECT
+    sum(i)
+FROM
+    integers;
+
++---------------+-------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[sum(sum(integers.i)) AS sum(integers.i)]]                             |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[sum(integers.i)]]            |
+|               |   TableScan: integers]                                                                                |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[sum(integers.i)]                                             |
+|               |   CoalescePartitionsExec                                                                              |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[sum(integers.i)]                                       |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    sum(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[sum(sum(integers.i)) AS sum(integers.i)]]                    |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[sum(integers.i)]]   |
+|               |   TableScan: integers]                                                                                  |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(integers.i)]                          |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(integers.i)]                             |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    sum(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: sum(integers.i)                                                                               |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[sum(sum(integers.i)) AS sum(integers.i)]]                    |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[sum(integers.i)]]   |
+|               |   TableScan: integers]                                                                                    |
+| physical_plan | ProjectionExec: expr=[sum(integers.i)@1 as sum(integers.i)]                                               |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(integers.i)]                          |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(integers.i)]                             |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
+
+-- min
+EXPLAIN SELECT
+    min(i)
+FROM
+    integers;
+
++---------------+-------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[min(min(integers.i)) AS min(integers.i)]]                             |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[min(integers.i)]]            |
+|               |   TableScan: integers]                                                                                |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[min(integers.i)]                                             |
+|               |   CoalescePartitionsExec                                                                              |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[min(integers.i)]                                       |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    min(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[min(min(integers.i)) AS min(integers.i)]]                    |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[min(integers.i)]]   |
+|               |   TableScan: integers]                                                                                  |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[min(integers.i)]                          |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[min(integers.i)]                             |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    min(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: min(integers.i)                                                                               |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[min(min(integers.i)) AS min(integers.i)]]                    |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[min(integers.i)]]   |
+|               |   TableScan: integers]                                                                                    |
+| physical_plan | ProjectionExec: expr=[min(integers.i)@1 as min(integers.i)]                                               |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[min(integers.i)]                          |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[min(integers.i)]                             |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
+
+-- max
+EXPLAIN SELECT
+    max(i)
+FROM
+    integers;
+
++---------------+-------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[max(max(integers.i)) AS max(integers.i)]]                             |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]            |
+|               |   TableScan: integers]                                                                                |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[max(integers.i)]                                             |
+|               |   CoalescePartitionsExec                                                                              |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[max(integers.i)]                                       |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    max(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[max(max(integers.i)) AS max(integers.i)]]                    |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[max(integers.i)]]   |
+|               |   TableScan: integers]                                                                                  |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[max(integers.i)]                          |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[max(integers.i)]                             |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    max(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: max(integers.i)                                                                               |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[max(max(integers.i)) AS max(integers.i)]]                    |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[max(integers.i)]]   |
+|               |   TableScan: integers]                                                                                    |
+| physical_plan | ProjectionExec: expr=[max(integers.i)@1 as max(integers.i)]                                               |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[max(integers.i)]                          |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                           |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                 |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[max(integers.i)]                             |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ] |
+|               |                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------+
+
+-- uddsketch_state
+EXPLAIN SELECT
+    uddsketch_state(128, 0.01, i)
+FROM
+    integers;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                       |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), uddsketch_state(Int64(128),Float64(0.01),integers.i)) AS uddsketch_state(Int64(128),Float64(0.01),integers.i)]] |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[uddsketch_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64))]]                                         |
+|               |   TableScan: integers]                                                                                                                                                                     |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                             |
+|               |   CoalescePartitionsExec                                                                                                                                                                   |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                       |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]                                                                                      |
+|               |                                                                                                                                                                                            |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    uddsketch_state(128, 0.01, i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), uddsketch_state(Int64(128),Float64(0.01),integers.i)) AS uddsketch_state(Int64(128),Float64(0.01),integers.i)]] |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[uddsketch_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64))]]                                         |
+|               |   TableScan: integers]                                                                                                                                                                                |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                   |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                         |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                                                                                                               |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                      |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]                                                                                               |
+|               |                                                                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    uddsketch_state(128, 0.01, i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: uddsketch_state(Int64(128),Float64(0.01),integers.i)                                                                                                                                        |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), uddsketch_state(Int64(128),Float64(0.01),integers.i)) AS uddsketch_state(Int64(128),Float64(0.01),integers.i)]] |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[uddsketch_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64))]]                                         |
+|               |   TableScan: integers]                                                                                                                                                                                  |
+| physical_plan | ProjectionExec: expr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)@1 as uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                   |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                   |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                         |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                                                                                                               |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[uddsketch_state(Int64(128),Float64(0.01),integers.i)]                                                                                      |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]                                                                                               |
+|               |                                                                                                                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- hll
+EXPLAIN SELECT
+    hll(i)
+FROM
+    integers;
+
++---------------+----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                     |
++---------------+----------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[]], aggr=[[hll_merge(hll(integers.i)) AS hll(integers.i)]]                          |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[]], aggr=[[hll(CAST(integers.i AS Utf8))]] |
+|               |   TableScan: integers]                                                                                   |
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[hll(integers.i)]                                                |
+|               |   CoalescePartitionsExec                                                                                 |
+|               |     AggregateExec: mode=Partial, gby=[], aggr=[hll(integers.i)]                                          |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]    |
+|               |                                                                                                          |
++---------------+----------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    ts,
+    hll(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+---------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                |
++---------------+---------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Aggregate: groupBy=[[integers.ts]], aggr=[[hll_merge(hll(integers.i)) AS hll(integers.i)]]                          |
+|               |   MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[hll(CAST(integers.i AS Utf8))]] |
+|               |   TableScan: integers]                                                                                              |
+| physical_plan | AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[hll(integers.i)]                                      |
+|               |   CoalesceBatchesExec: target_batch_size=8192                                                                       |
+|               |     RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                             |
+|               |       AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[hll(integers.i)]                                         |
+|               |         MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]             |
+|               |                                                                                                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------+
+
+EXPLAIN SELECT
+    hll(i)
+FROM
+    integers
+GROUP BY
+    ts;
+
++---------------+-----------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                  |
++---------------+-----------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: hll(integers.i)                                                                                           |
+|               |   Aggregate: groupBy=[[integers.ts]], aggr=[[hll_merge(hll(integers.i)) AS hll(integers.i)]]                          |
+|               |     MergeScan [is_placeholder=false, input=Aggregate: groupBy=[[integers.ts]], aggr=[[hll(CAST(integers.i AS Utf8))]] |
+|               |   TableScan: integers]                                                                                                |
+| physical_plan | ProjectionExec: expr=[hll(integers.i)@1 as hll(integers.i)]                                                           |
+|               |   AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[hll(integers.i)]                                      |
+|               |     CoalesceBatchesExec: target_batch_size=8192                                                                       |
+|               |       RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20                                             |
+|               |         AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[hll(integers.i)]                                         |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), 4402341478401(1025, 1), 4402341478402(1025, 2), ]             |
+|               |                                                                                                                       |
++---------------+-----------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
