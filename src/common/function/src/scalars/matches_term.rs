@@ -77,7 +77,7 @@ pub struct MatchesTermFunction;
 
 impl MatchesTermFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(MatchesTermFunction));
+        registry.register_scalar(MatchesTermFunction);
     }
 }
 

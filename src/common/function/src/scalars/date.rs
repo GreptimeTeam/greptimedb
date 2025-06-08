@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 mod date_add;
 mod date_format;
 mod date_sub;
@@ -27,8 +26,8 @@ pub(crate) struct DateFunction;
 
 impl DateFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(DateAddFunction));
-        registry.register(Arc::new(DateSubFunction));
-        registry.register(Arc::new(DateFormatFunction));
+        registry.register_scalar(DateAddFunction);
+        registry.register_scalar(DateSubFunction);
+        registry.register_scalar(DateFormatFunction);
     }
 }

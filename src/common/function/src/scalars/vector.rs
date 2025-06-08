@@ -28,36 +28,34 @@ mod vector_norm;
 mod vector_sub;
 mod vector_subvector;
 
-use std::sync::Arc;
-
 use crate::function_registry::FunctionRegistry;
 pub(crate) struct VectorFunction;
 
 impl VectorFunction {
     pub fn register(registry: &FunctionRegistry) {
         // conversion
-        registry.register(Arc::new(convert::ParseVectorFunction));
-        registry.register(Arc::new(convert::VectorToStringFunction));
+        registry.register_scalar(convert::ParseVectorFunction);
+        registry.register_scalar(convert::VectorToStringFunction);
 
         // distance
-        registry.register(Arc::new(distance::CosDistanceFunction));
-        registry.register(Arc::new(distance::DotProductFunction));
-        registry.register(Arc::new(distance::L2SqDistanceFunction));
+        registry.register_scalar(distance::CosDistanceFunction);
+        registry.register_scalar(distance::DotProductFunction);
+        registry.register_scalar(distance::L2SqDistanceFunction);
 
         // scalar calculation
-        registry.register(Arc::new(scalar_add::ScalarAddFunction));
-        registry.register(Arc::new(scalar_mul::ScalarMulFunction));
+        registry.register_scalar(scalar_add::ScalarAddFunction);
+        registry.register_scalar(scalar_mul::ScalarMulFunction);
 
         // vector calculation
-        registry.register(Arc::new(vector_add::VectorAddFunction));
-        registry.register(Arc::new(vector_sub::VectorSubFunction));
-        registry.register(Arc::new(vector_mul::VectorMulFunction));
-        registry.register(Arc::new(vector_div::VectorDivFunction));
-        registry.register(Arc::new(vector_norm::VectorNormFunction));
-        registry.register(Arc::new(vector_dim::VectorDimFunction));
-        registry.register(Arc::new(vector_kth_elem::VectorKthElemFunction));
-        registry.register(Arc::new(vector_subvector::VectorSubvectorFunction));
-        registry.register(Arc::new(elem_sum::ElemSumFunction));
-        registry.register(Arc::new(elem_product::ElemProductFunction));
+        registry.register_scalar(vector_add::VectorAddFunction);
+        registry.register_scalar(vector_sub::VectorSubFunction);
+        registry.register_scalar(vector_mul::VectorMulFunction);
+        registry.register_scalar(vector_div::VectorDivFunction);
+        registry.register_scalar(vector_norm::VectorNormFunction);
+        registry.register_scalar(vector_dim::VectorDimFunction);
+        registry.register_scalar(vector_kth_elem::VectorKthElemFunction);
+        registry.register_scalar(vector_subvector::VectorSubvectorFunction);
+        registry.register_scalar(elem_sum::ElemSumFunction);
+        registry.register_scalar(elem_product::ElemProductFunction);
     }
 }

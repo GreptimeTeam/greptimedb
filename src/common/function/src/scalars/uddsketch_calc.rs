@@ -16,7 +16,6 @@
 
 use std::fmt;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::{Signature, Volatility};
@@ -44,7 +43,7 @@ pub struct UddSketchCalcFunction;
 
 impl UddSketchCalcFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(UddSketchCalcFunction));
+        registry.register_scalar(UddSketchCalcFunction);
     }
 }
 

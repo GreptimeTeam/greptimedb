@@ -17,8 +17,6 @@ mod ipv4;
 mod ipv6;
 mod range;
 
-use std::sync::Arc;
-
 use cidr::{Ipv4ToCidr, Ipv6ToCidr};
 use ipv4::{Ipv4NumToString, Ipv4StringToNum};
 use ipv6::{Ipv6NumToString, Ipv6StringToNum};
@@ -31,15 +29,15 @@ pub(crate) struct IpFunctions;
 impl IpFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // Register IPv4 functions
-        registry.register(Arc::new(Ipv4NumToString));
-        registry.register(Arc::new(Ipv4StringToNum));
-        registry.register(Arc::new(Ipv4ToCidr));
-        registry.register(Arc::new(Ipv4InRange));
+        registry.register_scalar(Ipv4NumToString);
+        registry.register_scalar(Ipv4StringToNum);
+        registry.register_scalar(Ipv4ToCidr);
+        registry.register_scalar(Ipv4InRange);
 
         // Register IPv6 functions
-        registry.register(Arc::new(Ipv6NumToString));
-        registry.register(Arc::new(Ipv6StringToNum));
-        registry.register(Arc::new(Ipv6ToCidr));
-        registry.register(Arc::new(Ipv6InRange));
+        registry.register_scalar(Ipv6NumToString);
+        registry.register_scalar(Ipv6StringToNum);
+        registry.register_scalar(Ipv6ToCidr);
+        registry.register_scalar(Ipv6InRange);
     }
 }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 pub mod json_get;
 mod json_is;
 mod json_path_exists;
@@ -33,23 +32,23 @@ pub(crate) struct JsonFunction;
 
 impl JsonFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(JsonToStringFunction));
-        registry.register(Arc::new(ParseJsonFunction));
+        registry.register_scalar(JsonToStringFunction);
+        registry.register_scalar(ParseJsonFunction);
 
-        registry.register(Arc::new(JsonGetInt));
-        registry.register(Arc::new(JsonGetFloat));
-        registry.register(Arc::new(JsonGetString));
-        registry.register(Arc::new(JsonGetBool));
+        registry.register_scalar(JsonGetInt);
+        registry.register_scalar(JsonGetFloat);
+        registry.register_scalar(JsonGetString);
+        registry.register_scalar(JsonGetBool);
 
-        registry.register(Arc::new(JsonIsNull));
-        registry.register(Arc::new(JsonIsInt));
-        registry.register(Arc::new(JsonIsFloat));
-        registry.register(Arc::new(JsonIsString));
-        registry.register(Arc::new(JsonIsBool));
-        registry.register(Arc::new(JsonIsArray));
-        registry.register(Arc::new(JsonIsObject));
+        registry.register_scalar(JsonIsNull);
+        registry.register_scalar(JsonIsInt);
+        registry.register_scalar(JsonIsFloat);
+        registry.register_scalar(JsonIsString);
+        registry.register_scalar(JsonIsBool);
+        registry.register_scalar(JsonIsArray);
+        registry.register_scalar(JsonIsObject);
 
-        registry.register(Arc::new(json_path_exists::JsonPathExistsFunction));
-        registry.register(Arc::new(json_path_match::JsonPathMatchFunction));
+        registry.register_scalar(json_path_exists::JsonPathExistsFunction);
+        registry.register_scalar(json_path_match::JsonPathMatchFunction);
     }
 }

@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 use crate::admin::AdminFunction;
 use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
-use crate::function::{AsyncFunctionRef, FunctionRef};
+use crate::function::{AsyncFunctionRef, Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
@@ -45,12 +45,17 @@ pub struct FunctionRegistry {
 }
 
 impl FunctionRegistry {
-    pub fn register(&self, func: FunctionRef) {
+    pub fn register(&self, func: impl Into<ScalarFunctionFactory>) {
+        let func = func.into();
         let _ = self
             .functions
             .write()
             .unwrap()
-            .insert(func.name().to_string(), func.into());
+            .insert(func.name().to_string(), func);
+    }
+
+    pub fn register_scalar(&self, func: impl Function + 'static) {
+        self.register(Arc::new(func) as FunctionRef);
     }
 
     pub fn register_async(&self, func: AsyncFunctionRef) {
@@ -150,11 +155,10 @@ mod tests {
     #[test]
     fn test_function_registry() {
         let registry = FunctionRegistry::default();
-        let func = Arc::new(TestAndFunction);
 
         assert!(registry.get_function("test_and").is_none());
         assert!(registry.scalar_functions().is_empty());
-        registry.register(func);
+        registry.register_scalar(TestAndFunction);
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
     }

@@ -42,7 +42,7 @@ pub struct MatchesFunction;
 
 impl MatchesFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(MatchesFunction));
+        registry.register_scalar(MatchesFunction);
     }
 }
 

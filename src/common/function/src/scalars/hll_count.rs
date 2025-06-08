@@ -16,7 +16,6 @@
 
 use std::fmt;
 use std::fmt::Display;
-use std::sync::Arc;
 
 use common_query::error::{DowncastVectorSnafu, InvalidFuncArgsSnafu, Result};
 use common_query::prelude::{Signature, Volatility};
@@ -44,7 +43,7 @@ pub struct HllCalcFunction;
 
 impl HllCalcFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(HllCalcFunction));
+        registry.register_scalar(HllCalcFunction);
     }
 }
 
@@ -117,6 +116,8 @@ impl Function for HllCalcFunction {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::vectors::BinaryVector;
 
     use super::*;
