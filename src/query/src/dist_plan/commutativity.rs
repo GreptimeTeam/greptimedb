@@ -15,6 +15,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_function::aggr::{HllState, UddSketchState, HLL_NAME, UDDSKETCH_STATE_NAME};
+use common_telemetry::debug;
+use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -23,12 +26,157 @@ use promql::extension_plan::{
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
+/// generate the upper aggregation plan that will execute on the frontend.
+pub fn step_aggr_to_upper_aggr(aggr_plan: &LogicalPlan) -> datafusion_common::Result<LogicalPlan> {
+    let LogicalPlan::Aggregate(aggr) = aggr_plan else {
+        return Err(datafusion_common::DataFusionError::Plan(
+            "step_aggr_to_upper_aggr only accepts Aggregate plan".to_string(),
+        ));
+    };
+    if !is_all_aggr_exprs_steppable(&aggr.aggr_expr) {
+        return Err(datafusion_common::DataFusionError::NotImplemented(
+            "Some aggregate expressions are not steppable".to_string(),
+        ));
+    }
+    let mut upper_aggr_expr = vec![];
+    for aggr_expr in &aggr.aggr_expr {
+        let Some(aggr_func) = get_aggr_func(aggr_expr) else {
+            return Err(datafusion_common::DataFusionError::NotImplemented(
+                "Aggregate function not found".to_string(),
+            ));
+        };
+        let col_name = aggr_expr.name_for_alias()?;
+        let input_column =
+            Expr::Column(datafusion_common::Column::new_unqualified(col_name.clone()));
+        let upper_func = match aggr_func.func.name() {
+            "sum" | "min" | "max" | "last_value" | "first_value" => {
+                // aggr_calc(aggr_merge(input_column))) as col_name
+                let mut new_aggr_func = aggr_func.clone();
+                new_aggr_func.args = vec![input_column.clone()];
+                new_aggr_func
+            }
+            "count" => {
+                // sum(input_column) as col_name
+                let mut new_aggr_func = aggr_func.clone();
+                new_aggr_func.func = sum_udaf();
+                new_aggr_func.args = vec![input_column.clone()];
+                new_aggr_func
+            }
+            UDDSKETCH_STATE_NAME => {
+                // udd_merge(bucket_size, error_rate input_column) as col_name
+                let mut new_aggr_func = aggr_func.clone();
+                new_aggr_func.func = Arc::new(UddSketchState::merge_udf_impl());
+                new_aggr_func.args[2] = input_column.clone();
+                new_aggr_func
+            }
+            HLL_NAME => {
+                // hll_merge(input_column) as col_name
+                let mut new_aggr_func = aggr_func.clone();
+                new_aggr_func.func = Arc::new(HllState::merge_udf_impl());
+                new_aggr_func.args = vec![input_column.clone()];
+                new_aggr_func
+            }
+            _ => {
+                return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                    "Aggregate function {} is not supported for Step aggregation",
+                    aggr_func.func.name()
+                )))
+            }
+        };
+
+        // deal with nested alias case
+        let mut new_aggr_expr = aggr_expr.clone();
+        {
+            let new_aggr_func = get_aggr_func_mut(&mut new_aggr_expr).unwrap();
+            *new_aggr_func = upper_func;
+        }
+
+        // make the column name the same, so parent can recognize it
+        upper_aggr_expr.push(new_aggr_expr.alias(col_name));
+    }
+    let mut new_aggr = aggr.clone();
+    new_aggr.aggr_expr = upper_aggr_expr;
+    // group by expr also need alias to avoid duplicated computing
+
+    let mut new_group_expr = new_aggr.group_expr.clone();
+    for expr in &mut new_group_expr {
+        if let Expr::Column(_) = expr {
+            // already a column, no need to change
+            continue;
+        }
+        let col_name = expr.name_for_alias()?;
+        let input_column =
+            Expr::Column(datafusion_common::Column::new_unqualified(col_name.clone()));
+        *expr = input_column.alias(col_name);
+    }
+    new_aggr.group_expr = new_group_expr;
+    // return the new logical plan
+    Ok(LogicalPlan::Aggregate(new_aggr))
+}
+
+/// Check if the given aggregate expression is steppable.
+/// As in if it can be split into multiple steps:
+/// i.e. on datanode first call `state(input)` then
+/// on frontend call `calc(merge(state))` to get the final result.
+///
+pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
+    let step_action = HashSet::from([
+        "sum",
+        "count",
+        "min",
+        "max",
+        "first_value",
+        "last_value",
+        UDDSKETCH_STATE_NAME,
+        HLL_NAME,
+    ]);
+    aggr_exprs.iter().all(|expr| {
+        if let Some(aggr_func) = get_aggr_func(expr) {
+            if aggr_func.distinct {
+                // Distinct aggregate functions are not steppable(yet).
+                return false;
+            }
+            step_action.contains(aggr_func.func.name())
+        } else {
+            false
+        }
+    })
+}
+
+pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
+    let mut expr_ref = expr;
+    while let Expr::Alias(alias) = expr_ref {
+        expr_ref = &alias.expr;
+    }
+    if let Expr::AggregateFunction(aggr_func) = expr_ref {
+        Some(aggr_func)
+    } else {
+        None
+    }
+}
+
+pub fn get_aggr_func_mut(expr: &mut Expr) -> Option<&mut datafusion_expr::expr::AggregateFunction> {
+    let mut expr_ref = expr;
+    while let Expr::Alias(alias) = expr_ref {
+        expr_ref = &mut alias.expr;
+    }
+    if let Expr::AggregateFunction(aggr_func) = expr_ref {
+        Some(aggr_func)
+    } else {
+        None
+    }
+}
+
 #[allow(dead_code)]
 pub enum Commutativity {
     Commutative,
     PartialCommutative,
     ConditionalCommutative(Option<Transformer>),
-    TransformedCommutative(Option<Transformer>),
+    TransformedCommutative {
+        transformer: Option<Transformer>,
+        /// whether the transformer changes the child to parent
+        expand_on_parent: bool,
+    },
     NonCommutative,
     Unimplemented,
     /// For unrelated plans like DDL
@@ -55,7 +203,18 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                if !Self::check_partition(&aggr.group_expr, &partition_cols) {
+                let is_all_steppable = is_all_aggr_exprs_steppable(&aggr.aggr_expr);
+                let is_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
+                if !is_partition && is_all_steppable {
+                    debug!("Plan is steppable: {plan}");
+                    return Commutativity::TransformedCommutative {
+                        transformer: Some(Arc::new(|plan: &LogicalPlan| {
+                            step_aggr_to_upper_aggr(plan).ok()
+                        })),
+                        expand_on_parent: true,
+                    };
+                }
+                if !is_partition {
                     return Commutativity::NonCommutative;
                 }
                 for expr in &aggr.aggr_expr {
