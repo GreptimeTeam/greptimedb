@@ -142,7 +142,7 @@ impl VersionControl {
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
     pub(crate) fn mark_dropped(&self, memtable_builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        let part_duration = version.memtables.mutable.part_duration();
+        let part_duration = Some(version.memtables.mutable.part_duration());
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
         let new_mutable = Arc::new(TimePartitions::new(
             version.metadata.clone(),
@@ -166,7 +166,7 @@ impl VersionControl {
     /// new schema. Memtables of the version must be empty.
     pub(crate) fn alter_schema(&self, metadata: RegionMetadataRef, builder: &MemtableBuilderRef) {
         let version = self.current().version;
-        let part_duration = version.memtables.mutable.part_duration();
+        let part_duration = Some(version.memtables.mutable.part_duration());
         let next_memtable_id = version.memtables.mutable.next_memtable_id();
         let new_mutable = Arc::new(TimePartitions::new(
             metadata.clone(),
@@ -202,7 +202,7 @@ impl VersionControl {
             version.metadata.clone(),
             memtable_builder.clone(),
             next_memtable_id,
-            part_duration,
+            Some(part_duration),
         ));
         let new_version = Arc::new(
             VersionBuilder::new(version.metadata.clone(), new_mutable)

@@ -145,7 +145,7 @@ INSERT INTO t1 (ts, val, host) VALUES
 
 Affected Rows: 6
 
-SELECT * FROM t1;
+SELECT * FROM t1 ORDER BY ts ASC;
 
 +-------------+---------------------+------+
 | host        | ts                  | val  |
@@ -159,7 +159,7 @@ ALTER TABLE t1 ADD COLUMN k STRING PRIMARY KEY;
 
 Affected Rows: 0
 
-SELECT * FROM t1;
+SELECT * FROM t1 ORDER BY ts ASC;
 
 +-------------+---+---------------------+------+
 | host        | k | ts                  | val  |
