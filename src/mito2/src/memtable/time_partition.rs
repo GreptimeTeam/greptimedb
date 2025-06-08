@@ -315,7 +315,7 @@ impl TimePartitions {
                     .with_context(|| InvalidRequestSnafu {
                         region_id: self.metadata.region_id,
                         reason: format!(
-                            "Partition time range for {part_start:?} is out of bound, bucket size: {:?}",self.part_duration
+                            "Partition time range for {part_start:?} is out of bound, bucket size: {:?}", self.part_duration
                         ),
                     })?;
                 let memtable = self
