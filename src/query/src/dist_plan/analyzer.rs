@@ -31,7 +31,7 @@ use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::commutativity::{
-    partial_commutative_transformer, Categorizer, Commutativity,
+    is_all_aggr_exprs_steppable, partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::plan::ExtractExpr;
