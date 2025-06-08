@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
@@ -55,6 +55,10 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
+                let is_all_steppable = Self::is_all_aggr_exprs_steppable(&aggr.aggr_expr);
+                if is_all_steppable {
+                    todo!("transformmed commutative");
+                }
                 if !Self::check_partition(&aggr.group_expr, &partition_cols) {
                     return Commutativity::NonCommutative;
                 }
@@ -151,6 +155,29 @@ impl Categorizer {
             }
             _ => Commutativity::Unsupported,
         }
+    }
+
+    /// Check if the given aggregate expression is steppable.
+    /// As in if it can be split into multiple steps:
+    /// i.e. on datanode first call `state(input)` then
+    /// on frontend call `calc(merge(state))` to get the final result.
+    ///
+    pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
+        let step_action = HashMap::from([
+            ("sum", ("sum", "sum")),
+            ("count", ("count", "sum")),
+            ("min", ("min", "min")),
+            ("max", ("max", "max")),
+            ("uddsketch_state", ("uddsketch_merge", "")),
+            ("hll", ("hll_merge", "")),
+        ]);
+        aggr_exprs.iter().all(|expr| {
+            if let Expr::AggregateFunction(aggr_func) = expr {
+                step_action.contains_key(aggr_func.func.name())
+            } else {
+                false
+            }
+        })
     }
 
     pub fn check_expr(expr: &Expr) -> Commutativity {
