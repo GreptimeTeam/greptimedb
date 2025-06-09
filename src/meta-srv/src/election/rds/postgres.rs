@@ -454,7 +454,6 @@ impl Election for PgElection {
     }
 
     async fn reset_campaign(&self) {
-        self.is_leader.store(false, Ordering::Relaxed);
         if let Err(err) = self.pg_client.write().await.reset_client().await {
             error!(err; "Failed to reset client");
         }
