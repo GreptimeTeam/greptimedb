@@ -144,7 +144,8 @@ impl MetasrvInstance {
         let (serve_state_tx, serve_state_rx) = oneshot::channel();
 
         let socket_addr =
-            bootstrap_metasrv_with_router(&self.opts.bind_addr, router, serve_state_tx, rx).await?;
+            bootstrap_metasrv_with_router(&self.opts.grpc.bind_addr, router, serve_state_tx, rx)
+                .await?;
         self.bind_addr = Some(socket_addr);
 
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
@@ -260,7 +261,7 @@ pub async fn metasrv_builder(
             let etcd_client = create_etcd_client(&opts.store_addrs).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
-                &opts.server_addr,
+                &opts.grpc.server_addr,
                 etcd_client,
                 opts.store_key_prefix.clone(),
             )
@@ -277,7 +278,7 @@ pub async fn metasrv_builder(
             // Client for election should be created separately since we need a different session keep-alive idle time.
             let election_client = create_postgres_client(opts).await?;
             let election = PgElection::with_pg_client(
-                opts.server_addr.clone(),
+                opts.grpc.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,
@@ -299,7 +300,7 @@ pub async fn metasrv_builder(
             let election_table_name = opts.meta_table_name.clone() + "_election";
             let election_client = create_mysql_client(opts).await?;
             let election = MySqlElection::with_mysql_client(
-                opts.server_addr.clone(),
+                opts.grpc.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
                 CANDIDATE_LEASE_SECS,

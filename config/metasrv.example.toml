@@ -1,14 +1,6 @@
 ## The working home directory.
 data_home = "./greptimedb_data"
 
-## The bind address of metasrv.
-bind_addr = "127.0.0.1:3002"
-
-## The communication server address for the frontend and datanode to connect to metasrv.
-## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `bind_addr`.
-server_addr = "127.0.0.1:3002"
-
 ## Store server address default to etcd store.
 ## For postgres store, the format is:
 ## "password=password dbname=postgres user=postgres host=localhost port=5432"
@@ -66,6 +58,21 @@ node_max_idle_time = "24hours"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:3002"
+## The communication server address for the frontend and datanode to connect to metasrv.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `bind_addr`.
+server_addr = "127.0.0.1:3002"
+## The number of server worker threads.
+runtime_size = 8
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
 
 ## The HTTP server options.
 [http]

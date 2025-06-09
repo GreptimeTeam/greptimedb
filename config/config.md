@@ -315,8 +315,6 @@
 | Key | Type | Default | Descriptions |
 | --- | -----| ------- | ----------- |
 | `data_home` | String | `./greptimedb_data` | The working home directory. |
-| `bind_addr` | String | `127.0.0.1:3002` | The bind address of metasrv. |
-| `server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
 | `store_addrs` | Array | -- | Store server address default to etcd store.<br/>For postgres store, the format is:<br/>"password=password dbname=postgres user=postgres host=localhost port=5432"<br/>For etcd store, the format is:<br/>"127.0.0.1:2379" |
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
 | `backend` | String | `etcd_store` | The datastore for meta server.<br/>Available values:<br/>- `etcd_store` (default value)<br/>- `memory_store`<br/>- `postgres_store` |
@@ -331,6 +329,12 @@
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
 | `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute the runtime for global write operations. |
+| `grpc` | -- | -- | The gRPC server options. |
+| `grpc.bind_addr` | String | `127.0.0.1:3002` | The address to bind the gRPC server. |
+| `grpc.server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `bind_addr`. |
+| `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
+| `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
 | `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout. |

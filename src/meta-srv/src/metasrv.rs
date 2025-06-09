@@ -46,6 +46,7 @@ use common_telemetry::{error, info, warn};
 use common_wal::config::MetasrvWalConfig;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
+use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -96,8 +97,10 @@ pub enum BackendImpl {
 #[serde(default)]
 pub struct MetasrvOptions {
     /// The address the server listens on.
+    #[deprecated(note = "Use grpc.bind_addr instead")]
     pub bind_addr: String,
     /// The address the server advertises to the clients.
+    #[deprecated(note = "Use grpc.server_addr instead")]
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
     pub store_addrs: Vec<String>,
@@ -112,6 +115,7 @@ pub struct MetasrvOptions {
     /// If it's true, the region failover will be allowed even if the local WAL is used.
     /// Note that this option is not recommended to be set to true, because it may lead to data loss during failover.
     pub allow_region_failover_on_local_wal: bool,
+    pub grpc: GrpcOptions,
     /// The HTTP server options.
     pub http: HttpOptions,
     /// The logging options.
@@ -166,8 +170,6 @@ impl fmt::Debug for MetasrvOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("MetasrvOptions");
         debug_struct
-            .field("bind_addr", &self.bind_addr)
-            .field("server_addr", &self.server_addr)
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("selector", &self.selector)
             .field("use_memory_store", &self.use_memory_store)
@@ -176,6 +178,7 @@ impl fmt::Debug for MetasrvOptions {
                 "allow_region_failover_on_local_wal",
                 &self.allow_region_failover_on_local_wal,
             )
+            .field("grpc", &self.grpc)
             .field("http", &self.http)
             .field("logging", &self.logging)
             .field("procedure", &self.procedure)
@@ -208,14 +211,19 @@ const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
 impl Default for MetasrvOptions {
     fn default() -> Self {
         Self {
-            bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),
-            // If server_addr is not set, the server will use the local ip address as the server address.
+            #[allow(deprecated)]
+            bind_addr: String::new(),
+            #[allow(deprecated)]
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
             allow_region_failover_on_local_wal: false,
+            grpc: GrpcOptions {
+                bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),
+                ..Default::default()
+            },
             http: HttpOptions::default(),
             logging: LoggingOptions::default(),
             procedure: ProcedureConfig {
@@ -253,37 +261,6 @@ impl Configurable for MetasrvOptions {
 }
 
 impl MetasrvOptions {
-    /// Detect server address.
-    #[cfg(not(target_os = "android"))]
-    pub fn detect_server_addr(&mut self) {
-        if self.server_addr.is_empty() {
-            match local_ip_address::local_ip() {
-                Ok(ip) => {
-                    let detected_addr = format!(
-                        "{}:{}",
-                        ip,
-                        self.bind_addr
-                            .split(':')
-                            .nth(1)
-                            .unwrap_or(DEFAULT_METASRV_ADDR_PORT)
-                    );
-                    info!("Using detected: {} as server address", detected_addr);
-                    self.server_addr = detected_addr;
-                }
-                Err(e) => {
-                    error!("Failed to detect local ip address: {}", e);
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn detect_server_addr(&mut self) {
-        if self.server_addr.is_empty() {
-            common_telemetry::debug!("detect local IP is not supported on Android");
-        }
-    }
-
     fn sanitize_store_addrs(&self) -> Vec<String> {
         self.store_addrs
             .iter()
@@ -638,7 +615,7 @@ impl Metasrv {
     pub fn node_info(&self) -> MetasrvNodeInfo {
         let build_info = common_version::build_info();
         MetasrvNodeInfo {
-            addr: self.options().server_addr.clone(),
+            addr: self.options().grpc.server_addr.clone(),
             version: build_info.version.to_string(),
             git_commit: build_info.commit_short.to_string(),
             start_time_ms: self.start_time_ms(),
@@ -730,7 +707,7 @@ impl Metasrv {
 
     #[inline]
     pub fn new_ctx(&self) -> Context {
-        let server_addr = self.options().server_addr.clone();
+        let server_addr = self.options().grpc.server_addr.clone();
         let in_memory = self.in_memory.clone();
         let kv_backend = self.kv_backend.clone();
         let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();

@@ -190,6 +190,7 @@ mod tests {
     use api::v1::meta::*;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_telemetry::tracing_context::W3cTrace;
+    use servers::grpc::GrpcOptions;
     use tonic::IntoRequest;
 
     use super::get_node_id;
@@ -203,7 +204,10 @@ mod tests {
         let metasrv = MetasrvBuilder::new()
             .kv_backend(kv_backend)
             .options(MetasrvOptions {
-                server_addr: "127.0.0.1:3002".to_string(),
+                grpc: GrpcOptions {
+                    server_addr: "127.0.0.1:3002".to_string(),
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .build()
@@ -216,7 +220,7 @@ mod tests {
 
         let res = metasrv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
-        assert_eq!(metasrv.options().bind_addr, res.leader.unwrap().addr);
+        assert_eq!(metasrv.options().grpc.bind_addr, res.leader.unwrap().addr);
     }
 
     #[test]
