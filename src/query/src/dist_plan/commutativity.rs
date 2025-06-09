@@ -49,7 +49,7 @@ pub fn step_aggr_to_upper_aggr(aggr_plan: &LogicalPlan) -> datafusion_common::Re
         let input_column =
             Expr::Column(datafusion_common::Column::new_unqualified(col_name.clone()));
         let upper_func = match aggr_func.func.name() {
-            "sum" | "min" | "max" => {
+            "sum" | "min" | "max" | "last_value" | "first_value" => {
                 // aggr_calc(aggr_merge(input_column))) as col_name
                 let mut new_aggr_func = aggr_func.clone();
                 new_aggr_func.args = vec![input_column.clone()];
