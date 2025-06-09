@@ -177,6 +177,7 @@ fn test_load_metasrv_example_config() {
             selector: SelectorType::default(),
             data_home: DEFAULT_DATA_HOME.to_string(),
             grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:3002".to_string(),
                 server_addr: "127.0.0.1:3002".to_string(),
                 ..Default::default()
             },

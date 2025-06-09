@@ -220,7 +220,7 @@ mod tests {
 
         let res = metasrv.ask_leader(req.into_request()).await.unwrap();
         let res = res.into_inner();
-        assert_eq!(metasrv.options().grpc.bind_addr, res.leader.unwrap().addr);
+        assert_eq!(metasrv.options().grpc.server_addr, res.leader.unwrap().addr);
     }
 
     #[test]
