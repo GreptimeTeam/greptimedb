@@ -44,11 +44,7 @@ select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
 select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
 
-+---------------------------------------------------+
-| to_unixtime(Utf8("    2023-03-01T06:35:02Z    ")) |
-+---------------------------------------------------+
-| 1677652502                                        |
-+---------------------------------------------------+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '    2023-03-01T06:35:02Z    ': error parsing date
 
 select TO_UNIXTIME(2);
 
