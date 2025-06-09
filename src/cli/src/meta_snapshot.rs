@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::usize;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};

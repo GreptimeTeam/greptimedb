@@ -14,6 +14,7 @@
 
 pub mod file;
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -272,6 +273,10 @@ impl MetadataSnapshotManager {
         Ok((filename.to_string(), num_keyvalues as u64))
     }
 
+    fn format_output(key: Cow<'_, str>, value: Cow<'_, str>) -> String {
+        format!("{} => {}", key, value)
+    }
+
     pub async fn info(
         object_store: &ObjectStore,
         file_path: &str,
@@ -295,15 +300,14 @@ impl MetadataSnapshotManager {
         let mut results = Vec::new();
         for kv in metadata_content {
             let key_str = String::from_utf8_lossy(&kv.key);
-            if query_str.ends_with('*') {
-                let prefix = &query_str[..query_str.len() - 1];
+            if let Some(prefix) = query_str.strip_suffix('*') {
                 if key_str.starts_with(prefix) {
                     let value_str = String::from_utf8_lossy(&kv.value);
-                    results.push(format!("|{}|{}|", key_str, value_str));
+                    results.push(Self::format_output(key_str, value_str));
                 }
             } else if key_str == query_str {
                 let value_str = String::from_utf8_lossy(&kv.value);
-                results.push(format!("|{}|{}|", key_str, value_str));
+                results.push(Self::format_output(key_str, value_str));
             }
             if results.len() == limit.unwrap_or(usize::MAX) {
                 break;
