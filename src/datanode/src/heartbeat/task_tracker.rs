@@ -144,6 +144,11 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
         }
     }
 
+    /// Waits for a [RegisterResult] and returns a [WaitResult].
+    pub(crate) async fn wait_until_finish(&self, watcher: &mut TaskWatcher<T>) -> Result<T> {
+        wait(watcher).await
+    }
+
     /// Tries to register a new async task, returns [RegisterResult::Busy] if previous task is running.
     pub(crate) async fn try_register(
         &self,

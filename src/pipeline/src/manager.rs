@@ -20,14 +20,16 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::timestamp::TimestampNanosecond;
 use itertools::Itertools;
+use session::context::Channel;
 use snafu::ensure;
 use util::to_pipeline_version;
 
 use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
 use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
-use crate::{Pipeline, Value};
+use crate::{GreptimePipelineParams, Pipeline, Value};
 
+mod pipeline_cache;
 pub mod pipeline_operator;
 pub mod table;
 pub mod util;
@@ -102,8 +104,39 @@ impl PipelineDefinition {
             Ok(Self::ByNameAndValue((name.to_owned(), version)))
         }
     }
+
+    pub fn is_identity(&self) -> bool {
+        matches!(self, Self::GreptimeIdentityPipeline(_))
+    }
+
+    pub fn get_custom_ts(&self) -> Option<&IdentityTimeIndex> {
+        if let Self::GreptimeIdentityPipeline(custom_ts) = self {
+            custom_ts.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
+pub struct PipelineContext<'a> {
+    pub pipeline_definition: &'a PipelineDefinition,
+    pub pipeline_param: &'a GreptimePipelineParams,
+    pub channel: Channel,
+}
+
+impl<'a> PipelineContext<'a> {
+    pub fn new(
+        pipeline_definition: &'a PipelineDefinition,
+        pipeline_param: &'a GreptimePipelineParams,
+        channel: Channel,
+    ) -> Self {
+        Self {
+            pipeline_definition,
+            pipeline_param,
+            channel,
+        }
+    }
+}
 pub enum PipelineWay {
     OtlpLogDirect(Box<SelectInfo>),
     Pipeline(PipelineDefinition),

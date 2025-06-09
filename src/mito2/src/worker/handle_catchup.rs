@@ -51,6 +51,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_empty_memtable || region.manifest_ctx.has_update().await? {
+            if !is_empty_memtable {
+                warn!("Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                    region.region_id,
+                    region.manifest_ctx.manifest_version().await,
+                    region.version_control.current().last_entry_id
+                );
+            }
             self.reopen_region(&region).await?
         } else {
             region

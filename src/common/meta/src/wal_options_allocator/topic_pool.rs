@@ -15,6 +15,7 @@
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use common_wal::config::kafka::MetasrvKafkaConfig;
 use common_wal::TopicSelectorType;
 use snafu::ensure;
@@ -77,27 +78,35 @@ impl KafkaTopicPool {
     }
 
     /// Tries to activate the topic manager when metasrv becomes the leader.
+    ///
     /// First tries to restore persisted topics from the kv backend.
-    /// If not enough topics retrieved, it will try to contact the Kafka cluster and request creating more topics.
+    /// If there are unprepared topics (topics that exist in the configuration but not in the kv backend),
+    /// it will create these topics in Kafka if `auto_create_topics` is enabled.
+    ///
+    /// Then it prepares all unprepared topics by appending a noop record if the topic is empty,
+    /// and persists them in the kv backend for future use.
     pub async fn activate(&self) -> Result<()> {
-        if !self.auto_create_topics {
-            return Ok(());
-        }
-
         let num_topics = self.topics.len();
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        let topics_to_be_created = self
-            .topic_manager
-            .get_topics_to_create(&self.topics)
-            .await?;
+        let unprepared_topics = self.topic_manager.unprepare_topics(&self.topics).await?;
 
-        if !topics_to_be_created.is_empty() {
+        if !unprepared_topics.is_empty() {
+            if self.auto_create_topics {
+                info!("Creating {} topics", unprepared_topics.len());
+                self.topic_creator.create_topics(&unprepared_topics).await?;
+            } else {
+                info!("Auto create topics is disabled, skipping topic creation.");
+            }
             self.topic_creator
-                .prepare_topics(&topics_to_be_created)
+                .prepare_topics(&unprepared_topics)
                 .await?;
-            self.topic_manager.persist_topics(&self.topics).await?;
+            self.topic_manager
+                .persist_prepared_topics(&unprepared_topics)
+                .await?;
         }
+        info!("Activated topic pool with {} topics", self.topics.len());
+
         Ok(())
     }
 
@@ -115,76 +124,146 @@ impl KafkaTopicPool {
 }
 
 #[cfg(test)]
+impl KafkaTopicPool {
+    pub(crate) fn topic_manager(&self) -> &KafkaTopicManager {
+        &self.topic_manager
+    }
+
+    pub(crate) fn topic_creator(&self) -> &KafkaTopicCreator {
+        &self.topic_creator
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use common_wal::config::kafka::common::{KafkaConnectionConfig, KafkaTopicConfig};
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use std::assert_matches::assert_matches;
+
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
 
     use super::*;
-    use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::wal_options_allocator::topic_creator::build_kafka_topic_creator;
+    use crate::error::Error;
+    use crate::test_util::test_kafka_topic_pool;
+    use crate::wal_options_allocator::selector::RoundRobinTopicSelector;
+
+    #[tokio::test]
+    async fn test_pool_invalid_number_topics_err() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let endpoints = get_kafka_endpoints();
+
+        let pool = test_kafka_topic_pool(endpoints.clone(), 0, false, None).await;
+        let err = pool.activate().await.unwrap_err();
+        assert_matches!(err, Error::InvalidNumTopics { .. });
+
+        let pool = test_kafka_topic_pool(endpoints, 0, true, None).await;
+        let err = pool.activate().await.unwrap_err();
+        assert_matches!(err, Error::InvalidNumTopics { .. });
+    }
+
+    #[tokio::test]
+    async fn test_pool_activate_unknown_topics_err() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let pool =
+            test_kafka_topic_pool(get_kafka_endpoints(), 1, false, Some("unknown_topic")).await;
+        let err = pool.activate().await.unwrap_err();
+        assert_matches!(err, Error::KafkaPartitionClient { .. });
+    }
+
+    #[tokio::test]
+    async fn test_pool_activate() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let pool =
+            test_kafka_topic_pool(get_kafka_endpoints(), 2, true, Some("pool_activate")).await;
+        // clean up the topics before test
+        let topic_creator = pool.topic_creator();
+        topic_creator.delete_topics(&pool.topics).await.unwrap();
+
+        let topic_manager = pool.topic_manager();
+        pool.activate().await.unwrap();
+        let topics = topic_manager.list_topics().await.unwrap();
+        assert_eq!(topics.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pool_activate_with_existing_topics() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let prefix = "pool_activate_with_existing_topics";
+        let pool = test_kafka_topic_pool(get_kafka_endpoints(), 2, true, Some(prefix)).await;
+        let topic_creator = pool.topic_creator();
+        topic_creator.delete_topics(&pool.topics).await.unwrap();
+
+        let topic_manager = pool.topic_manager();
+        // persists one topic info, then pool.activate() will create new topics that not persisted.
+        topic_manager
+            .persist_prepared_topics(&pool.topics[0..1])
+            .await
+            .unwrap();
+
+        pool.activate().await.unwrap();
+        let topics = topic_manager.list_topics().await.unwrap();
+        assert_eq!(topics.len(), 2);
+
+        let client = pool.topic_creator().client();
+        let topics = client
+            .list_topics()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name.starts_with(prefix))
+            .collect::<Vec<_>>();
+        assert_eq!(topics.len(), 1);
+    }
 
     /// Tests that the topic manager could allocate topics correctly.
     #[tokio::test]
     async fn test_alloc_topics() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                // Constructs topics that should be created.
-                let topics = (0..256)
-                    .map(|i| format!("test_alloc_topics_{}_{}", i, uuid::Uuid::new_v4()))
-                    .collect::<Vec<_>>();
-
-                // Creates a topic manager.
-                let kafka_topic = KafkaTopicConfig {
-                    replication_factor: broker_endpoints.len() as i16,
-                    ..Default::default()
-                };
-                let config = MetasrvKafkaConfig {
-                    connection: KafkaConnectionConfig {
-                        broker_endpoints,
-                        ..Default::default()
-                    },
-                    kafka_topic,
-                    ..Default::default()
-                };
-                let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-                let topic_creator = build_kafka_topic_creator(&config).await.unwrap();
-                let mut topic_pool = KafkaTopicPool::new(&config, kv_backend, topic_creator);
-                // Replaces the default topic pool with the constructed topics.
-                topic_pool.topics.clone_from(&topics);
-                // Replaces the default selector with a round-robin selector without shuffled.
-                topic_pool.selector = Arc::new(RoundRobinTopicSelector::default());
-                topic_pool.activate().await.unwrap();
-
-                // Selects exactly the number of `num_topics` topics one by one.
-                let got = (0..topics.len())
-                    .map(|_| topic_pool.select().unwrap())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                assert_eq!(got, topics);
-
-                // Selects exactly the number of `num_topics` topics in a batching manner.
-                let got = topic_pool
-                    .select_batch(topics.len())
-                    .unwrap()
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                assert_eq!(got, topics);
-
-                // Selects more than the number of `num_topics` topics.
-                let got = topic_pool
-                    .select_batch(2 * topics.len())
-                    .unwrap()
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                let expected = vec![topics.clone(); 2]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                assert_eq!(got, expected);
-            })
-        })
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let num_topics = 5;
+        let mut topic_pool = test_kafka_topic_pool(
+            get_kafka_endpoints(),
+            num_topics,
+            true,
+            Some("test_allocator_with_kafka"),
+        )
         .await;
+        topic_pool.selector = Arc::new(RoundRobinTopicSelector::default());
+        let topics = topic_pool.topics.clone();
+        // clean up the topics before test
+        let topic_creator = topic_pool.topic_creator();
+        topic_creator.delete_topics(&topics).await.unwrap();
+
+        // Selects exactly the number of `num_topics` topics one by one.
+        let got = (0..topics.len())
+            .map(|_| topic_pool.select().unwrap())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(got, topics);
+
+        // Selects exactly the number of `num_topics` topics in a batching manner.
+        let got = topic_pool
+            .select_batch(topics.len())
+            .unwrap()
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(got, topics);
+
+        // Selects more than the number of `num_topics` topics.
+        let got = topic_pool
+            .select_batch(2 * topics.len())
+            .unwrap()
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let expected = vec![topics.clone(); 2]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
     }
 }

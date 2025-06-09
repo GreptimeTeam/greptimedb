@@ -38,6 +38,7 @@ use table::TableRef;
 use crate::dataframe::DataFrame;
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
+use crate::options::QueryOptions;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
@@ -106,6 +107,7 @@ impl QueryEngineFactory {
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
+        options: QueryOptions,
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
@@ -115,9 +117,11 @@ impl QueryEngineFactory {
             flow_service_handler,
             with_dist_planner,
             Default::default(),
+            options,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
@@ -126,6 +130,7 @@ impl QueryEngineFactory {
         flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
         plugins: Plugins,
+        options: QueryOptions,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
@@ -135,6 +140,7 @@ impl QueryEngineFactory {
             flow_service_handler,
             with_dist_planner,
             plugins.clone(),
+            options,
         ));
         let query_engine = Arc::new(DatafusionQueryEngine::new(state, plugins));
         register_functions(&query_engine);
@@ -166,7 +172,15 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, None, None, None, false);
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
 
         let engine = factory.query_engine();
 

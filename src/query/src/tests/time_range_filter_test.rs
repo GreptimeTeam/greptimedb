@@ -33,6 +33,7 @@ use table::predicate::build_time_range_predicate;
 use table::test_util::MemTable;
 use table::{Table, TableRef};
 
+use crate::options::QueryOptions;
 use crate::tests::exec_selection;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
@@ -102,8 +103,16 @@ fn create_test_engine() -> TimeRangeTester {
     };
     let _ = catalog_manager.register_table_sync(req).unwrap();
 
-    let engine =
-        QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine();
+    let engine = QueryEngineFactory::new(
+        catalog_manager,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    )
+    .query_engine();
     TimeRangeTester { engine, filter }
 }
 

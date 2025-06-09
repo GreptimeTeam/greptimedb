@@ -18,6 +18,7 @@ use common_recordbatch::{util, RecordBatch};
 use session::context::QueryContext;
 use table::TableRef;
 
+use crate::options::QueryOptions;
 use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
@@ -46,5 +47,14 @@ async fn exec_selection(engine: QueryEngineRef, sql: &str) -> Vec<RecordBatch> {
 pub fn new_query_engine_with_table(table: TableRef) -> QueryEngineRef {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
 
-    QueryEngineFactory::new(catalog_manager, None, None, None, None, false).query_engine()
+    QueryEngineFactory::new(
+        catalog_manager,
+        None,
+        None,
+        None,
+        None,
+        false,
+        QueryOptions::default(),
+    )
+    .query_engine()
 }

@@ -51,7 +51,10 @@ use crate::error::{
     Result, SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::metrics::PHYSICAL_REGION_COUNT;
-use crate::utils::{self, to_data_region_id, to_metadata_region_id};
+use crate::utils::{
+    self, append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id,
+    to_metadata_region_id,
+};
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
 
@@ -88,11 +91,15 @@ impl MetricEngineInner {
             if requests.len() == 1 {
                 let request = &requests.first().unwrap().1;
                 let physical_region_id = parse_physical_region_id(request)?;
+                let mut manifest_infos = Vec::with_capacity(1);
                 self.create_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
+                append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             } else {
                 let grouped_requests =
                     group_create_logical_region_requests_by_physical_region_id(requests)?;
+                let mut manifest_infos = Vec::with_capacity(grouped_requests.len());
                 for (physical_region_id, requests) in grouped_requests {
                     self.create_logical_regions(
                         physical_region_id,
@@ -100,7 +107,9 @@ impl MetricEngineInner {
                         extension_return_value,
                     )
                     .await?;
+                    append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
                 }
+                encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             }
         } else {
             return MissingRegionOptionSnafu {}.fail();
@@ -137,6 +146,23 @@ impl MetricEngineInner {
             .iter()
             .map(|metadata| (metadata.column_schema.name.clone(), metadata.column_id))
             .collect::<HashMap<_, _>>();
+        let time_index_unit = create_data_region_request
+            .column_metadatas
+            .iter()
+            .find_map(|metadata| {
+                if metadata.semantic_type == SemanticType::Timestamp {
+                    metadata
+                        .column_schema
+                        .data_type
+                        .as_timestamp()
+                        .map(|data_type| data_type.unit())
+                } else {
+                    None
+                }
+            })
+            .context(UnexpectedRequestSnafu {
+                reason: "No time index column found",
+            })?;
         self.mito
             .handle_request(
                 data_region_id,
@@ -161,6 +187,7 @@ impl MetricEngineInner {
             physical_columns,
             primary_key_encoding,
             physical_region_options,
+            time_index_unit,
         );
 
         Ok(())
@@ -175,15 +202,38 @@ impl MetricEngineInner {
     ) -> Result<()> {
         let data_region_id = utils::to_data_region_id(physical_region_id);
 
-        ensure!(
-            self.state
-                .read()
-                .unwrap()
-                .exist_physical_region(data_region_id),
-            PhysicalRegionNotFoundSnafu {
+        let unit = self
+            .state
+            .read()
+            .unwrap()
+            .physical_region_time_index_unit(physical_region_id)
+            .context(PhysicalRegionNotFoundSnafu {
                 region_id: data_region_id,
-            }
-        );
+            })?;
+        // Checks the time index unit of each request.
+        for (_, request) in &requests {
+            // Safety: verify_region_create_request() ensures that the request is valid.
+            let time_index_column = request
+                .column_metadatas
+                .iter()
+                .find(|col| col.semantic_type == SemanticType::Timestamp)
+                .unwrap();
+            let request_unit = time_index_column
+                .column_schema
+                .data_type
+                .as_timestamp()
+                .unwrap()
+                .unit();
+            ensure!(
+                request_unit == unit,
+                UnexpectedRequestSnafu {
+                    reason: format!(
+                        "Metric has differenttime unit ({:?}) than the physical region ({:?})",
+                        request_unit, unit
+                    ),
+                }
+            );
+        }
 
         // Filters out the requests that the logical region already exists
         let requests = {
@@ -728,7 +778,7 @@ mod test {
 
         // set up
         let env = TestEnv::new().await;
-        let engine = MetricEngine::new(env.mito(), EngineConfig::default());
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
         let engine_inner = engine.inner;
 
         // check create data region request

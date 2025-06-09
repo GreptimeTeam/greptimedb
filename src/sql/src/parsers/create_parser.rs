@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
@@ -40,12 +43,12 @@ use crate::parsers::utils::{
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
-    CreateTableLike, CreateView, Partitions, TableConstraint, VECTOR_OPT_DIM,
+    CreateTableLike, CreateView, Partitions, SqlOrTql, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
 use crate::statements::{sql_data_type_to_concrete_data_type, OptionMap};
-use crate::util::parse_option_string;
+use crate::util::{location_to_index, parse_option_string};
 
 pub const ENGINE: &str = "ENGINE";
 pub const MAXVALUE: &str = "MAXVALUE";
@@ -96,6 +99,12 @@ impl<'a> ParserContext<'a> {
                 Keyword::VIEW => {
                     let _ = self.parser.next_token();
                     self.parse_create_view(false)
+                }
+
+                #[cfg(feature = "enterprise")]
+                Keyword::TRIGGER => {
+                    let _ = self.parser.next_token();
+                    self.parse_create_trigger()
                 }
 
                 Keyword::NoKeyword => {
@@ -281,18 +290,7 @@ impl<'a> ParserContext<'a> {
             .parser
             .consume_tokens(&[Token::make_keyword(EXPIRE), Token::make_keyword(AFTER)])
         {
-            let expire_after_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
-            let expire_after_lit = utils::parser_expr_to_scalar_value(expire_after_expr.clone())?
-                .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
-                .ok()
-                .with_context(|| InvalidIntervalSnafu {
-                    reason: format!("cannot cast {} to interval type", expire_after_expr),
-                })?;
-            if let ScalarValue::IntervalMonthDayNano(Some(nanoseconds)) = expire_after_lit {
-                Some(nanoseconds.nanoseconds / 1_000_000_000)
-            } else {
-                unreachable!()
-            }
+            Some(self.parse_interval()?)
         } else {
             None
         };
@@ -318,7 +316,22 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = self.parser.parse_query().context(error::SyntaxSnafu)?;
+        let start_loc = self.parser.peek_token().span.start;
+        let start_index = location_to_index(self.sql, &start_loc);
+
+        let query = self.parse_statement()?;
+        let end_token = self.parser.peek_token();
+
+        let raw_query = if end_token == Token::EOF {
+            &self.sql[start_index..]
+        } else {
+            let end_loc = end_token.span.end;
+            let end_index = location_to_index(self.sql, &end_loc);
+            &self.sql[start_index..end_index.min(self.sql.len())]
+        };
+        let raw_query = raw_query.trim_end_matches(";");
+
+        let query = Box::new(SqlOrTql::try_from_statement(query, raw_query)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,
@@ -329,6 +342,28 @@ impl<'a> ParserContext<'a> {
             comment,
             query,
         }))
+    }
+
+    /// Parse the interval expr to duration in seconds.
+    fn parse_interval(&mut self) -> Result<i64> {
+        let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
+        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
+            .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
+            .ok()
+            .with_context(|| InvalidIntervalSnafu {
+                reason: format!("cannot cast {} to interval type", interval_expr),
+            })?;
+        if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
+            Ok(
+                interval.nanoseconds / 1_000_000_000
+                    + interval.days as i64 * 60 * 60 * 24
+                    + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
+                                                                           // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+                                                                           // which we use in database to parse i.e. ttl interval and many other intervals
+            )
+        } else {
+            unreachable!()
+        }
     }
 
     fn parse_if_not_exist(&mut self) -> Result<bool> {
@@ -1325,6 +1360,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let sql = r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
+EXPIRE AFTER '1 month 2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let stmts =
@@ -1337,7 +1373,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         assert!(!create_task.or_replace);
         assert!(!create_task.if_not_exists);
-        assert!(create_task.expire_after.is_none());
+        assert_eq!(
+            create_task.expire_after,
+            Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60)
+        );
         assert!(create_task.comment.is_none());
         assert_eq!(create_task.flow_name.to_string(), "`task_2`");
     }

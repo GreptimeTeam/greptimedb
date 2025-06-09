@@ -37,6 +37,9 @@ use crate::tracing_sampler::{create_sampler, TracingSampleOptions};
 
 pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
+/// The default logs directory.
+pub const DEFAULT_LOGGING_DIR: &str = "logs";
+
 // Handle for reloading log level
 pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
@@ -68,17 +71,16 @@ pub struct LoggingOptions {
 
     /// The tracing sample ratio.
     pub tracing_sample_ratio: Option<TracingSampleOptions>,
-
-    /// The logging options of slow query.
-    pub slow_query: SlowQueryOptions,
 }
 
 /// The options of slow query.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
+
+    /// The record type of slow queries.
+    pub record_type: SlowQueriesRecordType,
 
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
@@ -86,6 +88,29 @@ pub struct SlowQueryOptions {
 
     /// The sample ratio of slow queries.
     pub sample_ratio: Option<f64>,
+
+    /// The table TTL of `slow_queries` system table. Default is "30d".
+    /// It's used when `record_type` is `SystemTable`.
+    pub ttl: Option<String>,
+}
+
+impl Default for SlowQueryOptions {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            record_type: SlowQueriesRecordType::SystemTable,
+            threshold: Some(Duration::from_secs(30)),
+            sample_ratio: Some(1.0),
+            ttl: Some("30d".to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SlowQueriesRecordType {
+    SystemTable,
+    Log,
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,14 +136,14 @@ impl Eq for LoggingOptions {}
 impl Default for LoggingOptions {
     fn default() -> Self {
         Self {
-            dir: "./greptimedb_data/logs".to_string(),
+            // The directory path will be configured at application startup, typically using the data home directory as a base.
+            dir: "".to_string(),
             level: None,
             log_format: LogFormat::Text,
             enable_otlp_tracing: false,
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
-            slow_query: SlowQueryOptions::default(),
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
         }
@@ -158,7 +183,8 @@ pub fn init_default_ut_logging() {
             "unittest",
             &opts,
             &TracingOptions::default(),
-            None
+            None,
+            None,
         ));
 
         crate::info!("logs dir = {}", dir);
@@ -176,6 +202,7 @@ pub fn init_global_logging(
     opts: &LoggingOptions,
     tracing_opts: &TracingOptions,
     node_id: Option<String>,
+    slow_query_opts: Option<&SlowQueryOptions>,
 ) -> Vec<WorkerGuard> {
     static START: Once = Once::new();
     let mut guards = vec![];
@@ -278,50 +305,7 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = if !opts.dir.is_empty() && opts.slow_query.enable {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-slow-queries")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
-            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
-            guards.push(guard);
-
-            // Only logs if the field contains "slow".
-            let slow_query_filter = FilterFn::new(|metadata| {
-                metadata
-                    .fields()
-                    .iter()
-                    .any(|field| field.name().contains("slow"))
-            });
-
-            if opts.log_format == LogFormat::Json {
-                Some(
-                    Layer::new()
-                        .json()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
-            } else {
-                Some(
-                    Layer::new()
-                        .with_writer(writer)
-                        .with_ansi(false)
-                        .with_filter(slow_query_filter)
-                        .boxed(),
-                )
-            }
-        } else {
-            None
-        };
+        let slow_query_logging_layer = build_slow_query_logger(opts, slow_query_opts, &mut guards);
 
         // resolve log level settings from:
         // - options from command line or config files
@@ -434,4 +418,68 @@ pub fn init_global_logging(
     });
 
     guards
+}
+
+fn build_slow_query_logger<S>(
+    opts: &LoggingOptions,
+    slow_query_opts: Option<&SlowQueryOptions>,
+    guards: &mut Vec<WorkerGuard>,
+) -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
+where
+    S: tracing::Subscriber
+        + Send
+        + 'static
+        + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    if let Some(slow_query_opts) = slow_query_opts {
+        if !opts.dir.is_empty()
+            && slow_query_opts.enable
+            && slow_query_opts.record_type == SlowQueriesRecordType::Log
+        {
+            let rolling_appender = RollingFileAppender::builder()
+                .rotation(Rotation::HOURLY)
+                .filename_prefix("greptimedb-slow-queries")
+                .max_log_files(opts.max_log_files)
+                .build(&opts.dir)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "initializing rolling file appender at {} failed: {}",
+                        &opts.dir, e
+                    )
+                });
+            let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
+            guards.push(guard);
+
+            // Only logs if the field contains "slow".
+            let slow_query_filter = FilterFn::new(|metadata| {
+                metadata
+                    .fields()
+                    .iter()
+                    .any(|field| field.name().contains("slow"))
+            });
+
+            if opts.log_format == LogFormat::Json {
+                Some(
+                    Layer::new()
+                        .json()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            } else {
+                Some(
+                    Layer::new()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(slow_query_filter)
+                        .boxed(),
+                )
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }

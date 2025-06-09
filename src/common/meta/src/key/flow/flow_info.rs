@@ -114,36 +114,52 @@ impl<'a> MetadataKey<'a, FlowInfoKeyInner> for FlowInfoKeyInner {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FlowInfoValue {
     /// The source tables used by the flow.
-    pub(crate) source_table_ids: Vec<TableId>,
+    pub source_table_ids: Vec<TableId>,
     /// The sink table used by the flow.
-    pub(crate) sink_table_name: TableName,
+    pub sink_table_name: TableName,
     /// Which flow nodes this flow is running on.
-    pub(crate) flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
+    pub flownode_ids: BTreeMap<FlowPartitionId, FlownodeId>,
     /// The catalog name.
-    pub(crate) catalog_name: String,
+    pub catalog_name: String,
+    /// The query context used when create flow.
+    /// Although flow doesn't belong to any schema, this query_context is needed to remember
+    /// the query context when `create_flow` is executed
+    /// for recovering flow using the same sql&query_context after db restart.
+    /// if none, should use default query context
+    #[serde(default)]
+    pub query_context: Option<crate::rpc::ddl::QueryContext>,
     /// The flow name.
-    pub(crate) flow_name: String,
+    pub flow_name: String,
     /// The raw sql.
-    pub(crate) raw_sql: String,
+    pub raw_sql: String,
     /// The expr of expire.
     /// Duration in seconds as `i64`.
-    pub(crate) expire_after: Option<i64>,
+    pub expire_after: Option<i64>,
     /// The comment.
-    pub(crate) comment: String,
+    pub comment: String,
     /// The options.
-    pub(crate) options: HashMap<String, String>,
+    pub options: HashMap<String, String>,
     /// The created time
     #[serde(default)]
-    pub(crate) created_time: DateTime<Utc>,
+    pub created_time: DateTime<Utc>,
     /// The updated time.
     #[serde(default)]
-    pub(crate) updated_time: DateTime<Utc>,
+    pub updated_time: DateTime<Utc>,
 }
 
 impl FlowInfoValue {
     /// Returns the `flownode_id`.
     pub fn flownode_ids(&self) -> &BTreeMap<FlowPartitionId, FlownodeId> {
         &self.flownode_ids
+    }
+
+    /// Insert a new flownode id for a partition.
+    pub fn insert_flownode_id(
+        &mut self,
+        partition: FlowPartitionId,
+        node: FlownodeId,
+    ) -> Option<FlownodeId> {
+        self.flownode_ids.insert(partition, node)
     }
 
     /// Returns the `source_table`.
@@ -153,6 +169,10 @@ impl FlowInfoValue {
 
     pub fn catalog_name(&self) -> &String {
         &self.catalog_name
+    }
+
+    pub fn query_context(&self) -> &Option<crate::rpc::ddl::QueryContext> {
+        &self.query_context
     }
 
     pub fn flow_name(&self) -> &String {
@@ -261,10 +281,11 @@ impl FlowInfoManager {
         let raw_value = new_flow_value.try_as_raw_value()?;
         let prev_value = current_flow_value.get_raw_bytes();
         let txn = Txn::new()
-            .when(vec![
-                Compare::new(key.clone(), CompareOp::NotEqual, None),
-                Compare::new(key.clone(), CompareOp::Equal, Some(prev_value)),
-            ])
+            .when(vec![Compare::new(
+                key.clone(),
+                CompareOp::Equal,
+                Some(prev_value),
+            )])
             .and_then(vec![TxnOp::Put(key.clone(), raw_value)])
             .or_else(vec![TxnOp::Get(key.clone())]);
 

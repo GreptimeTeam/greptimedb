@@ -1,0 +1,41 @@
+-- SQLNESS PROTOCOL MYSQL
+CREATE TABLE integers (
+    val INT,
+    ts TIMESTAMP,
+    TIME INDEX(ts)
+);
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO integers VALUES (11, 1), (12, 2);
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO integers VALUES ('13', '3'), ('14', '4');
+
+affected_rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO integers VALUES ('15a', 5), ('16', 6);
+
+Failed to execute query, err: MySqlError { ERROR 1210 (HY000): (InvalidArguments): Unable to convert 15a to datatype Int32(Int32Type) }
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM integers ORDER BY ts;
+
++-----+----------------------------+
+| val | ts                         |
++-----+----------------------------+
+| 11  | 1970-01-01 00:00:00.001000 |
+| 12  | 1970-01-01 00:00:00.002000 |
+| 13  | 1970-01-01 00:00:00.003000 |
+| 14  | 1970-01-01 00:00:00.004000 |
++-----+----------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+DROP TABLE integers;
+
+affected_rows: 0
+

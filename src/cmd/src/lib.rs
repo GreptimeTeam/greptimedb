@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use common_telemetry::{error, info};
+use stat::{get_cpu_limit, get_memory_limit};
 
 use crate::error::Result;
 
@@ -31,6 +32,12 @@ pub mod standalone;
 lazy_static::lazy_static! {
     static ref APP_VERSION: prometheus::IntGaugeVec =
         prometheus::register_int_gauge_vec!("greptime_app_version", "app version", &["version", "short_version", "app"]).unwrap();
+
+    static ref CPU_LIMIT: prometheus::IntGaugeVec =
+        prometheus::register_int_gauge_vec!("greptime_cpu_limit_in_millicores", "cpu limit in millicores", &["app"]).unwrap();
+
+    static ref MEMORY_LIMIT: prometheus::IntGaugeVec =
+        prometheus::register_int_gauge_vec!("greptime_memory_limit_in_bytes", "memory limit in bytes", &["app"]).unwrap();
 }
 
 /// wait for the close signal, for unix platform it's SIGINT or SIGTERM
@@ -74,7 +81,7 @@ pub trait App: Send {
         true
     }
 
-    async fn stop(&self) -> Result<()>;
+    async fn stop(&mut self) -> Result<()>;
 
     async fn run(&mut self) -> Result<()> {
         info!("Starting app: {}", self.name());
@@ -112,6 +119,24 @@ pub fn log_versions(version: &str, short_version: &str, app: &str) {
     info!("GreptimeDB version: {}", version);
 
     log_env_flags();
+}
+
+pub fn create_resource_limit_metrics(app: &str) {
+    if let Some(cpu_limit) = get_cpu_limit() {
+        info!(
+            "GreptimeDB start with cpu limit in millicores: {}",
+            cpu_limit
+        );
+        CPU_LIMIT.with_label_values(&[app]).set(cpu_limit);
+    }
+
+    if let Some(memory_limit) = get_memory_limit() {
+        info!(
+            "GreptimeDB start with memory limit in bytes: {}",
+            memory_limit
+        );
+        MEMORY_LIMIT.with_label_values(&[app]).set(memory_limit);
+    }
 }
 
 fn log_env_flags() {

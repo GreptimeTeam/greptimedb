@@ -15,20 +15,28 @@
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
+use api::region::RegionResponse;
+use api::v1::meta::Peer;
+use api::v1::region::sync_request::ManifestInfo;
+use api::v1::region::{region_request, MetricManifestInfo, RegionRequest, SyncRequest};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
+use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
 use crate::ddl::test_util::{
     create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::TableMetadata;
-use crate::error::Error;
-use crate::key::table_route::TableRouteValue;
+use crate::error::{Error, Result};
+use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
+use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
 #[tokio::test]
@@ -389,4 +397,77 @@ async fn test_on_create_metadata_err() {
     // Triggers procedure to create table metadata
     let error = procedure.execute(&ctx).await.unwrap_err();
     assert!(!error.is_retry_later());
+}
+
+fn creates_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
+    if let region_request::Body::Creates(_) = request.body.unwrap() {
+        let mut response = RegionResponse::new(0);
+        // Default region id for physical table.
+        let region_id = RegionId::new(1024, 1);
+        response.extensions.insert(
+            MANIFEST_INFO_EXTENSION_KEY.to_string(),
+            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::metric(1, 0, 2, 0))])
+                .unwrap(),
+        );
+        return Ok(response);
+    }
+
+    Ok(RegionResponse::new(0))
+}
+
+#[tokio::test]
+async fn test_on_submit_create_request() {
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let handler = DatanodeWatcher::new(tx).with_handler(creates_request_handler);
+    let node_manager = Arc::new(MockDatanodeManager::new(handler));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut create_physical_table_task = test_create_physical_table_task("phy_table");
+    let table_id = 1024u32;
+    let region_routes = vec![RegionRoute {
+        region: Region::new_test(RegionId::new(table_id, 1)),
+        leader_peer: Some(Peer::empty(1)),
+        follower_peers: vec![Peer::empty(5)],
+        leader_state: None,
+        leader_down_since: None,
+    }];
+    create_physical_table_task.set_table_id(table_id);
+    create_physical_table_metadata(
+        &ddl_context,
+        create_physical_table_task.table_info.clone(),
+        TableRouteValue::Physical(PhysicalTableRouteValue::new(region_routes)),
+    )
+    .await;
+    let physical_table_id = table_id;
+    let task = test_create_logical_table_task("foo");
+    let yet_another_task = test_create_logical_table_task("bar");
+    let mut procedure = CreateLogicalTablesProcedure::new(
+        vec![task, yet_another_task],
+        physical_table_id,
+        ddl_context,
+    );
+    procedure.on_prepare().await.unwrap();
+    procedure.on_datanode_create_regions().await.unwrap();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let result = rx.try_recv().unwrap();
+        results.push(result);
+    }
+    rx.try_recv().unwrap_err();
+    let (peer, request) = results.remove(0);
+    assert_eq!(peer.id, 1);
+    assert_matches!(request.body.unwrap(), region_request::Body::Creates(_));
+    let (peer, request) = results.remove(0);
+    assert_eq!(peer.id, 5);
+    assert_matches!(
+        request.body.unwrap(),
+        region_request::Body::Sync(SyncRequest {
+            manifest_info: Some(ManifestInfo::MetricManifestInfo(MetricManifestInfo {
+                data_manifest_version: 1,
+                metadata_manifest_version: 2,
+                ..
+            })),
+            ..
+        })
+    );
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod metadata;
+
 use api::v1::flow::{flow_request, DropRequest, FlowRequest};
 use async_trait::async_trait;
 use common_catalog::format_full_flow_name;
@@ -29,7 +30,7 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::flow_name::FlowName;
@@ -153,6 +154,12 @@ impl DropFlowProcedure {
         };
         let flow_info_value = self.data.flow_info_value.as_ref().unwrap();
 
+        let flow_part2nodes = flow_info_value
+            .flownode_ids()
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
+
         self.context
             .cache_invalidator
             .invalidate(
@@ -164,8 +171,9 @@ impl DropFlowProcedure {
                         flow_name: flow_info_value.flow_name.to_string(),
                     }),
                     CacheIdent::DropFlow(DropFlow {
+                        flow_id,
                         source_table_ids: flow_info_value.source_table_ids.clone(),
-                        flownode_ids: flow_info_value.flownode_ids.values().cloned().collect(),
+                        flow_part2node_id: flow_part2nodes,
                     }),
                 ],
             )
@@ -193,7 +201,7 @@ impl Procedure for DropFlowProcedure {
             DropFlowState::InvalidateFlowCache => self.on_broadcast().await,
             DropFlowState::DropFlows => self.on_flownode_drop_flows().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

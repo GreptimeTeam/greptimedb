@@ -138,9 +138,7 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             }
 
             // else is rate
-            // TODO(ruihang): "divide 1000" converts the timestamp from millisecond to second.
-            //     it should consider other percisions.
-            let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) / 1000;
+            let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) as f64 / 1000.0;
             let last_value = values[len - 1];
             let prev_value = values[len - 2];
             let result_value = if last_value < prev_value {
@@ -192,6 +190,7 @@ mod test {
             IDelta::<false>::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![],
             vec![Some(1.0), Some(-5.0), None, Some(6.0), None, None],
         );
 
@@ -202,6 +201,7 @@ mod test {
             IDelta::<true>::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![],
             // the second point represent counter reset
             vec![Some(0.5), Some(0.0), None, Some(3.0), None, None],
         );

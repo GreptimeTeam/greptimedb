@@ -12,22 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "mem-prof")]
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use serde::{Deserialize, Serialize};
+
+/// Output format.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Output {
+    /// google’s pprof format report in protobuf.
+    Proto,
+    /// jeheap text format. Define by jemalloc.
+    #[default]
+    Text,
+    /// svg flamegraph.
+    Flamegraph,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct MemPprofQuery {
+    output: Output,
+}
 
 #[cfg(feature = "mem-prof")]
 #[axum_macros::debug_handler]
-pub async fn mem_prof_handler() -> crate::error::Result<impl IntoResponse> {
+pub async fn mem_prof_handler(
+    Query(req): Query<MemPprofQuery>,
+) -> crate::error::Result<impl IntoResponse> {
     use snafu::ResultExt;
 
     use crate::error::DumpProfileDataSnafu;
 
-    Ok((
-        StatusCode::OK,
-        common_mem_prof::dump_profile()
-            .await
-            .context(DumpProfileDataSnafu)?,
-    ))
+    let dump = match req.output {
+        Output::Proto => common_mem_prof::dump_pprof().await,
+        Output::Text => common_mem_prof::dump_profile().await,
+        Output::Flamegraph => common_mem_prof::dump_flamegraph().await,
+    }
+    .context(DumpProfileDataSnafu)?;
+
+    Ok((StatusCode::OK, dump))
 }
 
 #[cfg(not(feature = "mem-prof"))]

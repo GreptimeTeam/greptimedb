@@ -24,6 +24,7 @@ common-config.workspace = true
 common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-query.workspace = true
@@ -90,5 +91,15 @@ toml.workspace = true
 
 [[bench]]
 name = "memtable_bench"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_filter_time_partition"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_compaction_picker"
 harness = false
 required-features = ["test"]

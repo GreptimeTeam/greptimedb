@@ -44,7 +44,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+---------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                         | source_table_names                 |
 +---------------------+---------------+---------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number FROM numbers_input_show where number > 10 | greptime.public.numbers_input_show |
 +---------------------+---------------+---------------------------------------------------------+------------------------------------+
 
 SHOW FLOWS LIKE 'filter_numbers_show';
@@ -80,7 +80,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > 10 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- this one should error out
@@ -94,7 +94,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > 10 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure it's not replaced in flownode
@@ -131,7 +131,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > 10 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure it's not replaced in flownode
@@ -169,7 +169,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                            | source_table_names                 |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > 3 | greptime.public.numbers_input_show |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
 -- makesure it's replaced in flownode
@@ -209,7 +209,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                            | source_table_names                 |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > 3 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > 3 | greptime.public.numbers_input_show |
 +---------------------+---------------+------------------------------------------------------------+------------------------------------+
 
 DROP FLOW filter_numbers_show;
@@ -241,7 +241,7 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -2 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > -2 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 DROP FLOW filter_numbers_show;
@@ -258,17 +258,26 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > -3 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 -- makesure after recover should be the same
 -- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+-- SQLNESS SLEEP 3s
 SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name='filter_numbers_show';
 
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 | flow_name           | table_catalog | flow_definition                                             | source_table_names                 |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
-| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show WHERE number > -3 | greptime.public.numbers_input_show |
+| filter_numbers_show | greptime      | SELECT number, ts FROM numbers_input_show where number > -3 | greptime.public.numbers_input_show |
 +---------------------+---------------+-------------------------------------------------------------+------------------------------------+
 
 SELECT * FROM out_num_cnt_show;
@@ -380,7 +389,7 @@ SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE f
 +---------------------------------------------------------------+------------------------------------+
 | flow_definition                                               | source_table_names                 |
 +---------------------------------------------------------------+------------------------------------+
-| SELECT number AS n1 FROM numbers_input_show WHERE number > 10 | greptime.public.numbers_input_show |
+| SELECT number as n1 FROM numbers_input_show where number > 10 | greptime.public.numbers_input_show |
 +---------------------------------------------------------------+------------------------------------+
 
 INSERT INTO numbers_input_show VALUES (10, 6),(11, 8),(15, 7),(18, 3);

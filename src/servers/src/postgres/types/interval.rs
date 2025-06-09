@@ -16,9 +16,18 @@ use std::fmt::Display;
 
 use bytes::{Buf, BufMut};
 use common_time::interval::IntervalFormat;
-use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
+use common_time::timestamp::TimeUnit;
+use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use pgwire::types::ToSqlText;
 use postgres_types::{to_sql_checked, FromSql, IsNull, ToSql, Type};
+
+use crate::error;
+
+/// On average one month has 30.44 day, which is a common approximation.
+const SECONDS_PER_MONTH: i64 = 24 * 6 * 6 * 3044;
+const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+const MILLISECONDS_PER_MONTH: i64 = SECONDS_PER_MONTH * 1000;
+const MILLISECONDS_PER_DAY: i64 = SECONDS_PER_DAY * 1000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PgInterval {
@@ -53,6 +62,62 @@ impl From<IntervalMonthDayNano> for PgInterval {
             months: interval.months,
             days: interval.days,
             microseconds: interval.nanoseconds / 1000,
+        }
+    }
+}
+
+impl TryFrom<Duration> for PgInterval {
+    type Error = error::Error;
+
+    fn try_from(duration: Duration) -> error::Result<Self> {
+        let value = duration.value();
+        let unit = duration.unit();
+
+        // Convert the duration to microseconds
+        match unit {
+            TimeUnit::Second => {
+                let months = i32::try_from(value / SECONDS_PER_MONTH)
+                    .map_err(|_| error::DurationOverflowSnafu { val: duration }.build())?;
+                let days =
+                    i32::try_from((value - (months as i64) * SECONDS_PER_MONTH) / SECONDS_PER_DAY)
+                        .map_err(|_| error::DurationOverflowSnafu { val: duration }.build())?;
+                let microseconds =
+                    (value - (months as i64) * SECONDS_PER_MONTH - (days as i64) * SECONDS_PER_DAY)
+                        .checked_mul(1_000_000)
+                        .ok_or(error::DurationOverflowSnafu { val: duration }.build())?;
+
+                Ok(Self {
+                    months,
+                    days,
+                    microseconds,
+                })
+            }
+            TimeUnit::Millisecond => {
+                let months = i32::try_from(value / MILLISECONDS_PER_MONTH)
+                    .map_err(|_| error::DurationOverflowSnafu { val: duration }.build())?;
+                let days = i32::try_from(
+                    (value - (months as i64) * MILLISECONDS_PER_MONTH) / MILLISECONDS_PER_DAY,
+                )
+                .map_err(|_| error::DurationOverflowSnafu { val: duration }.build())?;
+                let microseconds = ((value - (months as i64) * MILLISECONDS_PER_MONTH)
+                    - (days as i64) * MILLISECONDS_PER_DAY)
+                    * 1_000;
+                Ok(Self {
+                    months,
+                    days,
+                    microseconds,
+                })
+            }
+            TimeUnit::Microsecond => Ok(Self {
+                months: 0,
+                days: 0,
+                microseconds: value,
+            }),
+            TimeUnit::Nanosecond => Ok(Self {
+                months: 0,
+                days: 0,
+                microseconds: value / 1000,
+            }),
         }
     }
 }
@@ -147,5 +212,85 @@ impl ToSqlText for PgInterval {
 
         out.put_slice(fmt.as_bytes());
         Ok(IsNull::No)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_time::timestamp::TimeUnit;
+    use common_time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_duration_to_pg_interval() {
+        // Test with seconds
+        let duration = Duration::new(86400, TimeUnit::Second); // 1 day
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 1);
+        assert_eq!(interval.microseconds, 0);
+
+        // Test with milliseconds
+        let duration = Duration::new(86400000, TimeUnit::Millisecond); // 1 day
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 1);
+        assert_eq!(interval.microseconds, 0);
+
+        // Test with microseconds
+        let duration = Duration::new(86400000000, TimeUnit::Microsecond); // 1 day
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.microseconds, 86400000000);
+
+        // Test with nanoseconds
+        let duration = Duration::new(86400000000000, TimeUnit::Nanosecond); // 1 day
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.microseconds, 86400000000);
+
+        // Test with partial day
+        let duration = Duration::new(43200, TimeUnit::Second); // 12 hours
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.microseconds, 43_200_000_000); // 12 hours in microseconds
+
+        // Test with negative duration
+        let duration = Duration::new(-86400, TimeUnit::Second); // -1 day
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, -1);
+        assert_eq!(interval.microseconds, 0);
+
+        // Test with multiple days
+        let duration = Duration::new(259200, TimeUnit::Second); // 3 days
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 3);
+        assert_eq!(interval.microseconds, 0);
+
+        // Test with small duration (less than a day)
+        let duration = Duration::new(3600, TimeUnit::Second); // 1 hour
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.microseconds, 3600000000); // 1 hour in microseconds
+
+        // Test with very small duration
+        let duration = Duration::new(1, TimeUnit::Microsecond); // 1 microsecond
+        let interval = PgInterval::try_from(duration).unwrap();
+        assert_eq!(interval.months, 0);
+        assert_eq!(interval.days, 0);
+        assert_eq!(interval.microseconds, 1);
+
+        let duration = Duration::new(i64::MAX, TimeUnit::Second);
+        assert!(PgInterval::try_from(duration).is_err());
+
+        let duration = Duration::new(i64::MAX, TimeUnit::Millisecond);
+        assert!(PgInterval::try_from(duration).is_err());
     }
 }

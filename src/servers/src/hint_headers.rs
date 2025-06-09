@@ -13,19 +13,8 @@
 // limitations under the License.
 
 use http::HeaderMap;
+use session::hints::{HINTS_KEY, HINTS_KEY_PREFIX, HINT_KEYS};
 use tonic::metadata::MetadataMap;
-
-// For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
-pub const HINTS_KEY: &str = "x-greptime-hints";
-
-pub const HINT_KEYS: [&str; 6] = [
-    "x-greptime-hint-auto_create_table",
-    "x-greptime-hint-ttl",
-    "x-greptime-hint-append_mode",
-    "x-greptime-hint-merge_mode",
-    "x-greptime-hint-physical_table",
-    "x-greptime-hint-skip_wal",
-];
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
     let mut hints = Vec::new();
@@ -41,7 +30,7 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
     }
     for key in HINT_KEYS.iter() {
         if let Some(value) = headers.get(key) {
-            let new_key = key.replace("x-greptime-hint-", "");
+            let new_key = key.replace(HINTS_KEY_PREFIX, "");
             hints.push((new_key, value.trim().to_string()));
         }
     }
@@ -90,10 +79,14 @@ mod tests {
             "x-greptime-hint-physical_table",
             HeaderValue::from_static("table1"),
         );
+        headers.insert(
+            "x-greptime-hint-read_preference",
+            HeaderValue::from_static("leader"),
+        );
 
         let hints = extract_hints(&headers);
 
-        assert_eq!(hints.len(), 5);
+        assert_eq!(hints.len(), 6);
         assert_eq!(
             hints[0],
             ("auto_create_table".to_string(), "true".to_string())
@@ -104,6 +97,10 @@ mod tests {
         assert_eq!(
             hints[4],
             ("physical_table".to_string(), "table1".to_string())
+        );
+        assert_eq!(
+            hints[5],
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 
@@ -131,12 +128,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-greptime-hints",
-            HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1"),
+            HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1,\
+            read_preference=leader"),
         );
 
         let hints = extract_hints(&headers);
 
-        assert_eq!(hints.len(), 5);
+        assert_eq!(hints.len(), 6);
         assert_eq!(
             hints[0],
             ("auto_create_table".to_string(), "true".to_string())
@@ -147,6 +145,10 @@ mod tests {
         assert_eq!(
             hints[4],
             ("physical_table".to_string(), "table1".to_string())
+        );
+        assert_eq!(
+            hints[5],
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 
@@ -170,10 +172,14 @@ mod tests {
             "x-greptime-hint-physical_table",
             MetadataValue::from_static("table1"),
         );
+        metadata.insert(
+            "x-greptime-hint-read_preference",
+            MetadataValue::from_static("leader"),
+        );
 
         let hints = extract_hints(&metadata);
 
-        assert_eq!(hints.len(), 5);
+        assert_eq!(hints.len(), 6);
         assert_eq!(
             hints[0],
             ("auto_create_table".to_string(), "true".to_string())
@@ -184,6 +190,10 @@ mod tests {
         assert_eq!(
             hints[4],
             ("physical_table".to_string(), "table1".to_string())
+        );
+        assert_eq!(
+            hints[5],
+            ("read_preference".to_string(), "leader".to_string())
         );
     }
 

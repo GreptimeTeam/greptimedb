@@ -64,11 +64,11 @@ inputs:
   upload-max-retry-times:
     description: Max retry times for uploading artifacts to S3
     required: false
-    default: "20"
+    default: "30"
   upload-retry-timeout:
     description: Timeout for uploading artifacts to S3
     required: false
-    default: "30" # minutes
+    default: "120" # minutes
 runs:
   using: composite
   steps:

@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
@@ -29,7 +28,6 @@ use servers::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::influxdb::InfluxdbRequest;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
@@ -37,19 +35,6 @@ use tokio::sync::mpsc;
 
 struct DummyInstance {
     tx: Arc<mpsc::Sender<(String, String)>>,
-}
-
-#[async_trait]
-impl GrpcQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(
-        &self,
-        _query: Request,
-        _ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
-        unimplemented!()
-    }
 }
 
 #[async_trait]

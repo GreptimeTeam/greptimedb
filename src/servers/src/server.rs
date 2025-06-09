@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ use common_runtime::Runtime;
 use common_telemetry::{error, info};
 use futures::future::{try_join_all, AbortHandle, AbortRegistration, Abortable};
 use snafu::{ensure, ResultExt};
-use tokio::sync::{Mutex, RwLock};
+use strum::Display;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -32,20 +34,37 @@ pub(crate) type AbortableStream = Abortable<TcpListenerStream>;
 pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 
 /// [ServerHandlers] is used to manage the lifecycle of all the services like http or grpc in the GreptimeDB server.
-#[derive(Clone, Default)]
-pub struct ServerHandlers {
-    handlers: Arc<RwLock<HashMap<String, ServerHandler>>>,
+#[derive(Clone, Display)]
+pub enum ServerHandlers {
+    Init(Arc<std::sync::Mutex<HashMap<String, ServerHandler>>>),
+    Started(Arc<HashMap<String, Box<dyn Server>>>),
+}
+
+impl Debug for ServerHandlers {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ServerHandlers::{}", self)
+    }
+}
+
+impl Default for ServerHandlers {
+    fn default() -> Self {
+        Self::Init(Arc::new(std::sync::Mutex::new(HashMap::new())))
+    }
 }
 
 impl ServerHandlers {
-    pub fn new() -> Self {
-        Self {
-            handlers: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub async fn insert(&self, handler: ServerHandler) {
-        let mut handlers = self.handlers.write().await;
+    /// Inserts a [ServerHandler] **before** the [ServerHandlers] is started.
+    pub fn insert(&self, handler: ServerHandler) {
+        // Inserts more to ServerHandlers while it is not in the initialization state
+        // is considered a bug.
+        assert!(
+            matches!(self, ServerHandlers::Init(_)),
+            "unexpected: insert when `ServerHandlers` is not during initialization"
+        );
+        let ServerHandlers::Init(handlers) = self else {
+            unreachable!("guarded by the assertion above");
+        };
+        let mut handlers = handlers.lock().unwrap();
         handlers.insert(handler.0.name().to_string(), handler);
     }
 
@@ -55,33 +74,53 @@ impl ServerHandlers {
     /// the server to get the real bound port number. This way we avoid doing careful assignment of
     /// the port number to the service in the test.
     ///
-    /// Note that the address is guaranteed to be correct only after the `start_all` method is
-    /// successfully invoked. Otherwise you may find the address to be what you configured before.
-    pub async fn addr(&self, name: &str) -> Option<SocketAddr> {
-        let handlers = self.handlers.read().await;
-        handlers.get(name).map(|x| x.1)
+    /// Note that the address is only retrievable after the [ServerHandlers] is started (the
+    /// `start_all` method is called successfully). Otherwise you may find the address still be
+    /// `None` even if you are certain the server was inserted before.
+    pub fn addr(&self, name: &str) -> Option<SocketAddr> {
+        let ServerHandlers::Started(handlers) = self else {
+            return None;
+        };
+        handlers.get(name).and_then(|x| x.bind_addr())
     }
 
     /// Starts all the managed services. It will block until all the services are started.
     /// And it will set the actual bound address to the service.
-    pub async fn start_all(&self) -> Result<()> {
-        let mut handlers = self.handlers.write().await;
+    pub async fn start_all(&mut self) -> Result<()> {
+        let ServerHandlers::Init(handlers) = self else {
+            // If already started, do nothing.
+            return Ok(());
+        };
+
+        let mut handlers = {
+            let mut handlers = handlers.lock().unwrap();
+            std::mem::take(&mut *handlers)
+        };
+
         try_join_all(handlers.values_mut().map(|(server, addr)| async move {
-            let bind_addr = server.start(*addr).await?;
-            *addr = bind_addr;
-            info!("Service {} is started at {}", server.name(), bind_addr);
+            server.start(*addr).await?;
+            info!("Server {} is started", server.name());
             Ok::<(), error::Error>(())
         }))
         .await?;
+
+        let handlers = handlers
+            .into_iter()
+            .map(|(k, v)| (k, v.0))
+            .collect::<HashMap<_, _>>();
+        *self = ServerHandlers::Started(Arc::new(handlers));
         Ok(())
     }
 
     /// Shutdown all the managed services. It will block until all the services are shutdown.
-    pub async fn shutdown_all(&self) -> Result<()> {
-        // Even though the `shutdown` method in server does not require mut self, we still acquire
-        // write lock to pair with `start_all` method.
-        let handlers = self.handlers.write().await;
-        try_join_all(handlers.values().map(|(server, _)| async move {
+    pub async fn shutdown_all(&mut self) -> Result<()> {
+        let ServerHandlers::Started(handlers) = self else {
+            // If not started, do nothing.
+            return Ok(());
+        };
+
+        let handlers = std::mem::take(handlers);
+        try_join_all(handlers.values().map(|server| async move {
             server.shutdown().await?;
             info!("Service {} is shutdown!", server.name());
             Ok::<(), error::Error>(())
@@ -99,9 +138,15 @@ pub trait Server: Send + Sync {
     /// Starts the server and binds on `listening`.
     ///
     /// Caller should ensure `start()` is only invoked once.
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr>;
+    async fn start(&mut self, listening: SocketAddr) -> Result<()>;
 
     fn name(&self) -> &str;
+
+    /// Finds the actual bind address of this server.
+    /// If not found (returns `None`), maybe it's not started yet, or just don't have it.
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 
 struct AcceptTask {

@@ -256,14 +256,13 @@ impl DummyTableProvider {
 
 pub struct DummyTableProviderFactory;
 
-#[async_trait]
-impl TableProviderFactory for DummyTableProviderFactory {
-    async fn create(
+impl DummyTableProviderFactory {
+    pub async fn create_table_provider(
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
         ctx: Option<&session::context::QueryContext>,
-    ) -> Result<Arc<dyn TableProvider>> {
+    ) -> Result<DummyTableProvider> {
         let metadata =
             engine
                 .get_metadata(region_id)
@@ -274,19 +273,32 @@ impl TableProviderFactory for DummyTableProviderFactory {
                 })?;
 
         let scan_request = ctx
-            .and_then(|c| c.get_snapshot(region_id.as_u64()))
-            .map(|seq| ScanRequest {
-                sequence: Some(seq),
+            .map(|ctx| ScanRequest {
+                sequence: ctx.get_snapshot(region_id.as_u64()),
+                sst_min_sequence: ctx.sst_min_sequence(region_id.as_u64()),
                 ..Default::default()
             })
             .unwrap_or_default();
 
-        Ok(Arc::new(DummyTableProvider {
+        Ok(DummyTableProvider {
             region_id,
             engine,
             metadata,
             scan_request: Arc::new(Mutex::new(scan_request)),
-        }))
+        })
+    }
+}
+
+#[async_trait]
+impl TableProviderFactory for DummyTableProviderFactory {
+    async fn create(
+        &self,
+        region_id: RegionId,
+        engine: RegionEngineRef,
+        ctx: Option<&session::context::QueryContext>,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let provider = self.create_table_provider(region_id, engine, ctx).await?;
+        Ok(Arc::new(provider))
     }
 }
 

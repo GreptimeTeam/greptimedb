@@ -1,61 +1,122 @@
-Grafana dashboard for GreptimeDB
---------------------------------
+# Grafana dashboards for GreptimeDB
 
-GreptimeDB's official Grafana dashboard.
+## Overview
 
-Status notify: we are still working on this config. It's expected to change frequently in the recent days. Please feel free to submit your feedback and/or contribution to this dashboard 🤗
+This repository contains Grafana dashboards for visualizing metrics and logs of GreptimeDB instances running in either cluster or standalone mode. **The Grafana version should be greater than 9.0**.
 
-If you use Helm [chart](https://github.com/GreptimeTeam/helm-charts) to deploy GreptimeDB cluster, you can enable self-monitoring by setting the following values in your Helm chart:
+We highly recommend using the self-monitoring feature provided by [GreptimeDB Operator](https://github.com/GrepTimeTeam/greptimedb-operator) to automatically collect metrics and logs from your GreptimeDB instances and store them in a dedicated GreptimeDB instance.
+
+- **Metrics Dashboards**
+
+  - `dashboards/metrics/cluster/dashboard.json`: The Grafana dashboard for the GreptimeDB cluster. Read the [dashboard.md](./dashboards/metrics/cluster/dashboard.md) for more details.
+  
+  - `dashboards/metrics/standalone/dashboard.json`: The Grafana dashboard for the standalone GreptimeDB instance. **It's generated from the `cluster/dashboard.json` by removing the instance filter through the `make dashboards` command**. Read the [dashboard.md](./dashboards/metrics/standalone/dashboard.md) for more details.
+
+- **Logs Dashboard**
+
+  The `dashboards/logs/dashboard.json` provides a comprehensive Grafana dashboard for visualizing GreptimeDB logs. To utilize this dashboard effectively, you need to collect logs in JSON format from your GreptimeDB instances and store them in a dedicated GreptimeDB instance.
+
+  For proper integration, the logs table must adhere to the following schema design with the table name `_gt_logs`:
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS `_gt_logs` (
+    `pod_ip` STRING NULL,
+    `namespace` STRING NULL,
+    `cluster` STRING NULL,
+    `file` STRING NULL,
+    `module_path` STRING NULL,
+    `level` STRING NULL,
+    `target` STRING NULL,
+    `role` STRING NULL,
+    `pod` STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),
+    `message` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),
+    `err` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),
+    `timestamp` TIMESTAMP(9) NOT NULL,
+    TIME INDEX (`timestamp`),
+    PRIMARY KEY (`level`, `target`, `role`)
+  )
+    ENGINE=mito
+  WITH (
+    append_mode = 'true'
+  )
+  ```
+
+## Development
+
+As GreptimeDB evolves rapidly, metrics may change over time. We welcome your feedback and contributions to improve these dashboards 🤗
+
+To modify the metrics dashboards, simply edit the `dashboards/metrics/cluster/dashboard.json` file and run the `make dashboards` command. This will automatically generate the updated `dashboards/metrics/standalone/dashboard.json` and other related files.
+
+For easier dashboard maintenance, we utilize the [`dac`](https://github.com/zyy17/dac) tool to generate human-readable intermediate dashboards and documentation:
+
+- `dashboards/metrics/cluster/dashboard.yaml`: The intermediate dashboard file for the GreptimeDB cluster.
+- `dashboards/metrics/standalone/dashboard.yaml`: The intermediate dashboard file for standalone GreptimeDB instances.
+
+## Data Sources
+
+The following data sources are used to fetch metrics and logs:
+
+- **`${metrics}`**: Prometheus data source for providing the GreptimeDB metrics.
+- **`${logs}`**: MySQL data source for providing the GreptimeDB logs.
+- **`${information_schema}`**: MySQL data source for providing the information schema of the current instance and used for the `overview` panel. It is the MySQL port of the current monitored instance.
+
+## Instance Filters
+
+To deploy the dashboards for multiple scenarios (K8s, bare metal, etc.), we prefer to use the `instance` label when filtering instances.
+
+Additionally, we recommend including the `pod` label in the legend to make it easier to identify each instance, even though this field will be empty in bare metal scenarios.
+
+For example, the following query is recommended:
+
+```promql
+sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)
+```
+
+And the legend will be like: `[{{instance}}]-[{{ pod }}]`.
+
+## Deployment
+
+### (Recommended) Helm Chart
+
+If you use the [Helm Chart](https://github.com/GreptimeTeam/helm-charts) to deploy a GreptimeDB cluster, you can enable self-monitoring by setting the following values in your Helm chart:
 
 - `monitoring.enabled=true`: Deploys a standalone GreptimeDB instance dedicated to monitoring the cluster;
 - `grafana.enabled=true`: Deploys Grafana and automatically imports the monitoring dashboard;
 
-The standalone GreptimeDB instance will collect metrics from your cluster and the dashboard will be available in the Grafana UI. For detailed deployment instructions, please refer to our [Kubernetes deployment guide](https://docs.greptime.com/nightly/user-guide/deployments/deploy-on-kubernetes/getting-started).
+The standalone GreptimeDB instance will collect metrics from your cluster, and the dashboard will be available in the Grafana UI. For detailed deployment instructions, please refer to our [Kubernetes deployment guide](https://docs.greptime.com/nightly/user-guide/deployments/deploy-on-kubernetes/getting-started).
 
-# How to use
+### Self-host Prometheus and import dashboards manually
 
-## `greptimedb.json`
+1. **Configure Prometheus to scrape the cluster**
 
-Open Grafana Dashboard page, choose `New` -> `Import`. And upload `greptimedb.json` file.
+   The following is an example configuration(**Please modify it according to your actual situation**):
 
-## `greptimedb-cluster.json`
+    ```yml
+    # example config
+    # only to indicate how to assign labels to each target
+    # modify yours accordingly
+    scrape_configs:
+      - job_name: metasrv
+        static_configs:
+        - targets: ['<metasrv-ip>:<port>']
 
-This cluster dashboard provides a comprehensive view of incoming requests, response statuses, and internal activities such as flush and compaction, with a layered structure from frontend to datanode. Designed with a focus on alert functionality, its primary aim is to highlight any anomalies in metrics, allowing users to quickly pinpoint the cause of errors.
+      - job_name: datanode
+        static_configs:
+        - targets: ['<datanode0-ip>:<port>', '<datanode1-ip>:<port>', '<datanode2-ip>:<port>']
 
-We use Prometheus to scrape off metrics from nodes in GreptimeDB cluster, Grafana to visualize the diagram. Any compatible stack should work too.
+      - job_name: frontend
+        static_configs:
+        - targets: ['<frontend-ip>:<port>']
+    ```
 
-__Note__: This dashboard is still in an early stage of development. Any issue or advice on improvement is welcomed.
+2. **Configure the data sources in Grafana**
 
-### Configuration
+   You need to add two data sources in Grafana:
 
-Please ensure the following configuration before importing the dashboard into Grafana.
+   - Prometheus: It is the Prometheus instance that scrapes the GreptimeDB metrics.
+   - Information Schema: It is the MySQL port of the current monitored instance. The dashboard will use this datasource to show the information schema of the current instance.
 
-__1. Prometheus scrape config__
+3. **Import the dashboards based on your deployment scenario**
 
-Configure Prometheus to scrape the cluster.
-
-```yml
-# example config
-# only to indicate how to assign labels to each target
-# modify yours accordingly
-scrape_configs:
-  - job_name: metasrv
-    static_configs:
-    - targets: ['<metasrv-ip>:<port>']
-
-  - job_name: datanode
-    static_configs:
-    - targets: ['<datanode0-ip>:<port>', '<datanode1-ip>:<port>', '<datanode2-ip>:<port>']
-
-  - job_name: frontend
-    static_configs:
-    - targets: ['<frontend-ip>:<port>']
-```
-
-__2. Grafana config__
-
-Create a Prometheus data source in Grafana before using this dashboard. We use `datasource` as a variable in Grafana dashboard so that multiple environments are supported.
-
-### Usage
-
-Use `datasource` or `instance` on the upper-left corner to filter data from certain node.
+   - **Cluster**: Import the `dashboards/metrics/cluster/dashboard.json` dashboard.
+   - **Standalone**: Import the `dashboards/metrics/standalone/dashboard.json` dashboard.

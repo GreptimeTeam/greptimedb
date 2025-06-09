@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKv
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
@@ -30,9 +31,12 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_version::{short_version, version};
-use flow::{FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendInvoker};
+use flow::{
+    get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
+    FrontendClient, FrontendInvoker,
+};
 use meta_client::{MetaClientOptions, MetaClientType};
 use snafu::{ensure, OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -42,7 +46,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -80,10 +84,14 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
+        plugins::start_flownode_plugins(self.flownode.flow_engine().plugins().clone())
+            .await
+            .context(StartFlownodeSnafu)?;
+
         self.flownode.start().await.context(StartFlownodeSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.flownode
             .shutdown()
             .await
@@ -149,6 +157,9 @@ struct StartCommand {
     /// HTTP request timeout in seconds.
     #[clap(long)]
     http_timeout: Option<u64>,
+    /// User Provider cfg, for auth, currently only support static user provider
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
@@ -174,6 +185,14 @@ impl StartCommand {
 
         if let Some(dir) = &global_options.log_dir {
             opts.logging.dir.clone_from(dir);
+        }
+
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(DEFAULT_DATA_HOME)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
         }
 
         if global_options.log_level.is_some() {
@@ -212,6 +231,10 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
+
         ensure!(
             opts.node_id.is_some(),
             MissingConfigSnafu {
@@ -230,14 +253,23 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             opts.component.node_id.map(|x| x.to_string()),
+            None,
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Flownode start command: {:#?}", self);
         info!("Flownode options: {:#?}", opts);
 
+        let plugin_opts = opts.plugins;
         let mut opts = opts.component;
         opts.grpc.detect_server_addr();
+
+        let mut plugins = Plugins::new();
+        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+            .await
+            .context(StartFlownodeSnafu)?;
 
         let member_id = opts
             .node_id
@@ -314,12 +346,16 @@ impl StartCommand {
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
+        let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
+        let frontend_client =
+            FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
-            Plugins::new(),
+            plugins,
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
+            Arc::new(frontend_client),
         )
         .with_heartbeat_task(heartbeat_task);
 
@@ -328,7 +364,6 @@ impl StartCommand {
             .with_grpc_server(flownode.flownode_server().clone())
             .enable_http_service()
             .build()
-            .await
             .context(StartFlownodeSnafu)?;
         flownode.setup_services(services);
         let flownode = flownode;
@@ -342,7 +377,7 @@ impl StartCommand {
         let client = Arc::new(NodeClients::new(channel_config));
 
         let invoker = FrontendInvoker::build_from(
-            flownode.flow_worker_manager().clone(),
+            flownode.flow_engine().streaming_engine(),
             catalog_manager.clone(),
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
@@ -352,7 +387,9 @@ impl StartCommand {
         .await
         .context(StartFlownodeSnafu)?;
         flownode
-            .flow_worker_manager()
+            .flow_engine()
+            .streaming_engine()
+            // TODO(discord9): refactor and avoid circular reference
             .set_frontend_invoker(invoker)
             .await;
 

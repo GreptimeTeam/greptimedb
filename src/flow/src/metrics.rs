@@ -38,10 +38,26 @@ lazy_static! {
     pub static ref METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY: HistogramVec = register_histogram_vec!(
         "greptime_flow_batching_engine_slow_query_secs",
         "flow batching engine slow query(seconds)",
-        &["flow_id", "sql", "peer"],
+        &["flow_id", "peer"],
         vec![60., 2. * 60., 3. * 60., 5. * 60., 10. * 60.]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT: HistogramVec =
+        register_histogram_vec!(
+            "greptime_flow_batching_engine_query_window_cnt",
+            "flow batching engine query time window count",
+            &["flow_id"],
+            vec![0.0, 5., 10., 20., 40.]
+        )
+        .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE: HistogramVec =
+        register_histogram_vec!(
+            "greptime_flow_batching_engine_query_time_range_secs",
+            "flow batching engine query time range(seconds)",
+            &["flow_id"],
+            vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(

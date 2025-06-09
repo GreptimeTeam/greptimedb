@@ -36,13 +36,7 @@ ALTER TABLE ato SET 'compaction.twcs.time_window'='2h';
 
 ALTER TABLE ato SET 'compaction.twcs.max_output_file_size'='500MB';
 
-ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_files'='2';
-
-ALTER TABLE ato SET 'compaction.twcs.max_active_window_files'='2';
-
-ALTER TABLE ato SET 'compaction.twcs.max_active_window_runs'='6';
-
-ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='6';
+ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='2';
 
 SHOW CREATE TABLE ato;
 
@@ -52,7 +46,7 @@ ALTER TABLE ato UNSET '🕶️';
 
 SHOW CREATE TABLE ato;
 
-ALTER TABLE ato SET 'compaction.twcs.max_inactive_window_runs'='';
+ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='';
 
 SHOW CREATE TABLE ato;
 

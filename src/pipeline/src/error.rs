@@ -35,6 +35,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Field renaming must be a string pair of 'key' and 'rename_to', got: {value:?}"
+    ))]
+    InvalidFieldRename {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Processor must be a map"))]
     ProcessorMustBeMap {
         #[snafu(implicit)]
@@ -395,11 +405,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform cannot be empty"))]
-    TransformEmpty {
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
     TransformColumnNameMustBeUnique {
         duplicates: String,
@@ -418,6 +423,11 @@ pub enum Error {
     TransformTimestampIndexCount {
         count: usize,
         columns: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform"))]
+    AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,
     },
@@ -517,12 +527,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Unsupported number type: {value}"))]
-    ValueUnsupportedNumberType {
-        value: serde_json::Number,
-        #[snafu(implicit)]
-        location: Location,
-    },
+
     #[snafu(display("Unsupported yaml type: {value:?}"))]
     ValueUnsupportedYamlType {
         value: yaml_rust::Yaml,
@@ -549,8 +554,8 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Prepare value must be an object"))]
-    PrepareValueMustBeObject {
+    #[snafu(display("Input value must be an object"))]
+    InputValueMustBeObject {
         #[snafu(implicit)]
         location: Location,
     },
@@ -571,6 +576,13 @@ pub enum Error {
     #[snafu(display("Unsupported number type: {value:?}"))]
     UnsupportedNumberType {
         value: serde_json::Number,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to parse json"))]
+    JsonParse {
+        #[snafu(source)]
+        error: serde_json::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -631,6 +643,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. schemas: {}",
+        schemas
+    ))]
+    MultiPipelineWithDiffSchema {
+        schemas: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The return value's length of the record batch does not match, see debug log for details"
+    ))]
+    RecordBatchLenNotMatch {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         #[snafu(implicit)]
@@ -645,6 +675,54 @@ pub enum Error {
     #[snafu(display("Invalid table suffix template, input: {}", input))]
     InvalidTableSuffixTemplate {
         input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to compile VRL, {}", msg))]
+    CompileVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute VRL, {}", msg))]
+    ExecuteVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Float is not a number: {}", input_float))]
+    FloatNaN {
+        input_float: f64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid timestamp value: {}", input))]
+    InvalidTimestamp {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert bytes to utf8"))]
+    BytesToUtf8 {
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Please don't use regex in Vrl script"))]
+    VrlRegexValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Vrl script should return `.` in the end"))]
+    VrlReturnValue {
         #[snafu(implicit)]
         location: Location,
     },
@@ -731,7 +809,8 @@ impl ErrorExt for Error {
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
-            BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            MultiPipelineWithDiffSchema { .. } => StatusCode::IllegalState,
+            BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
             Catalog { source, .. } => source.status_code(),
@@ -739,6 +818,7 @@ impl ErrorExt for Error {
 
             EmptyInputField { .. }
             | MissingInputField { .. }
+            | InvalidFieldRename { .. }
             | ProcessorMustBeMap { .. }
             | ProcessorMissingField { .. }
             | ProcessorExpectString { .. }
@@ -791,10 +871,10 @@ impl ErrorExt for Error {
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
             | TransformTypeMustBeSet { .. }
-            | TransformEmpty { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
             | TransformTimestampIndexCount { .. }
+            | AutoTransformOneTimestamp { .. }
             | CoerceUnsupportedNullType { .. }
             | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }
@@ -808,16 +888,16 @@ impl ErrorExt for Error {
             | ValueParseFloat { .. }
             | ValueParseBoolean { .. }
             | ValueDefaultValueUnsupported { .. }
-            | ValueUnsupportedNumberType { .. }
             | ValueUnsupportedYamlType { .. }
             | ValueYamlKeyMustBeString { .. }
             | YamlLoad { .. }
             | YamlParse { .. }
-            | PrepareValueMustBeObject { .. }
+            | InputValueMustBeObject { .. }
             | ColumnOptions { .. }
             | UnsupportedIndexType { .. }
             | UnsupportedNumberType { .. }
             | IdentifyPipelineColumnTypeMismatch { .. }
+            | JsonParse { .. }
             | JsonPathParse { .. }
             | JsonPathParseResultIndex { .. }
             | FieldRequiredForDispatcher
@@ -826,6 +906,13 @@ impl ErrorExt for Error {
             | ReachedMaxNestedLevels { .. }
             | RequiredTableSuffixTemplate
             | InvalidTableSuffixTemplate { .. }
+            | CompileVrl { .. }
+            | ExecuteVrl { .. }
+            | FloatNaN { .. }
+            | BytesToUtf8 { .. }
+            | InvalidTimestamp { .. }
+            | VrlRegexValue { .. }
+            | VrlReturnValue { .. }
             | PipelineMissing { .. } => StatusCode::InvalidArguments,
         }
     }

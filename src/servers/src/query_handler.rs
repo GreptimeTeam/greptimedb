@@ -34,6 +34,7 @@ use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use catalog::CatalogManager;
 use common_query::Output;
+use datatypes::timestamp::TimestampNanosecond;
 use headers::HeaderValue;
 use log_query::LogQuery;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -121,7 +122,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<Vec<Output>>;
 }
 
 /// PipelineHandler is responsible for handling pipeline related requests.
@@ -165,6 +166,14 @@ pub trait PipelineHandler {
 
     //// Build a pipeline from a string.
     fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline>;
+
+    /// Get a original pipeline by name.
+    async fn get_pipeline_str(
+        &self,
+        name: &str,
+        version: PipelineVersion,
+        query_ctx: QueryContextRef,
+    ) -> Result<(String, TimestampNanosecond)>;
 }
 
 /// Handle log query requests.

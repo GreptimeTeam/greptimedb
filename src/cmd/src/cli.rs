@@ -58,7 +58,7 @@ impl App for Instance {
         false
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -75,6 +75,7 @@ impl Command {
             APP_NAME,
             &opts,
             &TracingOptions::default(),
+            None,
             None,
         );
 

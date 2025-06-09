@@ -26,6 +26,7 @@ use tonic::codegen::http;
 
 use crate::metasrv::SelectTarget;
 use crate::pubsub::Message;
+use crate::service::mailbox::Channel;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -66,6 +67,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         region_id: RegionId,
+    },
+
+    #[snafu(display(
+        "The region migration procedure is completed for region: {}, target_peer: {}",
+        region_id,
+        target_peer_id
+    ))]
+    RegionMigrated {
+        #[snafu(implicit)]
+        location: Location,
+        region_id: RegionId,
+        target_peer_id: u64,
     },
 
     #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
@@ -336,6 +349,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to downgrade region leader, region: {}", region_id))]
+    DowngradeLeader {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Region's leader peer changed: {}", msg))]
+    LeaderPeerChanged {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments {
         err_msg: String,
@@ -518,6 +547,13 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
+    #[snafu(display("A prune task for topic {} is already running", topic))]
+    PruneTaskAlreadyRunning {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Schema already exists, name: {schema_name}"))]
     SchemaAlreadyExists {
         schema_name: String,
@@ -564,6 +600,13 @@ pub enum Error {
     MailboxReceiver {
         id: u64,
         err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mailbox channel closed: {channel}"))]
+    MailboxChannelClosed {
+        channel: Channel,
         #[snafu(implicit)]
         location: Location,
     },
@@ -788,6 +831,14 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to build kafka client."))]
+    BuildKafkaClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: common_meta::error::Error,
+    },
+
     #[snafu(display(
         "Failed to build a Kafka partition client, topic: {}, partition: {}",
         topic,
@@ -863,6 +914,7 @@ impl ErrorExt for Error {
             | Error::MailboxClosed { .. }
             | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
+            | Error::MailboxChannelClosed { .. }
             | Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
@@ -875,7 +927,9 @@ impl ErrorExt for Error {
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::DeleteRecords { .. } => StatusCode::Internal,
+            | Error::BuildKafkaClient { .. }
+            | Error::DeleteRecords { .. }
+            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
@@ -897,7 +951,8 @@ impl ErrorExt for Error {
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }
-            | Error::HandlerNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::HandlerNotFound { .. }
+            | Error::LeaderPeerChanged { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }
             | Error::InvalidRegionKeyFromUtf8 { .. }
@@ -910,7 +965,8 @@ impl ErrorExt for Error {
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
-            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
+            | Error::MigrationRunning { .. }
+            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
@@ -931,7 +987,7 @@ impl ErrorExt for Error {
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
             Error::NextSequence { source, .. } => source.status_code(),
-
+            Error::DowngradeLeader { source, .. } => source.status_code(),
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::SubmitDdlTask { source, .. } => source.status_code(),
             Error::ConvertProtoData { source, .. }

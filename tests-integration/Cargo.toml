@@ -6,6 +6,14 @@ license.workspace = true
 
 [features]
 dashboard = []
+enterprise = [
+    "cmd/enterprise",
+    "common-meta/enterprise",
+    "frontend/enterprise",
+    "meta-srv/enterprise",
+    "operator/enterprise",
+    "sql/enterprise",
+]
 
 [lints]
 workspace = true
@@ -100,3 +108,4 @@ session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 tokio-postgres = { workspace = true }
 url = "2.3"
+yaml-rust = "0.4"

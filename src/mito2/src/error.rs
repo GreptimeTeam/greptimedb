@@ -25,7 +25,7 @@ use common_time::Timestamp;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
-use prost::{DecodeError, EncodeError};
+use prost::DecodeError;
 use snafu::{Location, Snafu};
 use store_api::logstore::provider::Provider;
 use store_api::manifest::ManifestVersion;
@@ -243,6 +243,8 @@ pub enum Error {
         region_id: RegionId,
         column: String,
         source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to build entry, region_id: {}", region_id))]
@@ -251,15 +253,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
-    },
-
-    #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
-    EncodeWal {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: EncodeError,
     },
 
     #[snafu(display("Failed to write WAL"))]
@@ -664,13 +657,6 @@ pub enum Error {
         unexpected_entry_id: u64,
     },
 
-    #[snafu(display("Read the corrupted log entry, region_id: {}", region_id))]
-    CorruptedEntry {
-        region_id: RegionId,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Failed to download file, region_id: {}, file_id: {}, file_type: {:?}",
         region_id,
@@ -710,8 +696,8 @@ pub enum Error {
         error: std::io::Error,
     },
 
-    #[snafu(display("Failed to filter record batch"))]
-    FilterRecordBatch {
+    #[snafu(display("Record batch error"))]
+    RecordBatch {
         source: common_recordbatch::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -1021,6 +1007,27 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to scan series"))]
+    ScanSeries {
+        #[snafu(implicit)]
+        location: Location,
+        source: Arc<Error>,
+    },
+
+    #[snafu(display("Partition {} scan multiple times", partition))]
+    ScanMultiTimes {
+        partition: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode bulk wal entry"))]
+    ConvertBulkWalEntry {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1082,7 +1089,6 @@ impl ErrorExt for Error {
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
-            | EncodeWal { .. }
             | ConvertMetaData { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
@@ -1093,7 +1099,6 @@ impl ErrorExt for Error {
             | EncodeMemtable { .. }
             | CreateDir { .. }
             | ReadDataPart { .. }
-            | CorruptedEntry { .. }
             | BuildEntry { .. }
             | Metadata { .. }
             | MitoManifestInfo { .. } => StatusCode::Internal,
@@ -1143,7 +1148,7 @@ impl ErrorExt for Error {
 
             External { source, .. } => source.status_code(),
 
-            FilterRecordBatch { source, .. } => source.status_code(),
+            RecordBatch { source, .. } => source.status_code(),
 
             Download { .. } | Upload { .. } => StatusCode::StorageUnavailable,
             ChecksumMismatch { .. } => StatusCode::Unexpected,
@@ -1172,6 +1177,11 @@ impl ErrorExt for Error {
             ManualCompactionOverride {} => StatusCode::Cancelled,
 
             IncompatibleWalProviderChange { .. } => StatusCode::InvalidArguments,
+
+            ScanSeries { source, .. } => source.status_code(),
+
+            ScanMultiTimes { .. } => StatusCode::InvalidArguments,
+            Error::ConvertBulkWalEntry { source, .. } => source.status_code(),
         }
     }
 

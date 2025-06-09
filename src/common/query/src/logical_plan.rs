@@ -18,16 +18,19 @@ mod udaf;
 
 use std::sync::Arc;
 
+use api::v1::TableName;
 use datafusion::catalog::CatalogProviderList;
 use datafusion::error::Result as DatafusionResult;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
-use datafusion_common::Column;
-use datafusion_expr::col;
+use datafusion_common::{Column, TableReference};
+use datafusion_expr::dml::InsertOp;
+use datafusion_expr::{col, DmlStatement, WriteOp};
 pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
+use snafu::ResultExt;
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
 pub use self::udaf::AggregateFunction;
-use crate::error::Result;
+use crate::error::{GeneralDataFusionSnafu, Result};
 use crate::logical_plan::accumulator::*;
 use crate::signature::{Signature, Volatility};
 
@@ -77,6 +80,74 @@ pub fn rename_logical_plan_columns(
     }
 
     LogicalPlanBuilder::from(plan).project(projection)?.build()
+}
+
+/// Convert a insert into logical plan to an (table_name, logical_plan)
+/// where table_name is the name of the table to insert into.
+/// logical_plan is the plan to be executed.
+///
+/// if input logical plan is not `insert into table_name <input>`, return None
+///
+/// Returned TableName will use provided catalog and schema if not specified in the logical plan,
+/// if table scan in logical plan have full table name, will **NOT** override it.
+pub fn breakup_insert_plan(
+    plan: &LogicalPlan,
+    default_catalog: &str,
+    default_schema: &str,
+) -> Option<(TableName, Arc<LogicalPlan>)> {
+    if let LogicalPlan::Dml(dml) = plan {
+        if dml.op != WriteOp::Insert(InsertOp::Append) {
+            return None;
+        }
+        let table_name = &dml.table_name;
+        let table_name = match table_name {
+            TableReference::Bare { table } => TableName {
+                catalog_name: default_catalog.to_string(),
+                schema_name: default_schema.to_string(),
+                table_name: table.to_string(),
+            },
+            TableReference::Partial { schema, table } => TableName {
+                catalog_name: default_catalog.to_string(),
+                schema_name: schema.to_string(),
+                table_name: table.to_string(),
+            },
+            TableReference::Full {
+                catalog,
+                schema,
+                table,
+            } => TableName {
+                catalog_name: catalog.to_string(),
+                schema_name: schema.to_string(),
+                table_name: table.to_string(),
+            },
+        };
+        let logical_plan = dml.input.clone();
+        Some((table_name, logical_plan))
+    } else {
+        None
+    }
+}
+
+/// create a `insert into table_name <input>` logical plan
+pub fn add_insert_to_logical_plan(
+    table_name: TableName,
+    table_schema: datafusion_common::DFSchemaRef,
+    input: LogicalPlan,
+) -> Result<LogicalPlan> {
+    let table_name = TableReference::Full {
+        catalog: table_name.catalog_name.into(),
+        schema: table_name.schema_name.into(),
+        table: table_name.table_name.into(),
+    };
+
+    let plan = LogicalPlan::Dml(DmlStatement::new(
+        table_name,
+        table_schema,
+        WriteOp::Insert(InsertOp::Append),
+        Arc::new(input),
+    ));
+    let plan = plan.recompute_schema().context(GeneralDataFusionSnafu)?;
+    Ok(plan)
 }
 
 /// The datafusion `[LogicalPlan]` decoder.

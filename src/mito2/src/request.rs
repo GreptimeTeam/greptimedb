@@ -35,9 +35,9 @@ use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionFlushRequest, RegionOpenRequest,
-    RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionBulkInsertsRequest, RegionCatchupRequest,
+    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -47,6 +47,7 @@ use crate::error::{
     FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedImpureDefaultSnafu,
 };
 use crate::manifest::action::RegionEdit;
+use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -62,9 +63,9 @@ pub struct WriteRequest {
     /// Rows to write.
     pub rows: Rows,
     /// Map column name to column index in `rows`.
-    name_to_index: HashMap<String, usize>,
+    pub name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
-    has_null: Vec<bool>,
+    pub has_null: Vec<bool>,
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
@@ -534,6 +535,13 @@ pub(crate) struct SenderWriteRequest {
     pub(crate) request: WriteRequest,
 }
 
+pub(crate) struct SenderBulkRequest {
+    pub(crate) sender: OptionOutputTx,
+    pub(crate) region_id: RegionId,
+    pub(crate) request: BulkPart,
+    pub(crate) region_metadata: RegionMetadataRef,
+}
+
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
@@ -569,6 +577,13 @@ pub(crate) enum WorkerRequest {
 
     /// Keep the manifest of a region up to date.
     SyncRegion(RegionSyncRequest),
+
+    /// Bulk inserts request and region metadata.
+    BulkInserts {
+        metadata: Option<RegionMetadataRef>,
+        request: RegionBulkInsertsRequest,
+        sender: OptionOutputTx,
+    },
 }
 
 impl WorkerRequest {
@@ -668,6 +683,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Catchup(v),
             }),
+            RegionRequest::BulkInserts(region_bulk_inserts_request) => WorkerRequest::BulkInserts {
+                metadata: region_metadata,
+                sender: sender.into(),
+                request: region_bulk_inserts_request,
+            },
         };
 
         Ok((worker_request, receiver))

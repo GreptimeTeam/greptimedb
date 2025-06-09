@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-pub use bulk::part::BulkPart;
+pub use bulk::part::EncodedBulkPart;
 use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
@@ -40,13 +40,20 @@ use crate::read::Batch;
 use crate::region::options::{MemtableOptions, MergeMode};
 use crate::sst::file::FileTimeRange;
 
+mod builder;
 pub mod bulk;
 pub mod key_values;
 pub mod partition_tree;
+mod simple_bulk_memtable;
 mod stats;
 pub mod time_partition;
 pub mod time_series;
 pub(crate) mod version;
+
+#[cfg(any(test, feature = "test"))]
+pub use bulk::part::BulkPart;
+#[cfg(any(test, feature = "test"))]
+pub use time_partition::filter_record_batch;
 
 /// Id for memtables.
 ///
@@ -139,7 +146,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn write_one(&self, key_value: KeyValue) -> Result<()>;
 
     /// Writes an encoded batch of into memtable.
-    fn write_bulk(&self, part: BulkPart) -> Result<()>;
+    fn write_bulk(&self, part: crate::memtable::bulk::part::BulkPart) -> Result<()>;
 
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
@@ -158,7 +165,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
         projection: Option<&[ColumnId]>,
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges;
+    ) -> Result<MemtableRanges>;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

@@ -21,7 +21,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
-use crate::memtable::bulk::part::BulkPart;
+use crate::memtable::bulk::part::{BulkPart, EncodedBulkPart};
 use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef,
@@ -38,7 +38,7 @@ mod row_group_reader;
 #[derive(Debug)]
 pub struct BulkMemtable {
     id: MemtableId,
-    parts: RwLock<Vec<BulkPart>>,
+    parts: RwLock<Vec<EncodedBulkPart>>,
 }
 
 impl Memtable for BulkMemtable {
@@ -54,9 +54,7 @@ impl Memtable for BulkMemtable {
         unimplemented!()
     }
 
-    fn write_bulk(&self, fragment: BulkPart) -> Result<()> {
-        let mut parts = self.parts.write().unwrap();
-        parts.push(fragment);
+    fn write_bulk(&self, _fragment: BulkPart) -> Result<()> {
         Ok(())
     }
 
@@ -74,7 +72,7 @@ impl Memtable for BulkMemtable {
         _projection: Option<&[ColumnId]>,
         _predicate: PredicateGroup,
         _sequence: Option<SequenceNumber>,
-    ) -> MemtableRanges {
+    ) -> Result<MemtableRanges> {
         todo!()
     }
 

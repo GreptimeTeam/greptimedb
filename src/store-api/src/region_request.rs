@@ -20,16 +20,19 @@ use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
+use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
+    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
+    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
-    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, set_index, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption,
+    Rows, SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_grpc::flight::FlightDecoder;
+use common_recordbatch::DfRecordBatch;
 use common_time::TimeToLive;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
@@ -39,15 +42,14 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
-    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
-    RegionMetadata, Result,
+    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
+    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+use crate::metrics;
 use crate::mito_engine_options::{
-    TTL_KEY, TWCS_MAX_ACTIVE_WINDOW_FILES, TWCS_MAX_ACTIVE_WINDOW_RUNS,
-    TWCS_MAX_INACTIVE_WINDOW_FILES, TWCS_MAX_INACTIVE_WINDOW_RUNS, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW,
+    TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -126,6 +128,7 @@ pub enum RegionRequest {
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
+    BulkInserts(RegionBulkInsertsRequest),
 }
 
 impl RegionRequest {
@@ -146,6 +149,11 @@ impl RegionRequest {
             region_request::Body::Creates(creates) => make_region_creates(creates),
             region_request::Body::Drops(drops) => make_region_drops(drops),
             region_request::Body::Alters(alters) => make_region_alters(alters),
+            region_request::Body::BulkInsert(bulk) => make_region_bulk_inserts(bulk),
+            region_request::Body::Sync(_) => UnexpectedSnafu {
+                reason: "Sync request should be handled separately by RegionServer",
+            }
+            .fail(),
         }
     }
 
@@ -312,6 +320,32 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
     Ok(vec![(
         region_id,
         RegionRequest::Truncate(RegionTruncateRequest {}),
+    )])
+}
+
+/// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
+fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = request.region_id.into();
+    let Some(Body::ArrowIpc(request)) = request.body else {
+        return Ok(vec![]);
+    };
+
+    let decoder_timer = metrics::CONVERT_REGION_BULK_REQUEST
+        .with_label_values(&["decode"])
+        .start_timer();
+    let mut decoder =
+        FlightDecoder::try_from_schema_bytes(&request.schema).context(FlightCodecSnafu)?;
+    let payload = decoder
+        .try_decode_record_batch(&request.data_header, &request.payload)
+        .context(FlightCodecSnafu)?;
+    decoder_timer.observe_duration();
+    Ok(vec![(
+        region_id,
+        RegionRequest::BulkInserts(RegionBulkInsertsRequest {
+            region_id,
+            payload,
+            raw_data: request,
+        }),
     )])
 }
 
@@ -986,12 +1020,9 @@ impl TryFrom<&PbOption> for SetRegionOption {
 
                 Ok(Self::Ttl(Some(ttl)))
             }
-            TWCS_MAX_ACTIVE_WINDOW_RUNS
-            | TWCS_MAX_ACTIVE_WINDOW_FILES
-            | TWCS_MAX_INACTIVE_WINDOW_FILES
-            | TWCS_MAX_INACTIVE_WINDOW_RUNS
-            | TWCS_MAX_OUTPUT_FILE_SIZE
-            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.to_string(), value.to_string())),
+            TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
+                Ok(Self::Twsc(key.to_string(), value.to_string()))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1000,16 +1031,7 @@ impl TryFrom<&PbOption> for SetRegionOption {
 impl From<&UnsetRegionOption> for SetRegionOption {
     fn from(unset_option: &UnsetRegionOption) -> Self {
         match unset_option {
-            UnsetRegionOption::TwcsMaxActiveWindowFiles => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxInactiveWindowFiles => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxActiveWindowRuns => {
-                SetRegionOption::Twsc(unset_option.to_string(), String::new())
-            }
-            UnsetRegionOption::TwcsMaxInactiveWindowRuns => {
+            UnsetRegionOption::TwcsTriggerFileNum => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::TwcsMaxOutputFileSize => {
@@ -1029,10 +1051,7 @@ impl TryFrom<&str> for UnsetRegionOption {
     fn try_from(key: &str) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => Ok(Self::Ttl),
-            TWCS_MAX_ACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxActiveWindowFiles),
-            TWCS_MAX_INACTIVE_WINDOW_FILES => Ok(Self::TwcsMaxInactiveWindowFiles),
-            TWCS_MAX_ACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxActiveWindowRuns),
-            TWCS_MAX_INACTIVE_WINDOW_RUNS => Ok(Self::TwcsMaxInactiveWindowRuns),
+            TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
@@ -1042,10 +1061,7 @@ impl TryFrom<&str> for UnsetRegionOption {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnsetRegionOption {
-    TwcsMaxActiveWindowFiles,
-    TwcsMaxInactiveWindowFiles,
-    TwcsMaxActiveWindowRuns,
-    TwcsMaxInactiveWindowRuns,
+    TwcsTriggerFileNum,
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
@@ -1055,10 +1071,7 @@ impl UnsetRegionOption {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Ttl => TTL_KEY,
-            Self::TwcsMaxActiveWindowFiles => TWCS_MAX_ACTIVE_WINDOW_FILES,
-            Self::TwcsMaxInactiveWindowFiles => TWCS_MAX_INACTIVE_WINDOW_FILES,
-            Self::TwcsMaxActiveWindowRuns => TWCS_MAX_ACTIVE_WINDOW_RUNS,
-            Self::TwcsMaxInactiveWindowRuns => TWCS_MAX_INACTIVE_WINDOW_RUNS,
+            Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
         }
@@ -1119,6 +1132,19 @@ pub struct RegionSequencesRequest {
     pub region_ids: Vec<RegionId>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RegionBulkInsertsRequest {
+    pub region_id: RegionId,
+    pub payload: DfRecordBatch,
+    pub raw_data: ArrowIpc,
+}
+
+impl RegionBulkInsertsRequest {
+    pub fn estimated_size(&self) -> usize {
+        self.payload.get_array_memory_size()
+    }
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1133,6 +1159,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
             RegionRequest::Catchup(_) => write!(f, "Catchup"),
+            RegionRequest::BulkInserts(_) => write!(f, "BulkInserts"),
         }
     }
 }

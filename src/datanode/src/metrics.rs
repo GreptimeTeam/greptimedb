@@ -20,13 +20,21 @@ pub const REGION_REQUEST_TYPE: &str = "datanode_region_request_type";
 
 pub const REGION_ROLE: &str = "region_role";
 pub const REGION_ID: &str = "region_id";
+pub const RESULT_TYPE: &str = "result";
 
 lazy_static! {
     /// The elapsed time of handling a request in the region_server.
     pub static ref HANDLE_REGION_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_datanode_handle_region_request_elapsed",
         "datanode handle region request elapsed",
-        &[REGION_REQUEST_TYPE]
+        &[REGION_ID, REGION_REQUEST_TYPE]
+    )
+    .unwrap();
+    /// The number of rows in region request received by region server, labeled with request type.
+    pub static ref REGION_CHANGED_ROW_COUNT: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_region_changed_row_count",
+        "datanode region changed row count",
+        &[REGION_ID, REGION_REQUEST_TYPE]
     )
     .unwrap();
     /// The elapsed time since the last received heartbeat.
@@ -64,7 +72,7 @@ lazy_static! {
     pub static ref HEARTBEAT_RECV_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_datanode_heartbeat_recv_count",
         "datanode heartbeat received",
-        &["result"]
+        &[RESULT_TYPE]
     )
     .unwrap();
 }

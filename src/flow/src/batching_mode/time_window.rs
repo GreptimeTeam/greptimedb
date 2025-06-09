@@ -55,6 +55,9 @@ use crate::error::{
 use crate::expr::error::DataTypeSnafu;
 use crate::Error;
 
+/// Represents a test timestamp in seconds since the Unix epoch.
+const DEFAULT_TEST_TIMESTAMP: Timestamp = Timestamp::new_second(17_0000_0000);
+
 /// Time window expr like `date_bin(INTERVAL '1' MINUTE, ts)`, this type help with
 /// evaluating the expr using given timestamp
 ///
@@ -70,9 +73,26 @@ pub struct TimeWindowExpr {
     pub column_name: String,
     logical_expr: Expr,
     df_schema: DFSchema,
+    eval_time_window_size: Option<std::time::Duration>,
+}
+
+impl std::fmt::Display for TimeWindowExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeWindowExpr")
+            .field("phy_expr", &self.phy_expr.to_string())
+            .field("column_name", &self.column_name)
+            .field("logical_expr", &self.logical_expr.to_string())
+            .field("df_schema", &self.df_schema)
+            .finish()
+    }
 }
 
 impl TimeWindowExpr {
+    /// The time window size of the expr, get from calling `eval` with a test timestamp
+    pub fn time_window_size(&self) -> &Option<std::time::Duration> {
+        &self.eval_time_window_size
+    }
+
     pub fn from_expr(
         expr: &Expr,
         column_name: &str,
@@ -80,12 +100,28 @@ impl TimeWindowExpr {
         session: &SessionState,
     ) -> Result<Self, Error> {
         let phy_expr: PhysicalExprRef = to_phy_expr(expr, df_schema, session)?;
-        Ok(Self {
+        let mut zelf = Self {
             phy_expr,
             column_name: column_name.to_string(),
             logical_expr: expr.clone(),
             df_schema: df_schema.clone(),
-        })
+            eval_time_window_size: None,
+        };
+        let test_ts = DEFAULT_TEST_TIMESTAMP;
+        let (l, u) = zelf.eval(test_ts)?;
+        let time_window_size = match (l, u) {
+            (Some(l), Some(u)) => u.sub(&l).map(|r| r.to_std()).transpose().map_err(|_| {
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Expect upper bound older than lower bound, found upper={u:?} and lower={l:?}"
+                    ),
+                }
+                .build()
+            })?,
+            _ => None,
+        };
+        zelf.eval_time_window_size = time_window_size;
+        Ok(zelf)
     }
 
     pub fn eval(
@@ -256,7 +292,7 @@ fn columnar_to_ts_vector(columnar: &ColumnarValue) -> Result<Vec<Option<Timestam
     Ok(val)
 }
 
-/// Return (the column name of time index column, the time window expr, the expected time unit of time index column, the expr's schema for evaluating the time window)
+/// Return (`the column name of time index column`, `the time window expr`, `the expected time unit of time index column`, `the expr's schema for evaluating the time window`)
 ///
 /// The time window expr is expected to have one input column with Timestamp type, and also return Timestamp type, the time window expr is expected
 /// to be monotonic increasing and appears in the innermost GROUP BY clause
@@ -692,6 +728,28 @@ mod test {
                     Some(Timestamp::new(1740394140, TimeUnit::Second)),
                 ),
                 "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
+            ),
+            // complex time window index with where
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE number in (2, 3, 4) GROUP BY time_window;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394080, TimeUnit::Second)),
+                    Some(Timestamp::new(1740394140, TimeUnit::Second)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE numbers_with_ts.number IN (2, 3, 4) AND ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
+            ),
+            // complex time window index with between and
+            (
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE number BETWEEN 2 AND 4 GROUP BY time_window;",
+                Timestamp::new(1740394109, TimeUnit::Second),
+                (
+                    "ts".to_string(),
+                    Some(Timestamp::new(1740394080, TimeUnit::Second)),
+                    Some(Timestamp::new(1740394140, TimeUnit::Second)),
+                ),
+                "SELECT arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)') AS time_window FROM numbers_with_ts WHERE (numbers_with_ts.number BETWEEN 2 AND 4) AND ((ts >= CAST('2025-02-24 10:48:00' AS TIMESTAMP)) AND (ts <= CAST('2025-02-24 10:49:00' AS TIMESTAMP))) GROUP BY arrow_cast(date_bin(INTERVAL '1 MINS', numbers_with_ts.ts), 'Timestamp(Second, None)')"
             ),
             // no time index
             (

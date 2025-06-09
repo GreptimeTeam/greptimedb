@@ -1458,9 +1458,12 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
     .data;
     assert!(matches!(output, OutputData::AffectedRows(1)));
 
-    let output = execute_sql(&instance, &format!("select host, cpu from {table_name}"))
-        .await
-        .data;
+    let output = execute_sql(
+        &instance,
+        &format!("select host, cpu from {table_name} order by host"),
+    )
+    .await
+    .data;
     let expected = "\
 +-------+-----+
 | host  | cpu |
@@ -1757,7 +1760,12 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
     assert!(matches!(output, OutputData::AffectedRows(5)));
 
-    let output = execute_sql(&instance, "select * from demo;").await.data;
+    let output = execute_sql(
+        &instance,
+        "select * from demo order by timestamp_simple asc;",
+    )
+    .await
+    .data;
     let expected = r#"+-------------------------------+----------------------------+-------------------------+----------------------------+
 | bigint_direct                 | bigint_neg_direct          | bigint_other            | timestamp_simple           |
 +-------------------------------+----------------------------+-------------------------+----------------------------+

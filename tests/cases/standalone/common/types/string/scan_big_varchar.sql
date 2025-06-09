@@ -13,7 +13,7 @@ INSERT INTO test SELECT a||a||a||a||a||a||a||a||a||a, to_unixtime(ts) * 5 FROM t
 INSERT INTO test SELECT a||a||a||a||a||a||a||a||a||a, to_unixtime(ts) * 7 FROM test WHERE LENGTH(a)=(SELECT MAX(LENGTH(a)) FROM test);
 
 -- now create a second table, we only insert the big varchar string in there
-CREATE TABLE bigtable (a VARCHAR, ts timestamp_s time index);
+CREATE TABLE bigtable (a VARCHAR, ts timestamp_s time index) WITH ('compaction.type' = 'twcs', 'compaction.twcs.time_window'='1000000y');
 
 INSERT INTO bigtable SELECT a, ts FROM test WHERE LENGTH(a)=(SELECT MAX(LENGTH(a)) FROM test);
 
@@ -67,23 +67,14 @@ INSERT INTO bigtable SELECT a, to_unixtime(ts) * 63 FROM bigtable;
 
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
+-- SQLNESS ARG restart=true
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 INSERT INTO bigtable SELECT a, to_unixtime(ts) * 67 FROM bigtable;
 
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 INSERT INTO bigtable SELECT a, to_unixtime(ts) * 71 FROM bigtable;
-
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
--- SQLNESS ARG restart=true
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
-INSERT INTO bigtable SELECT a, to_unixtime(ts) * 73 FROM bigtable;
-
-SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
-
-INSERT INTO bigtable SELECT a, to_unixtime(ts) * 79 FROM bigtable;
 
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 

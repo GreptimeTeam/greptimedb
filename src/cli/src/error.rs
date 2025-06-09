@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use object_store::Error as ObjectStoreError;
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -100,9 +101,6 @@ pub enum Error {
         #[snafu(source)]
         error: reqwest::Error,
     },
-
-    #[snafu(display("Invalid REPL command: {reason}"))]
-    InvalidReplCommand { reason: String },
 
     #[snafu(display("Failed to parse SQL: {}", sql))]
     ParseSql {
@@ -228,7 +226,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
-        error: opendal::Error,
+        error: ObjectStoreError,
     },
     #[snafu(display("S3 config need be set"))]
     S3ConfigNotSet {
@@ -237,6 +235,12 @@ pub enum Error {
     },
     #[snafu(display("Output directory not set"))]
     OutputDirNotSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("KV backend not set: {}", backend))]
+    KvBackendNotSet {
+        backend: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -254,7 +258,6 @@ impl ErrorExt for Error {
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
-            | Error::InvalidReplCommand { .. }
             | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
             | Error::CreateDir { .. }
@@ -277,8 +280,9 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
             Error::OpenDal { .. } => StatusCode::Internal,
-            Error::S3ConfigNotSet { .. } => StatusCode::InvalidArguments,
-            Error::OutputDirNotSet { .. } => StatusCode::InvalidArguments,
+            Error::S3ConfigNotSet { .. }
+            | Error::OutputDirNotSet { .. }
+            | Error::KvBackendNotSet { .. } => StatusCode::InvalidArguments,
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 

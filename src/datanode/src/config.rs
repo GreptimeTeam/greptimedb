@@ -18,14 +18,16 @@ use core::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
+use common_workload::{sanitize_workload_types, DatanodeWorkloadType};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
@@ -33,9 +35,6 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
-
-/// Default data home in file storage
-const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -359,6 +358,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
+    pub workload_types: Vec<DatanodeWorkloadType>,
     pub require_lease_before_startup: bool,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
@@ -375,6 +375,7 @@ pub struct DatanodeOptions {
     pub enable_telemetry: bool,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub query: QueryOptions,
 
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.addr` instead.")]
@@ -389,11 +390,19 @@ pub struct DatanodeOptions {
     pub rpc_max_send_message_size: Option<ReadableSize>,
 }
 
+impl DatanodeOptions {
+    /// Sanitize the `DatanodeOptions` to ensure the config is valid.
+    pub fn sanitize(&mut self) {
+        sanitize_workload_types(&mut self.workload_types);
+    }
+}
+
 impl Default for DatanodeOptions {
     #[allow(deprecated)]
     fn default() -> Self {
         Self {
             node_id: None,
+            workload_types: vec![DatanodeWorkloadType::Hybrid],
             require_lease_before_startup: false,
             init_regions_in_background: false,
             init_regions_parallelism: 16,
@@ -412,6 +421,7 @@ impl Default for DatanodeOptions {
             enable_telemetry: true,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            query: QueryOptions::default(),
 
             // Deprecated options
             rpc_addr: None,

@@ -45,14 +45,41 @@ impl MockDatanodeHandler for () {
 }
 
 #[derive(Clone)]
-pub struct DatanodeWatcher(pub mpsc::Sender<(Peer, RegionRequest)>);
+pub struct DatanodeWatcher {
+    sender: mpsc::Sender<(Peer, RegionRequest)>,
+    handler: Option<fn(Peer, RegionRequest) -> Result<RegionResponse>>,
+}
+
+impl DatanodeWatcher {
+    pub fn new(sender: mpsc::Sender<(Peer, RegionRequest)>) -> Self {
+        Self {
+            sender,
+            handler: None,
+        }
+    }
+
+    pub fn with_handler(
+        mut self,
+        user_handler: fn(Peer, RegionRequest) -> Result<RegionResponse>,
+    ) -> Self {
+        self.handler = Some(user_handler);
+        self
+    }
+}
 
 #[async_trait::async_trait]
 impl MockDatanodeHandler for DatanodeWatcher {
     async fn handle(&self, peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
         debug!("Returning Ok(0) for request: {request:?}, peer: {peer:?}");
-        self.0.send((peer.clone(), request)).await.unwrap();
-        Ok(RegionResponse::new(0))
+        self.sender
+            .send((peer.clone(), request.clone()))
+            .await
+            .unwrap();
+        if let Some(handler) = self.handler {
+            handler(peer.clone(), request)
+        } else {
+            Ok(RegionResponse::new(0))
+        }
     }
 
     async fn handle_query(
@@ -78,6 +105,7 @@ impl MockDatanodeHandler for RetryErrorDatanodeHandler {
                 }
                 .build(),
             ),
+            clean_poisons: false,
         })
     }
 
@@ -191,6 +219,7 @@ impl MockDatanodeHandler for PartialSuccessDatanodeHandler {
                     }
                     .build(),
                 ),
+                clean_poisons: false,
             })
         } else {
             error::UnexpectedSnafu {
@@ -225,6 +254,7 @@ impl MockDatanodeHandler for AllFailureDatanodeHandler {
                     }
                     .build(),
                 ),
+                clean_poisons: false,
             })
         } else {
             error::UnexpectedSnafu {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -37,10 +38,11 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal_options_allocator::build_wal_options_allocator;
+use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
-use snafu::ResultExt;
+use common_telemetry::{info, warn};
+use snafu::{ensure, ResultExt};
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
@@ -53,14 +55,16 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
-    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, SelectTarget, SelectorContext, SelectorRef,
-    FLOW_ID_SEQ, TABLE_ID_SEQ,
+    ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
+    SelectorContext, SelectorRef, FLOW_ID_SEQ, METASRV_DATA_DIR, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
+use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
+use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
-    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorTicker,
-    DEFAULT_TICK_INTERVAL,
+    HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
+    RegionSupervisorTicker, DEFAULT_TICK_INTERVAL,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -156,8 +160,6 @@ impl MetasrvBuilder {
     }
 
     pub async fn build(self) -> Result<Metasrv> {
-        let started = Arc::new(AtomicBool::new(false));
-
         let MetasrvBuilder {
             election,
             meta_peer_client,
@@ -188,7 +190,7 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
+        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
@@ -232,13 +234,17 @@ impl MetasrvBuilder {
             ))
         });
 
+        let flow_selector = Arc::new(RoundRobinSelector::new(
+            SelectTarget::Flownode,
+            Arc::new(Vec::new()),
+        )) as SelectorRef;
+
         let flow_metadata_allocator = {
             // for now flownode just use round-robin selector
-            let flow_selector = RoundRobinSelector::new(SelectTarget::Flownode);
             let flow_selector_ctx = selector_ctx.clone();
             let peer_allocator = Arc::new(FlowPeerAllocator::new(
                 flow_selector_ctx,
-                Arc::new(flow_selector),
+                flow_selector.clone(),
             ));
             let seq = Arc::new(
                 SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
@@ -270,18 +276,25 @@ impl MetasrvBuilder {
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
+
         if !is_remote_wal && options.enable_region_failover {
-            return error::UnexpectedSnafu {
-                violated: "Region failover is not supported in the local WAL implementation!",
+            ensure!(
+                options.allow_region_failover_on_local_wal,
+                error::UnexpectedSnafu {
+                    violated: "Region failover is not supported in the local WAL implementation!
+                    If you want to enable region failover for local WAL, please set `allow_region_failover_on_local_wal` to true.",
+                }
+            );
+            if options.allow_region_failover_on_local_wal {
+                warn!("Region failover is force enabled in the local WAL implementation! This may lead to data loss during failover!");
             }
-            .fail();
         }
 
         let (tx, rx) = RegionSupervisor::channel();
         let (region_failure_detector_controller, region_supervisor_ticker): (
             RegionFailureDetectorControllerRef,
             Option<std::sync::Arc<RegionSupervisorTicker>>,
-        ) = if options.enable_region_failover && is_remote_wal {
+        ) = if options.enable_region_failover {
             (
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
@@ -297,6 +310,7 @@ impl MetasrvBuilder {
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
             DefaultContextFactory::new(
+                in_memory.clone(),
                 table_metadata_manager.clone(),
                 memory_region_keeper.clone(),
                 region_failure_detector_controller.clone(),
@@ -306,13 +320,24 @@ impl MetasrvBuilder {
             ),
         ));
         region_migration_manager.try_start()?;
+        let region_supervisor_selector = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
 
-        let region_failover_handler = if options.enable_region_failover && is_remote_wal {
+        let supervisor_selector = match region_supervisor_selector {
+            Some(selector) => {
+                info!("Using region stat aware selector");
+                RegionSupervisorSelector::RegionStatAwareSelector(selector)
+            }
+            None => RegionSupervisorSelector::NaiveSelector(selector.clone()),
+        };
+
+        let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
                 options.failure_detector,
                 selector_ctx.clone(),
-                selector.clone(),
+                supervisor_selector,
                 region_migration_manager.clone(),
                 maintenance_mode_manager.clone(),
                 peer_lookup_service.clone(),
@@ -327,6 +352,11 @@ impl MetasrvBuilder {
         };
 
         let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
+
+        #[cfg(feature = "enterprise")]
+        let trigger_ddl_manager = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>());
         let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
@@ -342,9 +372,45 @@ impl MetasrvBuilder {
                 },
                 procedure_manager.clone(),
                 true,
+                #[cfg(feature = "enterprise")]
+                trigger_ddl_manager,
             )
             .context(error::InitDdlManagerSnafu)?,
         );
+
+        // remote WAL prune ticker and manager
+        let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
+            let (tx, rx) = WalPruneManager::channel();
+            // Safety: Must be remote WAL.
+            let remote_wal_options = options.wal.remote_wal_options().unwrap();
+            let kafka_client = build_kafka_client(&remote_wal_options.connection)
+                .await
+                .context(error::BuildKafkaClientSnafu)?;
+            let wal_prune_context = WalPruneContext {
+                client: Arc::new(kafka_client),
+                table_metadata_manager: table_metadata_manager.clone(),
+                leader_region_registry: leader_region_registry.clone(),
+                server_addr: options.server_addr.clone(),
+                mailbox: mailbox.clone(),
+            };
+            let wal_prune_manager = WalPruneManager::new(
+                table_metadata_manager.clone(),
+                remote_wal_options.auto_prune_parallelism,
+                rx,
+                procedure_manager.clone(),
+                wal_prune_context,
+                remote_wal_options.trigger_flush_threshold,
+            );
+            // Start manager in background. Ticker will be started in the main thread to send ticks.
+            wal_prune_manager.try_start().await?;
+            let wal_prune_ticker = Arc::new(WalPruneTicker::new(
+                remote_wal_options.auto_prune_interval,
+                tx.clone(),
+            ));
+            Some(wal_prune_ticker)
+        } else {
+            None
+        };
 
         let customized_region_lease_renewer = plugins
             .as_ref()
@@ -371,11 +437,14 @@ impl MetasrvBuilder {
         };
 
         let enable_telemetry = options.enable_telemetry;
-        let metasrv_home = options.data_home.to_string();
+        let metasrv_home = Path::new(&options.data_home)
+            .join(METASRV_DATA_DIR)
+            .to_string_lossy()
+            .to_string();
 
         Ok(Metasrv {
             state,
-            started,
+            started: Arc::new(AtomicBool::new(false)),
             start_time_ms: common_time::util::current_time_millis() as u64,
             options,
             in_memory,
@@ -384,7 +453,7 @@ impl MetasrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             selector,
             // TODO(jeremy): We do not allow configuring the flow selector.
-            flow_selector: Arc::new(RoundRobinSelector::new(SelectTarget::Flownode)),
+            flow_selector,
             handler_group: RwLock::new(None),
             handler_group_builder: Mutex::new(Some(handler_group_builder)),
             election,
@@ -406,6 +475,7 @@ impl MetasrvBuilder {
             region_supervisor_ticker,
             cache_invalidator,
             leader_region_registry,
+            wal_prune_ticker,
         })
     }
 }

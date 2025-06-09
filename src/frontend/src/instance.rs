@@ -56,7 +56,6 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::stats::StatementStatistics;
 use query::QueryEngineRef;
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -81,6 +80,7 @@ use crate::error::{
     TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
+use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -95,7 +95,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    stats: StatementStatistics,
+    slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
     #[allow(dead_code)]
     process_manager: Option<Arc<ProcessManager>>,
@@ -169,9 +169,11 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = self
-            .stats
-            .start_slow_query_timer(QueryStatement::Sql(stmt.clone()));
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -215,6 +217,7 @@ impl Instance {
                 self.statement_executor.execute_sql(stmt, query_ctx).await
             }
         };
+
         output.context(TableOperationSnafu)
     }
 }
@@ -281,7 +284,7 @@ impl SqlQueryHandler for Instance {
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
-            .execute(plan, query_ctx)
+            .execute(plan.clone(), query_ctx)
             .await
             .context(ExecLogicalPlanSnafu)
     }
@@ -377,7 +380,11 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = self.stats.start_slow_query_timer(stmt.clone());
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(stmt.clone(), query_ctx.clone())
+        } else {
+            None
+        };
 
         let plan = self
             .statement_executor
@@ -491,6 +498,10 @@ pub fn check_permission(
             // TODO: should also validate source table name here?
             validate_param(&stmt.sink_table_name, query_ctx)?;
         }
+        #[cfg(feature = "enterprise")]
+        Statement::CreateTrigger(stmt) => {
+            validate_param(&stmt.trigger_name, query_ctx)?;
+        }
         Statement::CreateView(stmt) => {
             validate_param(&stmt.name, query_ctx)?;
         }
@@ -541,6 +552,11 @@ pub fn check_permission(
         }
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
+        }
+        #[cfg(feature = "enterprise")]
+        Statement::ShowTriggers(_stmt) => {
+            // The trigger is organized based on the catalog dimension, so there
+            // is no need to check the permission of the database(schema).
         }
         Statement::ShowStatus(_stmt) => {}
         Statement::ShowSearchPath(_stmt) => {}

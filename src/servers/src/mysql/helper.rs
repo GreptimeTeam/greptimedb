@@ -241,10 +241,12 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
     }
 }
 
+/// Convert an MySQL expression to a scalar value.
+/// It automatically handles the conversion of strings to numeric values.
 pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
     match param {
         Expr::Value(v) => {
-            let v = sql_value_to_value("", t, v, None, None);
+            let v = sql_value_to_value("", t, v, None, None, true);
             match v {
                 Ok(v) => v
                     .try_to_scalar_value(t)
@@ -256,7 +258,7 @@ pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Resul
             }
         }
         Expr::UnaryOp { op, expr } if let Expr::Value(v) = &**expr => {
-            let v = sql_value_to_value("", t, v, None, Some(*op));
+            let v = sql_value_to_value("", t, v, None, Some(*op), true);
             match v {
                 Ok(v) => v
                     .try_to_scalar_value(t)

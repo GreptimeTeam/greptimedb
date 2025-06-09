@@ -514,6 +514,7 @@ fn query_request_type(request: &QueryRequest) -> &'static str {
         Some(Query::Sql(_)) => "query.sql",
         Some(Query::LogicalPlan(_)) => "query.logical_plan",
         Some(Query::PromRangeQuery(_)) => "query.prom_range",
+        Some(Query::InsertIntoPlan(_)) => "query.insert_into_plan",
         None => "query.empty",
     }
 }
@@ -1049,7 +1050,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
             Value::Int64(v) => Some(ValueData::I64Value(v)),
             Value::Float32(v) => Some(ValueData::F32Value(*v)),
             Value::Float64(v) => Some(ValueData::F64Value(*v)),
-            Value::String(v) => Some(ValueData::StringValue(v.as_utf8().to_string())),
+            Value::String(v) => Some(ValueData::StringValue(v.into_string())),
             Value::Binary(v) => Some(ValueData::BinaryValue(v.to_vec())),
             Value::Date(v) => Some(ValueData::DateValue(v.val())),
             Value::Timestamp(v) => Some(match v.unit() {

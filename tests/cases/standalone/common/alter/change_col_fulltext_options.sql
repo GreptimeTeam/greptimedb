@@ -51,6 +51,18 @@ SHOW CREATE TABLE test;
 
 SHOW INDEX FROM test;
 
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'bloom');
+
+SHOW CREATE TABLE test;
+
+SHOW INDEX FROM test;
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'tantivy');
+
+SHOW CREATE TABLE test;
+
+SHOW INDEX FROM test;
+
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinglish', case_sensitive = 'false');
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'no');
@@ -58,5 +70,7 @@ ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chine
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
 
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true');
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(backend = 'xor');
 
 DROP TABLE test;

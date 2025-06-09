@@ -191,10 +191,7 @@ mod tests {
                     AlterTableOption::Ttl(Ttl::Duration(Duration::new_second(60))),
                     AlterTableOption::TwcsTimeWindow(Duration::new_second(60)),
                     AlterTableOption::TwcsMaxOutputFileSize(ReadableSize::from_str("1GB").unwrap()),
-                    AlterTableOption::TwcsMaxActiveWindowFiles(10),
-                    AlterTableOption::TwcsMaxActiveWindowRuns(10),
-                    AlterTableOption::TwcsMaxInactiveWindowFiles(5),
-                    AlterTableOption::TwcsMaxInactiveWindowRuns(5),
+                    AlterTableOption::TwcsTriggerFileNum(5),
                 ],
             },
         };
@@ -204,10 +201,7 @@ mod tests {
             "ALTER TABLE test SET 'ttl' = '60s', ",
             "'compaction.twcs.time_window' = '60s', ",
             "'compaction.twcs.max_output_file_size' = '1.0GiB', ",
-            "'compaction.twcs.max_active_window_files' = '10', ",
-            "'compaction.twcs.max_active_window_runs' = '10', ",
-            "'compaction.twcs.max_inactive_window_files' = '5', ",
-            "'compaction.twcs.max_inactive_window_runs' = '5';"
+            "'compaction.twcs.trigger_file_num' = '5';"
         );
         assert_eq!(expected, output);
     }

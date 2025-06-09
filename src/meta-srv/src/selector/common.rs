@@ -12,14 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use common_meta::peer::Peer;
 use snafu::ensure;
 
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::SelectTarget;
-use crate::selector::weighted_choose::WeightedChoose;
+use crate::selector::weighted_choose::{WeightedChoose, WeightedItem};
 use crate::selector::SelectorOptions;
+
+/// Filter out the excluded peers from the `weight_array`.
+pub fn filter_out_excluded_peers(
+    weight_array: &mut Vec<WeightedItem<Peer>>,
+    exclude_peer_ids: &HashSet<u64>,
+) {
+    weight_array.retain(|peer| !exclude_peer_ids.contains(&peer.item.id));
+}
 
 /// According to the `opts`, choose peers from the `weight_array` through `weighted_choose`.
 pub fn choose_items<W>(opts: &SelectorOptions, weighted_choose: &mut W) -> Result<Vec<Peer>>
@@ -80,7 +90,7 @@ mod tests {
 
     use common_meta::peer::Peer;
 
-    use crate::selector::common::choose_items;
+    use crate::selector::common::{choose_items, filter_out_excluded_peers};
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
     use crate::selector::SelectorOptions;
 
@@ -92,35 +102,35 @@ mod tests {
                     id: 1,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 2,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 3,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 4,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
             WeightedItem {
                 item: Peer {
                     id: 5,
                     addr: "127.0.0.1:3001".to_string(),
                 },
-                weight: 1,
+                weight: 1.0,
             },
         ];
 
@@ -128,6 +138,7 @@ mod tests {
             let opts = SelectorOptions {
                 min_required_items: i,
                 allow_duplication: false,
+                exclude_peer_ids: HashSet::new(),
             };
 
             let selected_peers: HashSet<_> =
@@ -142,6 +153,7 @@ mod tests {
         let opts = SelectorOptions {
             min_required_items: 6,
             allow_duplication: false,
+            exclude_peer_ids: HashSet::new(),
         };
 
         let selected_result =
@@ -152,6 +164,7 @@ mod tests {
             let opts = SelectorOptions {
                 min_required_items: i,
                 allow_duplication: true,
+                exclude_peer_ids: HashSet::new(),
             };
 
             let selected_peers =
@@ -159,5 +172,31 @@ mod tests {
 
             assert_eq!(i, selected_peers.len());
         }
+    }
+
+    #[test]
+    fn test_filter_out_excluded_peers() {
+        let mut weight_array = vec![
+            WeightedItem {
+                item: Peer {
+                    id: 1,
+                    addr: "127.0.0.1:3001".to_string(),
+                },
+                weight: 1.0,
+            },
+            WeightedItem {
+                item: Peer {
+                    id: 2,
+                    addr: "127.0.0.1:3002".to_string(),
+                },
+                weight: 1.0,
+            },
+        ];
+
+        let exclude_peer_ids = HashSet::from([1]);
+        filter_out_excluded_peers(&mut weight_array, &exclude_peer_ids);
+
+        assert_eq!(weight_array.len(), 1);
+        assert_eq!(weight_array[0].item.id, 2);
     }
 }

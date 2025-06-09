@@ -294,7 +294,7 @@ mod tests {
         let input = Arc::new(StringVector::from_slice(&values)) as VectorRef;
 
         // Convert IPv6 addresses to binary
-        let binary_result = to_num.eval(&ctx, &[input.clone()]).unwrap();
+        let binary_result = to_num.eval(&ctx, std::slice::from_ref(&input)).unwrap();
 
         // Convert binary to hex string representation (for ipv6_num_to_string)
         let mut hex_strings = Vec::new();

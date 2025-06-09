@@ -121,8 +121,8 @@ pub enum FlowNameLock {
 }
 
 impl FlowNameLock {
-    pub fn new(catalog: &str, table: &str) -> Self {
-        Self::Write(format!("{catalog}.{table}"))
+    pub fn new(catalog: &str, flow_name: &str) -> Self {
+        Self::Write(format!("{catalog}.{flow_name}"))
     }
 }
 

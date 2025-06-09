@@ -16,16 +16,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
+use dfir_rs::scheduled::graph::Dfir;
+use dfir_rs::scheduled::SubgraphId;
 use get_size2::GetSize;
-use hydroflow::scheduled::graph::Hydroflow;
-use hydroflow::scheduled::SubgraphId;
 
 use crate::compute::types::ErrCollector;
 use crate::repr::{self, Timestamp};
 use crate::utils::{ArrangeHandler, Arrangement};
 
 /// input/output of a dataflow
-/// One `ComputeState` manage the input/output/schedule of one `Hydroflow`
+/// One `ComputeState` manage the input/output/schedule of one `Dfir`
 #[derive(Debug, Default)]
 pub struct DataflowState {
     /// it is important to use a deque to maintain the order of subgraph here
@@ -38,7 +38,7 @@ pub struct DataflowState {
     /// Which means it's also the current time in temporal filter to get current correct result
     as_of: Rc<RefCell<Timestamp>>,
     /// error collector local to this `ComputeState`,
-    /// useful for distinguishing errors from different `Hydroflow`
+    /// useful for distinguishing errors from different `Dfir`
     err_collector: ErrCollector,
     /// save all used arrange in this dataflow, since usually there is no delete operation
     /// we can just keep track of all used arrange and schedule subgraph when they need to be updated
@@ -65,7 +65,8 @@ impl DataflowState {
     /// schedule all subgraph that need to run with time <= `as_of` and run_available()
     ///
     /// return true if any subgraph actually executed
-    pub fn run_available_with_schedule(&mut self, df: &mut Hydroflow) -> bool {
+    #[allow(clippy::swap_with_temporary)]
+    pub fn run_available_with_schedule(&mut self, df: &mut Dfir) -> bool {
         // first split keys <= as_of into another map
         let mut before = self
             .schedule_subgraph

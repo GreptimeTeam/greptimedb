@@ -15,20 +15,32 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, Rows};
-use hashbrown::HashMap;
+use itertools::Itertools;
+use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    DispatchedTo, GreptimePipelineParams, IdentityTimeIndex, Pipeline, PipelineDefinition,
-    PipelineExecOutput, PipelineMap, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, PipelineMap, TransformedOutput,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
-use session::context::QueryContextRef;
-use snafu::ResultExt;
+use session::context::{Channel, QueryContextRef};
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
+use crate::http::event::PipelineIngestRequest;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_HTTP_LOGS_TRANSFORM_ELAPSED, METRIC_SUCCESS_VALUE,
 };
 use crate::query_handler::PipelineHandlerRef;
+
+macro_rules! push_to_map {
+    ($map:expr, $key:expr, $value:expr, $capacity:expr) => {
+        $map.entry($key)
+            .or_insert_with(|| Vec::with_capacity($capacity))
+            .push($value);
+    };
+}
 
 /// Never call this on `GreptimeIdentityPipeline` because it's a real pipeline
 pub async fn get_pipeline(
@@ -51,83 +63,66 @@ pub async fn get_pipeline(
 
 pub(crate) async fn run_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: &PipelineDefinition,
-    pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_ctx: &PipelineContext<'_>,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<Vec<RowInsertRequest>> {
-    match pipeline_definition {
-        PipelineDefinition::GreptimeIdentityPipeline(custom_ts) => {
-            run_identity_pipeline(
-                handler,
-                custom_ts.as_ref(),
-                pipeline_parameters,
-                data_array,
-                table_name,
-                query_ctx,
-            )
-            .await
-        }
-        _ => {
-            run_custom_pipeline(
-                handler,
-                pipeline_definition,
-                pipeline_parameters,
-                data_array,
-                table_name,
-                query_ctx,
-                is_top_level,
-            )
-            .await
-        }
+) -> Result<ContextReq> {
+    if pipeline_ctx.pipeline_definition.is_identity() {
+        run_identity_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx).await
+    } else {
+        run_custom_pipeline(handler, pipeline_ctx, pipeline_req, query_ctx, is_top_level).await
     }
 }
 
 async fn run_identity_pipeline(
     handler: &PipelineHandlerRef,
-    custom_ts: Option<&IdentityTimeIndex>,
-    pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_ctx: &PipelineContext<'_>,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
-) -> Result<Vec<RowInsertRequest>> {
-    let table = handler
-        .get_table(&table_name, query_ctx)
-        .await
-        .context(CatalogSnafu)?;
-    pipeline::identity_pipeline(data_array, table, pipeline_parameters, custom_ts)
-        .map(|rows| {
-            vec![RowInsertRequest {
-                rows: Some(rows),
-                table_name,
-            }]
-        })
+) -> Result<ContextReq> {
+    let PipelineIngestRequest {
+        table: table_name,
+        values: data_array,
+    } = pipeline_req;
+    let table = if pipeline_ctx.channel == Channel::Prometheus {
+        None
+    } else {
+        handler
+            .get_table(&table_name, query_ctx)
+            .await
+            .context(CatalogSnafu)?
+    };
+    pipeline::identity_pipeline(data_array, table, pipeline_ctx)
+        .map(|opt_map| ContextReq::from_opt_map(opt_map, table_name))
         .context(PipelineSnafu)
 }
 
 async fn run_custom_pipeline(
     handler: &PipelineHandlerRef,
-    pipeline_definition: &PipelineDefinition,
-    pipeline_parameters: &GreptimePipelineParams,
-    data_array: Vec<PipelineMap>,
-    table_name: String,
+    pipeline_ctx: &PipelineContext<'_>,
+    pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
     is_top_level: bool,
-) -> Result<Vec<RowInsertRequest>> {
+) -> Result<ContextReq> {
     let db = query_ctx.get_db_string();
-    let pipeline = get_pipeline(pipeline_definition, handler, query_ctx).await?;
+    let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
     let transform_timer = std::time::Instant::now();
 
-    let arr_len = data_array.len();
-    let mut req_map = HashMap::new();
+    let PipelineIngestRequest {
+        table: table_name,
+        values: pipeline_maps,
+    } = pipeline_req;
+    let arr_len = pipeline_maps.len();
+    let mut transformed_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
+    let mut auto_map = HashMap::new();
+    let mut auto_map_ts_keys = HashMap::new();
 
-    for mut values in data_array {
+    for pipeline_map in pipeline_maps {
         let r = pipeline
-            .exec_mut(&mut values)
+            .exec_mut(pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -136,39 +131,90 @@ async fn run_custom_pipeline(
             .context(PipelineSnafu)?;
 
         match r {
-            PipelineExecOutput::Transformed((row, table_suffix)) => {
-                let act_table_name = match table_suffix {
-                    Some(suffix) => format!("{}{}", table_name, suffix),
-                    None => table_name.clone(),
-                };
-
-                req_map
-                    .entry(act_table_name)
-                    .or_insert_with(|| Vec::with_capacity(arr_len))
-                    .push(row);
+            PipelineExecOutput::Transformed(TransformedOutput {
+                opt,
+                row,
+                table_suffix,
+                pipeline_map: _val,
+            }) => {
+                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
+                push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
             }
-            PipelineExecOutput::DispatchedTo(dispatched_to) => {
-                if let Some(coll) = dispatched.get_mut(&dispatched_to) {
-                    coll.push(values);
-                } else {
-                    dispatched.insert(dispatched_to, vec![values]);
-                }
+            PipelineExecOutput::AutoTransform(AutoTransformOutput {
+                table_suffix,
+                ts_unit_map,
+                pipeline_map,
+            }) => {
+                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
+                push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
+                auto_map_ts_keys
+                    .entry(act_table_name)
+                    .or_insert_with(HashMap::new)
+                    .extend(ts_unit_map);
+            }
+            PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
+                push_to_map!(dispatched, dispatched_to, val, arr_len);
             }
         }
     }
 
-    let mut results = Vec::new();
-    // if current pipeline generates some transformed results, build it as
-    // `RowInsertRequest` and append to results. If the pipeline doesn't
-    // have dispatch, this will be only output of the pipeline.
-    for (table_name, rows) in req_map {
-        results.push(RowInsertRequest {
-            rows: Some(Rows {
-                rows,
-                schema: pipeline.schemas().clone(),
-            }),
-            table_name,
-        });
+    let mut results = ContextReq::default();
+
+    if let Some(s) = pipeline.schemas() {
+        // transformed
+
+        // if current pipeline generates some transformed results, build it as
+        // `RowInsertRequest` and append to results. If the pipeline doesn't
+        // have dispatch, this will be only output of the pipeline.
+        for ((opt, table_name), rows) in transformed_map {
+            results.add_rows(
+                opt,
+                RowInsertRequest {
+                    rows: Some(Rows {
+                        rows,
+                        schema: s.clone(),
+                    }),
+                    table_name,
+                },
+            );
+        }
+    } else {
+        // auto map
+        for (table_name, pipeline_maps) in auto_map {
+            if pipeline_maps.is_empty() {
+                continue;
+            }
+
+            let ts_unit_map = auto_map_ts_keys
+                .remove(&table_name)
+                .context(AutoTransformOneTimestampSnafu)
+                .context(PipelineSnafu)?;
+            // only one timestamp key is allowed
+            // which will be converted to ts index
+            let (ts_key, unit) = ts_unit_map
+                .into_iter()
+                .exactly_one()
+                .map_err(|_| AutoTransformOneTimestampSnafu.build())
+                .context(PipelineSnafu)?;
+
+            let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
+            let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
+            let next_pipeline_ctx =
+                PipelineContext::new(&new_def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
+
+            let reqs = run_identity_pipeline(
+                handler,
+                &next_pipeline_ctx,
+                PipelineIngestRequest {
+                    table: table_name,
+                    values: pipeline_maps,
+                },
+                query_ctx,
+            )
+            .await?;
+
+            results.merge(reqs);
+        }
     }
 
     // if current pipeline contains dispatcher and has several rules, we may
@@ -185,18 +231,24 @@ async fn run_custom_pipeline(
         // run pipeline recursively.
         let next_pipeline_def =
             PipelineDefinition::from_name(next_pipeline_name, None, None).context(PipelineSnafu)?;
+        let next_pipeline_ctx = PipelineContext::new(
+            &next_pipeline_def,
+            pipeline_ctx.pipeline_param,
+            pipeline_ctx.channel,
+        );
         let requests = Box::pin(run_pipeline(
             handler,
-            &next_pipeline_def,
-            pipeline_parameters,
-            coll,
-            table_name,
+            &next_pipeline_ctx,
+            PipelineIngestRequest {
+                table: table_name,
+                values: coll,
+            },
             query_ctx,
             false,
         ))
         .await?;
 
-        results.extend(requests);
+        results.merge(requests);
     }
 
     if is_top_level {
@@ -206,4 +258,12 @@ async fn run_custom_pipeline(
     }
 
     Ok(results)
+}
+
+#[inline]
+fn table_suffix_to_table_name(table_name: &String, table_suffix: Option<String>) -> String {
+    match table_suffix {
+        Some(suffix) => format!("{}{}", table_name, suffix),
+        None => table_name.clone(),
+    }
 }

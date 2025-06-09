@@ -176,9 +176,9 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
         )?;
 
         // Write the `service_name` column.
-        row_writer::write_fields(
+        row_writer::write_tags(
             writer,
-            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
+            std::iter::once((SERVICE_NAME_COLUMN.to_string(), service_name)),
             &mut row,
         )?;
         writer.add_row(row);

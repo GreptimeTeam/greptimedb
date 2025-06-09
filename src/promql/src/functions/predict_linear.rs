@@ -22,6 +22,7 @@ use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::ScalarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
@@ -44,25 +45,41 @@ impl PredictLinear {
         "prom_predict_linear"
     }
 
-    pub fn scalar_udf(t: i64) -> ScalarUDF {
+    pub fn scalar_udf() -> ScalarUDF {
         let input_types = vec![
             // time index column
             RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
             // value column
             RangeArray::convert_data_type(DataType::Float64),
+            // t
+            DataType::Int64,
         ];
         create_udf(
             Self::name(),
             input_types,
             DataType::Float64,
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::new(t).predict_linear(input)) as _,
+            Arc::new(move |input: &_| Self::create_function(input)?.predict_linear(input)) as _,
         )
+    }
+
+    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
+        if inputs.len() != 3 {
+            return Err(DataFusionError::Plan(
+                "PredictLinear function should have 3 inputs".to_string(),
+            ));
+        }
+        let ColumnarValue::Scalar(ScalarValue::Int64(Some(t))) = inputs[2] else {
+            return Err(DataFusionError::Plan(
+                "PredictLinear function's third input should be a scalar int64".to_string(),
+            ));
+        };
+        Ok(Self::new(t))
     }
 
     fn predict_linear(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
         // construct matrix from input.
-        assert_eq!(input.len(), 2);
+        assert_eq!(input.len(), 3);
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
 
@@ -190,9 +207,10 @@ mod test {
         let ts_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(0),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(0))],
             vec![None, None],
         );
     }
@@ -201,9 +219,10 @@ mod test {
     fn calculate_predict_linear_test1() {
         let (ts_array, value_array) = build_test_range_arrays();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(0),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(0))],
             // value at t = 0
             vec![Some(38.63636363636364)],
         );
@@ -213,9 +232,10 @@ mod test {
     fn calculate_predict_linear_test2() {
         let (ts_array, value_array) = build_test_range_arrays();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(3000),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(3000))],
             // value at t = 3000
             vec![Some(31856.818181818187)],
         );
@@ -225,9 +245,10 @@ mod test {
     fn calculate_predict_linear_test3() {
         let (ts_array, value_array) = build_test_range_arrays();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(4200),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(4200))],
             // value at t = 4200
             vec![Some(44584.09090909091)],
         );
@@ -237,9 +258,10 @@ mod test {
     fn calculate_predict_linear_test4() {
         let (ts_array, value_array) = build_test_range_arrays();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(6600),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(6600))],
             // value at t = 6600
             vec![Some(70038.63636363638)],
         );
@@ -249,9 +271,10 @@ mod test {
     fn calculate_predict_linear_test5() {
         let (ts_array, value_array) = build_test_range_arrays();
         simple_range_udf_runner(
-            PredictLinear::scalar_udf(7800),
+            PredictLinear::scalar_udf(),
             ts_array,
             value_array,
+            vec![ScalarValue::Int64(Some(7800))],
             // value at t = 7800
             vec![Some(82765.9090909091)],
         );

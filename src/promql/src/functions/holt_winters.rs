@@ -22,6 +22,7 @@ use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::ScalarValue;
 use datafusion_expr::create_udf;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::DataType;
@@ -62,6 +63,10 @@ impl HoltWinters {
         vec![
             RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
             RangeArray::convert_data_type(DataType::Float64),
+            // sf
+            DataType::Float64,
+            // tf
+            DataType::Float64,
         ]
     }
 
@@ -69,20 +74,39 @@ impl HoltWinters {
         DataType::Float64
     }
 
-    pub fn scalar_udf(level: f64, trend: f64) -> ScalarUDF {
+    pub fn scalar_udf() -> ScalarUDF {
         create_udf(
             Self::name(),
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::new(level, trend).calc(input)) as _,
+            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
         )
+    }
+
+    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
+        if inputs.len() != 4 {
+            return Err(DataFusionError::Plan(
+                "HoltWinters function should have 4 inputs".to_string(),
+            ));
+        }
+        let ColumnarValue::Scalar(ScalarValue::Float64(Some(sf))) = inputs[2] else {
+            return Err(DataFusionError::Plan(
+                "HoltWinters function's third input should be a scalar float64".to_string(),
+            ));
+        };
+        let ColumnarValue::Scalar(ScalarValue::Float64(Some(tf))) = inputs[3] else {
+            return Err(DataFusionError::Plan(
+                "HoltWinters function's fourth input should be a scalar float64".to_string(),
+            ));
+        };
+        Ok(Self::new(sf, tf))
     }
 
     fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
         // construct matrix from input.
         // The third one is level param, the fourth - trend param which are included in fields.
-        assert_eq!(input.len(), 2);
+        assert_eq!(input.len(), 4);
 
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
@@ -264,9 +288,13 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(0.5, 0.1),
+            HoltWinters::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![
+                ScalarValue::Float64(Some(0.5)),
+                ScalarValue::Float64(Some(0.1)),
+            ],
             vec![Some(5.0)],
         );
     }
@@ -287,9 +315,13 @@ mod tests {
         let ts_range_array = RangeArray::from_ranges(ts_array, ranges).unwrap();
         let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         simple_range_udf_runner(
-            HoltWinters::scalar_udf(0.5, 0.1),
+            HoltWinters::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![
+                ScalarValue::Float64(Some(0.5)),
+                ScalarValue::Float64(Some(0.1)),
+            ],
             vec![Some(38.18119566835938)],
         );
     }
@@ -315,9 +347,13 @@ mod tests {
             let (ts_range_array, value_range_array) =
                 create_ts_and_value_range_arrays(query, ranges.clone());
             simple_range_udf_runner(
-                HoltWinters::scalar_udf(0.01, 0.1),
+                HoltWinters::scalar_udf(),
                 ts_range_array,
                 value_range_array,
+                vec![
+                    ScalarValue::Float64(Some(0.01)),
+                    ScalarValue::Float64(Some(0.1)),
+                ],
                 vec![Some(expected)],
             );
         }

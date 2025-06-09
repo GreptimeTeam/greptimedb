@@ -17,6 +17,7 @@ use datafusion_expr::LogicalPlan;
 use store_api::storage::RegionId;
 
 /// The query request to be handled by the RegionServer (Datanode).
+#[derive(Clone, Debug)]
 pub struct QueryRequest {
     /// The header of this request. Often to store some context of the query. None means all to defaults.
     pub header: Option<RegionRequestHeader>,

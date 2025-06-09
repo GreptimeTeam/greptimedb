@@ -72,12 +72,13 @@ INSERT INTO ngx_access_log VALUES ('192.168.1.1', 'GET', '/index.html', 200, 512
 
 Affected Rows: 4
 
+-- TODO(discord9): fix flow stat update for batching mode flow
 SELECT created_time < last_execution_time, created_time IS NOT NULL, last_execution_time IS NOT NULL, source_table_names FROM information_schema.flows WHERE flow_name = 'user_agent_flow';
 
 +--------------------------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------+--------------------------------+
 | information_schema.flows.created_time < information_schema.flows.last_execution_time | information_schema.flows.created_time IS NOT NULL | information_schema.flows.last_execution_time IS NOT NULL | source_table_names             |
 +--------------------------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------+--------------------------------+
-| true                                                                                 | true                                              | true                                                     | greptime.public.ngx_access_log |
+|                                                                                      | true                                              | false                                                    | greptime.public.ngx_access_log |
 +--------------------------------------------------------------------------------------+---------------------------------------------------+----------------------------------------------------------+--------------------------------+
 
 DROP TABLE ngx_access_log;

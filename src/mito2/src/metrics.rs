@@ -70,8 +70,8 @@ lazy_static! {
         )
         .unwrap();
     /// Counter of scheduled failed flush jobs.
-    pub static ref FLUSH_ERRORS_TOTAL: IntCounter =
-        register_int_counter!("greptime_mito_flush_errors_total", "mito flush errors total").unwrap();
+    pub static ref FLUSH_FAILURE_TOTAL: IntCounter =
+        register_int_counter!("greptime_mito_flush_failure_total", "mito flush failure total").unwrap();
     /// Elapsed time of a flush job.
     pub static ref FLUSH_ELAPSED: HistogramVec = register_histogram_vec!(
             "greptime_mito_flush_elapsed",
@@ -84,7 +84,7 @@ lazy_static! {
     /// Histogram of flushed bytes.
     pub static ref FLUSH_BYTES_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_bytes_total", "mito flush bytes total").unwrap();
-    /// Gauge for inflight compaction tasks.
+    /// Gauge for inflight flush tasks.
     pub static ref INFLIGHT_FLUSH_COUNT: IntGauge =
         register_int_gauge!(
             "greptime_mito_inflight_flush_count",
@@ -153,7 +153,6 @@ lazy_static! {
             "greptime_mito_inflight_compaction_count",
             "inflight compaction count",
         ).unwrap();
-    // ------- End of compaction metrics.
 
     // Query metrics.
     /// Timer of different stages in query.
@@ -392,6 +391,29 @@ lazy_static! {
         // 0.01 ~ 1000
         exponential_buckets(0.01, 10.0, 6).unwrap(),
     ).unwrap();
+
+
+    pub static ref REGION_WORKER_HANDLE_WRITE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_region_worker_handle_write",
+        "elapsed time for handling writes in region worker loop",
+        &["stage"],
+        exponential_buckets(0.001, 10.0, 5).unwrap()
+    ).unwrap();
+
+}
+
+lazy_static! {
+    /// Counter for compaction input file size.
+    pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
+        "greptime_mito_compaction_input_bytes",
+        "mito compaction input file size",
+        ).unwrap();
+
+    /// Counter for compaction output file size.
+    pub static ref COMPACTION_OUTPUT_BYTES: Counter = register_counter!(
+        "greptime_mito_compaction_output_bytes",
+        "mito compaction output file size",
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

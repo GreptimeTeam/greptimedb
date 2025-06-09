@@ -20,6 +20,7 @@ pub mod error;
 pub mod local;
 pub mod options;
 mod procedure;
+pub mod rwlock;
 pub mod store;
 pub mod watcher;
 
@@ -28,8 +29,8 @@ pub mod test_util;
 
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
-    BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, LockKey, Output, ParseIdError,
-    PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, StringKey,
+    BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, ContextProviderRef, LockKey,
+    Output, ParseIdError, PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo,
+    ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, StringKey,
 };
 pub use crate::watcher::Watcher;

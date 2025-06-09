@@ -89,11 +89,14 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Makes an entry instance of the associated Entry type
     fn entry(
         &self,
-        data: &mut Vec<u8>,
+        data: Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
         provider: &Provider,
     ) -> Result<Entry, Self::Error>;
+
+    /// Returns the highest existing entry id in the log store.
+    fn high_watermark(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
 }
 
 /// The response of an `append` operation.

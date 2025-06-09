@@ -20,11 +20,13 @@ use snafu::ResultExt;
 use sqlx::mysql::MySqlRow;
 use sqlx::pool::Pool;
 use sqlx::{MySql, MySqlPool, Row, Transaction as MySqlTransaction};
+use strum::AsRefStr;
 
 use crate::error::{CreateMySqlPoolSnafu, MySqlExecutionSnafu, MySqlTransactionSnafu, Result};
 use crate::kv_backend::rds::{
     Executor, ExecutorFactory, ExecutorImpl, KvQueryExecutor, RdsStore, Transaction,
-    RDS_STORE_TXN_RETRY_COUNT,
+    RDS_STORE_OP_BATCH_DELETE, RDS_STORE_OP_BATCH_GET, RDS_STORE_OP_BATCH_PUT,
+    RDS_STORE_OP_RANGE_DELETE, RDS_STORE_OP_RANGE_QUERY, RDS_STORE_TXN_RETRY_COUNT,
 };
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{
@@ -32,6 +34,8 @@ use crate::rpc::store::{
     BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
+
+const MYSQL_STORE_NAME: &str = "mysql_store";
 
 type MySqlClient = Arc<Pool<MySql>>;
 pub struct MySqlTxnClient(MySqlTransaction<'static, MySql>);
@@ -47,7 +51,7 @@ fn key_value_from_row(row: MySqlRow) -> KeyValue {
 const EMPTY: &[u8] = &[0];
 
 /// Type of range template.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, AsRefStr)]
 enum RangeTemplateType {
     Point,
     Range,
@@ -58,6 +62,8 @@ enum RangeTemplateType {
 
 /// Builds params for the given range template type.
 impl RangeTemplateType {
+    /// Builds the parameters for the given range template type.
+    /// You can check out the conventions at [RangeRequest]
     fn build_params(&self, mut key: Vec<u8>, range_end: Vec<u8>) -> Vec<Vec<u8>> {
         match self {
             RangeTemplateType::Point => vec![key],
@@ -160,7 +166,7 @@ impl<'a> MySqlTemplateFactory<'a> {
             range_template: RangeTemplate {
                 point: format!("SELECT k, v FROM `{table_name}` WHERE k = ?"),
                 range: format!("SELECT k, v FROM `{table_name}` WHERE k >= ? AND k < ? ORDER BY k"),
-                full: format!("SELECT k, v FROM `{table_name}` ? ORDER BY k"),
+                full: format!("SELECT k, v FROM `{table_name}` ORDER BY k"),
                 left_bounded: format!("SELECT k, v FROM `{table_name}` WHERE k >= ? ORDER BY k"),
                 prefix: format!("SELECT k, v FROM `{table_name}` WHERE k LIKE ? ORDER BY k"),
             },
@@ -343,7 +349,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             RangeTemplate::with_limit(template, if req.limit == 0 { 0 } else { req.limit + 1 });
         let limit = req.limit as usize;
         debug!("query: {:?}, params: {:?}", query, params);
-        let mut kvs = query_executor.query(&query, &params_ref).await?;
+        let mut kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params_ref).await,
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_RANGE_QUERY,
+            template_type.as_ref()
+        )?;
         if req.keys_only {
             kvs.iter_mut().for_each(|kv| kv.value = vec![]);
         }
@@ -381,7 +392,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
 
         // Fast path: if we don't need previous kvs, we can just upsert the keys.
         if !req.prev_kv {
-            query_executor.execute(&update, &values_params).await?;
+            crate::record_rds_sql_execute_elapsed!(
+                query_executor.execute(&update, &values_params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_PUT,
+                ""
+            )?;
             return Ok(BatchPutResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -392,7 +408,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             txn.commit().await?;
             return res;
         }
-        let prev_kvs = query_executor.query(&select, &in_params).await?;
+        let prev_kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&select, &in_params).await,
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_PUT,
+            ""
+        )?;
         query_executor.execute(&update, &values_params).await?;
         Ok(BatchPutResponse { prev_kvs })
     }
@@ -409,7 +430,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             .sql_template_set
             .generate_batch_get_query(req.keys.len());
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
-        let kvs = query_executor.query(&query, &params).await?;
+        let kvs = crate::record_rds_sql_execute_elapsed!(
+            query_executor.query(&query, &params).await,
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_GET,
+            ""
+        )?;
         Ok(BatchGetResponse { kvs })
     }
 
@@ -441,7 +467,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let template = self.sql_template_set.delete_template.get(template_type);
         let params = template_type.build_params(req.key, req.range_end);
         let params_ref = params.iter().map(|x| x as _).collect::<Vec<_>>();
-        query_executor.execute(template, &params_ref).await?;
+        crate::record_rds_sql_execute_elapsed!(
+            query_executor.execute(template, &params_ref).await,
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_RANGE_DELETE,
+            template_type.as_ref()
+        )?;
         let mut resp = DeleteRangeResponse::new(prev_kvs.len() as i64);
         if req.prev_kv {
             resp.with_prev_kvs(prev_kvs);
@@ -463,7 +494,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
         let params = req.keys.iter().map(|x| x as _).collect::<Vec<_>>();
         // Fast path: if we don't need previous kvs, we can just delete the keys.
         if !req.prev_kv {
-            query_executor.execute(&query, &params).await?;
+            crate::record_rds_sql_execute_elapsed!(
+                query_executor.execute(&query, &params).await,
+                MYSQL_STORE_NAME,
+                RDS_STORE_OP_BATCH_DELETE,
+                ""
+            )?;
             return Ok(BatchDeleteResponse::default());
         }
         // Should use transaction to ensure atomicity.
@@ -483,7 +519,12 @@ impl KvQueryExecutor<MySqlClient> for MySqlStore {
             .await?
             .kvs;
         // Pure `DELETE` has no return value, so we need to use `execute` instead of `query`.
-        query_executor.execute(&query, &params).await?;
+        crate::record_rds_sql_execute_elapsed!(
+            query_executor.execute(&query, &params).await,
+            MYSQL_STORE_NAME,
+            RDS_STORE_OP_BATCH_DELETE,
+            ""
+        )?;
         if req.prev_kv {
             Ok(BatchDeleteResponse { prev_kvs })
         } else {
@@ -538,10 +579,11 @@ mod tests {
         prepare_kv_with_prefix, test_kv_batch_delete_with_prefix, test_kv_batch_get_with_prefix,
         test_kv_compare_and_put_with_prefix, test_kv_delete_range_with_prefix,
         test_kv_put_with_prefix, test_kv_range_2_with_prefix, test_kv_range_with_prefix,
-        test_txn_compare_equal, test_txn_compare_greater, test_txn_compare_less,
-        test_txn_compare_not_equal, test_txn_one_compare_op, text_txn_multi_compare_op,
-        unprepare_kv,
+        test_simple_kv_range, test_txn_compare_equal, test_txn_compare_greater,
+        test_txn_compare_less, test_txn_compare_not_equal, test_txn_one_compare_op,
+        text_txn_multi_compare_op, unprepare_kv,
     };
+    use crate::maybe_skip_mysql_integration_test;
 
     async fn build_mysql_kv_backend(table_name: &str) -> Option<MySqlStore> {
         init_default_ut_logging();
@@ -568,6 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_put() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("put_test").await.unwrap();
         let prefix = b"put/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -577,6 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_range() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("range_test").await.unwrap();
         let prefix = b"range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -586,6 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_range_2() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("range2_test").await.unwrap();
         let prefix = b"range2/";
         test_kv_range_2_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -593,7 +638,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mysql_all_range() {
+        maybe_skip_mysql_integration_test!();
+        let kv_backend = build_mysql_kv_backend("simple_range_test").await.unwrap();
+        let prefix = b"";
+        prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
+        test_simple_kv_range(&kv_backend).await;
+        unprepare_kv(&kv_backend, prefix).await;
+    }
+
+    #[tokio::test]
     async fn test_mysql_batch_get() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("batch_get_test").await.unwrap();
         let prefix = b"batch_get/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -603,6 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_batch_delete() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("batch_delete_test").await.unwrap();
         let prefix = b"batch_delete/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -612,6 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_batch_delete_with_prefix() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("batch_delete_with_prefix_test")
             .await
             .unwrap();
@@ -623,6 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_delete_range() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("delete_range_test").await.unwrap();
         let prefix = b"delete_range/";
         prepare_kv_with_prefix(&kv_backend, prefix.to_vec()).await;
@@ -632,6 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_compare_and_put() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("compare_and_put_test")
             .await
             .unwrap();
@@ -642,6 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mysql_txn() {
+        maybe_skip_mysql_integration_test!();
         let kv_backend = build_mysql_kv_backend("txn_test").await.unwrap();
         test_txn_one_compare_op(&kv_backend).await;
         text_txn_multi_compare_op(&kv_backend).await;

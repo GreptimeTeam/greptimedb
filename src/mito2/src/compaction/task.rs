@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 
 use crate::compaction::compactor::{CompactionRegion, Compactor};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::error;
 use crate::error::CompactRegionSnafu;
 use crate::manifest::action::RegionEdit;
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
@@ -30,6 +29,7 @@ use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
 use crate::worker::WorkerListener;
+use crate::{error, metrics};
 
 /// Maximum number of compaction tasks in parallel.
 pub const MAX_PARALLEL_COMPACTION: usize = 1;
@@ -98,6 +98,8 @@ impl CompactionTaskImpl {
         };
         let merge_time = merge_timer.stop_and_record();
 
+        metrics::COMPACTION_INPUT_BYTES.inc_by(compaction_result.input_file_size() as f64);
+        metrics::COMPACTION_OUTPUT_BYTES.inc_by(compaction_result.output_file_size() as f64);
         info!(
             "Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s",
             self.compaction_region.region_id,

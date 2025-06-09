@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
-    DecodeStatsSnafu, FieldTypeMismatchSnafu, FilterRecordBatchSnafu, Result, StatsNotPresentSnafu,
+    DecodeStatsSnafu, FieldTypeMismatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
@@ -36,7 +36,9 @@ use crate::read::Batch;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::{RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext};
+use crate::sst::parquet::reader::{
+    MaybeFilter, RowGroupReader, RowGroupReaderBuilder, SimpleFilterContext,
+};
 
 /// A range of a parquet SST. Now it is a row group.
 /// We can read different file ranges in parallel.
@@ -255,8 +257,15 @@ impl RangeBase {
 
         // Run filter one by one and combine them result
         // TODO(ruihang): run primary key filter first. It may short circuit other filters
-        for filter in &self.filters {
-            let result = match filter.semantic_type() {
+        for filter_ctx in &self.filters {
+            let filter = match filter_ctx.filter() {
+                MaybeFilter::Filter(f) => f,
+                // Column matches.
+                MaybeFilter::Matched => continue,
+                // Column doesn't match, filter the entire batch.
+                MaybeFilter::Pruned => return Ok(None),
+            };
+            let result = match filter_ctx.semantic_type() {
                 SemanticType::Tag => {
                     let pk_values = if let Some(pk_values) = input.pk_values() {
                         pk_values
@@ -270,23 +279,22 @@ impl RangeBase {
                             let pk_index = self
                                 .read_format
                                 .metadata()
-                                .primary_key_index(filter.column_id())
+                                .primary_key_index(filter_ctx.column_id())
                                 .unwrap();
                             v[pk_index]
                                 .1
-                                .try_to_scalar_value(filter.data_type())
+                                .try_to_scalar_value(filter_ctx.data_type())
                                 .context(FieldTypeMismatchSnafu)?
                         }
                         CompositeValues::Sparse(v) => {
-                            let v = v.get_or_null(filter.column_id());
-                            v.try_to_scalar_value(filter.data_type())
+                            let v = v.get_or_null(filter_ctx.column_id());
+                            v.try_to_scalar_value(filter_ctx.data_type())
                                 .context(FieldTypeMismatchSnafu)?
                         }
                     };
                     if filter
-                        .filter()
                         .evaluate_scalar(&pk_value)
-                        .context(FilterRecordBatchSnafu)?
+                        .context(RecordBatchSnafu)?
                     {
                         continue;
                     } else {
@@ -295,20 +303,19 @@ impl RangeBase {
                     }
                 }
                 SemanticType::Field => {
-                    let Some(field_index) = self.read_format.field_index_by_id(filter.column_id())
+                    let Some(field_index) =
+                        self.read_format.field_index_by_id(filter_ctx.column_id())
                     else {
                         continue;
                     };
                     let field_col = &input.fields()[field_index].data;
                     filter
-                        .filter()
                         .evaluate_vector(field_col)
-                        .context(FilterRecordBatchSnafu)?
+                        .context(RecordBatchSnafu)?
                 }
                 SemanticType::Timestamp => filter
-                    .filter()
                     .evaluate_vector(input.timestamps())
-                    .context(FilterRecordBatchSnafu)?,
+                    .context(RecordBatchSnafu)?,
             };
 
             mask = mask.bitand(&result);

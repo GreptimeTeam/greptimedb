@@ -325,7 +325,7 @@ impl std::str::FromStr for Pattern {
 
 impl Pattern {
     fn check(&self) -> Result<()> {
-        if self.len() == 0 {
+        if self.is_empty() {
             return DissectEmptyPatternSnafu.fail();
         }
 
@@ -601,7 +601,7 @@ impl Processor for DissectProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
+    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -629,7 +629,7 @@ impl Processor for DissectProcessor {
                 }
             }
         }
-        Ok(())
+        Ok(val)
     }
 }
 

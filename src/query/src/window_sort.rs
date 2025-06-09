@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
+use std::slice::from_ref;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -801,18 +802,18 @@ fn find_slice_from_range(
         // note that `data < max_val`
         // i,e, for max_val = 4, array = [5,3,2] should be start=1
         // max_val = 4, array = [5, 4, 3, 2] should be start= 2
-        let start = bisect::<false>(&[array.clone()], &[max_val.clone()], &[*opt])?;
+        let start = bisect::<false>(from_ref(array), from_ref(&max_val), &[*opt])?;
         // min_val = 1, array = [3, 2, 1, 0], end = 3
         // min_val = 1, array = [3, 2, 0], end = 2
-        let end = bisect::<false>(&[array.clone()], &[min_val.clone()], &[*opt])?;
+        let end = bisect::<false>(from_ref(array), from_ref(&min_val), &[*opt])?;
         (start, end)
     } else {
         // min_val = 1, array = [1, 2, 3], start = 0
         // min_val = 1, array = [0, 2, 3], start = 1
-        let start = bisect::<true>(&[array.clone()], &[min_val.clone()], &[*opt])?;
+        let start = bisect::<true>(from_ref(array), from_ref(&min_val), &[*opt])?;
         // max_val = 3, array = [1, 3, 4], end = 1
         // max_val = 3, array = [1, 2, 4], end = 2
-        let end = bisect::<true>(&[array.clone()], &[max_val.clone()], &[*opt])?;
+        let end = bisect::<true>(from_ref(array), from_ref(&max_val), &[*opt])?;
         (start, end)
     };
 
@@ -3156,7 +3157,8 @@ mod test {
         let fetch_bound = 100;
 
         let mut rng = fastrand::Rng::new();
-        rng.seed(1337);
+        let rng_seed = rng.u64(..);
+        rng.seed(rng_seed);
         let mut bound_val = None;
         // construct testcases
         type CmpFn<T> = Box<dyn FnMut(&T, &T) -> std::cmp::Ordering>;
@@ -3299,8 +3301,8 @@ mod test {
             }
             assert_eq!(
                 res_concat, expected_concat,
-                "case failed, case id: {}",
-                case_id
+                "case failed, case id: {}, rng seed: {}",
+                case_id, rng_seed
             );
         }
     }

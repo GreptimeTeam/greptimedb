@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
@@ -36,7 +37,6 @@ use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
 use etcd_client::Client;
-use futures::future;
 use servers::configurator::ConfiguratorRef;
 use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -53,6 +53,7 @@ use sqlx::mysql::{MySqlConnection, MySqlPool};
 use sqlx::Connection;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{oneshot, Mutex};
 #[cfg(feature = "pg_kvbackend")]
 use tokio_postgres::NoTls;
 use tonic::codec::CompressionEncoding;
@@ -60,16 +61,18 @@ use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
 #[cfg(feature = "mysql_kvbackend")]
-use crate::election::mysql::MySqlElection;
+use crate::election::rds::mysql::MySqlElection;
 #[cfg(feature = "pg_kvbackend")]
-use crate::election::postgres::PgElection;
+use crate::election::rds::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectorRef};
+use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
+use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
+use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
 use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::{error, Result};
@@ -77,7 +80,7 @@ use crate::{error, Result};
 pub struct MetasrvInstance {
     metasrv: Arc<Metasrv>,
 
-    httpsrv: Arc<HttpServer>,
+    http_server: HttpServer,
 
     opts: MetasrvOptions,
 
@@ -86,6 +89,12 @@ pub struct MetasrvInstance {
     plugins: Plugins,
 
     export_metrics_task: Option<ExportMetricsTask>,
+
+    /// gRPC serving state receiver. Only present if the gRPC server is started.
+    serve_state: Arc<Mutex<Option<oneshot::Receiver<Result<()>>>>>,
+
+    /// gRPC bind addr
+    bind_addr: Option<SocketAddr>,
 }
 
 impl MetasrvInstance {
@@ -94,12 +103,11 @@ impl MetasrvInstance {
         plugins: Plugins,
         metasrv: Metasrv,
     ) -> Result<MetasrvInstance> {
-        let httpsrv = Arc::new(
-            HttpServerBuilder::new(opts.http.clone())
-                .with_metrics_handler(MetricsHandler)
-                .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
-                .build(),
-        );
+        let http_server = HttpServerBuilder::new(opts.http.clone())
+            .with_metrics_handler(MetricsHandler)
+            .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
+            .build();
+
         let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
@@ -107,11 +115,13 @@ impl MetasrvInstance {
             .context(error::InitExportMetricsTaskSnafu)?;
         Ok(MetasrvInstance {
             metasrv,
-            httpsrv,
+            http_server,
             opts,
             signal_sender: None,
             plugins,
             export_metrics_task,
+            serve_state: Default::default(),
+            bind_addr: None,
         })
     }
 
@@ -131,22 +141,30 @@ impl MetasrvInstance {
             router = configurator.config_grpc(router);
         }
 
-        let metasrv = bootstrap_metasrv_with_router(&self.opts.bind_addr, router, rx);
+        let (serve_state_tx, serve_state_rx) = oneshot::channel();
+
+        let socket_addr =
+            bootstrap_metasrv_with_router(&self.opts.bind_addr, router, serve_state_tx, rx).await?;
+        self.bind_addr = Some(socket_addr);
+
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
-        let http_srv = async {
-            self.httpsrv
-                .start(addr)
-                .await
-                .map(|_| ())
-                .context(error::StartHttpSnafu)
-        };
-        future::try_join(metasrv, http_srv).await?;
+        self.http_server
+            .start(addr)
+            .await
+            .context(error::StartHttpSnafu)?;
+
+        *self.serve_state.lock().await = Some(serve_state_rx);
         Ok(())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        if let Some(mut rx) = self.serve_state.lock().await.take() {
+            if let Ok(Err(err)) = rx.try_recv() {
+                common_telemetry::error!(err; "Metasrv start failed")
+            }
+        }
         if let Some(signal) = &self.signal_sender {
             signal
                 .send(())
@@ -154,11 +172,11 @@ impl MetasrvInstance {
                 .context(error::SendShutdownSignalSnafu)?;
         }
         self.metasrv.shutdown().await?;
-        self.httpsrv
+        self.http_server
             .shutdown()
             .await
             .context(error::ShutdownServerSnafu {
-                server: self.httpsrv.name(),
+                server: self.http_server.name(),
             })?;
         Ok(())
     }
@@ -170,30 +188,42 @@ impl MetasrvInstance {
     pub fn get_inner(&self) -> &Metasrv {
         &self.metasrv
     }
+    pub fn bind_addr(&self) -> &Option<SocketAddr> {
+        &self.bind_addr
+    }
 }
 
 pub async fn bootstrap_metasrv_with_router(
     bind_addr: &str,
     router: Router,
-    mut signal: Receiver<()>,
-) -> Result<()> {
+    serve_state_tx: oneshot::Sender<Result<()>>,
+    mut shutdown_rx: Receiver<()>,
+) -> Result<SocketAddr> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .context(error::TcpBindSnafu { addr: bind_addr })?;
 
-    info!("gRPC server is bound to: {bind_addr}");
+    let real_bind_addr = listener
+        .local_addr()
+        .context(error::TcpBindSnafu { addr: bind_addr })?;
+
+    info!("gRPC server is bound to: {}", real_bind_addr);
 
     let incoming =
         TcpIncoming::from_listener(listener, true, None).context(error::TcpIncomingSnafu)?;
 
-    router
-        .serve_with_incoming_shutdown(incoming, async {
-            let _ = signal.recv().await;
-        })
-        .await
-        .context(error::StartGrpcSnafu)?;
+    let _handle = common_runtime::spawn_global(async move {
+        let result = router
+            .serve_with_incoming_shutdown(incoming, async {
+                let _ = shutdown_rx.recv().await;
+            })
+            .await
+            .inspect_err(|err| common_telemetry::error!(err;"Failed to start metasrv"))
+            .context(error::StartGrpcSnafu);
+        let _ = serve_state_tx.send(result);
+    });
 
-    Ok(())
+    Ok(real_bind_addr)
 }
 
 #[macro_export]
@@ -227,7 +257,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(opts).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.server_addr,
@@ -240,7 +270,7 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
-            let pool = create_postgres_pool(opts).await?;
+            let pool = create_postgres_pool(&opts.store_addrs).await?;
             let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;
@@ -260,7 +290,7 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "mysql_kvbackend")]
         (None, BackendImpl::MysqlStore) => {
-            let pool = create_mysql_pool(opts).await?;
+            let pool = create_mysql_pool(&opts.store_addrs).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                     .await
@@ -294,10 +324,31 @@ pub async fn metasrv_builder(
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
-    let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
-        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
-        SelectorType::RoundRobin => Arc::new(RoundRobinSelector::default()) as SelectorRef,
+    let node_excluder = plugins
+        .get::<NodeExcluderRef>()
+        .unwrap_or_else(|| Arc::new(Vec::new()) as NodeExcluderRef);
+    let selector = if let Some(selector) = plugins.get::<SelectorRef>() {
+        info!("Using selector from plugins");
+        selector
+    } else {
+        let selector = match opts.selector {
+            SelectorType::LoadBased => Arc::new(LoadBasedSelector::new(
+                RegionNumsBasedWeightCompute,
+                node_excluder,
+            )) as SelectorRef,
+            SelectorType::LeaseBased => {
+                Arc::new(LeaseBasedSelector::new(node_excluder)) as SelectorRef
+            }
+            SelectorType::RoundRobin => Arc::new(RoundRobinSelector::new(
+                SelectTarget::Datanode,
+                node_excluder,
+            )) as SelectorRef,
+        };
+        info!(
+            "Using selector from options, selector type: {}",
+            opts.selector.as_ref()
+        );
+        selector
     };
 
     Ok(MetasrvBuilder::new()
@@ -309,9 +360,8 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-async fn create_etcd_client(opts: &MetasrvOptions) -> Result<Client> {
-    let etcd_endpoints = opts
-        .store_addrs
+pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+    let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
@@ -342,13 +392,10 @@ async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres:
 }
 
 #[cfg(feature = "pg_kvbackend")]
-async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres::Pool> {
-    let postgres_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
+pub async fn create_postgres_pool(store_addrs: &[String]) -> Result<deadpool_postgres::Pool> {
+    let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
+        err_msg: "empty store addrs",
+    })?;
     let mut cfg = Config::new();
     cfg.url = Some(postgres_url.to_string());
     let pool = cfg
@@ -358,13 +405,10 @@ async fn create_postgres_pool(opts: &MetasrvOptions) -> Result<deadpool_postgres
 }
 
 #[cfg(feature = "mysql_kvbackend")]
-async fn setup_mysql_options(opts: &MetasrvOptions) -> Result<MySqlConnectOptions> {
-    let mysql_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
+async fn setup_mysql_options(store_addrs: &[String]) -> Result<MySqlConnectOptions> {
+    let mysql_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
+        err_msg: "empty store addrs",
+    })?;
     // Avoid `SET` commands in sqlx
     let opts: MySqlConnectOptions = mysql_url
         .parse()
@@ -378,8 +422,8 @@ async fn setup_mysql_options(opts: &MetasrvOptions) -> Result<MySqlConnectOption
 }
 
 #[cfg(feature = "mysql_kvbackend")]
-async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
-    let opts = setup_mysql_options(opts).await?;
+pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
+    let opts = setup_mysql_options(store_addrs).await?;
     let pool = MySqlPool::connect_with(opts)
         .await
         .context(error::CreateMySqlPoolSnafu)?;
@@ -388,7 +432,7 @@ async fn create_mysql_pool(opts: &MetasrvOptions) -> Result<MySqlPool> {
 
 #[cfg(feature = "mysql_kvbackend")]
 async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
-    let opts = setup_mysql_options(opts).await?;
+    let opts = setup_mysql_options(&opts.store_addrs).await?;
     let client = MySqlConnection::connect_with(&opts)
         .await
         .context(error::ConnectMySqlSnafu)?;

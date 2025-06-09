@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,14 +24,14 @@ use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
 use frontend::frontend::Frontend;
@@ -38,7 +39,6 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
-use query::stats::StatementStatistics;
 use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -46,7 +46,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -90,7 +90,7 @@ impl App for Instance {
             .context(error::StartFrontendSnafu)
     }
 
-    async fn stop(&self) -> Result<()> {
+    async fn stop(&mut self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -196,6 +196,14 @@ impl StartCommand {
             opts.logging.dir.clone_from(dir);
         }
 
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(DEFAULT_DATA_HOME)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
+        }
+
         if global_options.log_level.is_some() {
             opts.logging.level.clone_from(&global_options.log_level);
         }
@@ -270,8 +278,11 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             opts.component.node_id.clone(),
+            opts.component.slow_query.as_ref(),
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);
         info!("Frontend options: {:#?}", opts);
@@ -375,7 +386,6 @@ impl StartCommand {
             catalog_manager,
             Arc::new(client),
             meta_client,
-            StatementStatistics::new(opts.logging.slow_query.clone()),
             Some(process_manager),
         )
         .with_plugin(plugins.clone())
@@ -390,7 +400,6 @@ impl StartCommand {
 
         let servers = Services::new(opts, instance.clone(), plugins)
             .build()
-            .await
             .context(error::StartFrontendSnafu)?;
 
         let frontend = Frontend {
@@ -456,8 +465,6 @@ mod tests {
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
-
             [http]
             addr = "127.0.0.1:4000"
             timeout = "0s"
@@ -546,8 +553,6 @@ mod tests {
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
         let toml_str = r#"
-            mode = "distributed"
-
             [http]
             addr = "127.0.0.1:4000"
 

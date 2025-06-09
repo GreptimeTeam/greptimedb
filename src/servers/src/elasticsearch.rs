@@ -33,7 +33,9 @@ use crate::error::{
     status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu, PipelineSnafu,
     Result as ServersResult,
 };
-use crate::http::event::{ingest_logs_inner, LogIngestRequest, LogIngesterQueryParams, LogState};
+use crate::http::event::{
+    ingest_logs_inner, LogIngesterQueryParams, LogState, PipelineIngestRequest,
+};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
@@ -276,7 +278,7 @@ fn parse_bulk_request(
     input: &str,
     index_from_url: &Option<String>,
     msg_field: &Option<String>,
-) -> ServersResult<Vec<LogIngestRequest>> {
+) -> ServersResult<Vec<PipelineIngestRequest>> {
     // Read the ndjson payload and convert it to `Vec<Value>`. Return error if the input is not a valid JSON.
     let values: Vec<Value> = Deserializer::from_str(input)
         .into_iter::<Value>()
@@ -291,7 +293,7 @@ fn parse_bulk_request(
         }
     );
 
-    let mut requests: Vec<LogIngestRequest> = Vec::with_capacity(values.len() / 2);
+    let mut requests: Vec<PipelineIngestRequest> = Vec::with_capacity(values.len() / 2);
     let mut values = values.into_iter();
 
     // Read the ndjson payload and convert it to a (index, value) vector.
@@ -331,7 +333,7 @@ fn parse_bulk_request(
             );
 
             let log_value = pipeline::json_to_map(log_value).context(PipelineSnafu)?;
-            requests.push(LogIngestRequest {
+            requests.push(PipelineIngestRequest {
                 table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
                 values: vec![log_value],
             });
@@ -402,13 +404,13 @@ mod tests {
                 None,
                 None,
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![
                             pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
                         ],
                     },
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
@@ -425,11 +427,11 @@ mod tests {
                 Some("logs".to_string()),
                 None,
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "logs".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
@@ -446,11 +448,11 @@ mod tests {
                 Some("logs".to_string()),
                 None,
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "logs".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
@@ -466,7 +468,7 @@ mod tests {
                 Some("logs".to_string()),
                 None,
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
@@ -483,11 +485,11 @@ mod tests {
                 None,
                 Some("data".to_string()),
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
                     },
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
                     },
@@ -504,13 +506,13 @@ mod tests {
                 None,
                 Some("message".to_string()),
                 Ok(vec![
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
                             pipeline::json_to_map(json!({"message": "172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""})).unwrap(),
                         ],
                     },
-                    LogIngestRequest {
+                    PipelineIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
                             pipeline::json_to_map(json!({"message": "10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""})).unwrap(),

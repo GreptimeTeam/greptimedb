@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::{HashMap, HashSet};
 use std::result;
 
@@ -35,17 +38,20 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_time::DatabaseTimeToLive;
+use common_time::{DatabaseTimeToLive, Timezone};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
-use session::context::QueryContextRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
-use crate::error::{self, InvalidSetDatabaseOptionSnafu, InvalidUnsetDatabaseOptionSnafu, Result};
+use crate::error::{
+    self, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu,
+    Result,
+};
 use crate::key::FlowId;
 
 /// DDL tasks
@@ -65,6 +71,8 @@ pub enum DdlTask {
     DropFlow(DropFlowTask),
     CreateView(CreateViewTask),
     DropView(DropViewTask),
+    #[cfg(feature = "enterprise")]
+    CreateTrigger(trigger::CreateTriggerTask),
 }
 
 impl DdlTask {
@@ -239,6 +247,18 @@ impl TryFrom<Task> for DdlTask {
             Task::DropFlowTask(drop_flow) => Ok(DdlTask::DropFlow(drop_flow.try_into()?)),
             Task::CreateViewTask(create_view) => Ok(DdlTask::CreateView(create_view.try_into()?)),
             Task::DropViewTask(drop_view) => Ok(DdlTask::DropView(drop_view.try_into()?)),
+            Task::CreateTriggerTask(create_trigger) => {
+                #[cfg(feature = "enterprise")]
+                return Ok(DdlTask::CreateTrigger(create_trigger.try_into()?));
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    let _ = create_trigger;
+                    crate::error::UnsupportedSnafu {
+                        operation: "create trigger",
+                    }
+                    .fail()
+                }
+            }
         }
     }
 }
@@ -289,6 +309,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropFlow(task) => Task::DropFlowTask(task.into()),
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
+            #[cfg(feature = "enterprise")]
+            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
         };
 
         Ok(Self {
@@ -1202,7 +1224,7 @@ impl From<DropFlowTask> for PbDropFlowTask {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
@@ -1220,6 +1242,19 @@ impl From<QueryContextRef> for QueryContext {
             extensions: query_context.extensions(),
             channel: query_context.channel() as u8,
         }
+    }
+}
+
+impl TryFrom<QueryContext> for session::context::QueryContext {
+    type Error = error::Error;
+    fn try_from(value: QueryContext) -> std::result::Result<Self, Self::Error> {
+        Ok(QueryContextBuilder::default()
+            .current_catalog(value.current_catalog)
+            .current_schema(value.current_schema)
+            .timezone(Timezone::from_tz_string(&value.timezone).context(InvalidTimeZoneSnafu)?)
+            .extensions(value.extensions)
+            .channel((value.channel as u32).into())
+            .build())
     }
 }
 

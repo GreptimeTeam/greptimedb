@@ -24,12 +24,16 @@ use datafusion_common::arrow::buffer::BooleanBuffer;
 use datafusion_common::arrow::compute::kernels::cmp;
 use datafusion_common::cast::{as_boolean_array, as_null_array, as_string_array};
 use datafusion_common::{internal_err, DataFusionError, ScalarValue};
-use datatypes::arrow::array::{Array, BooleanArray, RecordBatch};
+use datatypes::arrow::array::{
+    Array, ArrayAccessor, ArrayData, BooleanArray, BooleanBufferBuilder, RecordBatch,
+    StringArrayType,
+};
 use datatypes::arrow::compute::filter_record_batch;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::error::ArrowError;
-use datatypes::compute::kernels::regexp;
 use datatypes::compute::or_kleene;
 use datatypes::vectors::VectorRef;
+use regex::Regex;
 use snafu::ResultExt;
 
 use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOperationSnafu};
@@ -53,6 +57,12 @@ pub struct SimpleFilterEvaluator {
     op: Operator,
     /// Only used when the operator is `Or`-chain.
     literal_list: Vec<Scalar<ArrayRef>>,
+    /// Pre-compiled regex.
+    /// Only used when the operator is regex operators.
+    /// If the regex is empty, it is also `None`.
+    regex: Option<Regex>,
+    /// Whether the regex is negative.
+    regex_negative: bool,
 }
 
 impl SimpleFilterEvaluator {
@@ -76,6 +86,8 @@ impl SimpleFilterEvaluator {
             literal: val.to_scalar().ok()?,
             op,
             literal_list: vec![],
+            regex: None,
+            regex_negative: false,
         })
     }
 
@@ -121,6 +133,8 @@ impl SimpleFilterEvaluator {
                             literal: placeholder_literal,
                             op: Operator::Or,
                             literal_list: list,
+                            regex: None,
+                            regex_negative: false,
                         });
                     }
                     _ => return None,
@@ -138,12 +152,15 @@ impl SimpleFilterEvaluator {
                     _ => return None,
                 };
 
+                let (regex, regex_negative) = Self::maybe_build_regex(op, rhs).ok()?;
                 let literal = rhs.to_scalar().ok()?;
                 Some(Self {
                     column_name: lhs.name.clone(),
                     literal,
                     op,
                     literal_list: vec![],
+                    regex,
+                    regex_negative,
                 })
             }
             _ => None,
@@ -179,10 +196,10 @@ impl SimpleFilterEvaluator {
             Operator::LtEq => cmp::lt_eq(input, &self.literal),
             Operator::Gt => cmp::gt(input, &self.literal),
             Operator::GtEq => cmp::gt_eq(input, &self.literal),
-            Operator::RegexMatch => self.regex_match(input, false, false),
-            Operator::RegexIMatch => self.regex_match(input, true, false),
-            Operator::RegexNotMatch => self.regex_match(input, false, true),
-            Operator::RegexNotIMatch => self.regex_match(input, true, true),
+            Operator::RegexMatch => self.regex_match(input),
+            Operator::RegexIMatch => self.regex_match(input),
+            Operator::RegexNotMatch => self.regex_match(input),
+            Operator::RegexNotIMatch => self.regex_match(input),
             Operator::Or => {
                 // OR operator stands for OR-chained EQs (or INLIST in other words)
                 let mut result: BooleanArray = vec![false; input_len].into();
@@ -204,23 +221,54 @@ impl SimpleFilterEvaluator {
             .map(|array| array.values().clone())
     }
 
-    fn regex_match(
-        &self,
-        input: &impl Datum,
-        ignore_case: bool,
-        negative: bool,
-    ) -> std::result::Result<BooleanArray, ArrowError> {
+    /// Builds a regex pattern from a scalar value and operator.
+    /// Returns the `(regex, negative)` and if successful.
+    ///
+    /// Returns `Err` if
+    /// - the value is not a string
+    /// - the regex pattern is invalid
+    ///
+    /// The regex is `None` if
+    /// - the operator is not a regex operator
+    /// - the pattern is empty
+    fn maybe_build_regex(
+        operator: Operator,
+        value: &ScalarValue,
+    ) -> Result<(Option<Regex>, bool), ArrowError> {
+        let (ignore_case, negative) = match operator {
+            Operator::RegexMatch => (false, false),
+            Operator::RegexIMatch => (true, false),
+            Operator::RegexNotMatch => (false, true),
+            Operator::RegexNotIMatch => (true, true),
+            _ => return Ok((None, false)),
+        };
         let flag = if ignore_case { Some("i") } else { None };
+        let regex = value
+            .try_as_str()
+            .ok_or_else(|| ArrowError::CastError(format!("Cannot cast {:?} to str", value)))?
+            .ok_or_else(|| ArrowError::CastError("Regex should not be null".to_string()))?;
+        let pattern = match flag {
+            Some(flag) => format!("(?{flag}){regex}"),
+            None => regex.to_string(),
+        };
+        if pattern.is_empty() {
+            Ok((None, negative))
+        } else {
+            Regex::new(pattern.as_str())
+                .map_err(|e| {
+                    ArrowError::ComputeError(format!("Regular expression did not compile: {e:?}"))
+                })
+                .map(|regex| (Some(regex), negative))
+        }
+    }
+
+    fn regex_match(&self, input: &impl Datum) -> std::result::Result<BooleanArray, ArrowError> {
         let array = input.get().0;
         let string_array = as_string_array(array).map_err(|_| {
             ArrowError::CastError(format!("Cannot cast {:?} to StringArray", array))
         })?;
-        let literal_array = self.literal.clone().into_inner();
-        let regex_array = as_string_array(&literal_array).map_err(|_| {
-            ArrowError::CastError(format!("Cannot cast {:?} to StringArray", literal_array))
-        })?;
-        let mut result = regexp::regexp_is_match_scalar(string_array, regex_array.value(0), flag)?;
-        if negative {
+        let mut result = regexp_is_match_scalar(string_array, self.regex.as_ref())?;
+        if self.regex_negative {
             result = datatypes::compute::not(&result)?;
         }
         Ok(result)
@@ -252,6 +300,44 @@ pub fn batch_filter(
             }?;
             Ok(filter_record_batch(batch, &filter_array)?)
         })
+}
+
+/// The same as arrow [regexp_is_match_scalar()](datatypes::compute::kernels::regexp::regexp_is_match_scalar())
+/// with pre-compiled regex.
+/// See <https://github.com/apache/arrow-rs/blob/54.2.0/arrow-string/src/regexp.rs#L204-L246> for the implementation details.
+pub fn regexp_is_match_scalar<'a, S>(
+    array: &'a S,
+    regex: Option<&Regex>,
+) -> Result<BooleanArray, ArrowError>
+where
+    &'a S: StringArrayType<'a>,
+{
+    let null_bit_buffer = array.nulls().map(|x| x.inner().sliced());
+    let mut result = BooleanBufferBuilder::new(array.len());
+
+    if let Some(re) = regex {
+        for i in 0..array.len() {
+            let value = array.value(i);
+            result.append(re.is_match(value));
+        }
+    } else {
+        result.append_n(array.len(), true);
+    }
+
+    let buffer = result.into();
+    let data = unsafe {
+        ArrayData::new_unchecked(
+            DataType::Boolean,
+            array.len(),
+            None,
+            null_bit_buffer,
+            0,
+            vec![buffer],
+            vec![],
+        )
+    };
+
+    Ok(BooleanArray::from(data))
 }
 
 #[cfg(test)]
@@ -445,5 +531,85 @@ mod test {
             .downcast_ref::<datatypes::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(col_filtered, &expected);
+    }
+
+    #[test]
+    fn test_maybe_build_regex() {
+        // Test case for RegexMatch (case sensitive, non-negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(!negative);
+        assert!(regex.unwrap().is_match("axxb"));
+
+        // Test case for RegexIMatch (case insensitive, non-negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexIMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(!negative);
+        assert!(regex.unwrap().is_match("AxxB"));
+
+        // Test case for RegexNotMatch (case sensitive, negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexNotMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(negative);
+
+        // Test case for RegexNotIMatch (case insensitive, negative)
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexNotIMatch,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_some());
+        assert!(negative);
+
+        // Test with empty regex pattern
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_none());
+        assert!(!negative);
+
+        // Test with non-regex operator
+        let (regex, negative) = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::Eq,
+            &ScalarValue::Utf8(Some("a.*b".to_string())),
+        )
+        .unwrap();
+        assert!(regex.is_none());
+        assert!(!negative);
+
+        // Test with invalid regex pattern
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(Some("a(b".to_string())),
+        );
+        assert!(result.is_err());
+
+        // Test with non-string value
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Int64(Some(123)),
+        );
+        assert!(result.is_err());
+
+        // Test with null value
+        let result = SimpleFilterEvaluator::maybe_build_regex(
+            Operator::RegexMatch,
+            &ScalarValue::Utf8(None),
+        );
+        assert!(result.is_err());
     }
 }

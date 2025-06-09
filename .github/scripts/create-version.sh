@@ -8,19 +8,20 @@ set -e
 # - If it's a nightly build, the version is 'nightly-YYYYMMDD-$(git rev-parse --short HEAD)', like 'nightly-20230712-e5b243c'.
 # create_version ${GIHUB_EVENT_NAME} ${NEXT_RELEASE_VERSION} ${NIGHTLY_RELEASE_PREFIX}
 function create_version() {
-  # Read from envrionment variables.
+  # Read from environment variables.
   if [ -z "$GITHUB_EVENT_NAME" ]; then
-      echo "GITHUB_EVENT_NAME is empty"
+      echo "GITHUB_EVENT_NAME is empty" >&2
       exit 1
   fi
 
   if [ -z "$NEXT_RELEASE_VERSION" ]; then
-      echo "NEXT_RELEASE_VERSION is empty"
-      exit 1
+      echo "NEXT_RELEASE_VERSION is empty, use version from Cargo.toml" >&2
+      # NOTE: Need a `v` prefix for the version string.
+      export NEXT_RELEASE_VERSION=v$(grep '^version = ' Cargo.toml | cut -d '"' -f 2 | head -n 1)
   fi
 
   if [ -z "$NIGHTLY_RELEASE_PREFIX" ]; then
-      echo "NIGHTLY_RELEASE_PREFIX is empty"
+      echo "NIGHTLY_RELEASE_PREFIX is empty" >&2
       exit 1
   fi
 
@@ -35,7 +36,7 @@ function create_version() {
   # It will be like 'dev-2023080819-f0e7216c'.
   if [ "$NEXT_RELEASE_VERSION" = dev ]; then
     if [ -z "$COMMIT_SHA" ]; then
-      echo "COMMIT_SHA is empty in dev build"
+      echo "COMMIT_SHA is empty in dev build" >&2
       exit 1
     fi
     echo "dev-$(date "+%Y%m%d-%s")-$(echo "$COMMIT_SHA" | cut -c1-8)"
@@ -45,7 +46,7 @@ function create_version() {
   # Note: Only output 'version=xxx' to stdout when everything is ok, so that it can be used in GitHub Actions Outputs.
   if [ "$GITHUB_EVENT_NAME" = push ]; then
     if [ -z "$GITHUB_REF_NAME" ]; then
-      echo "GITHUB_REF_NAME is empty in push event"
+      echo "GITHUB_REF_NAME is empty in push event" >&2
       exit 1
     fi
     echo "$GITHUB_REF_NAME"
@@ -54,7 +55,7 @@ function create_version() {
   elif [ "$GITHUB_EVENT_NAME" = schedule ]; then
     echo "$NEXT_RELEASE_VERSION-$NIGHTLY_RELEASE_PREFIX-$(date "+%Y%m%d")"
   else
-    echo "Unsupported GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME"
+    echo "Unsupported GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME" >&2
     exit 1
   fi
 }

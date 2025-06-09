@@ -47,6 +47,11 @@ use crate::metrics::PROMQL_SERIES_COUNT;
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesDivide {
     tag_columns: Vec<String>,
+    /// `SeriesDivide` requires `time_index` column's name to generate ordering requirement
+    /// for input data. But this plan itself doesn't depend on the ordering of time index
+    /// column. This is for follow on plans like `RangeManipulate`. Because requiring ordering
+    /// here can avoid unnecessary sort in follow on plans.
+    time_index_column: String,
     input: LogicalPlan,
 }
 
@@ -84,14 +89,19 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
 
         Ok(Self {
             tag_columns: self.tag_columns.clone(),
+            time_index_column: self.time_index_column.clone(),
             input: inputs[0].clone(),
         })
     }
 }
 
 impl SeriesDivide {
-    pub fn new(tag_columns: Vec<String>, input: LogicalPlan) -> Self {
-        Self { tag_columns, input }
+    pub fn new(tag_columns: Vec<String>, time_index_column: String, input: LogicalPlan) -> Self {
+        Self {
+            tag_columns,
+            time_index_column,
+            input,
+        }
     }
 
     pub const fn name() -> &'static str {
@@ -101,14 +111,20 @@ impl SeriesDivide {
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesDivideExec {
             tag_columns: self.tag_columns.clone(),
+            time_index_column: self.time_index_column.clone(),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
 
+    pub fn tags(&self) -> &[String] {
+        &self.tag_columns
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         pb::SeriesDivide {
             tag_columns: self.tag_columns.clone(),
+            time_index_column: self.time_index_column.clone(),
         }
         .encode_to_vec()
     }
@@ -121,6 +137,7 @@ impl SeriesDivide {
         });
         Ok(Self {
             tag_columns: pb_series_divide.tag_columns,
+            time_index_column: pb_series_divide.time_index_column,
             input: placeholder_plan,
         })
     }
@@ -129,6 +146,7 @@ impl SeriesDivide {
 #[derive(Debug)]
 pub struct SeriesDivideExec {
     tag_columns: Vec<String>,
+    time_index_column: String,
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
 }
@@ -159,7 +177,7 @@ impl ExecutionPlan for SeriesDivideExec {
 
     fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
         let input_schema = self.input.schema();
-        let exprs: Vec<PhysicalSortRequirement> = self
+        let mut exprs: Vec<PhysicalSortRequirement> = self
             .tag_columns
             .iter()
             .map(|tag| PhysicalSortRequirement {
@@ -171,11 +189,17 @@ impl ExecutionPlan for SeriesDivideExec {
                 }),
             })
             .collect();
-        if !exprs.is_empty() {
-            vec![Some(LexRequirement::new(exprs))]
-        } else {
-            vec![None]
-        }
+
+        exprs.push(PhysicalSortRequirement {
+            expr: Arc::new(
+                ColumnExpr::new_with_schema(&self.time_index_column, &input_schema).unwrap(),
+            ),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: true,
+            }),
+        });
+        vec![Some(LexRequirement::new(exprs))]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -193,6 +217,7 @@ impl ExecutionPlan for SeriesDivideExec {
         assert!(!children.is_empty());
         Ok(Arc::new(Self {
             tag_columns: self.tag_columns.clone(),
+            time_index_column: self.time_index_column.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
         }))
@@ -315,7 +340,9 @@ impl Stream for SeriesDivideStream {
                     let next_batch = ready!(self.as_mut().fetch_next_batch(cx)).transpose()?;
                     let timer = std::time::Instant::now();
                     if let Some(next_batch) = next_batch {
-                        self.buffer.push(next_batch);
+                        if next_batch.num_rows() != 0 {
+                            self.buffer.push(next_batch);
+                        }
                         continue;
                     } else {
                         // input stream is ended
@@ -468,6 +495,11 @@ mod test {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("path", DataType::Utf8, true),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
         ]));
 
         let path_column_1 = Arc::new(StringArray::from(vec![
@@ -476,9 +508,17 @@ mod test {
         let host_column_1 = Arc::new(StringArray::from(vec![
             "000", "000", "001", "002", "002", "002", "002", "002", "003", "005", "005", "005",
         ])) as _;
+        let time_index_column_1 = Arc::new(
+            datafusion::arrow::array::TimestampMillisecondArray::from(vec![
+                1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000,
+            ]),
+        ) as _;
 
         let path_column_2 = Arc::new(StringArray::from(vec!["bla", "bla", "bla"])) as _;
         let host_column_2 = Arc::new(StringArray::from(vec!["005", "005", "005"])) as _;
+        let time_index_column_2 = Arc::new(
+            datafusion::arrow::array::TimestampMillisecondArray::from(vec![13000, 14000, 15000]),
+        ) as _;
 
         let path_column_3 = Arc::new(StringArray::from(vec![
             "bla", "🥺", "🥺", "🥺", "🥺", "🥺", "🫠", "🫠",
@@ -486,13 +526,26 @@ mod test {
         let host_column_3 = Arc::new(StringArray::from(vec![
             "005", "001", "001", "001", "001", "001", "001", "001",
         ])) as _;
+        let time_index_column_3 =
+            Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                vec![16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000],
+            )) as _;
 
-        let data_1 =
-            RecordBatch::try_new(schema.clone(), vec![path_column_1, host_column_1]).unwrap();
-        let data_2 =
-            RecordBatch::try_new(schema.clone(), vec![path_column_2, host_column_2]).unwrap();
-        let data_3 =
-            RecordBatch::try_new(schema.clone(), vec![path_column_3, host_column_3]).unwrap();
+        let data_1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![path_column_1, host_column_1, time_index_column_1],
+        )
+        .unwrap();
+        let data_2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![path_column_2, host_column_2, time_index_column_2],
+        )
+        .unwrap();
+        let data_3 = RecordBatch::try_new(
+            schema.clone(),
+            vec![path_column_3, host_column_3, time_index_column_3],
+        )
+        .unwrap();
 
         MemoryExec::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap()
     }
@@ -502,6 +555,7 @@ mod test {
         let memory_exec = Arc::new(prepare_test_data());
         let divide_exec = Arc::new(SeriesDivideExec {
             tag_columns: vec!["host".to_string(), "path".to_string()],
+            time_index_column: "time_index".to_string(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -514,33 +568,33 @@ mod test {
             .to_string();
 
         let expected = String::from(
-            "+------+------+\
-            \n| host | path |\
-            \n+------+------+\
-            \n| foo  | 000  |\
-            \n| foo  | 000  |\
-            \n| foo  | 001  |\
-            \n| bar  | 002  |\
-            \n| bar  | 002  |\
-            \n| bar  | 002  |\
-            \n| bar  | 002  |\
-            \n| bar  | 002  |\
-            \n| bar  | 003  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| bla  | 005  |\
-            \n| 🥺   | 001  |\
-            \n| 🥺   | 001  |\
-            \n| 🥺   | 001  |\
-            \n| 🥺   | 001  |\
-            \n| 🥺   | 001  |\
-            \n| 🫠   | 001  |\
-            \n| 🫠   | 001  |\
-            \n+------+------+",
+            "+------+------+---------------------+\
+            \n| host | path | time_index          |\
+            \n+------+------+---------------------+\
+            \n| foo  | 000  | 1970-01-01T00:00:01 |\
+            \n| foo  | 000  | 1970-01-01T00:00:02 |\
+            \n| foo  | 001  | 1970-01-01T00:00:03 |\
+            \n| bar  | 002  | 1970-01-01T00:00:04 |\
+            \n| bar  | 002  | 1970-01-01T00:00:05 |\
+            \n| bar  | 002  | 1970-01-01T00:00:06 |\
+            \n| bar  | 002  | 1970-01-01T00:00:07 |\
+            \n| bar  | 002  | 1970-01-01T00:00:08 |\
+            \n| bar  | 003  | 1970-01-01T00:00:09 |\
+            \n| bla  | 005  | 1970-01-01T00:00:10 |\
+            \n| bla  | 005  | 1970-01-01T00:00:11 |\
+            \n| bla  | 005  | 1970-01-01T00:00:12 |\
+            \n| bla  | 005  | 1970-01-01T00:00:13 |\
+            \n| bla  | 005  | 1970-01-01T00:00:14 |\
+            \n| bla  | 005  | 1970-01-01T00:00:15 |\
+            \n| bla  | 005  | 1970-01-01T00:00:16 |\
+            \n| 🥺   | 001  | 1970-01-01T00:00:17 |\
+            \n| 🥺   | 001  | 1970-01-01T00:00:18 |\
+            \n| 🥺   | 001  | 1970-01-01T00:00:19 |\
+            \n| 🥺   | 001  | 1970-01-01T00:00:20 |\
+            \n| 🥺   | 001  | 1970-01-01T00:00:21 |\
+            \n| 🫠   | 001  | 1970-01-01T00:00:22 |\
+            \n| 🫠   | 001  | 1970-01-01T00:00:23 |\
+            \n+------+------+---------------------+",
         );
         assert_eq!(result_literal, expected);
     }
@@ -550,6 +604,7 @@ mod test {
         let memory_exec = Arc::new(prepare_test_data());
         let divide_exec = Arc::new(SeriesDivideExec {
             tag_columns: vec!["host".to_string(), "path".to_string()],
+            time_index_column: "time_index".to_string(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -559,69 +614,69 @@ mod test {
 
         let mut expectations = vec![
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| foo  | 000  |\
-                \n| foo  | 000  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| foo  | 000  | 1970-01-01T00:00:01 |\
+                \n| foo  | 000  | 1970-01-01T00:00:02 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| foo  | 001  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| foo  | 001  | 1970-01-01T00:00:03 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| bar  | 002  |\
-                \n| bar  | 002  |\
-                \n| bar  | 002  |\
-                \n| bar  | 002  |\
-                \n| bar  | 002  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| bar  | 002  | 1970-01-01T00:00:04 |\
+                \n| bar  | 002  | 1970-01-01T00:00:05 |\
+                \n| bar  | 002  | 1970-01-01T00:00:06 |\
+                \n| bar  | 002  | 1970-01-01T00:00:07 |\
+                \n| bar  | 002  | 1970-01-01T00:00:08 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| bar  | 003  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| bar  | 003  | 1970-01-01T00:00:09 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n| bla  | 005  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| bla  | 005  | 1970-01-01T00:00:10 |\
+                \n| bla  | 005  | 1970-01-01T00:00:11 |\
+                \n| bla  | 005  | 1970-01-01T00:00:12 |\
+                \n| bla  | 005  | 1970-01-01T00:00:13 |\
+                \n| bla  | 005  | 1970-01-01T00:00:14 |\
+                \n| bla  | 005  | 1970-01-01T00:00:15 |\
+                \n| bla  | 005  | 1970-01-01T00:00:16 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| 🥺   | 001  |\
-                \n| 🥺   | 001  |\
-                \n| 🥺   | 001  |\
-                \n| 🥺   | 001  |\
-                \n| 🥺   | 001  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| 🥺   | 001  | 1970-01-01T00:00:17 |\
+                \n| 🥺   | 001  | 1970-01-01T00:00:18 |\
+                \n| 🥺   | 001  | 1970-01-01T00:00:19 |\
+                \n| 🥺   | 001  | 1970-01-01T00:00:20 |\
+                \n| 🥺   | 001  | 1970-01-01T00:00:21 |\
+                \n+------+------+---------------------+",
             ),
             String::from(
-                "+------+------+\
-                \n| host | path |\
-                \n+------+------+\
-                \n| 🫠   | 001  |\
-                \n| 🫠   | 001  |\
-                \n+------+------+",
+                "+------+------+---------------------+\
+                \n| host | path | time_index          |\
+                \n+------+------+---------------------+\
+                \n| 🫠   | 001  | 1970-01-01T00:00:22 |\
+                \n| 🫠   | 001  | 1970-01-01T00:00:23 |\
+                \n+------+------+---------------------+",
             ),
         ];
         expectations.reverse();
@@ -642,6 +697,11 @@ mod test {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("path", DataType::Utf8, true),
+            Field::new(
+                "time_index",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
         ]));
 
         // Create batches with three different combinations
@@ -654,6 +714,9 @@ mod test {
             vec![
                 Arc::new(StringArray::from(vec!["server1", "server1", "server1"])) as _,
                 Arc::new(StringArray::from(vec!["/var/log", "/var/log", "/var/log"])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![1000, 2000, 3000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -663,6 +726,9 @@ mod test {
             vec![
                 Arc::new(StringArray::from(vec!["server1", "server1"])) as _,
                 Arc::new(StringArray::from(vec!["/var/log", "/var/log"])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![4000, 5000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -677,6 +743,9 @@ mod test {
                     "/var/data",
                     "/var/data",
                 ])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![6000, 7000, 8000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -686,6 +755,9 @@ mod test {
             vec![
                 Arc::new(StringArray::from(vec!["server2"])) as _,
                 Arc::new(StringArray::from(vec!["/var/data"])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![9000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -696,6 +768,9 @@ mod test {
             vec![
                 Arc::new(StringArray::from(vec!["server3", "server3"])) as _,
                 Arc::new(StringArray::from(vec!["/opt/logs", "/opt/logs"])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![10000, 11000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -709,6 +784,9 @@ mod test {
                     "/opt/logs",
                     "/opt/logs",
                 ])) as _,
+                Arc::new(datafusion::arrow::array::TimestampMillisecondArray::from(
+                    vec![12000, 13000, 14000],
+                )) as _,
             ],
         )
         .unwrap();
@@ -726,6 +804,7 @@ mod test {
         // Create SeriesDivideExec
         let divide_exec = Arc::new(SeriesDivideExec {
             tag_columns: vec!["host".to_string(), "path".to_string()],
+            time_index_column: "time_index".to_string(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -760,10 +839,16 @@ mod test {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let time_index_array1 = result[0]
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+            .unwrap();
 
         for i in 0..5 {
             assert_eq!(host_array1.value(i), "server1");
             assert_eq!(path_array1.value(i), "/var/log");
+            assert_eq!(time_index_array1.value(i), 1000 + (i as i64) * 1000);
         }
 
         // Verify values in second batch (server2, /var/data)
@@ -777,10 +862,16 @@ mod test {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let time_index_array2 = result[1]
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+            .unwrap();
 
         for i in 0..4 {
             assert_eq!(host_array2.value(i), "server2");
             assert_eq!(path_array2.value(i), "/var/data");
+            assert_eq!(time_index_array2.value(i), 6000 + (i as i64) * 1000);
         }
 
         // Verify values in third batch (server3, /opt/logs)
@@ -794,10 +885,16 @@ mod test {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let time_index_array3 = result[2]
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>()
+            .unwrap();
 
         for i in 0..5 {
             assert_eq!(host_array3.value(i), "server3");
             assert_eq!(path_array3.value(i), "/opt/logs");
+            assert_eq!(time_index_array3.value(i), 10000 + (i as i64) * 1000);
         }
 
         // Also verify streaming behavior

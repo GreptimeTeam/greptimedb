@@ -23,8 +23,8 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge,
-    Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
+    register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
@@ -209,7 +209,8 @@ lazy_static! {
     pub static ref METRIC_MYSQL_QUERY_TIMER: HistogramVec = register_histogram_vec!(
         "greptime_servers_mysql_query_elapsed",
         "servers mysql query elapsed",
-        &[METRIC_MYSQL_SUBPROTOCOL_LABEL, METRIC_DB_LABEL]
+        &[METRIC_MYSQL_SUBPROTOCOL_LABEL, METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     pub static ref METRIC_MYSQL_PREPARED_COUNT: IntCounterVec = register_int_counter_vec!(
@@ -226,7 +227,8 @@ lazy_static! {
     pub static ref METRIC_POSTGRES_QUERY_TIMER: HistogramVec = register_histogram_vec!(
         "greptime_servers_postgres_query_elapsed",
         "servers postgres query elapsed",
-        &[METRIC_POSTGRES_SUBPROTOCOL_LABEL, METRIC_DB_LABEL]
+        &[METRIC_POSTGRES_SUBPROTOCOL_LABEL, METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     pub static ref METRIC_POSTGRES_PREPARED_COUNT: IntCounter = register_int_counter!(
@@ -243,7 +245,8 @@ lazy_static! {
     pub static ref METRIC_SERVER_GRPC_PROM_REQUEST_TIMER: HistogramVec = register_histogram_vec!(
         "greptime_servers_grpc_prom_request_elapsed",
         "servers grpc prom request elapsed",
-        &[METRIC_DB_LABEL]
+        &[METRIC_DB_LABEL],
+        vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
     pub static ref METRIC_HTTP_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
@@ -276,8 +279,12 @@ lazy_static! {
         "greptime_servers_jaeger_query_elapsed",
         "servers jaeger query elapsed",
         &[METRIC_DB_LABEL, METRIC_PATH_LABEL]
-    )
-.unwrap();
+    ).unwrap();
+
+    pub static ref GRPC_BULK_INSERT_ELAPSED: Histogram = register_histogram!(
+        "greptime_servers_bulk_insert_elapsed",
+        "servers handle bulk insert elapsed",
+    ).unwrap();
 }
 
 // Based on https://github.com/hyperium/tonic/blob/master/examples/src/tower/server.rs

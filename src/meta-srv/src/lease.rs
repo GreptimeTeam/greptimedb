@@ -13,24 +13,67 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
+use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
-use common_meta::kv_backend::KvBackend;
+use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
+use common_workload::DatanodeWorkloadType;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{Error, Result};
+use crate::error::{Error, KvBackendSnafu, Result};
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
 fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
     move |v: &LeaseValue| {
         ((time_util::current_time_millis() - v.timestamp_millis) as u64)
-            < lease_secs.checked_mul(1000).unwrap_or(u64::MAX)
+            < lease_secs.saturating_mul(1000)
     }
+}
+
+/// Returns true if the datanode can accept ingest workload based on its workload types.
+///
+/// A datanode is considered to accept ingest workload if it supports either:
+/// - Hybrid workload (both ingest and query workloads)
+/// - Ingest workload (only ingest workload)
+pub fn is_datanode_accept_ingest_workload(lease_value: &LeaseValue) -> bool {
+    match &lease_value.workloads {
+        NodeWorkloads::Datanode(workloads) => workloads
+            .types
+            .iter()
+            .filter_map(|w| DatanodeWorkloadType::from_i32(*w))
+            .any(|w| w.accept_ingest()),
+        _ => false,
+    }
+}
+
+/// Returns the lease value of the given datanode id, if the datanode is not found, returns None.
+pub async fn find_datanode_lease_value(
+    datanode_id: DatanodeId,
+    in_memory_key: &ResettableKvBackendRef,
+) -> Result<Option<LeaseValue>> {
+    let lease_key = DatanodeLeaseKey {
+        node_id: datanode_id,
+    };
+    let lease_key_bytes: Vec<u8> = lease_key.try_into()?;
+    let Some(kv) = in_memory_key
+        .get(&lease_key_bytes)
+        .await
+        .context(KvBackendSnafu)?
+    else {
+        return Ok(None);
+    };
+
+    let lease_value: LeaseValue = kv.value.try_into()?;
+
+    Ok(Some(lease_value))
 }
 
 /// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], will only return if it's alive under given `lease_secs`
@@ -59,16 +102,78 @@ pub async fn lookup_datanode_peer(
     }
 }
 
+type LeaseFilterFuture<'a, K> =
+    Pin<Box<dyn Future<Output = Result<HashMap<K, LeaseValue>>> + Send + 'a>>;
+
+pub struct LeaseFilter<'a, K>
+where
+    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
+{
+    lease_secs: u64,
+    key_prefix: Vec<u8>,
+    meta_peer_client: &'a MetaPeerClientRef,
+    condition: Option<fn(&LeaseValue) -> bool>,
+    inner_future: Option<LeaseFilterFuture<'a, K>>,
+}
+
+impl<'a, K> LeaseFilter<'a, K>
+where
+    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
+{
+    pub fn new(
+        lease_secs: u64,
+        key_prefix: Vec<u8>,
+        meta_peer_client: &'a MetaPeerClientRef,
+    ) -> Self {
+        Self {
+            lease_secs,
+            key_prefix,
+            meta_peer_client,
+            condition: None,
+            inner_future: None,
+        }
+    }
+
+    /// Set the condition for the lease filter.
+    pub fn with_condition(mut self, condition: fn(&LeaseValue) -> bool) -> Self {
+        self.condition = Some(condition);
+        self
+    }
+}
+
+impl<'a, K> Future for LeaseFilter<'a, K>
+where
+    K: Eq + Hash + TryFrom<Vec<u8>, Error = Error> + 'a,
+{
+    type Output = Result<HashMap<K, LeaseValue>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        if this.inner_future.is_none() {
+            let lease_filter = build_lease_filter(this.lease_secs);
+            let condition = this.condition;
+            let key_prefix = std::mem::take(&mut this.key_prefix);
+            let fut = filter(key_prefix, this.meta_peer_client, move |v| {
+                lease_filter(v) && condition.unwrap_or(|_| true)(v)
+            });
+
+            this.inner_future = Some(Box::pin(fut));
+        }
+
+        let fut = this.inner_future.as_mut().unwrap();
+        let result = futures::ready!(fut.as_mut().poll(cx))?;
+
+        Poll::Ready(Ok(result))
+    }
+}
+
 /// Find all alive datanodes
-pub async fn alive_datanodes(
+pub fn alive_datanodes(
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
-) -> Result<HashMap<DatanodeLeaseKey, LeaseValue>> {
-    let predicate = build_lease_filter(lease_secs);
-    filter(DatanodeLeaseKey::prefix_key(), meta_peer_client, |v| {
-        predicate(v)
-    })
-    .await
+) -> LeaseFilter<'_, DatanodeLeaseKey> {
+    LeaseFilter::new(lease_secs, DatanodeLeaseKey::prefix_key(), meta_peer_client)
 }
 
 /// look up [`Peer`] given [`ClusterId`] and [`DatanodeId`], only return if it's alive under given `lease_secs`
@@ -99,17 +204,15 @@ pub async fn lookup_flownode_peer(
 }
 
 /// Find all alive flownodes
-pub async fn alive_flownodes(
+pub fn alive_flownodes(
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
-) -> Result<HashMap<FlownodeLeaseKey, LeaseValue>> {
-    let predicate = build_lease_filter(lease_secs);
-    filter(
+) -> LeaseFilter<'_, FlownodeLeaseKey> {
+    LeaseFilter::new(
+        lease_secs,
         FlownodeLeaseKey::prefix_key_by_cluster(),
         meta_peer_client,
-        |v| predicate(v),
     )
-    .await
 }
 
 pub async fn filter<P, K>(
@@ -166,5 +269,126 @@ impl PeerLookupService for MetaPeerLookupService {
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use api::v1::meta::DatanodeWorkloads;
+    use common_meta::kv_backend::ResettableKvBackendRef;
+    use common_meta::rpc::store::PutRequest;
+    use common_time::util::current_time_millis;
+    use common_workload::DatanodeWorkloadType;
+
+    use crate::key::{DatanodeLeaseKey, LeaseValue};
+    use crate::lease::{alive_datanodes, is_datanode_accept_ingest_workload};
+    use crate::test_util::create_meta_peer_client;
+
+    async fn put_lease_value(
+        kv_backend: &ResettableKvBackendRef,
+        key: DatanodeLeaseKey,
+        value: LeaseValue,
+    ) {
+        kv_backend
+            .put(PutRequest {
+                key: key.try_into().unwrap(),
+                value: value.try_into().unwrap(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_alive_datanodes() {
+        let client = create_meta_peer_client();
+        let in_memory = client.memory_backend();
+        let lease_secs = 10;
+
+        // put a stale lease value for node 1
+        let key = DatanodeLeaseKey { node_id: 1 };
+        let value = LeaseValue {
+            // 20s ago
+            timestamp_millis: current_time_millis() - lease_secs * 2 * 1000,
+            node_addr: "127.0.0.1:20201".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Hybrid as i32],
+            }),
+        };
+        put_lease_value(&in_memory, key, value).await;
+
+        // put a fresh lease value for node 2
+        let key = DatanodeLeaseKey { node_id: 2 };
+        let value = LeaseValue {
+            timestamp_millis: current_time_millis(),
+            node_addr: "127.0.0.1:20202".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Hybrid as i32],
+            }),
+        };
+        put_lease_value(&in_memory, key.clone(), value.clone()).await;
+        let leases = alive_datanodes(&client, lease_secs as u64).await.unwrap();
+        assert_eq!(leases.len(), 1);
+        assert_eq!(leases.get(&key), Some(&value));
+    }
+
+    #[tokio::test]
+    async fn test_alive_datanodes_with_condition() {
+        let client = create_meta_peer_client();
+        let in_memory = client.memory_backend();
+        let lease_secs = 10;
+
+        // put a lease value for node 1 without mode info
+        let key = DatanodeLeaseKey { node_id: 1 };
+        let value = LeaseValue {
+            // 20s ago
+            timestamp_millis: current_time_millis() - 20 * 1000,
+            node_addr: "127.0.0.1:20201".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Hybrid as i32],
+            }),
+        };
+        put_lease_value(&in_memory, key, value).await;
+
+        // put a lease value for node 2 with mode info
+        let key = DatanodeLeaseKey { node_id: 2 };
+        let value = LeaseValue {
+            timestamp_millis: current_time_millis(),
+            node_addr: "127.0.0.1:20202".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![DatanodeWorkloadType::Hybrid as i32],
+            }),
+        };
+        put_lease_value(&in_memory, key, value).await;
+
+        // put a lease value for node 3 with mode info
+        let key = DatanodeLeaseKey { node_id: 3 };
+        let value = LeaseValue {
+            timestamp_millis: current_time_millis(),
+            node_addr: "127.0.0.1:20203".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![i32::MAX],
+            }),
+        };
+        put_lease_value(&in_memory, key, value).await;
+
+        // put a lease value for node 3 with mode info
+        let key = DatanodeLeaseKey { node_id: 4 };
+        let value = LeaseValue {
+            timestamp_millis: current_time_millis(),
+            node_addr: "127.0.0.1:20204".to_string(),
+            workloads: NodeWorkloads::Datanode(DatanodeWorkloads {
+                types: vec![i32::MAX],
+            }),
+        };
+        put_lease_value(&in_memory, key, value).await;
+
+        let leases = alive_datanodes(&client, lease_secs as u64)
+            .with_condition(is_datanode_accept_ingest_workload)
+            .await
+            .unwrap();
+        assert_eq!(leases.len(), 1);
+        assert!(leases.contains_key(&DatanodeLeaseKey { node_id: 2 }));
     }
 }

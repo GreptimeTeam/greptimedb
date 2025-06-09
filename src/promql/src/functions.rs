@@ -40,17 +40,17 @@ pub use holt_winters::HoltWinters;
 pub use idelta::IDelta;
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
-pub use quantile_aggr::quantile_udaf;
+pub use quantile_aggr::{quantile_udaf, QUANTILE_NAME};
 pub use resets::Resets;
 pub use round::Round;
 
+/// Extracts an array from a `ColumnarValue`.
+///
+/// If the `ColumnarValue` is a scalar, it converts it to an array of size 1.
 pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, DataFusionError> {
-    if let ColumnarValue::Array(array) = columnar_value {
-        Ok(array.clone())
-    } else {
-        Err(DataFusionError::Execution(
-            "expect array as input, found scalar value".to_string(),
-        ))
+    match columnar_value {
+        ColumnarValue::Array(array) => Ok(array.clone()),
+        ColumnarValue::Scalar(scalar) => Ok(scalar.to_array_of_size(1)?),
     }
 }
 
@@ -243,7 +243,7 @@ mod test {
     // From prometheus `promql/functions_test.go` case `TestKahanSum`
     #[test]
     fn test_kahan_sum() {
-        let inputs = vec![1.0, 10.0f64.powf(100.0), 1.0, -1.0 * 10.0f64.powf(100.0)];
+        let inputs = vec![1.0, 10.0f64.powf(100.0), 1.0, -10.0f64.powf(100.0)];
 
         let mut sum = 0.0;
         let mut c = 0f64;

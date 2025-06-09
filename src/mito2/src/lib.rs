@@ -18,6 +18,10 @@
 
 #![feature(let_chains)]
 #![feature(assert_matches)]
+#![feature(result_flattening)]
+#![feature(int_roundings)]
+#![feature(debug_closure_helpers)]
+#![feature(duration_constructors)]
 
 #[cfg(any(test, feature = "test"))]
 #[cfg_attr(feature = "test", allow(unused))]

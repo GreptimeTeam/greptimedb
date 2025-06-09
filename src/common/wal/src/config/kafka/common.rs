@@ -23,12 +23,24 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 /// The default backoff config for kafka client.
+///
+/// If the operation fails, the client will retry 3 times.
+/// The backoff time is 100ms, 300ms, 900ms.
 pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
     init_backoff: Duration::from_millis(100),
-    max_backoff: Duration::from_secs(10),
-    base: 2.0,
-    deadline: Some(Duration::from_secs(120)),
+    max_backoff: Duration::from_secs(1),
+    base: 3.0,
+    // The deadline shouldn't be too long,
+    // otherwise the client will block the worker loop for a long time.
+    deadline: Some(Duration::from_secs(3)),
 };
+
+/// Default interval for auto WAL pruning.
+pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::ZERO;
+/// Default limit for concurrent auto pruning tasks.
+pub const DEFAULT_AUTO_PRUNE_PARALLELISM: usize = 10;
+/// Default interval for sending flush request to regions when pruning remote WAL.
+pub const DEFAULT_TRIGGER_FLUSH_THRESHOLD: u64 = 0;
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};

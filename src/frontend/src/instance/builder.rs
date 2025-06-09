@@ -35,7 +35,6 @@ use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::region_query::RegionQueryHandlerFactoryRef;
-use query::stats::StatementStatistics;
 use query::QueryEngineFactory;
 use snafu::OptionExt;
 
@@ -44,6 +43,7 @@ use crate::frontend::FrontendOptions;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
 use crate::limiter::Limiter;
+use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -55,7 +55,6 @@ pub struct FrontendBuilder {
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
-    stats: StatementStatistics,
     process_manager: Option<Arc<ProcessManager>>,
 }
 
@@ -68,7 +67,6 @@ impl FrontendBuilder {
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
-        stats: StatementStatistics,
         process_manager: Option<Arc<ProcessManager>>,
     ) -> Self {
         Self {
@@ -80,7 +78,6 @@ impl FrontendBuilder {
             node_manager,
             plugins: None,
             procedure_executor,
-            stats,
             process_manager,
         }
     }
@@ -171,6 +168,7 @@ impl FrontendBuilder {
             Some(Arc::new(flow_service)),
             true,
             plugins.clone(),
+            self.options.query.clone(),
         )
         .query_engine();
 
@@ -193,6 +191,17 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        let slow_query_recorder = self.options.slow_query.and_then(|opts| {
+            opts.enable.then(|| {
+                SlowQueryRecorder::new(
+                    opts.clone(),
+                    inserter.clone(),
+                    statement_executor.clone(),
+                    self.catalog_manager.clone(),
+                )
+            })
+        });
+
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self
             .options
@@ -210,7 +219,7 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
-            stats: self.stats,
+            slow_query_recorder,
             limiter,
             process_manager,
         })

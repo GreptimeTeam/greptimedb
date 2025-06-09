@@ -31,7 +31,8 @@ impl Plugins {
     }
 
     pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
-        let _ = self.write().insert(value);
+        let last = self.write().insert(value);
+        assert!(last.is_none(), "each type of plugins must be one and only");
     }
 
     pub fn get<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {
@@ -136,5 +137,13 @@ mod tests {
 
         assert_eq!(plugins.len(), 2);
         assert!(!plugins.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "each type of plugins must be one and only")]
+    fn test_plugin_uniqueness() {
+        let plugins = Plugins::new();
+        plugins.insert(1i32);
+        plugins.insert(2i32);
     }
 }

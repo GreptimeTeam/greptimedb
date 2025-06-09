@@ -25,8 +25,8 @@ use common_telemetry::common_error::status_code::StatusCode;
 use snafu::{Location, ResultExt, Snafu};
 use tonic::metadata::MetadataMap;
 
-use crate::adapter::FlowId;
 use crate::expr::EvalError;
+use crate::FlowId;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -46,6 +46,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Flow engine is still recovering"))]
+    FlowNotRecovered {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Error encountered while creating flow: {sql}"))]
     CreateFlow {
         sql: String,
@@ -57,6 +63,16 @@ pub enum Error {
     #[snafu(display("Time error"))]
     Time {
         source: common_time::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "No available frontend found after timeout: {timeout:?}, context: {context}"
+    ))]
+    NoAvailableFrontend {
+        timeout: std::time::Duration,
+        context: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -142,8 +158,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid auth config"))]
+    IllegalAuthConfig { source: auth::error::Error },
+
     #[snafu(display("Flow plan error: {reason}"))]
     Plan {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported: {reason}"))]
+    Unsupported {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -185,6 +211,25 @@ pub enum Error {
     #[snafu(display("Unexpected: {reason}"))]
     Unexpected {
         reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Illegal check task state: {reason}"))]
+    IllegalCheckTaskState {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to sync with check task for flow {} with allow_drop={}",
+        flow_id,
+        allow_drop
+    ))]
+    SyncCheckTask {
+        flow_id: FlowId,
+        allow_drop: bool,
         #[snafu(implicit)]
         location: Location,
     },
@@ -270,20 +315,24 @@ impl ErrorExt for Error {
             Self::Eval { .. }
             | Self::JoinTask { .. }
             | Self::Datafusion { .. }
-            | Self::InsertIntoFlow { .. } => StatusCode::Internal,
+            | Self::InsertIntoFlow { .. }
+            | Self::NoAvailableFrontend { .. }
+            | Self::FlowNotRecovered { .. } => StatusCode::Internal,
             Self::FlowAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Self::TableNotFound { .. }
             | Self::TableNotFoundMeta { .. }
-            | Self::FlowNotFound { .. }
             | Self::ListFlows { .. } => StatusCode::TableNotFound,
+            Self::FlowNotFound { .. } => StatusCode::FlowNotFound,
             Self::Plan { .. } | Self::Datatypes { .. } => StatusCode::PlanQuery,
             Self::CreateFlow { .. } | Self::Arrow { .. } | Self::Time { .. } => {
                 StatusCode::EngineExecuteQuery
             }
-            Self::Unexpected { .. } => StatusCode::Unexpected,
-            Self::NotImplemented { .. } | Self::UnsupportedTemporalFilter { .. } => {
-                StatusCode::Unsupported
-            }
+            Self::Unexpected { .. }
+            | Self::SyncCheckTask { .. }
+            | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
+            Self::NotImplemented { .. }
+            | Self::UnsupportedTemporalFilter { .. }
+            | Self::Unsupported { .. } => StatusCode::Unsupported,
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
@@ -291,9 +340,10 @@ impl ErrorExt for Error {
             }
             Self::MetaClientInit { source, .. } => source.status_code(),
 
-            Self::InvalidQuery { .. } | Self::InvalidRequest { .. } | Self::ParseAddr { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Self::InvalidQuery { .. }
+            | Self::InvalidRequest { .. }
+            | Self::ParseAddr { .. }
+            | Self::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
 
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 

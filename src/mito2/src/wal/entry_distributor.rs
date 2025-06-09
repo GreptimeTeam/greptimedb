@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_stream::stream;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use futures::future::join_all;
 use snafu::OptionExt;
 use store_api::logstore::entry::Entry;
@@ -133,11 +133,15 @@ impl WalEntryReader for WalEntryReceiver {
         }
 
         let stream = stream! {
-            let mut buffered_entry = None;
+            let mut buffered_entry: Option<Entry> = None;
             while let Some(next_entry) = entry_receiver.recv().await {
                 match buffered_entry.take() {
                     Some(entry) => {
-                        yield decode_raw_entry(entry);
+                        if entry.is_complete() {
+                            yield decode_raw_entry(entry);
+                        } else {
+                            warn!("Ignoring incomplete entry: {}", entry);
+                        }
                         buffered_entry = Some(next_entry);
                     },
                     None => {
@@ -149,6 +153,8 @@ impl WalEntryReader for WalEntryReceiver {
                 // Ignores tail corrupted data.
                 if entry.is_complete() {
                     yield decode_raw_entry(entry);
+                } else {
+                    warn!("Ignoring incomplete entry: {}", entry);
                 }
             }
         };
@@ -213,7 +219,6 @@ pub fn build_wal_entry_distributor_and_receivers(
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
 
     use api::v1::{Mutation, OpType, WalEntry};
     use futures::{stream, TryStreamExt};
@@ -281,6 +286,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -295,6 +301,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -309,6 +316,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -353,6 +361,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );
@@ -373,6 +382,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );
@@ -380,6 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tail_corrupted_stream() {
+        common_telemetry::init_default_ut_logging();
         let mut entries = vec![];
         let region1 = RegionId::new(1, 1);
         let region1_expected_wal_entry = WalEntry {
@@ -389,6 +400,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region2 = RegionId::new(1, 2);
         let region2_expected_wal_entry = WalEntry {
@@ -398,6 +410,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region3 = RegionId::new(1, 3);
         let region3_expected_wal_entry = WalEntry {
@@ -407,6 +420,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let provider = Provider::kafka_provider("my_topic".to_string());
         entries.extend(generate_tail_corrupted_stream(
@@ -476,6 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_part_corrupted_stream() {
+        common_telemetry::init_default_ut_logging();
         let mut entries = vec![];
         let region1 = RegionId::new(1, 1);
         let region1_expected_wal_entry = WalEntry {
@@ -485,6 +500,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let region2 = RegionId::new(1, 2);
         let provider = Provider::kafka_provider("my_topic".to_string());
@@ -495,7 +511,7 @@ mod tests {
             3,
         ));
         entries.extend(vec![
-            // The corrupted data.
+            // The incomplete entry.
             Entry::MultiplePart(MultiplePartEntry {
                 provider: provider.clone(),
                 region_id: region2,
@@ -503,6 +519,7 @@ mod tests {
                 headers: vec![MultiplePartHeader::First],
                 parts: vec![vec![1; 100]],
             }),
+            // The incomplete entry.
             Entry::MultiplePart(MultiplePartEntry {
                 provider: provider.clone(),
                 region_id: region2,
@@ -536,14 +553,14 @@ mod tests {
             vec![(0, region1_expected_wal_entry)]
         );
 
-        assert_matches!(
+        assert_eq!(
             streams
                 .get_mut(1)
                 .unwrap()
                 .try_collect::<Vec<_>>()
                 .await
-                .unwrap_err(),
-            error::Error::CorruptedEntry { .. }
+                .unwrap(),
+            vec![]
         );
     }
 
@@ -562,6 +579,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -576,6 +594,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -590,6 +609,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -604,6 +624,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
                 .encode_to_vec(),
             }),
@@ -639,6 +660,7 @@ mod tests {
                         rows: None,
                         write_hint: None,
                     }],
+                    bulk_entries: vec![],
                 }
             )]
         );

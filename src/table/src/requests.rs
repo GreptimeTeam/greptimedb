@@ -19,6 +19,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use common_base::readable_size::ReadableSize;
+use common_datasource::object_store::oss::is_supported_in_oss;
 use common_datasource::object_store::s3::is_supported_in_s3;
 use common_query::AddColumnLocation;
 use common_time::range::TimestampRange;
@@ -67,6 +68,10 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
 /// Returns true if the `key` is a valid key for any engine or storage.
 pub fn validate_table_option(key: &str) -> bool {
     if is_supported_in_s3(key) {
+        return true;
+    }
+
+    if is_supported_in_oss(key) {
         return true;
     }
 

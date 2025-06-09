@@ -85,11 +85,9 @@ impl ImpureDefaultFiller {
             .schema
             .iter()
             .filter_map(|schema| {
-                if self.impure_columns.contains_key(&schema.column_name) {
-                    Some(&schema.column_name)
-                } else {
-                    None
-                }
+                self.impure_columns
+                    .contains_key(&schema.column_name)
+                    .then_some(&schema.column_name)
             })
             .collect();
 

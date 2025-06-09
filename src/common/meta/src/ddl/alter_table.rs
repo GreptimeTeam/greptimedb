@@ -19,6 +19,7 @@ mod update_metadata;
 
 use std::vec;
 
+use api::region::RegionResponse;
 use api::v1::alter_table_expr::Kind;
 use api::v1::RenameTable;
 use async_trait::async_trait;
@@ -29,7 +30,7 @@ use common_procedure::{
     PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
-use futures::future;
+use futures::future::{self};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
@@ -38,9 +39,12 @@ use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, handle_multiple_results, MultipleResults};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, handle_multiple_results, map_to_procedure_error,
+    sync_follower_regions, MultipleResults,
+};
 use crate::ddl::DdlContext;
-use crate::error::{AbortProcedureSnafu, Error, NoLeaderSnafu, PutPoisonSnafu, Result};
+use crate::error::{AbortProcedureSnafu, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
@@ -48,7 +52,7 @@ use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution};
+use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution, RegionRoute};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -192,9 +196,14 @@ impl AlterTableProcedure {
             }
             MultipleResults::AllRetryable(error) => {
                 // Just returns the error, and wait for the next try.
-                Err(error)
+                let err = BoxedError::new(error);
+                Err(err).context(RetryLaterSnafu {
+                    clean_poisons: true,
+                })
             }
-            MultipleResults::Ok => {
+            MultipleResults::Ok(results) => {
+                self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+                    .await;
                 self.data.state = AlterTableState::UpdateMetadata;
                 Ok(Status::executing_with_clean_poisons(true))
             }
@@ -208,6 +217,26 @@ impl AlterTableProcedure {
                     clean_poisons: true,
                 })
             }
+        }
+    }
+
+    async fn submit_sync_region_requests(
+        &mut self,
+        results: Vec<RegionResponse>,
+        region_routes: &[RegionRoute],
+    ) {
+        // Safety: filled in `prepare` step.
+        let table_info = self.data.table_info().unwrap();
+        if let Err(err) = sync_follower_regions(
+            &self.context,
+            self.data.table_id(),
+            results,
+            region_routes,
+            table_info.meta.engine.as_str(),
+        )
+        .await
+        {
+            error!(err; "Failed to sync regions for table {}, table_id: {}", self.data.table_ref(), self.data.table_id());
         }
     }
 
@@ -298,16 +327,6 @@ impl Procedure for AlterTableProcedure {
     }
 
     async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e: Error| {
-            if e.is_retry_later() {
-                ProcedureError::retry_later(e)
-            } else if e.need_clean_poisons() {
-                ProcedureError::external_and_clean_poisons(e)
-            } else {
-                ProcedureError::external(e)
-            }
-        };
-
         let state = &self.data.state;
 
         let step = state.as_ref();
@@ -325,7 +344,7 @@ impl Procedure for AlterTableProcedure {
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
         }
-        .map_err(error_handler)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

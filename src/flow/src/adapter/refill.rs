@@ -31,7 +31,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 
 use crate::adapter::table_source::ManagedTableSource;
-use crate::adapter::{FlowId, FlowWorkerManager, FlowWorkerManagerRef};
+use crate::adapter::{FlowId, FlowStreamingEngineRef, StreamingEngine};
 use crate::error::{FlowNotFoundSnafu, JoinTaskSnafu, UnexpectedSnafu};
 use crate::expr::error::ExternalSnafu;
 use crate::expr::utils::find_plan_time_window_expr_lower_bound;
@@ -39,10 +39,10 @@ use crate::repr::RelationDesc;
 use crate::server::get_all_flow_ids;
 use crate::{Error, FrontendInvoker};
 
-impl FlowWorkerManager {
+impl StreamingEngine {
     /// Create and start refill flow tasks in background
     pub async fn create_and_start_refill_flow_tasks(
-        self: &FlowWorkerManagerRef,
+        self: &FlowStreamingEngineRef,
         flow_metadata_manager: &FlowMetadataManagerRef,
         catalog_manager: &CatalogManagerRef,
     ) -> Result<(), Error> {
@@ -130,7 +130,7 @@ impl FlowWorkerManager {
 
     /// Starting to refill flows, if any error occurs, will rebuild the flow and retry
     pub(crate) async fn starting_refill_flows(
-        self: &FlowWorkerManagerRef,
+        self: &FlowStreamingEngineRef,
         tasks: Vec<RefillTask>,
     ) -> Result<(), Error> {
         // TODO(discord9): add a back pressure mechanism
@@ -266,7 +266,7 @@ impl TaskState<()> {
     fn start_running(
         &mut self,
         task_data: &TaskData,
-        manager: FlowWorkerManagerRef,
+        manager: FlowStreamingEngineRef,
         mut output_stream: SendableRecordBatchStream,
     ) -> Result<(), Error> {
         let data = (*task_data).clone();
@@ -383,7 +383,7 @@ impl RefillTask {
     /// Start running the task in background, non-blocking
     pub async fn start_running(
         &mut self,
-        manager: FlowWorkerManagerRef,
+        manager: FlowStreamingEngineRef,
         invoker: &FrontendInvoker,
     ) -> Result<(), Error> {
         let TaskState::Prepared { sql } = &mut self.state else {

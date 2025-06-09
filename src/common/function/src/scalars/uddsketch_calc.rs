@@ -115,6 +115,13 @@ impl Function for UddSketchCalcFunction {
                 }
             };
 
+            // Check if the sketch is empty, if so, return null
+            // This is important to avoid panics when calling estimate_quantile on an empty sketch
+            // In practice, this will happen if input is all null
+            if sketch.bucket_iter().count() == 0 {
+                builder.push_null();
+                continue;
+            }
             // Compute the estimated quantile from the sketch
             let result = sketch.estimate_quantile(perc);
             builder.push(Some(result));

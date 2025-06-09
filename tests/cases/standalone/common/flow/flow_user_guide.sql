@@ -291,7 +291,7 @@ CREATE TABLE temp_alerts (
     sensor_id INT,
     loc STRING,
     max_temp DOUBLE,
-    update_at TIMESTAMP TIME INDEX,
+    event_ts TIMESTAMP TIME INDEX,
     PRIMARY KEY(sensor_id, loc)
 );
 
@@ -300,6 +300,7 @@ SELECT
     sensor_id,
     loc,
     max(temperature) as max_temp,
+    max(ts) as event_ts,
 FROM
     temp_sensor_data
 GROUP BY
@@ -320,7 +321,8 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 SELECT
     sensor_id,
     loc,
-    max_temp
+    max_temp,
+    event_ts
 FROM
     temp_alerts;
 
@@ -337,7 +339,8 @@ ADMIN FLUSH_FLOW('temp_monitoring');
 SELECT
     sensor_id,
     loc,
-    max_temp
+    max_temp,
+    event_ts
 FROM
     temp_alerts;
 

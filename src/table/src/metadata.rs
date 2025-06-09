@@ -817,17 +817,34 @@ impl TableMeta {
             );
         }
         // Collect columns after changed.
-        let columns: Vec<_> = table_schema
-            .column_schemas()
-            .iter()
-            .cloned()
-            .map(|mut column| {
-                if let Some(change_column) = modify_column_types.get(&column.name) {
-                    column.data_type = change_column.target_type.clone();
-                }
-                column
-            })
-            .collect();
+
+        let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
+        for mut column in table_schema.column_schemas().iter().cloned() {
+            if let Some(change_column) = modify_column_types.get(&column.name) {
+                column.data_type = change_column.target_type.clone();
+                let new_default = if let Some(default_value) = column.default_constraint() {
+                    Some(
+                        default_value
+                            .cast_to_datatype(&change_column.target_type)
+                            .with_context(|_| error::CastDefaultValueSnafu {
+                                reason: format!(
+                                    "Failed to cast default value from {:?} to type {:?}",
+                                    default_value, &change_column.target_type
+                                ),
+                            })?,
+                    )
+                } else {
+                    None
+                };
+                column = column
+                    .clone()
+                    .with_default_constraint(new_default.clone())
+                    .with_context(|_| error::CastDefaultValueSnafu {
+                        reason: format!("Failed to set new default: {:?}", new_default),
+                    })?;
+            }
+            columns.push(column)
+        }
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -1149,6 +1166,14 @@ impl TryFrom<RawTableInfo> for TableInfo {
     }
 }
 
+/// Set column fulltext options if it passed the validation.
+///
+/// Options allowed to modify:
+/// * backend
+///
+/// Options not allowed to modify:
+/// * analyzer
+/// * case_sensitive
 fn set_column_fulltext_options(
     column_schema: &mut ColumnSchema,
     column_name: &str,
@@ -1156,14 +1181,6 @@ fn set_column_fulltext_options(
     current_options: Option<FulltextOptions>,
 ) -> Result<()> {
     if let Some(current_options) = current_options {
-        ensure!(
-            !current_options.enable,
-            error::InvalidColumnOptionSnafu {
-                column_name,
-                msg: "FULLTEXT index already enabled",
-            }
-        );
-
         ensure!(
             current_options.analyzer == options.analyzer
                 && current_options.case_sensitive == options.case_sensitive,

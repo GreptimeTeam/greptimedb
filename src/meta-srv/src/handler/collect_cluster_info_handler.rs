@@ -131,6 +131,7 @@ impl HeartbeatHandler for CollectDatanodeClusterInfoHandler {
                 wcus: stat.wcus,
                 leader_regions,
                 follower_regions,
+                workloads: stat.datanode_workloads.clone(),
             }),
             version: info.version,
             git_commit: info.git_commit,

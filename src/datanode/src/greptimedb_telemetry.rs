@@ -20,7 +20,6 @@ use common_greptimedb_telemetry::{
     default_get_uuid, Collector, GreptimeDBTelemetry, GreptimeDBTelemetryTask,
     Mode as VersionReporterMode, TELEMETRY_INTERVAL,
 };
-use servers::Mode;
 
 struct StandaloneGreptimeDBTelemetryCollector {
     uuid: Option<String>,
@@ -55,7 +54,6 @@ impl Collector for StandaloneGreptimeDBTelemetryCollector {
 
 pub async fn get_greptimedb_telemetry_task(
     working_home: Option<String>,
-    mode: &Mode,
     enable: bool,
 ) -> Arc<GreptimeDBTelemetryTask> {
     if !enable || cfg!(test) || cfg!(debug_assertions) {
@@ -64,19 +62,14 @@ pub async fn get_greptimedb_telemetry_task(
     // Always enable.
     let should_report = Arc::new(AtomicBool::new(true));
 
-    match mode {
-        Mode::Standalone => Arc::new(GreptimeDBTelemetryTask::enable(
-            TELEMETRY_INTERVAL,
-            Box::new(GreptimeDBTelemetry::new(
-                working_home.clone(),
-                Box::new(StandaloneGreptimeDBTelemetryCollector {
-                    uuid: default_get_uuid(&working_home),
-                    retry: 0,
-                }),
-                should_report.clone(),
-            )),
-            should_report,
+    let uuid = default_get_uuid(&working_home);
+    Arc::new(GreptimeDBTelemetryTask::enable(
+        TELEMETRY_INTERVAL,
+        Box::new(GreptimeDBTelemetry::new(
+            working_home,
+            Box::new(StandaloneGreptimeDBTelemetryCollector { uuid, retry: 0 }),
+            should_report.clone(),
         )),
-        Mode::Distributed => Arc::new(GreptimeDBTelemetryTask::disable()),
-    }
+        should_report,
+    ))
 }

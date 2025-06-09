@@ -40,17 +40,23 @@ pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution 
     let mut regions_id_map = RegionDistribution::new();
     for route in region_routes.iter() {
         if let Some(peer) = route.leader_peer.as_ref() {
-            let region_id = route.region.id.region_number();
-            regions_id_map.entry(peer.id).or_default().push(region_id);
+            let region_number = route.region.id.region_number();
+            regions_id_map
+                .entry(peer.id)
+                .or_default()
+                .add_leader_region(region_number);
         }
         for peer in route.follower_peers.iter() {
-            let region_id = route.region.id.region_number();
-            regions_id_map.entry(peer.id).or_default().push(region_id);
+            let region_number = route.region.id.region_number();
+            regions_id_map
+                .entry(peer.id)
+                .or_default()
+                .add_follower_region(region_number);
         }
     }
-    for (_, regions) in regions_id_map.iter_mut() {
-        // id asc
-        regions.sort()
+    for (_, region_role_set) in regions_id_map.iter_mut() {
+        // Sort the regions in ascending order.
+        region_role_set.sort()
     }
     regions_id_map
 }
@@ -62,10 +68,20 @@ pub struct TableRoute {
     region_leaders: HashMap<RegionNumber, Option<Peer>>,
 }
 
+/// Returns the leader peers of the table.
 pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
     region_routes
         .iter()
         .flat_map(|x| &x.leader_peer)
+        .cloned()
+        .collect()
+}
+
+/// Returns the followers of the table.
+pub fn find_followers(region_routes: &[RegionRoute]) -> HashSet<Peer> {
+    region_routes
+        .iter()
+        .flat_map(|x| &x.follower_peers)
         .cloned()
         .collect()
 }
@@ -108,6 +124,7 @@ pub fn find_region_leader(
         .cloned()
 }
 
+/// Returns the region numbers of the leader regions on the target datanode.
 pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
     region_routes
         .iter()
@@ -116,6 +133,19 @@ pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Ve
                 if peer == datanode {
                     return Some(x.region.id.region_number());
                 }
+            }
+            None
+        })
+        .collect()
+}
+
+/// Returns the region numbers of the follower regions on the target datanode.
+pub fn find_follower_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            if x.follower_peers.contains(datanode) {
+                return Some(x.region.id.region_number());
             }
             None
         })
@@ -152,15 +182,12 @@ impl TableRoute {
                 })?
                 .into();
 
-            let leader_peer = peers
-                .get(region_route.leader_peer_index as usize)
-                .cloned()
-                .map(Into::into);
+            let leader_peer = peers.get(region_route.leader_peer_index as usize).cloned();
 
             let follower_peers = region_route
                 .follower_peer_indexes
                 .into_iter()
-                .filter_map(|x| peers.get(x as usize).cloned().map(Into::into))
+                .filter_map(|x| peers.get(x as usize).cloned())
                 .collect::<Vec<_>>();
 
             region_routes.push(RegionRoute {
@@ -434,6 +461,7 @@ impl From<PbPartition> for Partition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::RegionRoleSet;
 
     #[test]
     fn test_leader_is_downgraded() {
@@ -590,8 +618,8 @@ mod tests {
 
         let distribution = region_distribution(&region_routes);
         assert_eq!(distribution.len(), 3);
-        assert_eq!(distribution[&1], vec![1, 2]);
-        assert_eq!(distribution[&2], vec![1, 2]);
-        assert_eq!(distribution[&3], vec![1, 2]);
+        assert_eq!(distribution[&1], RegionRoleSet::new(vec![1], vec![2]));
+        assert_eq!(distribution[&2], RegionRoleSet::new(vec![2], vec![1]));
+        assert_eq!(distribution[&3], RegionRoleSet::new(vec![], vec![1, 2]));
     }
 }

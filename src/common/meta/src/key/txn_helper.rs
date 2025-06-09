@@ -25,7 +25,7 @@ pub struct TxnOpGetResponseSet(Vec<KeyValue>);
 
 impl TxnOpGetResponseSet {
     /// Returns a filter to consume a [KeyValue] where the key equals `key`.
-    pub(crate) fn filter(key: Vec<u8>) -> impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>> {
+    pub fn filter(key: Vec<u8>) -> impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>> {
         move |set| {
             let pos = set.0.iter().position(|kv| kv.key == key);
             match pos {
@@ -36,7 +36,7 @@ impl TxnOpGetResponseSet {
     }
 
     /// Returns a decoder to decode bytes to `DeserializedValueWithBytes<T>`.
-    pub(crate) fn decode_with<F, T>(
+    pub fn decode_with<F, T>(
         mut f: F,
     ) -> impl FnMut(&mut TxnOpGetResponseSet) -> Result<Option<DeserializedValueWithBytes<T>>>
     where

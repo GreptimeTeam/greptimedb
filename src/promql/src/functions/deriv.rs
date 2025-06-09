@@ -74,6 +74,7 @@ mod test {
             Deriv::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![Some(10.606060606060607), None],
         );
     }
@@ -99,6 +100,7 @@ mod test {
             Deriv::scalar_udf(),
             ts_range_array,
             value_range_array,
+            vec![],
             vec![Some(0.0)],
         );
     }

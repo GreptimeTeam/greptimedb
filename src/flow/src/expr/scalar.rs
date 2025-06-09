@@ -15,13 +15,18 @@
 //! Scalar expressions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use arrow::array::{make_array, ArrayData, ArrayRef};
+use arrow::array::{make_array, ArrayData, ArrayRef, BooleanArray};
+use arrow::buffer::BooleanBuffer;
+use arrow::compute::or_kleene;
 use common_error::ext::BoxedError;
+use datafusion::physical_expr_common::datum::compare_with_eq;
+use datafusion_common::DataFusionError;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::Value;
 use datatypes::vectors::{BooleanVector, Helper, VectorRef};
-use hydroflow::lattices::cc_traits::Iter;
+use dfir_rs::lattices::cc_traits::Iter;
 use itertools::Itertools;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -92,6 +97,10 @@ pub enum ScalarExpr {
         then: Box<ScalarExpr>,
         els: Box<ScalarExpr>,
     },
+    InList {
+        expr: Box<ScalarExpr>,
+        list: Vec<ScalarExpr>,
+    },
 }
 
 impl ScalarExpr {
@@ -137,6 +146,7 @@ impl ScalarExpr {
                     .context(crate::error::ExternalSnafu)?;
                 Ok(ColumnType::new_nullable(typ))
             }
+            ScalarExpr::InList { expr, .. } => expr.typ(context),
         }
     }
 }
@@ -222,7 +232,55 @@ impl ScalarExpr {
                 exprs,
             } => df_scalar_fn.eval_batch(batch, exprs),
             ScalarExpr::If { cond, then, els } => Self::eval_if_then(batch, cond, then, els),
+            ScalarExpr::InList { expr, list } => Self::eval_in_list(batch, expr, list),
         }
+    }
+
+    fn eval_in_list(
+        batch: &Batch,
+        expr: &ScalarExpr,
+        list: &[ScalarExpr],
+    ) -> Result<VectorRef, EvalError> {
+        let eval_list = list
+            .iter()
+            .map(|e| e.eval_batch(batch))
+            .collect::<Result<Vec<_>, _>>()?;
+        let eval_expr = expr.eval_batch(batch)?;
+
+        ensure!(
+            eval_list
+                .iter()
+                .all(|v| v.data_type() == eval_expr.data_type()),
+            TypeMismatchSnafu {
+                expected: eval_expr.data_type(),
+                actual: eval_list
+                    .iter()
+                    .find(|v| v.data_type() != eval_expr.data_type())
+                    .map(|v| v.data_type())
+                    .unwrap(),
+            }
+        );
+
+        let lhs = eval_expr.to_arrow_array();
+
+        let found = eval_list
+            .iter()
+            .map(|v| v.to_arrow_array())
+            .try_fold(
+                BooleanArray::new(BooleanBuffer::new_unset(batch.row_count()), None),
+                |result, in_list_elem| -> Result<BooleanArray, DataFusionError> {
+                    let rhs = compare_with_eq(&lhs, &in_list_elem, false)?;
+
+                    Ok(or_kleene(&result, &rhs)?)
+                },
+            )
+            .with_context(|_| crate::expr::error::DatafusionSnafu {
+                context: "Failed to compare eval_expr with eval_list",
+            })?;
+
+        let res = BooleanVector::from(found);
+
+        Ok(Arc::new(res))
     }
 
     /// NOTE: this if then eval impl assume all given expr are pure, and will not change the state of the world
@@ -337,6 +395,15 @@ impl ScalarExpr {
                 df_scalar_fn,
                 exprs,
             } => df_scalar_fn.eval(values, exprs),
+            ScalarExpr::InList { expr, list } => {
+                let eval_expr = expr.eval(values)?;
+                let eval_list = list
+                    .iter()
+                    .map(|v| v.eval(values))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let found = eval_list.iter().any(|item| *item == eval_expr);
+                Ok(Value::Boolean(found))
+            }
         }
     }
 
@@ -514,6 +581,13 @@ impl ScalarExpr {
                 }
                 Ok(())
             }
+            ScalarExpr::InList { expr, list } => {
+                f(expr)?;
+                for item in list {
+                    f(item)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -555,6 +629,13 @@ impl ScalarExpr {
             } => {
                 for expr in exprs {
                     f(expr)?;
+                }
+                Ok(())
+            }
+            ScalarExpr::InList { expr, list } => {
+                f(expr)?;
+                for item in list {
+                    f(item)?;
                 }
                 Ok(())
             }

@@ -12,18 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
-use api::v1::RowInsertRequests;
+use api::v1::RowInsertRequest;
 use bytes::{Buf, Bytes};
+use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_telemetry::debug;
+use pipeline::{
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value,
+};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
+use session::context::QueryContextRef;
+use snafu::OptionExt;
 
+use crate::error::InternalSnafu;
+use crate::http::event::PipelineIngestRequest;
+use crate::http::PromValidationMode;
+use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
 impl Clear for Sample {
@@ -150,7 +164,7 @@ impl PromTimeSeries {
         tag: u32,
         wire_type: WireType,
         buf: &mut Bytes,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromTimeSeries";
         match tag {
@@ -176,15 +190,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
                 if label.name.deref() == METRIC_NAME_LABEL_BYTES {
-                    let table_name = if is_strict_mode {
-                        match String::from_utf8(label.value.to_vec()) {
-                            Ok(s) => s,
-                            Err(_) => return Err(DecodeError::new("invalid utf-8")),
-                        }
-                    } else {
-                        unsafe { String::from_utf8_unchecked(label.value.to_vec()) }
-                    };
-                    self.table_name = table_name;
+                    self.table_name = decode_string(&label.value, prom_validation_mode)?;
                     self.labels.truncate(self.labels.len() - 1); // remove last label
                 }
                 Ok(())
@@ -208,7 +214,7 @@ impl PromTimeSeries {
     fn add_to_table_data(
         &mut self,
         table_builders: &mut TablesBuilder,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
@@ -220,13 +226,34 @@ impl PromTimeSeries {
         table_data.add_labels_and_samples(
             self.labels.as_slice(),
             self.samples.as_slice(),
-            is_strict_mode,
+            prom_validation_mode,
         )?;
-        self.labels.clear();
-        self.samples.clear();
 
         Ok(())
     }
+}
+
+/// Decodes bytes into String values according provided validation mode.
+pub(crate) fn decode_string(
+    bytes: &Bytes,
+    mode: PromValidationMode,
+) -> Result<String, DecodeError> {
+    let result = match mode {
+        PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(
+                    "Invalid UTF-8 string value: {:?}, error: {:?}",
+                    &bytes[..],
+                    e
+                );
+                return Err(DecodeError::new("invalid utf-8"));
+            }
+        },
+        PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
+        PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
+    };
+    Ok(result)
 }
 
 #[derive(Default, Debug)]
@@ -242,12 +269,17 @@ impl Clear for PromWriteRequest {
 }
 
 impl PromWriteRequest {
-    pub fn as_row_insert_requests(&mut self) -> (RowInsertRequests, usize) {
+    pub fn as_row_insert_requests(&mut self) -> Vec<RowInsertRequest> {
         self.table_data.as_insert_requests()
     }
 
     // todo(hl): maybe use &[u8] can reduce the overhead introduced with Bytes.
-    pub fn merge(&mut self, mut buf: Bytes, is_strict_mode: bool) -> Result<(), DecodeError> {
+    pub fn merge(
+        &mut self,
+        mut buf: Bytes,
+        prom_validation_mode: PromValidationMode,
+        processor: &mut PromSeriesProcessor,
+    ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
         while buf.has_remaining() {
             let (tag, wire_type) = decode_key(&mut buf)?;
@@ -268,13 +300,22 @@ impl PromWriteRequest {
                     while buf.remaining() > limit {
                         let (tag, wire_type) = decode_key(&mut buf)?;
                         self.series
-                            .merge_field(tag, wire_type, &mut buf, is_strict_mode)?;
+                            .merge_field(tag, wire_type, &mut buf, prom_validation_mode)?;
                     }
                     if buf.remaining() != limit {
                         return Err(DecodeError::new("delimited length exceeded"));
                     }
-                    self.series
-                        .add_to_table_data(&mut self.table_data, is_strict_mode)?;
+
+                    if processor.use_pipeline {
+                        processor.consume_series_to_pipeline_map(&mut self.series)?;
+                    } else {
+                        self.series
+                            .add_to_table_data(&mut self.table_data, prom_validation_mode)?;
+                    }
+
+                    // clear state
+                    self.series.labels.clear();
+                    self.series.samples.clear();
                 }
                 3u32 => {
                     // todo(hl): metadata are skipped.
@@ -283,7 +324,121 @@ impl PromWriteRequest {
                 _ => prost::encoding::skip_field(wire_type, tag, &mut buf, Default::default())?,
             }
         }
+
         Ok(())
+    }
+}
+
+/// A hook to be injected into the PromWriteRequest decoding process.
+/// It was originally designed with two usage:
+/// 1. consume one series to desired type, in this case, the pipeline map
+/// 2. convert itself to RowInsertRequests
+///
+/// Since the origin conversion is coupled with PromWriteRequest,
+/// let's keep it that way for now.
+pub struct PromSeriesProcessor {
+    pub(crate) use_pipeline: bool,
+    pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
+
+    // optional fields for pipeline
+    pub(crate) pipeline_handler: Option<PipelineHandlerRef>,
+    pub(crate) query_ctx: Option<QueryContextRef>,
+    pub(crate) pipeline_def: Option<PipelineDefinition>,
+}
+
+impl PromSeriesProcessor {
+    pub fn default_processor() -> Self {
+        Self {
+            use_pipeline: false,
+            table_values: BTreeMap::new(),
+            pipeline_handler: None,
+            query_ctx: None,
+            pipeline_def: None,
+        }
+    }
+
+    pub fn set_pipeline(
+        &mut self,
+        handler: PipelineHandlerRef,
+        query_ctx: QueryContextRef,
+        pipeline_def: PipelineDefinition,
+    ) {
+        self.use_pipeline = true;
+        self.pipeline_handler = Some(handler);
+        self.query_ctx = Some(query_ctx);
+        self.pipeline_def = Some(pipeline_def);
+    }
+
+    // convert one series to pipeline map
+    pub(crate) fn consume_series_to_pipeline_map(
+        &mut self,
+        series: &mut PromTimeSeries,
+    ) -> Result<(), DecodeError> {
+        let mut vec_pipeline_map: Vec<PipelineMap> = Vec::new();
+        let mut pipeline_map = PipelineMap::new();
+        for l in series.labels.iter() {
+            let name = String::from_utf8(l.name.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            let value = String::from_utf8(l.value.to_vec())
+                .map_err(|_| DecodeError::new("invalid utf-8"))?;
+            pipeline_map.insert(name, Value::String(value));
+        }
+
+        let one_sample = series.samples.len() == 1;
+
+        for s in series.samples.iter() {
+            let timestamp = s.timestamp;
+            pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
+            pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
+            if one_sample {
+                vec_pipeline_map.push(pipeline_map);
+                break;
+            } else {
+                vec_pipeline_map.push(pipeline_map.clone());
+            }
+        }
+
+        let table_name = std::mem::take(&mut series.table_name);
+        match self.table_values.entry(table_name) {
+            Entry::Occupied(mut occupied_entry) => {
+                occupied_entry.get_mut().append(&mut vec_pipeline_map);
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(vec_pipeline_map);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) async fn exec_pipeline(&mut self) -> crate::error::Result<ContextReq> {
+        // prepare params
+        let handler = self.pipeline_handler.as_ref().context(InternalSnafu {
+            err_msg: "pipeline handler is not set",
+        })?;
+        let pipeline_def = self.pipeline_def.as_ref().context(InternalSnafu {
+            err_msg: "pipeline definition is not set",
+        })?;
+        let pipeline_param = GreptimePipelineParams::default();
+        let query_ctx = self.query_ctx.as_ref().context(InternalSnafu {
+            err_msg: "query context is not set",
+        })?;
+
+        let pipeline_ctx = PipelineContext::new(pipeline_def, &pipeline_param, query_ctx.channel());
+
+        // run pipeline
+        let mut req = ContextReq::default();
+        for (table_name, pipeline_maps) in self.table_values.iter_mut() {
+            let pipeline_req = PipelineIngestRequest {
+                table: table_name.clone(),
+                values: pipeline_maps.clone(),
+            };
+            let row_req =
+                run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;
+            req.merge(row_req);
+        }
+
+        Ok(req)
     }
 }
 
@@ -296,8 +451,9 @@ mod tests {
     use bytes::Bytes;
     use prost::Message;
 
+    use crate::http::PromValidationMode;
     use crate::prom_store::to_grpc_row_insert_requests;
-    use crate::proto::PromWriteRequest;
+    use crate::proto::{decode_string, PromSeriesProcessor, PromWriteRequest};
     use crate::repeated_field::Clear;
 
     fn sort_rows(rows: Rows) -> Rows {
@@ -321,9 +477,18 @@ mod tests {
         expected_samples: usize,
         expected_rows: &RowInsertRequests,
     ) {
+        let mut p = PromSeriesProcessor::default_processor();
         prom_write_request.clear();
-        prom_write_request.merge(data.clone(), true).unwrap();
-        let (prom_rows, samples) = prom_write_request.as_row_insert_requests();
+        prom_write_request
+            .merge(data.clone(), PromValidationMode::Strict, &mut p)
+            .unwrap();
+
+        let req = prom_write_request.as_row_insert_requests();
+        let samples = req
+            .iter()
+            .filter_map(|r| r.rows.as_ref().map(|r| r.rows.len()))
+            .sum::<usize>();
+        let prom_rows = RowInsertRequests { inserts: req };
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
@@ -361,5 +526,153 @@ mod tests {
                 &expected_rows,
             );
         }
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Strict);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Strict);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "failed to decode Protobuf message: invalid utf-8"
+        );
+    }
+
+    #[test]
+    fn test_decode_string_strict_mode_incomplete_utf8() {
+        // Incomplete UTF-8 sequence (missing continuation bytes)
+        let incomplete_utf8 = Bytes::from(vec![0xC2]); // Start of 2-byte sequence but missing second byte
+        let result = decode_string(&incomplete_utf8, PromValidationMode::Strict);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "failed to decode Protobuf message: invalid utf-8"
+        );
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence - should be replaced with replacement character
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        // Each invalid byte should be replaced with the Unicode replacement character
+        assert_eq!(result.unwrap(), "���");
+    }
+
+    #[test]
+    fn test_decode_string_lossy_mode_mixed_valid_invalid() {
+        // Mix of valid and invalid UTF-8
+        let mut mixed = Vec::new();
+        mixed.extend_from_slice(b"hello");
+        mixed.push(0xFF); // Invalid byte
+        mixed.extend_from_slice(b"world");
+        let mixed_utf8 = Bytes::from(mixed);
+
+        let result = decode_string(&mixed_utf8, PromValidationMode::Lossy);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello�world");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_valid_utf8() {
+        let valid_utf8 = Bytes::from("hello world");
+        let result = decode_string(&valid_utf8, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_empty() {
+        let empty = Bytes::new();
+        let result = decode_string(&empty, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_unicode() {
+        let unicode = Bytes::from("Hello 世界 🌍");
+        let result = decode_string(&unicode, PromValidationMode::Unchecked);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_decode_string_unchecked_mode_invalid_utf8() {
+        // Invalid UTF-8 sequence - unchecked mode doesn't validate
+        let invalid_utf8 = Bytes::from(vec![0xFF, 0xFE, 0xFD]);
+        let result = decode_string(&invalid_utf8, PromValidationMode::Unchecked);
+        // This should succeed but the resulting string may contain invalid UTF-8
+        assert!(result.is_ok());
+        // We can't easily test the exact content since it's invalid UTF-8,
+        // but we can verify it doesn't panic and returns something
+        let _string = result.unwrap();
+    }
+
+    #[test]
+    fn test_decode_string_all_modes_ascii() {
+        let ascii = Bytes::from("simple_ascii_123");
+
+        // All modes should handle ASCII identically
+        let strict_result = decode_string(&ascii, PromValidationMode::Strict).unwrap();
+        let lossy_result = decode_string(&ascii, PromValidationMode::Lossy).unwrap();
+        let unchecked_result = decode_string(&ascii, PromValidationMode::Unchecked).unwrap();
+
+        assert_eq!(strict_result, "simple_ascii_123");
+        assert_eq!(lossy_result, "simple_ascii_123");
+        assert_eq!(unchecked_result, "simple_ascii_123");
+        assert_eq!(strict_result, lossy_result);
+        assert_eq!(lossy_result, unchecked_result);
     }
 }

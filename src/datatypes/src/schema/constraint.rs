@@ -20,6 +20,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
+use crate::types::cast;
 use crate::value::Value;
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{TimestampMillisecondVector, VectorRef};
@@ -178,6 +179,18 @@ impl ColumnDefaultConstraint {
         }
     }
 
+    /// Cast default value to given type
+    pub fn cast_to_datatype(&self, data_type: &ConcreteDataType) -> Result<Self> {
+        match self {
+            ColumnDefaultConstraint::Value(v) => Ok(Self::Value(cast(v.clone(), data_type)?)),
+            ColumnDefaultConstraint::Function(expr) => match &expr[..] {
+                // no need to cast, since function always require a data_type when need to create default value
+                CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => Ok(self.clone()),
+                _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
+            },
+        }
+    }
+
     /// Only create default vector if it's impure, i.e., it's a function.
     ///
     /// This helps to delay creating constant default values to mito engine while also keeps impure default have consistent values
@@ -253,9 +266,10 @@ fn create_current_timestamp_vector(
     data_type: &ConcreteDataType,
     num_rows: usize,
 ) -> Result<VectorRef> {
-    let current_timestamp_vector = TimestampMillisecondVector::from_values(
-        std::iter::repeat(util::current_time_millis()).take(num_rows),
-    );
+    let current_timestamp_vector = TimestampMillisecondVector::from_values(std::iter::repeat_n(
+        util::current_time_millis(),
+        num_rows,
+    ));
     if data_type.is_timestamp() {
         current_timestamp_vector.cast(data_type)
     } else {

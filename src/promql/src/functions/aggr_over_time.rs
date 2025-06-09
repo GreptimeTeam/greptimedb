@@ -231,6 +231,7 @@ mod test {
             AvgOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(49.9999995),
                 Some(45.8618844),
@@ -253,6 +254,7 @@ mod test {
             MinOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(12.345678),
                 Some(12.345678),
@@ -275,6 +277,7 @@ mod test {
             MaxOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(87.654321),
                 Some(87.654321),
@@ -297,6 +300,7 @@ mod test {
             SumOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(99.999999),
                 Some(229.309422),
@@ -319,6 +323,7 @@ mod test {
             CountOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(2.0),
                 Some(5.0),
@@ -341,6 +346,7 @@ mod test {
             LastOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(87.654321),
                 Some(70.710678),
@@ -363,6 +369,7 @@ mod test {
             AbsentOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 None,
                 None,
@@ -385,6 +392,7 @@ mod test {
             PresentOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(1.0),
                 Some(1.0),
@@ -407,6 +415,7 @@ mod test {
             StdvarOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(1417.8479276253622),
                 Some(808.999919713209),
@@ -442,6 +451,7 @@ mod test {
             StdvarOverTime::scalar_udf(),
             RangeArray::from_ranges(ts_array, ranges).unwrap(),
             RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![],
             vec![Some(0.0), Some(10.559999999999999)],
         );
     }
@@ -453,6 +463,7 @@ mod test {
             StddevOverTime::scalar_udf(),
             ts_array,
             value_array,
+            vec![],
             vec![
                 Some(37.6543215),
                 Some(28.442923895289123),
@@ -488,6 +499,7 @@ mod test {
             StddevOverTime::scalar_udf(),
             RangeArray::from_ranges(ts_array, ranges).unwrap(),
             RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![],
             vec![Some(0.0), Some(3.249615361854384)],
         );
     }

@@ -18,10 +18,12 @@ mod region_request;
 mod table_cache_keys;
 mod update_metadata;
 
+use api::region::RegionResponse;
 use async_trait::async_trait;
+use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use futures_util::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -30,16 +32,19 @@ use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use crate::ddl::utils::add_peer_context_if_needed;
+use crate::ddl::utils::{
+    add_peer_context_if_needed, map_to_procedure_error, sync_follower_regions,
+};
 use crate::ddl::DdlContext;
-use crate::error::{DecodeJsonSnafu, Error, MetadataCorruptionSnafu, Result};
+use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
+use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::find_leaders;
+use crate::rpc::router::{find_leaders, RegionRoute};
 
 pub struct AlterLogicalTablesProcedure {
     pub context: DdlContext,
@@ -64,6 +69,7 @@ impl AlterLogicalTablesProcedure {
                 physical_table_info: None,
                 physical_table_route: None,
                 physical_columns: vec![],
+                table_cache_keys_to_invalidate: vec![],
             },
         }
     }
@@ -125,14 +131,20 @@ impl AlterLogicalTablesProcedure {
             });
         }
 
-        // Collects responses from datanodes.
-        let phy_raw_schemas = future::join_all(alter_region_tasks)
+        let mut results = future::join_all(alter_region_tasks)
             .await
             .into_iter()
-            .map(|res| res.map(|mut res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY)))
             .collect::<Result<Vec<_>>>()?;
 
+        // Collects responses from datanodes.
+        let phy_raw_schemas = results
+            .iter_mut()
+            .map(|res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY))
+            .collect::<Vec<_>>();
+
         if phy_raw_schemas.is_empty() {
+            self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+                .await;
             self.data.state = AlterTablesState::UpdateMetadata;
             return Ok(Status::executing(true));
         }
@@ -155,24 +167,51 @@ impl AlterLogicalTablesProcedure {
             warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
 
+        self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+            .await;
         self.data.state = AlterTablesState::UpdateMetadata;
         Ok(Status::executing(true))
+    }
+
+    async fn submit_sync_region_requests(
+        &self,
+        results: Vec<RegionResponse>,
+        region_routes: &[RegionRoute],
+    ) {
+        let table_info = &self.data.physical_table_info.as_ref().unwrap().table_info;
+        if let Err(err) = sync_follower_regions(
+            &self.context,
+            self.data.physical_table_id,
+            results,
+            region_routes,
+            table_info.meta.engine.as_str(),
+        )
+        .await
+        {
+            error!(err; "Failed to sync regions for table {}, table_id: {}",
+                        format_full_table_name(&table_info.catalog_name, &table_info.schema_name, &table_info.name),
+                        self.data.physical_table_id
+            );
+        }
     }
 
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
         self.update_physical_table_metadata().await?;
         self.update_logical_tables_metadata().await?;
 
+        self.data.build_cache_keys_to_invalidate();
+        self.data.clear_metadata_fields();
+
         self.data.state = AlterTablesState::InvalidateTableCache;
         Ok(Status::executing(true))
     }
 
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
-        let to_invalidate = self.build_table_cache_keys_to_invalidate();
+        let to_invalidate = &self.data.table_cache_keys_to_invalidate;
 
         self.context
             .cache_invalidator
-            .invalidate(&Default::default(), &to_invalidate)
+            .invalidate(&Default::default(), to_invalidate)
             .await?;
         Ok(Status::done())
     }
@@ -185,14 +224,6 @@ impl Procedure for AlterLogicalTablesProcedure {
     }
 
     async fn execute(&mut self, _ctx: &Context) -> ProcedureResult<Status> {
-        let error_handler = |e: Error| {
-            if e.is_retry_later() {
-                common_procedure::Error::retry_later(e)
-            } else {
-                common_procedure::Error::external(e)
-            }
-        };
-
         let state = &self.data.state;
 
         let step = state.as_ref();
@@ -209,7 +240,7 @@ impl Procedure for AlterLogicalTablesProcedure {
             AlterTablesState::UpdateMetadata => self.on_update_metadata().await,
             AlterTablesState::InvalidateTableCache => self.on_invalidate_table_cache().await,
         }
-        .map_err(error_handler)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -248,6 +279,20 @@ pub struct AlterTablesData {
     physical_table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
     physical_table_route: Option<PhysicalTableRouteValue>,
     physical_columns: Vec<ColumnMetadata>,
+    table_cache_keys_to_invalidate: Vec<CacheIdent>,
+}
+
+impl AlterTablesData {
+    /// Clears all data fields except `state` and `table_cache_keys_to_invalidate` after metadata update.
+    /// This is done to avoid persisting unnecessary data after the update metadata step.
+    fn clear_metadata_fields(&mut self) {
+        self.tasks.clear();
+        self.table_info_values.clear();
+        self.physical_table_id = 0;
+        self.physical_table_info = None;
+        self.physical_table_route = None;
+        self.physical_columns.clear();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, AsRefStr)]

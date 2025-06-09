@@ -24,7 +24,7 @@ use table::table_name::TableName;
 
 use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
-use crate::key::FlowId;
+use crate::key::{FlowId, FlowPartitionId};
 use crate::peer::Peer;
 use crate::{DatanodeId, FlownodeId};
 
@@ -184,14 +184,19 @@ pub enum CacheIdent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateFlow {
+    /// The unique identifier for the flow.
+    pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    pub flownodes: Vec<Peer>,
+    /// Mapping of flow partition to peer information
+    pub partition_to_peer_mapping: Vec<(FlowPartitionId, Peer)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DropFlow {
+    pub flow_id: FlowId,
     pub source_table_ids: Vec<TableId>,
-    pub flownode_ids: Vec<FlownodeId>,
+    /// Mapping of flow partition to flownode id
+    pub flow_part2node_id: Vec<(FlowPartitionId, FlownodeId)>,
 }
 
 /// Flushes a batch of regions.
@@ -217,7 +222,9 @@ pub enum Instruction {
     /// Invalidates batch cache.
     InvalidateCaches(Vec<CacheIdent>),
     /// Flushes regions.
-    FlushRegion(FlushRegions),
+    FlushRegions(FlushRegions),
+    /// Flushes a single region.
+    FlushRegion(RegionId),
 }
 
 /// The reply of [UpgradeRegion].
@@ -248,6 +255,7 @@ pub enum InstructionReply {
     CloseRegion(SimpleReply),
     UpgradeRegion(UpgradeRegionReply),
     DowngradeRegion(DowngradeRegionReply),
+    FlushRegion(SimpleReply),
 }
 
 impl Display for InstructionReply {
@@ -259,6 +267,7 @@ impl Display for InstructionReply {
             Self::DowngradeRegion(reply) => {
                 write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
+            Self::FlushRegion(reply) => write!(f, "InstructionReply::FlushRegion({})", reply),
         }
     }
 }

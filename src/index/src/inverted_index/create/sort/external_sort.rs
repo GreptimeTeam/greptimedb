@@ -481,7 +481,7 @@ mod tests {
 
         let mock_values = dic_values
             .iter()
-            .flat_map(|(value, size)| iter::repeat(value.clone()).take(*size))
+            .flat_map(|(value, size)| std::iter::repeat_n(value.clone(), *size))
             .collect::<Vec<_>>();
 
         let sorted_result = sorted_result(&mock_values, segment_row_count);

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::Float64Array;
 use datafusion::logical_expr::ScalarUDF;
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::ScalarValue;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::DataType;
 
@@ -28,13 +29,17 @@ pub fn simple_range_udf_runner(
     range_fn: ScalarUDF,
     input_ts: RangeArray,
     input_value: RangeArray,
+    other_args: Vec<ScalarValue>,
     expected: Vec<Option<f64>>,
 ) {
     let num_rows = input_ts.len();
-    let input = vec![
+    let input = [
         ColumnarValue::Array(Arc::new(input_ts.into_dict())),
         ColumnarValue::Array(Arc::new(input_value.into_dict())),
-    ];
+    ]
+    .into_iter()
+    .chain(other_args.into_iter().map(ColumnarValue::Scalar))
+    .collect::<Vec<_>>();
     let args = ScalarFunctionArgs {
         args: input,
         number_rows: num_rows,

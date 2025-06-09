@@ -113,7 +113,7 @@ pub mod test_utils;
 mod tombstone;
 pub mod topic_name;
 pub mod topic_region;
-pub(crate) mod txn_helper;
+pub mod txn_helper;
 pub mod view_info;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -192,7 +192,71 @@ pub const CACHE_KEY_PREFIXES: [&str; 5] = [
     NODE_ADDRESS_PREFIX,
 ];
 
-pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
+/// A set of regions with the same role.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct RegionRoleSet {
+    /// Leader regions.
+    pub leader_regions: Vec<RegionNumber>,
+    /// Follower regions.
+    pub follower_regions: Vec<RegionNumber>,
+}
+
+impl<'de> Deserialize<'de> for RegionRoleSet {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RegionRoleSetOrLeaderOnly {
+            Full {
+                leader_regions: Vec<RegionNumber>,
+                follower_regions: Vec<RegionNumber>,
+            },
+            LeaderOnly(Vec<RegionNumber>),
+        }
+        match RegionRoleSetOrLeaderOnly::deserialize(deserializer)? {
+            RegionRoleSetOrLeaderOnly::Full {
+                leader_regions,
+                follower_regions,
+            } => Ok(RegionRoleSet::new(leader_regions, follower_regions)),
+            RegionRoleSetOrLeaderOnly::LeaderOnly(leader_regions) => {
+                Ok(RegionRoleSet::new(leader_regions, vec![]))
+            }
+        }
+    }
+}
+
+impl RegionRoleSet {
+    /// Create a new region role set.
+    pub fn new(leader_regions: Vec<RegionNumber>, follower_regions: Vec<RegionNumber>) -> Self {
+        Self {
+            leader_regions,
+            follower_regions,
+        }
+    }
+
+    /// Add a leader region to the set.
+    pub fn add_leader_region(&mut self, region_number: RegionNumber) {
+        self.leader_regions.push(region_number);
+    }
+
+    /// Add a follower region to the set.
+    pub fn add_follower_region(&mut self, region_number: RegionNumber) {
+        self.follower_regions.push(region_number);
+    }
+
+    /// Sort the regions.
+    pub fn sort(&mut self) {
+        self.follower_regions.sort();
+        self.leader_regions.sort();
+    }
+}
+
+/// The distribution of regions.
+///
+/// The key is the datanode id, the value is the region role set.
+pub type RegionDistribution = BTreeMap<DatanodeId, RegionRoleSet>;
 
 /// The id of flow.
 pub type FlowId = u32;
@@ -1380,7 +1444,8 @@ mod tests {
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
     use crate::key::{
-        DeserializedValueWithBytes, TableMetadataManager, ViewInfoValue, TOPIC_REGION_PREFIX,
+        DeserializedValueWithBytes, RegionDistribution, RegionRoleSet, TableMetadataManager,
+        ViewInfoValue, TOPIC_REGION_PREFIX,
     };
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::KvBackend;
@@ -2007,7 +2072,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            assert_eq!(got.regions, regions)
+            assert_eq!(got.regions, regions.leader_regions);
+            assert_eq!(got.follower_regions, regions.follower_regions);
         }
     }
 
@@ -2423,5 +2489,29 @@ mod tests {
         assert_eq!(current_view_info.definition, new_definition);
         assert_eq!(current_view_info.columns, new_columns);
         assert_eq!(current_view_info.plan_columns, new_plan_columns);
+    }
+
+    #[test]
+    fn test_region_role_set_deserialize() {
+        let s = r#"{"leader_regions": [1, 2, 3], "follower_regions": [4, 5, 6]}"#;
+        let region_role_set: RegionRoleSet = serde_json::from_str(s).unwrap();
+        assert_eq!(region_role_set.leader_regions, vec![1, 2, 3]);
+        assert_eq!(region_role_set.follower_regions, vec![4, 5, 6]);
+
+        let s = r#"[1, 2, 3]"#;
+        let region_role_set: RegionRoleSet = serde_json::from_str(s).unwrap();
+        assert_eq!(region_role_set.leader_regions, vec![1, 2, 3]);
+        assert!(region_role_set.follower_regions.is_empty());
+    }
+
+    #[test]
+    fn test_region_distribution_deserialize() {
+        let s = r#"{"1": [1,2,3], "2": {"leader_regions": [7, 8, 9], "follower_regions": [10, 11, 12]}}"#;
+        let region_distribution: RegionDistribution = serde_json::from_str(s).unwrap();
+        assert_eq!(region_distribution.len(), 2);
+        assert_eq!(region_distribution[&1].leader_regions, vec![1, 2, 3]);
+        assert!(region_distribution[&1].follower_regions.is_empty());
+        assert_eq!(region_distribution[&2].leader_regions, vec![7, 8, 9]);
+        assert_eq!(region_distribution[&2].follower_regions, vec![10, 11, 12]);
     }
 }

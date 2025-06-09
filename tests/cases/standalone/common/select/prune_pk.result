@@ -1,0 +1,158 @@
+CREATE TABLE IF NOT EXISTS `test_multi_pk_filter` ( `namespace` STRING NULL, `env` STRING NULL DEFAULT 'NULL', `flag` INT NULL, `total` BIGINT NULL, `greptime_timestamp` TIMESTAMP(9) NOT NULL, TIME INDEX (`greptime_timestamp`), PRIMARY KEY (`namespace`, `env`, `flag`) ) ENGINE=mito;
+
+Affected Rows: 0
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5289, '2023-05-15 10:00:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 0, 421, '2023-05-15 10:05:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 356, '2023-05-15 10:10:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('test_multi_pk_filter');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('test_multi_pk_filter') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 412, '2023-05-15 10:15:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'dev', 1, 298, '2023-05-15 10:20:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5289, '2023-05-15 10:25:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 5874, '2023-05-15 10:30:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('test_multi_pk_filter');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('test_multi_pk_filter') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 1, 6132, '2023-05-15 10:35:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1287, '2023-05-15 10:40:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1432, '2023-05-15 10:45:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_filter
+    (namespace, env, flag, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'testing', 1, 1056, '2023-05-15 10:50:00');
+
+Affected Rows: 1
+
+SELECT greptime_timestamp, namespace, env, total FROM test_multi_pk_filter WHERE
+    greptime_timestamp BETWEEN '2023-05-15 10:00:00' AND '2023-05-15 11:00:00' AND flag = 1 AND namespace = 'thermostat_v2'
+    ORDER BY greptime_timestamp;
+
++---------------------+---------------+------------+-------+
+| greptime_timestamp  | namespace     | env        | total |
++---------------------+---------------+------------+-------+
+| 2023-05-15T10:00:00 | thermostat_v2 | production | 5289  |
+| 2023-05-15T10:10:00 | thermostat_v2 | dev        | 356   |
+| 2023-05-15T10:15:00 | thermostat_v2 | dev        | 412   |
+| 2023-05-15T10:20:00 | thermostat_v2 | dev        | 298   |
+| 2023-05-15T10:25:00 | thermostat_v2 | production | 5289  |
+| 2023-05-15T10:30:00 | thermostat_v2 | production | 5874  |
+| 2023-05-15T10:35:00 | thermostat_v2 | production | 6132  |
+| 2023-05-15T10:40:00 | thermostat_v2 | testing    | 1287  |
+| 2023-05-15T10:45:00 | thermostat_v2 | testing    | 1432  |
+| 2023-05-15T10:50:00 | thermostat_v2 | testing    | 1056  |
++---------------------+---------------+------------+-------+
+
+SELECT greptime_timestamp, namespace, env, total FROM test_multi_pk_filter WHERE
+    greptime_timestamp BETWEEN '2023-05-15 10:00:00' AND '2023-05-15 11:00:00' AND flag = 1 AND namespace = 'thermostat_v2' AND env='dev'
+    ORDER BY greptime_timestamp;
+
++---------------------+---------------+-----+-------+
+| greptime_timestamp  | namespace     | env | total |
++---------------------+---------------+-----+-------+
+| 2023-05-15T10:10:00 | thermostat_v2 | dev | 356   |
+| 2023-05-15T10:15:00 | thermostat_v2 | dev | 412   |
+| 2023-05-15T10:20:00 | thermostat_v2 | dev | 298   |
++---------------------+---------------+-----+-------+
+
+DROP TABLE test_multi_pk_filter;
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS `test_multi_pk_null` ( `namespace` STRING NULL, `env` STRING NULL DEFAULT 'NULL', `total` BIGINT NULL, `greptime_timestamp` TIMESTAMP(9) NOT NULL, TIME INDEX (`greptime_timestamp`), PRIMARY KEY (`namespace`, `env`) ) ENGINE=mito;
+
+Affected Rows: 0
+
+INSERT INTO test_multi_pk_null
+    (namespace, env, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 5289, '2023-05-15 10:00:00');
+
+Affected Rows: 1
+
+INSERT INTO test_multi_pk_null
+    (namespace, env, total, greptime_timestamp)
+    VALUES ('thermostat_v2', 'production', 421, '2023-05-15 10:05:00');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('test_multi_pk_null');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('test_multi_pk_null') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT * FROM test_multi_pk_null WHERE env IS NOT NULL;
+
++---------------+------------+-------+---------------------+
+| namespace     | env        | total | greptime_timestamp  |
++---------------+------------+-------+---------------------+
+| thermostat_v2 | production | 5289  | 2023-05-15T10:00:00 |
+| thermostat_v2 | production | 421   | 2023-05-15T10:05:00 |
++---------------+------------+-------+---------------------+
+
+DROP TABLE test_multi_pk_null;
+
+Affected Rows: 0
+

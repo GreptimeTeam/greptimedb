@@ -57,33 +57,13 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, SemanticType, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::key::catalog_name::{CatalogManager, CatalogNameKey};
-    use common_meta::key::schema_name::{SchemaManager, SchemaNameKey};
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::kv_backend::KvBackendRef;
     use datatypes::vectors::{Int32Vector, VectorRef};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::tests::{create_partition_rule_manager, new_test_table_info};
-
-    async fn prepare_mocked_backend() -> KvBackendRef {
-        let backend = Arc::new(MemoryKvBackend::default());
-
-        let catalog_manager = CatalogManager::new(backend.clone());
-        let schema_manager = SchemaManager::new(backend.clone());
-
-        catalog_manager
-            .create(CatalogNameKey::default(), false)
-            .await
-            .unwrap();
-        schema_manager
-            .create(SchemaNameKey::default(), None, false)
-            .await
-            .unwrap();
-
-        backend
-    }
+    use crate::tests::{
+        create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
+    };
 
     #[tokio::test]
     async fn test_delete_request_table_to_region() {

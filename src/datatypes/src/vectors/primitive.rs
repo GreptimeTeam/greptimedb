@@ -388,7 +388,7 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
                     // Safety: std::iter::Repeat and std::iter::Take implement TrustedLen.
                     builder
                         .mutable_array
-                        .append_trusted_len_iter(std::iter::repeat(data).take(repeat_times));
+                        .append_trusted_len_iter(std::iter::repeat_n(data, repeat_times));
                 }
             }
             None => {

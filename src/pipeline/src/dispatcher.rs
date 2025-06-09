@@ -20,10 +20,10 @@ use crate::error::{
     Error, FieldRequiredForDispatcherSnafu, Result, TableSuffixRequiredForDispatcherRuleSnafu,
     ValueRequiredForDispatcherRuleSnafu,
 };
+use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::{PipelineMap, Value};
 
 const FIELD: &str = "field";
-const TABLE_SUFFIX: &str = "table_suffix";
 const PIPELINE: &str = "pipeline";
 const VALUE: &str = "value";
 const RULES: &str = "rules";
@@ -80,7 +80,7 @@ impl TryFrom<&Yaml> for Dispatcher {
             rules
                 .iter()
                 .map(|rule| {
-                    let table_part = rule[TABLE_SUFFIX]
+                    let table_part = rule[TABLE_SUFFIX_KEY]
                         .as_str()
                         .map(|s| s.to_string())
                         .context(TableSuffixRequiredForDispatcherRuleSnafu)?;

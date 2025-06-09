@@ -10,7 +10,7 @@ GREPTIMEDB_IMAGE_TAG=${GREPTIMEDB_IMAGE_TAG:-latest}
 ETCD_CHART="oci://registry-1.docker.io/bitnamicharts/etcd"
 GREPTIME_CHART="https://greptimeteam.github.io/helm-charts/"
 
-# Ceate a cluster with 1 control-plane node and 5 workers.
+# Create a cluster with 1 control-plane node and 5 workers.
 function create_kind_cluster() {
   cat <<EOF | kind create cluster --name "${CLUSTER}" --image kindest/node:"$KUBERNETES_VERSION" --config=-
 kind: Cluster

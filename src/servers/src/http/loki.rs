@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use ahash::{HashMap, HashMapExt};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -28,7 +29,6 @@ use bytes::Bytes;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
-use hashbrown::HashMap;
 use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
@@ -345,7 +345,7 @@ pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
 
     while !labels.is_empty() {
         // parse key
-        let first_index = labels.find("=").context(InvalidLokiLabelsSnafu {
+        let first_index = labels.find("=").with_context(|| InvalidLokiLabelsSnafu {
             msg: format!("missing `=` near: {}", labels),
         })?;
         let key = &labels[..first_index];

@@ -20,7 +20,7 @@ use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::RegionIdent;
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -40,13 +40,23 @@ pub struct CloseDowngradedRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for CloseDowngradedRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         if let Err(err) = self.close_downgraded_leader_region(ctx).await {
             let downgrade_leader_datanode = &ctx.persistent_ctx.from_peer;
             let region_id = ctx.region_id();
             warn!(err; "Failed to close downgraded leader region: {region_id} on datanode {:?}", downgrade_leader_datanode);
         }
-
+        info!(
+            "Region migration is finished: region_id: {}, from_peer: {}, to_peer: {}, {}",
+            ctx.region_id(),
+            ctx.persistent_ctx.from_peer,
+            ctx.persistent_ctx.to_peer,
+            ctx.volatile_ctx.metrics,
+        );
         Ok((Box::new(RegionMigrationEnd), Status::done()))
     }
 
@@ -103,7 +113,7 @@ impl CloseDowngradedRegion {
             .send(&ch, msg, CLOSE_DOWNGRADED_REGION_TIMEOUT)
             .await?;
 
-        match receiver.await? {
+        match receiver.await {
             Ok(msg) => {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 info!(

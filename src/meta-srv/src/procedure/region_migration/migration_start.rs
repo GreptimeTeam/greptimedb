@@ -16,7 +16,8 @@ use std::any::Any;
 
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_procedure::Status;
+use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -48,15 +49,27 @@ impl State for RegionMigrationStart {
     /// If the candidate region has been opened on `to_peer`, go to the [UpdateMetadata::Downgrade] state.
     ///
     /// Otherwise go to the [OpenCandidateRegion] state.
-    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
         let region_id = ctx.persistent_ctx.region_id;
         let region_route = self.retrieve_region_route(ctx, region_id).await?;
         let to_peer = &ctx.persistent_ctx.to_peer;
         let from_peer = &ctx.persistent_ctx.from_peer;
 
         if self.has_migrated(&region_route, to_peer)? {
+            info!(
+                "Region has been migrated, region: {:?}, to_peer: {:?}",
+                region_route.region.id, to_peer
+            );
             Ok((Box::new(RegionMigrationEnd), Status::done()))
         } else if self.invalid_leader_peer(&region_route, from_peer)? {
+            info!(
+                "Abort region migration, region:{:?}, unexpected leader peer: {:?}, expected: {:?}",
+                region_route.region.id, region_route.leader_peer, from_peer,
+            );
             Ok((
                 Box::new(RegionMigrationAbort::new(&format!(
                     "Invalid region leader peer: {from_peer:?}, expected: {:?}",
@@ -148,7 +161,7 @@ impl RegionMigrationStart {
     fn has_migrated(&self, region_route: &RegionRoute, to_peer: &Peer) -> Result<bool> {
         let region_id = region_route.region.id;
 
-        let region_opened = region_route
+        let region_migrated = region_route
             .leader_peer
             .as_ref()
             .context(error::UnexpectedSnafu {
@@ -156,8 +169,7 @@ impl RegionMigrationStart {
             })?
             .id
             == to_peer.id;
-
-        Ok(region_opened)
+        Ok(region_migrated)
     }
 }
 
@@ -172,7 +184,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::test_util::{self, new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -248,8 +260,8 @@ mod tests {
 
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
-
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
 
@@ -279,8 +291,8 @@ mod tests {
 
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
-
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
     }
@@ -305,8 +317,8 @@ mod tests {
 
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
-
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
     }
@@ -330,8 +342,8 @@ mod tests {
 
         env.create_physical_table_metadata(table_info, region_routes)
             .await;
-
-        let (next, _) = state.next(&mut ctx).await.unwrap();
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
 
         let _ = next
             .as_any()

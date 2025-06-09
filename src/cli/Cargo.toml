@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-pg_kvbackend = ["common-meta/pg_kvbackend"]
-mysql_kvbackend = ["common-meta/mysql_kvbackend"]
+default = [
+    "pg_kvbackend",
+    "mysql_kvbackend",
+]
+pg_kvbackend = ["common-meta/pg_kvbackend", "meta-srv/pg_kvbackend"]
+mysql_kvbackend = ["common-meta/mysql_kvbackend", "meta-srv/mysql_kvbackend"]
 
 [lints]
 workspace = true
@@ -43,15 +47,12 @@ etcd-client.workspace = true
 futures.workspace = true
 humantime.workspace = true
 meta-client.workspace = true
+meta-srv.workspace = true
 nu-ansi-term = "0.46"
-opendal = { version = "0.51.1", features = [
-    "services-fs",
-    "services-s3",
-] }
+object-store.workspace = true
 query.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-rustyline = "10.1"
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true

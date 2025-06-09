@@ -33,7 +33,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{
-    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL,
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
 use crate::read::Source;
@@ -41,8 +41,8 @@ use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
-    SenderWriteRequest, WorkerRequest,
+    BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
+    SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
@@ -547,7 +547,11 @@ impl FlushScheduler {
     pub(crate) fn on_flush_success(
         &mut self,
         region_id: RegionId,
-    ) -> Option<(Vec<SenderDdlRequest>, Vec<SenderWriteRequest>)> {
+    ) -> Option<(
+        Vec<SenderDdlRequest>,
+        Vec<SenderWriteRequest>,
+        Vec<SenderBulkRequest>,
+    )> {
         let flush_status = self.region_status.get_mut(&region_id)?;
 
         // This region doesn't have running flush job.
@@ -557,7 +561,11 @@ impl FlushScheduler {
             // The region doesn't have any pending flush task.
             // Safety: The flush status must exist.
             let flush_status = self.region_status.remove(&region_id).unwrap();
-            Some((flush_status.pending_ddls, flush_status.pending_writes))
+            Some((
+                flush_status.pending_ddls,
+                flush_status.pending_writes,
+                flush_status.pending_bulk_writes,
+            ))
         } else {
             let version_data = flush_status.version_control.current();
             if version_data.version.memtables.is_empty() {
@@ -570,7 +578,11 @@ impl FlushScheduler {
                 // it from the status to avoid leaking pending requests.
                 // Safety: The flush status must exist.
                 let flush_status = self.region_status.remove(&region_id).unwrap();
-                Some((flush_status.pending_ddls, flush_status.pending_writes))
+                Some((
+                    flush_status.pending_ddls,
+                    flush_status.pending_writes,
+                    flush_status.pending_bulk_writes,
+                ))
             } else {
                 // We can flush the region again, keep it in the region status.
                 None
@@ -589,7 +601,7 @@ impl FlushScheduler {
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
 
-        FLUSH_ERRORS_TOTAL.inc();
+        FLUSH_FAILURE_TOTAL.inc();
 
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
@@ -657,6 +669,15 @@ impl FlushScheduler {
         status.pending_writes.push(request);
     }
 
+    /// Add bulk write request to pending queue.
+    ///
+    /// # Panics
+    /// Panics if region didn't request flush.
+    pub(crate) fn add_bulk_request_to_pending(&mut self, request: SenderBulkRequest) {
+        let status = self.region_status.get_mut(&request.region_id).unwrap();
+        status.pending_bulk_writes.push(request);
+    }
+
     /// Returns true if the region has pending DDLs.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
@@ -717,6 +738,8 @@ struct FlushStatus {
     pending_ddls: Vec<SenderDdlRequest>,
     /// Requests waiting to write after altering the region.
     pending_writes: Vec<SenderWriteRequest>,
+    /// Bulk requests waiting to write after altering the region.
+    pending_bulk_writes: Vec<SenderBulkRequest>,
 }
 
 impl FlushStatus {
@@ -728,6 +751,7 @@ impl FlushStatus {
             pending_task: None,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
+            pending_bulk_writes: Vec::new(),
         }
     }
 

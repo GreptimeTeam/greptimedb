@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use common_telemetry::{debug, warn};
 use common_wal::config::kafka::DatanodeKafkaConfig;
+use dashmap::DashMap;
 use futures::future::try_join_all;
 use futures_util::StreamExt;
 use rskafka::client::partition::OffsetAt;
@@ -32,6 +33,7 @@ use store_api::storage::RegionId;
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
+use crate::kafka::high_watermark_manager::HighWatermarkManager;
 use crate::kafka::index::{
     build_region_wal_index_iterator, GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE,
 };
@@ -40,6 +42,8 @@ use crate::kafka::util::record::{
     convert_to_kafka_records, maybe_emit_entry, remaining_entries, Record, ESTIMATED_META_SIZE,
 };
 use crate::metrics;
+
+const DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A log store backed by Kafka.
 #[derive(Debug)]
@@ -52,6 +56,18 @@ pub struct KafkaLogStore {
     consumer_wait_timeout: Duration,
     /// Ignore missing entries during read WAL.
     overwrite_entry_start_id: bool,
+    /// High watermark for all topics.
+    ///
+    /// Represents the offset of the last record in each topic. This is used to track
+    /// the latest available data in Kafka topics.
+    ///
+    /// The high watermark is updated in two ways:
+    /// - Automatically when the producer successfully commits data to Kafka
+    /// - Periodically by the [HighWatermarkManager](crate::kafka::high_watermark_manager::HighWatermarkManager).
+    ///
+    /// This shared map allows multiple components to access the latest high watermark
+    /// information without needing to query Kafka directly.
+    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
 }
 
 impl KafkaLogStore {
@@ -60,20 +76,29 @@ impl KafkaLogStore {
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
     ) -> Result<Self> {
-        let client_manager =
-            Arc::new(ClientManager::try_new(config, global_index_collector).await?);
+        let high_watermark = Arc::new(DashMap::new());
+        let client_manager = Arc::new(
+            ClientManager::try_new(config, global_index_collector, high_watermark.clone()).await?,
+        );
+        let high_watermark_manager = HighWatermarkManager::new(
+            DEFAULT_HIGH_WATERMARK_UPDATE_INTERVAL,
+            high_watermark.clone(),
+            client_manager.clone(),
+        );
+        high_watermark_manager.run().await;
 
         Ok(Self {
             client_manager,
             max_batch_bytes: config.max_batch_bytes.as_bytes() as usize,
             consumer_wait_timeout: config.consumer_wait_timeout,
             overwrite_entry_start_id: config.overwrite_entry_start_id,
+            high_watermark,
         })
     }
 }
 
 fn build_entry(
-    data: &mut Vec<u8>,
+    data: Vec<u8>,
     entry_id: EntryId,
     region_id: RegionId,
     provider: &Provider,
@@ -84,10 +109,10 @@ fn build_entry(
             provider: provider.clone(),
             region_id,
             entry_id,
-            data: std::mem::take(data),
+            data,
         })
     } else {
-        let parts = std::mem::take(data)
+        let parts = data
             .chunks(max_data_size)
             .map(|s| s.into())
             .collect::<Vec<_>>();
@@ -115,7 +140,7 @@ impl LogStore for KafkaLogStore {
     /// Creates an [Entry].
     fn entry(
         &self,
-        data: &mut Vec<u8>,
+        data: Vec<u8>,
         entry_id: EntryId,
         region_id: RegionId,
         provider: &Provider,
@@ -158,6 +183,7 @@ impl LogStore for KafkaLogStore {
             .collect::<HashSet<_>>();
         let mut region_grouped_records: HashMap<RegionId, (OrderedBatchProducerRef, Vec<_>)> =
             HashMap::with_capacity(region_ids.len());
+        let mut region_to_provider = HashMap::with_capacity(region_ids.len());
         for entry in entries {
             let provider = entry.provider().as_kafka_provider().with_context(|| {
                 error::InvalidProviderSnafu {
@@ -165,6 +191,7 @@ impl LogStore for KafkaLogStore {
                     actual: entry.provider().type_name(),
                 }
             })?;
+            region_to_provider.insert(entry.region_id(), provider.clone());
             let region_id = entry.region_id();
             match region_grouped_records.entry(region_id) {
                 std::collections::hash_map::Entry::Occupied(mut slot) => {
@@ -198,6 +225,13 @@ impl LogStore for KafkaLogStore {
                 },
             ))
             .await?;
+
+        // Updates the high watermark offset of the last record in the topic.
+        for (region_id, offset) in &region_grouped_max_offset {
+            // Safety: `region_id` is always valid.
+            let provider = region_to_provider.get(region_id).unwrap();
+            self.high_watermark.insert(provider.clone(), *offset);
+        }
 
         Ok(AppendBatchResponse {
             last_entry_ids: region_grouped_max_offset.into_iter().collect(),
@@ -383,6 +417,25 @@ impl LogStore for KafkaLogStore {
         Ok(())
     }
 
+    /// Returns the highest entry id of the specified topic in remote WAL.
+    fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+        let provider = provider
+            .as_kafka_provider()
+            .with_context(|| InvalidProviderSnafu {
+                expected: KafkaProvider::type_name(),
+                actual: provider.type_name(),
+            })?;
+
+        let high_watermark = self
+            .high_watermark
+            .get(provider)
+            .as_deref()
+            .copied()
+            .unwrap_or(0);
+
+        Ok(high_watermark)
+    }
+
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<()> {
         Ok(())
@@ -426,7 +479,7 @@ mod tests {
     fn test_build_naive_entry() {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 120);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 120);
 
         assert_eq!(
             entry.into_naive_entry().unwrap(),
@@ -443,7 +496,7 @@ mod tests {
     fn test_build_into_multiple_part_entry() {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 50);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 50);
 
         assert_eq!(
             entry.into_multiple_part_entry().unwrap(),
@@ -457,7 +510,7 @@ mod tests {
         );
 
         let region_id = RegionId::new(1, 1);
-        let entry = build_entry(&mut vec![1; 100], 1, region_id, &provider, 21);
+        let entry = build_entry(vec![1; 100], 1, region_id, &provider, 21);
 
         assert_eq!(
             entry.into_multiple_part_entry().unwrap(),
@@ -492,11 +545,19 @@ mod tests {
     ) -> Vec<Entry> {
         (0..num_entries)
             .map(|_| {
-                let mut data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
+                let data: Vec<u8> = (0..data_len).map(|_| rand::random::<u8>()).collect();
                 // Always set `entry_id` to 0, the real entry_id will be set during the read.
-                logstore.entry(&mut data, 0, region_id, provider).unwrap()
+                logstore.entry(data, 0, region_id, provider).unwrap()
             })
             .collect()
+    }
+
+    async fn prepare_topic(logstore: &KafkaLogStore, topic_name: &str) {
+        let controller_client = logstore.client_manager.controller_client();
+        controller_client
+            .create_topic(topic_name.to_string(), 1, 1, 5000)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -520,7 +581,9 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
+
         let region_entries = (0..5)
             .map(|i| {
                 let region_id = RegionId::new(1, i);
@@ -567,6 +630,8 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
+        let high_wathermark = logstore.high_watermark(&provider).unwrap();
+        assert_eq!(high_wathermark, 99);
     }
 
     #[tokio::test]
@@ -592,6 +657,7 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
+        prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
         let region_entries = (0..5)
             .map(|i| {
@@ -640,5 +706,7 @@ mod tests {
                 .for_each(|entry| entry.set_entry_id(0));
             assert_eq!(expected_entries, actual_entries);
         }
+        let high_wathermark = logstore.high_watermark(&provider).unwrap();
+        assert_eq!(high_wathermark, (data_size_kb as u64 / 8 + 1) * 20 * 5 - 1);
     }
 }

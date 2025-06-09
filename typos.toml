@@ -6,6 +6,7 @@ ot = "ot"
 typ = "typ"
 typs = "typs"
 unqualifed = "unqualifed"
+excluder = "excluder"
 
 [files]
 extend-exclude = [

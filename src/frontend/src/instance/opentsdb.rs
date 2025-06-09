@@ -52,8 +52,9 @@ impl OpentsdbProtocolHandler for Instance {
             None
         };
 
+        // OpenTSDB is single value.
         let output = self
-            .handle_row_inserts(requests, ctx)
+            .handle_row_inserts(requests, ctx, true, true)
             .await
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)?;

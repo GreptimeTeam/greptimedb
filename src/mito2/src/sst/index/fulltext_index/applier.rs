@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter;
 use std::ops::Range;
 use std::sync::Arc;
@@ -34,6 +34,7 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::bloom_filter_index::{
     BloomFilterIndexCacheRef, CachedBloomFilterIndexBlobReader, Tag,
 };
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyBloomFilterIndexSnafu, ApplyFulltextIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu,
     PuffinReadBlobSnafu, Result,
@@ -52,13 +53,16 @@ pub mod builder;
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
-    requests: HashMap<ColumnId, FulltextRequest>,
+    requests: Arc<BTreeMap<ColumnId, FulltextRequest>>,
 
     /// The source of the index.
     index_source: IndexSource,
 
     /// Cache for bloom filter index.
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
+
+    /// Predicate key. Used to identify the predicate and fetch result from cache.
+    predicate_key: PredicateKey,
 }
 
 pub type FulltextIndexApplierRef = Arc<FulltextIndexApplier>;
@@ -69,12 +73,14 @@ impl FulltextIndexApplier {
         region_dir: String,
         region_id: RegionId,
         store: ObjectStore,
-        requests: HashMap<ColumnId, FulltextRequest>,
+        requests: BTreeMap<ColumnId, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
+        let requests = Arc::new(requests);
         let index_source = IndexSource::new(region_dir, region_id, puffin_manager_factory, store);
 
         Self {
+            predicate_key: PredicateKey::new_fulltext(requests.clone()),
             requests,
             index_source,
             bloom_filter_index_cache: None,
@@ -105,6 +111,11 @@ impl FulltextIndexApplier {
         self.bloom_filter_index_cache = bloom_filter_index_cache;
         self
     }
+
+    /// Returns the predicate key.
+    pub fn predicate_key(&self) -> &PredicateKey {
+        &self.predicate_key
+    }
 }
 
 impl FulltextIndexApplier {
@@ -120,7 +131,7 @@ impl FulltextIndexApplier {
             .start_timer();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
-        for (column_id, request) in &self.requests {
+        for (column_id, request) in self.requests.iter() {
             if request.queries.is_empty() && request.terms.is_empty() {
                 continue;
             }
@@ -233,7 +244,7 @@ impl FulltextIndexApplier {
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
 
-        for (column_id, request) in &self.requests {
+        for (column_id, request) in self.requests.iter() {
             if request.terms.is_empty() {
                 // only apply terms
                 continue;

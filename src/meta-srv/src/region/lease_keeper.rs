@@ -38,7 +38,7 @@ pub struct RegionLeaseKeeper {
 /// The result of region lease renewal,
 /// contains the renewed region leases and [RegionId] of non-existing regions.
 pub struct RenewRegionLeasesResponse {
-    pub renewed: HashMap<RegionId, RegionRole>,
+    pub renewed: HashMap<RegionId, RegionLeaseInfo>,
     pub non_exists: HashSet<RegionId>,
 }
 
@@ -89,6 +89,39 @@ fn renew_region_lease_via_region_route(
     None
 }
 
+/// The information of region lease.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RegionLeaseInfo {
+    pub region_id: RegionId,
+    /// Whether the region is operating.
+    ///
+    /// The region is under dropping or opening / migration operation.
+    pub is_operating: bool,
+    /// The role of region.
+    pub role: RegionRole,
+}
+
+impl RegionLeaseInfo {
+    /// Creates a new [RegionLeaseInfo] with the given region id and role with operating status.
+    pub fn operating(region_id: RegionId, role: RegionRole) -> Self {
+        Self {
+            region_id,
+            is_operating: true,
+            role,
+        }
+    }
+}
+
+impl From<(RegionId, RegionRole)> for RegionLeaseInfo {
+    fn from((region_id, role): (RegionId, RegionRole)) -> Self {
+        Self {
+            region_id,
+            is_operating: false,
+            role,
+        }
+    }
+}
+
 impl RegionLeaseKeeper {
     async fn collect_table_metadata(
         &self,
@@ -123,20 +156,28 @@ impl RegionLeaseKeeper {
         datanode_id: DatanodeId,
         region_id: RegionId,
         role: RegionRole,
-    ) -> Option<(RegionId, RegionRole)> {
+    ) -> Option<RegionLeaseInfo> {
         if operating_regions.contains(&region_id) {
-            return Some((region_id, role));
+            let region_lease_info = RegionLeaseInfo::operating(region_id, role);
+            return Some(region_lease_info);
         }
 
         if let Some(table_route) = table_metadata.get(&region_id.table_id()) {
             if let Ok(Some(region_route)) = table_route.region_route(region_id) {
-                return renew_region_lease_via_region_route(&region_route, datanode_id, region_id);
+                return renew_region_lease_via_region_route(&region_route, datanode_id, region_id)
+                    .map(RegionLeaseInfo::from);
+            } else {
+                warn!(
+                    "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, region route is not found in table({})",
+                    region_id.table_id()
+                );
             }
+        } else {
+            warn!(
+                "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, table({}) is not found",
+                region_id.table_id()
+            );
         }
-        warn!(
-            "Denied to renew region lease for datanode: {datanode_id}, region_id: {region_id}, table({}) is not found",
-            region_id.table_id()
-        );
         None
     }
 
@@ -152,6 +193,8 @@ impl RegionLeaseKeeper {
         let table_ids = region_ids
             .into_iter()
             .map(|region_id| region_id.table_id())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let table_metadata = self.collect_table_metadata(&table_ids).await?;
         Ok((table_metadata, operating_regions))
@@ -187,8 +230,8 @@ impl RegionLeaseKeeper {
                 region,
                 role,
             ) {
-                Some((region, renewed_role)) => {
-                    renewed.insert(region, renewed_role);
+                Some(region_lease_info) => {
+                    renewed.insert(region_lease_info.region_id, region_lease_info);
                 }
                 None => {
                     non_exists.insert(region);
@@ -225,7 +268,7 @@ mod tests {
     use table::metadata::RawTableInfo;
 
     use super::{renew_region_lease_via_region_route, RegionLeaseKeeper};
-    use crate::region::lease_keeper::RenewRegionLeasesResponse;
+    use crate::region::lease_keeper::{RegionLeaseInfo, RenewRegionLeasesResponse};
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
@@ -400,7 +443,13 @@ mod tests {
                 .unwrap();
 
             assert!(non_exists.is_empty());
-            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Leader)]));
+            assert_eq!(
+                renewed,
+                HashMap::from([(
+                    region_id,
+                    RegionLeaseInfo::from((region_id, RegionRole::Leader))
+                )])
+            );
         }
 
         // The follower region on the datanode.
@@ -414,7 +463,13 @@ mod tests {
                 .unwrap();
 
             assert!(non_exists.is_empty());
-            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Follower)]));
+            assert_eq!(
+                renewed,
+                HashMap::from([(
+                    region_id,
+                    RegionLeaseInfo::from((region_id, RegionRole::Follower))
+                )])
+            );
         }
 
         let opening_region_id = RegionId::new(2048, 1);
@@ -435,7 +490,13 @@ mod tests {
                 .unwrap();
 
             assert!(non_exists.is_empty());
-            assert_eq!(renewed, HashMap::from([(opening_region_id, role)]));
+            assert_eq!(
+                renewed,
+                HashMap::from([(
+                    opening_region_id,
+                    RegionLeaseInfo::operating(opening_region_id, role)
+                )])
+            );
         }
     }
 
@@ -515,7 +576,13 @@ mod tests {
                 .unwrap();
 
             assert!(non_exists.is_empty());
-            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Follower)]));
+            assert_eq!(
+                renewed,
+                HashMap::from([(
+                    region_id,
+                    RegionLeaseInfo::from((region_id, RegionRole::Follower))
+                )])
+            );
         }
     }
 }

@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,6 +47,7 @@ use crate::read::compat::{self, CompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
+use crate::read::series_scan::SeriesScan;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -66,6 +68,8 @@ pub(crate) enum Scanner {
     Seq(SeqScan),
     /// Unordered scan.
     Unordered(UnorderedScan),
+    /// Per-series scan.
+    Series(SeriesScan),
 }
 
 impl Scanner {
@@ -75,6 +79,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
+            Scanner::Series(series_scan) => series_scan.build_stream().await,
         }
     }
 }
@@ -86,6 +91,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_files(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_files(),
+            Scanner::Series(series_scan) => series_scan.input().num_files(),
         }
     }
 
@@ -94,6 +100,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().num_memtables(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().num_memtables(),
+            Scanner::Series(series_scan) => series_scan.input().num_memtables(),
         }
     }
 
@@ -102,6 +109,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+            Scanner::Series(series_scan) => series_scan.input().file_ids(),
         }
     }
 
@@ -113,6 +121,7 @@ impl Scanner {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
             Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
+            Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
         }
     }
 }
@@ -248,7 +257,9 @@ impl ScanRegion {
 
     /// Returns a [Scanner] to scan the region.
     pub(crate) fn scanner(self) -> Result<Scanner> {
-        if self.use_unordered_scan() {
+        if self.use_series_scan() {
+            self.series_scan().map(Scanner::Series)
+        } else if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
             self.unordered_scan().map(Scanner::Unordered)
@@ -260,7 +271,9 @@ impl ScanRegion {
     /// Returns a [RegionScanner] to scan the region.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
     pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
-        if self.use_unordered_scan() {
+        if self.use_series_scan() {
+            self.series_scan().map(|scanner| Box::new(scanner) as _)
+        } else if self.use_unordered_scan() {
             self.unordered_scan().map(|scanner| Box::new(scanner) as _)
         } else {
             self.seq_scan().map(|scanner| Box::new(scanner) as _)
@@ -277,6 +290,12 @@ impl ScanRegion {
     pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
         let input = self.scan_input(true)?;
         Ok(UnorderedScan::new(input))
+    }
+
+    /// Scans by series.
+    pub(crate) fn series_scan(self) -> Result<SeriesScan> {
+        let input = self.scan_input(true)?;
+        Ok(SeriesScan::new(input))
     }
 
     #[cfg(test)]
@@ -299,16 +318,33 @@ impl ScanRegion {
                 || self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed))
     }
 
+    /// Returns true if the region can use series scan for current request.
+    fn use_series_scan(&self) -> bool {
+        self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+    }
+
     /// Creates a scan input.
     fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
+        let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
         for level in ssts.levels() {
             for file in level.files.values() {
+                let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
+                    (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                    // If the file's sequence is None (or actually is zero), it could mean the file
+                    // is generated and added to the region "directly". In this case, its data should
+                    // be considered as fresh as the memtable. So its sequence is treated greater than
+                    // the min_sequence, whatever the value of min_sequence is. Hence the default
+                    // "true" in this arm.
+                    (Some(_), None) => true,
+                    (None, _) => true,
+                };
+
                 // Finds SST files in range.
-                if file_in_range(file, &time_range) {
+                if exceed_min_sequence && file_in_range(file, &time_range) {
                     files.push(file.clone());
                 }
                 // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
@@ -322,13 +358,10 @@ impl ScanRegion {
         let memtables: Vec<_> = memtables
             .into_iter()
             .filter(|mem| {
-                if mem.is_empty() {
+                // check if memtable is empty by reading stats.
+                let Some((start, end)) = mem.stats().time_range() else {
                     return false;
-                }
-                let stats = mem.stats();
-                // Safety: the memtable is not empty.
-                let (start, end) = stats.time_range().unwrap();
-
+                };
                 // The time range of the memtable is inclusive.
                 let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
                 memtable_range.intersects(&time_range)
@@ -361,14 +394,14 @@ impl ScanRegion {
         let memtables = memtables
             .into_iter()
             .map(|mem| {
-                let ranges = mem.ranges(
+                mem.ranges(
                     Some(mapper.column_ids()),
                     predicate.clone(),
                     self.request.sequence,
-                );
-                MemRangeBuilder::new(ranges)
+                )
+                .map(MemRangeBuilder::new)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
@@ -777,7 +810,7 @@ impl ScanInput {
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .build_reader_input(reader_metrics)
             .await;
-        let (mut file_range_ctx, row_groups) = match res {
+        let (mut file_range_ctx, selection) = match res {
             Ok(x) => x,
             Err(e) => {
                 if e.is_object_not_found() && self.ignore_file_not_found {
@@ -800,7 +833,7 @@ impl ScanInput {
             )?;
             file_range_ctx.set_compat_batch(Some(compat));
         }
-        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), row_groups))
+        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
     }
 
     /// Scans the input source in another task and sends batches to the sender.

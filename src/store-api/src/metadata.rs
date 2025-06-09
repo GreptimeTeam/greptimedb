@@ -27,8 +27,10 @@ use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
+use datatypes::types::TimestampType;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
@@ -240,6 +242,19 @@ impl RegionMetadata {
         &self.column_metadatas[index]
     }
 
+    /// Returns timestamp type of time index column
+    ///
+    /// # Panics
+    /// Panics if the time index column id is invalid.
+    pub fn time_index_type(&self) -> TimestampType {
+        let index = self.id_to_index[&self.time_index];
+        self.column_metadatas[index]
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .unwrap()
+    }
+
     /// Returns the position of the time index.
     pub fn time_index_column_pos(&self) -> usize {
         self.id_to_index[&self.time_index]
@@ -289,7 +304,7 @@ impl RegionMetadata {
     pub fn project(&self, projection: &[ColumnId]) -> Result<RegionMetadata> {
         // check time index
         ensure!(
-            projection.iter().any(|id| *id == self.time_index),
+            projection.contains(&self.time_index),
             TimeIndexNotFoundSnafu
         );
 
@@ -566,7 +581,7 @@ impl RegionMetadataBuilder {
         match kind {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
-            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns),
+            AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
             AlterKind::SetIndex { options } => match options {
                 ApiSetIndexOptions::Fulltext {
                     column_name,
@@ -680,7 +695,7 @@ impl RegionMetadataBuilder {
     }
 
     /// Changes columns type to the metadata if exist.
-    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) {
+    fn modify_column_types(&mut self, columns: Vec<ModifyColumnType>) -> Result<()> {
         let mut change_type_map: HashMap<_, _> = columns
             .into_iter()
             .map(
@@ -693,9 +708,34 @@ impl RegionMetadataBuilder {
 
         for column_meta in self.column_metadatas.iter_mut() {
             if let Some(target_type) = change_type_map.remove(&column_meta.column_schema.name) {
-                column_meta.column_schema.data_type = target_type;
+                column_meta.column_schema.data_type = target_type.clone();
+                // also cast default value to target_type if default value exist
+                let new_default =
+                    if let Some(default_value) = column_meta.column_schema.default_constraint() {
+                        Some(
+                            default_value
+                                .cast_to_datatype(&target_type)
+                                .with_context(|_| CastDefaultValueSnafu {
+                                    reason: format!(
+                                        "Failed to cast default value from {:?} to type {:?}",
+                                        default_value, target_type
+                                    ),
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                column_meta.column_schema = column_meta
+                    .column_schema
+                    .clone()
+                    .with_default_constraint(new_default.clone())
+                    .with_context(|_| CastDefaultValueSnafu {
+                        reason: format!("Failed to set new default: {:?}", new_default),
+                    })?;
             }
         }
+
+        Ok(())
     }
 
     fn change_column_inverted_index_options(
@@ -957,6 +997,36 @@ pub enum MetadataError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to decode arrow ipc record batches"))]
+    DecodeArrowIpc {
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast default value, reason: {}", reason))]
+    CastDefaultValue {
+        reason: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected: {}", reason))]
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to encode/decode flight message"))]
+    FlightCodec {
+        source: common_grpc::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {
@@ -969,6 +1039,14 @@ impl ErrorExt for MetadataError {
     }
 }
 
+/// Set column fulltext options if it passed the validation.
+///
+/// Options allowed to modify:
+/// * backend
+///
+/// Options not allowed to modify:
+/// * analyzer
+/// * case_sensitive
 fn set_column_fulltext_options(
     column_meta: &mut ColumnMetadata,
     column_name: String,
@@ -976,14 +1054,6 @@ fn set_column_fulltext_options(
     current_options: Option<FulltextOptions>,
 ) -> Result<()> {
     if let Some(current_options) = current_options {
-        ensure!(
-            !current_options.enable,
-            InvalidColumnOptionSnafu {
-                column_name,
-                msg: "FULLTEXT index already enabled".to_string(),
-            }
-        );
-
         ensure!(
             current_options.analyzer == options.analyzer
                 && current_options.case_sensitive == options.case_sensitive,

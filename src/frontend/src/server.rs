@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use common_config::{Configurable, Mode};
+use common_config::Configurable;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
@@ -27,6 +27,7 @@ use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::otel_arrow::OtelArrowServiceHandler;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
@@ -101,8 +102,9 @@ where
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
+                    Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
-                    opts.http.is_strict_mode,
+                    opts.http.prom_validation_mode,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
@@ -142,15 +144,10 @@ where
         let user_provider = self.plugins.get::<UserProviderRef>();
 
         // Determine whether it is Standalone or Distributed mode based on whether the meta client is configured.
-        let mode = if opts.meta_client.is_none() {
-            Mode::Standalone
+        let runtime = if opts.meta_client.is_none() {
+            Some(builder.runtime().clone())
         } else {
-            Mode::Distributed
-        };
-
-        let runtime = match mode {
-            Mode::Standalone => Some(builder.runtime().clone()),
-            _ => None,
+            None
         };
 
         let greptime_request_handler = GreptimeRequestHandler::new(
@@ -162,6 +159,7 @@ where
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
+            .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler))
             .build();
         Ok(grpc_server)
@@ -182,7 +180,7 @@ where
         Ok(http_server)
     }
 
-    pub async fn build(mut self) -> Result<ServerHandlers> {
+    pub fn build(mut self) -> Result<ServerHandlers> {
         let opts = self.opts.clone();
         let instance = self.instance.clone();
 
@@ -197,7 +195,7 @@ where
             // Always init GRPC server
             let grpc_addr = parse_addr(&opts.grpc.bind_addr)?;
             let grpc_server = self.build_grpc_server(&opts)?;
-            handlers.insert((Box::new(grpc_server), grpc_addr)).await;
+            handlers.insert((Box::new(grpc_server), grpc_addr));
         }
 
         {
@@ -205,7 +203,7 @@ where
             let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
             let http_server = self.build_http_server(&opts, toml)?;
-            handlers.insert((Box::new(http_server), http_addr)).await;
+            handlers.insert((Box::new(http_server), http_addr));
         }
 
         if opts.mysql.enable {
@@ -233,7 +231,7 @@ where
                     opts.reject_no_database.unwrap_or(false),
                 )),
             );
-            handlers.insert((mysql_server, mysql_addr)).await;
+            handlers.insert((mysql_server, mysql_addr));
         }
 
         if opts.postgres.enable {
@@ -256,7 +254,7 @@ where
                 user_provider.clone(),
             )) as Box<dyn Server>;
 
-            handlers.insert((pg_server, pg_addr)).await;
+            handlers.insert((pg_server, pg_addr));
         }
 
         Ok(handlers)

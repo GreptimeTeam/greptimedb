@@ -34,11 +34,11 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
-use datafusion::common::DataFusionError;
+use datafusion::common::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::{ScalarUDF, Volatility};
 use datafusion::physical_plan::ColumnarValue;
 use datafusion_expr::create_udf;
-use datatypes::arrow::array::Array;
+use datatypes::arrow::array::{Array, Int64Array};
 use datatypes::arrow::datatypes::DataType;
 
 use crate::extension_plan::Millisecond;
@@ -53,7 +53,7 @@ pub type Increase = ExtrapolatedRate<true, false>;
 /// from <https://github.com/prometheus/prometheus/blob/v0.40.1/promql/functions.go#L66>
 #[derive(Debug)]
 pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
-    /// Range duration in millisecond
+    /// Range length in milliseconds.
     range_length: i64,
 }
 
@@ -63,7 +63,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         Self { range_length }
     }
 
-    fn scalar_udf_with_name(name: &str, range_length: i64) -> ScalarUDF {
+    fn scalar_udf_with_name(name: &str) -> ScalarUDF {
         let input_types = vec![
             // timestamp range vector
             RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
@@ -71,6 +71,8 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             RangeArray::convert_data_type(DataType::Float64),
             // timestamp vector
             DataType::Timestamp(TimeUnit::Millisecond, None),
+            // range length
+            DataType::Int64,
         ];
 
         create_udf(
@@ -78,12 +80,34 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             input_types,
             DataType::Float64,
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::new(range_length).calc(input)) as _,
+            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
         )
     }
 
-    fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
-        assert_eq!(input.len(), 3);
+    fn create_function(inputs: &[ColumnarValue]) -> DfResult<Self> {
+        if inputs.len() != 4 {
+            return Err(DataFusionError::Plan(
+                "ExtrapolatedRate function should have 4 inputs".to_string(),
+            ));
+        }
+
+        let range_length_array = extract_array(&inputs[3])?;
+        let range_length = range_length_array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0) as i64;
+
+        Ok(Self::new(range_length))
+    }
+
+    /// Input parameters:
+    /// * 0: timestamp range vector
+    /// * 1: value range vector
+    /// * 2: timestamp vector
+    /// * 3: range length. Range duration in millisecond. Not used here
+    fn calc(&self, input: &[ColumnarValue]) -> DfResult<ColumnarValue> {
+        assert_eq!(input.len(), 4);
 
         // construct matrix from input
         let ts_array = extract_array(&input[0])?;
@@ -98,20 +122,26 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
+
+        let all_timestamps = ts_range
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values();
+        let all_values = value_range
+            .values()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .values();
         for index in 0..ts_range.len() {
-            let timestamps = ts_range.get(index).unwrap();
-            let timestamps = timestamps
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .values();
+            // Safety: we are inside `ts_range`'s iterator which guarantees the index is valid.
+            let (offset, length) = ts_range.get_offset_length(index).unwrap();
+
+            let timestamps = &all_timestamps[offset..offset + length];
             let end_ts = ts.value(index);
-            let values = value_range.get(index).unwrap();
-            let values = values
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values();
+            let values = &all_values[offset..offset + length];
 
             if values.len() < 2 {
                 result_array.push(None);
@@ -204,34 +234,34 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
 // delta
 impl ExtrapolatedRate<false, false> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_delta"
     }
 
-    pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        Self::scalar_udf_with_name(Self::name(), range_length)
+    pub fn scalar_udf() -> ScalarUDF {
+        Self::scalar_udf_with_name(Self::name())
     }
 }
 
 // rate
 impl ExtrapolatedRate<true, true> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_rate"
     }
 
-    pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        Self::scalar_udf_with_name(Self::name(), range_length)
+    pub fn scalar_udf() -> ScalarUDF {
+        Self::scalar_udf_with_name(Self::name())
     }
 }
 
 // increase
 impl ExtrapolatedRate<true, false> {
-    pub fn name() -> &'static str {
+    pub const fn name() -> &'static str {
         "prom_increase"
     }
 
-    pub fn scalar_udf(range_length: i64) -> ScalarUDF {
-        Self::scalar_udf_with_name(Self::name(), range_length)
+    pub fn scalar_udf() -> ScalarUDF {
+        Self::scalar_udf_with_name(Self::name())
     }
 }
 
@@ -271,6 +301,7 @@ mod test {
             ColumnarValue::Array(Arc::new(ts_range.into_dict())),
             ColumnarValue::Array(Arc::new(value_range.into_dict())),
             ColumnarValue::Array(timestamps),
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![5]))),
         ];
         let output = extract_array(
             &ExtrapolatedRate::<IS_COUNTER, IS_RATE>::new(5)

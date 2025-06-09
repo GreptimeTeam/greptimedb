@@ -8,6 +8,7 @@ license.workspace = true
 testing = []
 pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
+enterprise = []
 
 [lints]
 workspace = true
@@ -34,6 +35,7 @@ common-recordbatch.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+common-workload.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
@@ -41,6 +43,7 @@ deadpool = { workspace = true, optional = true }
 deadpool-postgres = { workspace = true, optional = true }
 derive_builder.workspace = true
 etcd-client.workspace = true
+flexbuffers = "25.2"
 futures.workspace = true
 futures-util.workspace = true
 hex.workspace = true
@@ -48,6 +51,7 @@ humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 moka.workspace = true
+object-store.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
@@ -70,6 +74,7 @@ typetag.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
 hyper = { version = "0.14", features = ["full"] }

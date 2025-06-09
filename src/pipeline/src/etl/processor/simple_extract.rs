@@ -18,7 +18,7 @@ use crate::error::{Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Resu
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
-    IGNORE_MISSING_NAME, SIMPLE_EXTRACT_KEY_NAME,
+    IGNORE_MISSING_NAME, KEY_NAME,
 };
 use crate::{PipelineMap, Processor, Value};
 
@@ -55,8 +55,8 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SimpleExtractProcessor {
                 IGNORE_MISSING_NAME => {
                     ignore_missing = yaml_bool(v, IGNORE_MISSING_NAME)?;
                 }
-                SIMPLE_EXTRACT_KEY_NAME => {
-                    let key_str = yaml_string(v, SIMPLE_EXTRACT_KEY_NAME)?;
+                KEY_NAME => {
+                    let key_str = yaml_string(v, KEY_NAME)?;
                     keys.extend(key_str.split(".").map(|s| s.to_string()));
                 }
                 _ => {}
@@ -98,7 +98,7 @@ impl Processor for SimpleExtractProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
+    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -118,7 +118,7 @@ impl Processor for SimpleExtractProcessor {
                 }
             }
         }
-        Ok(())
+        Ok(val)
     }
 }
 
@@ -126,7 +126,7 @@ impl Processor for SimpleExtractProcessor {
 mod test {
 
     #[test]
-    fn test_json_path() {
+    fn test_simple_extract() {
         use super::*;
         use crate::{Map, Value};
 

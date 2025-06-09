@@ -90,8 +90,8 @@ macro_rules! grpc_tests {
 }
 
 pub async fn test_invalid_dbname(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_invalid_dbname").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname("tom", grpc_client);
@@ -115,12 +115,11 @@ pub async fn test_invalid_dbname(store_type: StorageType) {
     assert!(result.is_err());
 
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_dbname(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_dbname").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -129,7 +128,6 @@ pub async fn test_dbname(store_type: StorageType) {
     );
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_message_size_ok(store_type: StorageType) {
@@ -138,8 +136,9 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let (_db, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "test_grpc_message_size_ok", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -148,7 +147,6 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     );
     db.sql("show tables;").await.unwrap();
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_zstd_compression(store_type: StorageType) {
@@ -158,8 +156,9 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let (_db, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "test_grpc_zstd_compression", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -168,7 +167,6 @@ pub async fn test_grpc_zstd_compression(store_type: StorageType) {
     );
     db.sql("show tables;").await.unwrap();
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
@@ -177,8 +175,14 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
         max_send_message_size: 50,
         ..Default::default()
     };
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_message_size_limit_send",
+        None,
+        Some(config),
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -188,7 +192,6 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     let err_msg = db.sql("show tables;").await.unwrap_err().to_string();
     assert!(err_msg.contains("message length too large"), "{}", err_msg);
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
@@ -197,8 +200,14 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_message_size_limit_recv",
+        None,
+        Some(config),
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new_with_dbname(
@@ -212,7 +221,6 @@ pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
         err_msg
     );
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_auth(store_type: StorageType) {
@@ -220,9 +228,10 @@ pub async fn test_grpc_auth(store_type: StorageType) {
         &"static_user_provider:cmd:greptime_user=greptime_pwd".to_string(),
     )
     .unwrap();
-    let (addr, mut guard, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with_user_provider(store_type, "auto_create_table", Some(user_provider))
             .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let mut db = Database::new_with_dbname(
@@ -265,29 +274,27 @@ pub async fn test_grpc_auth(store_type: StorageType) {
     assert!(re.is_ok());
 
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_auto_create_table").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_auto_create_table_with_hints(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table_with_hints").await;
+    let (_db, fe_grpc_server) =
+        setup_grpc_server(store_type, "test_auto_create_table_with_hints").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
     insert_with_hints_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 fn expect_data() -> (Column, Column, Column, Column) {
@@ -348,8 +355,8 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 pub async fn test_insert_and_select(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "insert_and_select").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_insert_and_select").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, grpc_client);
@@ -388,7 +395,6 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     insert_and_assert(&db).await;
 
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 async fn insert_with_hints_and_assert(db: &Database) {
@@ -514,7 +520,7 @@ async fn insert_and_assert(db: &Database) {
 
     // select
     let output = db
-        .sql("SELECT host, cpu, memory, ts FROM demo")
+        .sql("SELECT host, cpu, memory, ts FROM demo order by host")
         .await
         .unwrap();
 
@@ -591,21 +597,22 @@ fn testing_create_expr() -> CreateTableExpr {
 }
 
 pub async fn test_health_check(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server) =
-        setup_grpc_server(store_type, "auto_create_table").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_health_check").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     grpc_client.health_check().await.unwrap();
 
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_prom_gateway_query(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
     // prepare connection
-    let (addr, mut guard, fe_grpc_server) = setup_grpc_server(store_type, "prom_gateway").await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_prom_gateway_query").await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new(
         DEFAULT_CATALOG_NAME,
@@ -652,38 +659,45 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .body;
     let instant_query_result =
         serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
-    let expected = PrometheusJsonResponse {
-        status: "success".to_string(),
-        data: PrometheusResponse::PromData(PromData {
-            result_type: "vector".to_string(),
-            result: PromQueryResult::Vector(vec![
-                PromSeriesVector {
-                    metric: [
-                        ("k".to_string(), "a".to_string()),
-                        ("__name__".to_string(), "test".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    value: Some((5.0, "2".to_string())),
-                },
-                PromSeriesVector {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "b".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    value: Some((5.0, "1".to_string())),
-                },
-            ]),
-        }),
-        error: None,
-        error_type: None,
-        warnings: None,
-        resp_metrics: Default::default(),
-        status_code: None,
+    assert_eq!(&instant_query_result.status, "success");
+    assert!(instant_query_result.error.is_none());
+    assert!(instant_query_result.error_type.is_none());
+    assert!(instant_query_result.warnings.is_none());
+    assert!(instant_query_result.resp_metrics.is_empty());
+    assert!(instant_query_result.status_code.is_none());
+    let PrometheusResponse::PromData(data) = instant_query_result.data else {
+        panic!("unexpected result data type")
     };
-    assert_eq!(instant_query_result, expected);
+    assert_eq!(&data.result_type, "vector");
+    let PromQueryResult::Vector(mut vector) = data.result else {
+        panic!("unexpected result type")
+    };
+
+    vector.sort_unstable_by_key(|v| v.value.as_ref().map(|f| f.1.clone()));
+
+    assert_eq!(
+        vector,
+        vec![
+            PromSeriesVector {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "b".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                value: Some((5.0, "1".to_string())),
+            },
+            PromSeriesVector {
+                metric: [
+                    ("k".to_string(), "a".to_string()),
+                    ("__name__".to_string(), "test".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                value: Some((5.0, "2".to_string())),
+            },
+        ]
+    );
 
     // Range query using prometheus gateway service
     let range_query = PromRangeQuery {
@@ -704,38 +718,46 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         .into_inner()
         .body;
     let range_query_result = serde_json::from_slice::<PrometheusJsonResponse>(&json_bytes).unwrap();
-    let expected = PrometheusJsonResponse {
-        status: "success".to_string(),
-        data: PrometheusResponse::PromData(PromData {
-            result_type: "matrix".to_string(),
-            result: PromQueryResult::Matrix(vec![
-                PromSeriesMatrix {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "a".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
-                },
-                PromSeriesMatrix {
-                    metric: [
-                        ("__name__".to_string(), "test".to_string()),
-                        ("k".to_string(), "b".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
-                },
-            ]),
-        }),
-        error: None,
-        error_type: None,
-        warnings: None,
-        resp_metrics: Default::default(),
-        status_code: None,
+
+    assert_eq!(&range_query_result.status, "success");
+    assert!(range_query_result.error.is_none());
+    assert!(range_query_result.error_type.is_none());
+    assert!(range_query_result.warnings.is_none());
+    assert!(range_query_result.resp_metrics.is_empty());
+    assert!(range_query_result.status_code.is_none());
+    let PrometheusResponse::PromData(data) = range_query_result.data else {
+        panic!("unexpected result data type")
     };
-    assert_eq!(range_query_result, expected);
+    assert_eq!(&data.result_type, "matrix");
+    let PromQueryResult::Matrix(mut mat) = data.result else {
+        panic!("unexpected result type")
+    };
+
+    mat.sort_unstable_by_key(|v| v.values[0].1.clone());
+
+    assert_eq!(
+        mat,
+        vec![
+            PromSeriesMatrix {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "b".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+            },
+            PromSeriesMatrix {
+                metric: [
+                    ("__name__".to_string(), "test".to_string()),
+                    ("k".to_string(), "a".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+            },
+        ]
+    );
 
     // query nonexistent data
     let range_query = PromRangeQuery {
@@ -772,7 +794,6 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
 
     // clean up
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 pub async fn test_grpc_timezone(store_type: StorageType) {
@@ -781,8 +802,9 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
         max_send_message_size: 1024,
         ..Default::default()
     };
-    let (addr, mut guard, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let grpc_client = Client::with_urls(vec![addr]);
     let mut db = Database::new_with_dbname(
@@ -824,7 +846,6 @@ pub async fn test_grpc_timezone(store_type: StorageType) {
 +-----------+"
     );
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }
 
 async fn to_batch(output: Output) -> String {
@@ -856,8 +877,9 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         max_send_message_size: 1024,
         tls,
     };
-    let (addr, mut guard, fe_grpc_server) =
+    let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "tls_create_table", None, Some(config)).await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
     let mut client_tls = ClientTlsOption {
         server_ca_cert_path: ca_path,
@@ -902,5 +924,4 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
     }
 
     let _ = fe_grpc_server.shutdown().await;
-    guard.remove_all().await;
 }

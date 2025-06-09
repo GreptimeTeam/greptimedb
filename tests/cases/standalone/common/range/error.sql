@@ -40,6 +40,8 @@ SELECT 1 RANGE '10s' FILL NULL FROM host ALIGN '1h' FILL NULL;
 
 SELECT min(val) RANGE '5s' FROM host;
 
+SELECT min(val) RANGE '5s' FILL PREV FROM host;
+
 -- 2.3 type mismatch
 
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';

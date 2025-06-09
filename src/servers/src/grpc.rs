@@ -32,11 +32,13 @@ use common_grpc::channel_manager::{
 };
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
+use otel_arrow_rust::opentelemetry::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
+use tonic::service::interceptor::InterceptedService;
 use tonic::service::Routes;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::ServerTlsConfig;
@@ -47,6 +49,8 @@ use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
 };
 use crate::metrics::MetricsMiddlewareLayer;
+use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::server::Server;
 use crate::tls::TlsOption;
 
@@ -138,6 +142,16 @@ pub struct GrpcServer {
     routes: Mutex<Option<Routes>>,
     // tls config
     tls_config: Option<ServerTlsConfig>,
+    // Otel arrow service
+    otel_arrow_service: Mutex<
+        Option<
+            InterceptedService<
+                ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
+                HeaderInterceptor,
+            >,
+        >,
+    >,
+    bind_addr: Option<SocketAddr>,
 }
 
 /// Grpc Server configuration
@@ -223,7 +237,7 @@ impl Server for GrpcServer {
         Ok(())
     }
 
-    async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, addr: SocketAddr) -> Result<()> {
         let routes = {
             let mut routes = self.routes.lock().await;
             let Some(routes) = routes.take() else {
@@ -264,10 +278,15 @@ impl Server for GrpcServer {
         if let Some(tls_config) = self.tls_config.clone() {
             builder = builder.tls_config(tls_config).context(StartGrpcSnafu)?;
         }
-        let builder = builder
+
+        let mut builder = builder
             .add_routes(routes)
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
+
+        if let Some(otel_arrow_service) = self.otel_arrow_service.lock().await.take() {
+            builder = builder.add_service(otel_arrow_service);
+        }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();
         let mut serve_state = self.serve_state.lock().await;
@@ -280,10 +299,16 @@ impl Server for GrpcServer {
                 .context(StartGrpcSnafu);
             serve_state_tx.send(result)
         });
-        Ok(addr)
+
+        self.bind_addr = Some(addr);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         GRPC_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }

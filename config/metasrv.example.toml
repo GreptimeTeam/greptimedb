@@ -1,5 +1,5 @@
 ## The working home directory.
-data_home = "./greptimedb_data/metasrv/"
+data_home = "./greptimedb_data"
 
 ## The bind address of metasrv.
 bind_addr = "127.0.0.1:3002"
@@ -50,6 +50,10 @@ use_memory_store = false
 ## - Using shared storage (e.g., s3).
 enable_region_failover = false
 
+## Whether to allow region failover on local WAL.
+## **This option is not recommended to be set to true, because it may lead to data loss during failover.**
+allow_region_failover_on_local_wal = false
+
 ## Max allowed idle time before removing node info from metasrv memory.
 node_max_idle_time = "24hours"
 
@@ -62,6 +66,17 @@ node_max_idle_time = "24hours"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
 
 ## Procedure storage options.
 [procedure]
@@ -130,6 +145,22 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
 auto_create_topics = true
 
+## Interval of automatically WAL pruning.
+## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
+auto_prune_interval = "0s"
+
+## The threshold to trigger a flush operation of a region in automatically WAL pruning.
+## Metasrv will send a flush request to flush the region when:
+## `trigger_flush_threshold` + `prunable_entry_id` < `max_prunable_entry_id`
+## where:
+## - `prunable_entry_id` is the maximum entry id that can be pruned of the region.
+## - `max_prunable_entry_id` is the maximum prunable entry id among all regions in the same topic.
+## Set to `0` to disable the flush operation.
+trigger_flush_threshold = 0
+
+## Concurrent task limit for automatically WAL pruning.
+auto_prune_parallelism = 10
+
 ## Number of topics.
 num_topics = 64
 
@@ -197,19 +228,6 @@ max_log_files = 720
 ## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
 [logging.tracing_sample_ratio]
 default_ratio = 1.0
-
-## The slow query log options.
-[logging.slow_query]
-## Whether to enable slow query log.
-enable = false
-
-## The threshold of slow query.
-## @toml2docs:none-default
-threshold = "10s"
-
-## The sampling ratio of slow query log. The value should be in the range of (0, 1].
-## @toml2docs:none-default
-sample_ratio = 1.0
 
 ## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
 ## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.

@@ -19,8 +19,11 @@ use arrow_flight::flight_service_server::FlightServiceServer;
 use auth::UserProviderRef;
 use common_grpc::error::{Error, InvalidConfigFilePathSnafu, Result};
 use common_runtime::Runtime;
+use otel_arrow_rust::opentelemetry::ArrowMetricsServiceServer;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
+use tonic::codec::CompressionEncoding;
+use tonic::service::interceptor::InterceptedService;
 use tonic::service::RoutesBuilder;
 use tonic::transport::{Identity, ServerTlsConfig};
 
@@ -30,7 +33,9 @@ use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::grpc::{GrpcServer, GrpcServerConfig};
+use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::prometheus_handler::PrometheusHandlerRef;
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::tls::TlsOption;
 
 /// Add a gRPC service (`service`) to a `builder`([RoutesBuilder]).
@@ -59,6 +64,12 @@ pub struct GrpcServerBuilder {
     runtime: Runtime,
     routes_builder: RoutesBuilder,
     tls_config: Option<ServerTlsConfig>,
+    otel_arrow_service: Option<
+        InterceptedService<
+            ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
+            HeaderInterceptor,
+        >,
+    >,
 }
 
 impl GrpcServerBuilder {
@@ -68,6 +79,7 @@ impl GrpcServerBuilder {
             runtime,
             routes_builder: RoutesBuilder::default(),
             tls_config: None,
+            otel_arrow_service: None,
         }
     }
 
@@ -113,6 +125,22 @@ impl GrpcServerBuilder {
         self
     }
 
+    /// Add handler for [OtelArrowService].
+    pub fn otel_arrow_handler(
+        mut self,
+        handler: OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>,
+    ) -> Self {
+        let mut server = ArrowMetricsServiceServer::new(handler);
+        server = server
+            .max_decoding_message_size(self.config.max_recv_message_size)
+            .max_encoding_message_size(self.config.max_send_message_size)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+        let svc = InterceptedService::new(server, HeaderInterceptor {});
+        self.otel_arrow_service = Some(svc);
+        self
+    }
+
     /// Add handler for [RegionServer].
     pub fn region_server_handler(mut self, region_server_handler: RegionServerHandlerRef) -> Self {
         let handler = RegionServerRequestHandler::new(region_server_handler, self.runtime.clone());
@@ -152,6 +180,8 @@ impl GrpcServerBuilder {
             shutdown_tx: Mutex::new(None),
             serve_state: Mutex::new(None),
             tls_config: self.tls_config,
+            otel_arrow_service: Mutex::new(self.otel_arrow_service),
+            bind_addr: None,
         }
     }
 }

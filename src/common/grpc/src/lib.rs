@@ -18,4 +18,5 @@ pub mod flight;
 pub mod precision;
 pub mod select;
 
+pub use arrow_flight::FlightData;
 pub use error::Error;

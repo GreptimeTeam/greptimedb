@@ -38,6 +38,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert to utf8"))]
+    FromUtf8 {
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Authentication source failure"))]
     AuthBackend {
         #[snafu(implicit)]
@@ -85,7 +93,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
-            Error::IllegalParam { .. } => StatusCode::InvalidArguments,
+            Error::IllegalParam { .. } | Error::FromUtf8 { .. } => StatusCode::InvalidArguments,
             Error::FileWatch { .. } => StatusCode::InvalidArguments,
             Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::StorageUnavailable,

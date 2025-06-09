@@ -48,6 +48,8 @@ pub struct QueryContext {
     /// container data that was committed before(and include) the given sequence number
     /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
     snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
+    /// Mappings of the RegionId to the minimal sequence of SST file to scan.
+    sst_min_sequences: Arc<RwLock<HashMap<u64, u64>>>,
     // we use Arc<RwLock>> for modifiable fields
     #[builder(default)]
     mutable_session_data: Arc<RwLock<MutableInner>>,
@@ -123,29 +125,30 @@ impl QueryContextBuilder {
             .explain_options = explain_options;
         self
     }
+
+    pub fn read_preference(mut self, read_preference: ReadPreference) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .read_preference = read_preference;
+        self
+    }
 }
 
 impl From<&RegionRequestHeader> for QueryContext {
     fn from(value: &RegionRequestHeader) -> Self {
-        let mut builder = QueryContextBuilder::default();
         if let Some(ctx) = &value.query_context {
-            builder = builder
-                .current_catalog(ctx.current_catalog.clone())
-                .current_schema(ctx.current_schema.clone())
-                .timezone(parse_timezone(Some(&ctx.timezone)))
-                .extensions(ctx.extensions.clone())
-                .channel(ctx.channel.into())
-                .snapshot_seqs(Arc::new(RwLock::new(
-                    ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
-                )))
-                .explain_options(ctx.explain);
+            ctx.clone().into()
+        } else {
+            QueryContextBuilder::default().build()
         }
-        builder.build()
     }
 }
 
 impl From<api::v1::QueryContext> for QueryContext {
     fn from(ctx: api::v1::QueryContext) -> Self {
+        let sequences = ctx.snapshot_seqs.as_ref();
         QueryContextBuilder::default()
             .current_catalog(ctx.current_catalog)
             .current_schema(ctx.current_schema)
@@ -153,7 +156,14 @@ impl From<api::v1::QueryContext> for QueryContext {
             .extensions(ctx.extensions)
             .channel(ctx.channel.into())
             .snapshot_seqs(Arc::new(RwLock::new(
-                ctx.snapshot_seqs.clone().unwrap_or_default().snapshot_seqs,
+                sequences
+                    .map(|x| x.snapshot_seqs.clone())
+                    .unwrap_or_default(),
+            )))
+            .sst_min_sequences(Arc::new(RwLock::new(
+                sequences
+                    .map(|x| x.sst_min_sequences.clone())
+                    .unwrap_or_default(),
             )))
             .explain_options(ctx.explain)
             .build()
@@ -168,6 +178,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             extensions,
             channel,
             snapshot_seqs,
+            sst_min_sequences,
             mutable_query_context_data,
             ..
         }: QueryContext,
@@ -182,6 +193,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             channel: channel as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
+                sst_min_sequences: sst_min_sequences.read().unwrap().clone(),
             }),
             explain,
         }
@@ -406,6 +418,20 @@ impl QueryContext {
     pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
         self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
     }
+
+    /// Returns `true` if the session can cast strings to numbers in MySQL style.
+    pub fn auto_string_to_numeric(&self) -> bool {
+        matches!(self.channel, Channel::Mysql)
+    }
+
+    /// Finds the minimal sequence of SST files to scan of a Region.
+    pub fn sst_min_sequence(&self, region_id: u64) -> Option<u64> {
+        self.sst_min_sequences
+            .read()
+            .unwrap()
+            .get(&region_id)
+            .copied()
+    }
 }
 
 impl QueryContextBuilder {
@@ -416,6 +442,7 @@ impl QueryContextBuilder {
                 .current_catalog
                 .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
             snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
+            sst_min_sequences: self.sst_min_sequences.unwrap_or_default(),
             mutable_session_data: self.mutable_session_data.unwrap_or_default(),
             mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
             sql_dialect: self

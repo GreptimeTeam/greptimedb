@@ -12,68 +12,100 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use std::ops::Deref;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::CreateTableExpr;
 use arrow_schema::Fields;
+use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::key::TableMetadataManagerRef;
+use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
+use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
+use datafusion::optimizer::AnalyzerRule;
 use datafusion::sql::unparser::expr_to_sql;
-use datafusion_common::tree_node::TreeNode;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::DFSchemaRef;
 use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::constraint::NOW_FN;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
-use datatypes::value::Value;
+use datatypes::schema::{ColumnSchema, Schema};
 use operator::expr_helper::column_schemas_to_defs;
 use query::query_engine::DefaultSerializer;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-use table::metadata::RawTableMeta;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
 
-use crate::adapter::{FlowId, AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
+use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::TaskState;
+use crate::batching_mode::state::{DirtyTimeWindows, TaskState};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter, FindGroupByFinalName,
+    get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
+    FindGroupByFinalName,
 };
 use crate::batching_mode::{
     DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD,
 };
+use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
-    ConvertColumnSchemaSnafu, DatafusionSnafu, DatatypesSnafu, ExternalSnafu, InvalidRequestSnafu,
-    SubstraitEncodeLogicalPlanSnafu, TableNotFoundMetaSnafu, TableNotFoundSnafu, UnexpectedSnafu,
+    ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
+    SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
 };
-use crate::Error;
+use crate::{Error, FlowId};
 
 /// The task's config, immutable once created
 #[derive(Clone)]
 pub struct TaskConfig {
     pub flow_id: FlowId,
     pub query: String,
-    plan: Arc<LogicalPlan>,
+    /// output schema of the query
+    pub output_schema: DFSchemaRef,
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
     sink_table_name: [String; 3],
     pub source_table_names: HashSet<[String; 3]>,
-    table_meta: TableMetadataManagerRef,
+    catalog_manager: CatalogManagerRef,
+    query_type: QueryType,
+}
+
+fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
+    let stmts =
+        ParserContext::create_with_dialect(query, query_ctx.sql_dialect(), ParseOptions::default())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+    ensure!(
+        stmts.len() == 1,
+        InvalidQuerySnafu {
+            reason: format!("Expect only one statement, found {}", stmts.len())
+        }
+    );
+    let stmt = &stmts[0];
+    match stmt {
+        Statement::Tql(_) => Ok(QueryType::Tql),
+        _ => Ok(QueryType::Sql),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum QueryType {
+    /// query is a tql query
+    Tql,
+    /// query is a sql query
+    Sql,
 }
 
 #[derive(Clone)]
@@ -84,7 +116,7 @@ pub struct BatchingTask {
 
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn try_new(
         flow_id: FlowId,
         query: &str,
         plan: LogicalPlan,
@@ -93,44 +125,61 @@ impl BatchingTask {
         sink_table_name: [String; 3],
         source_table_names: Vec<[String; 3]>,
         query_ctx: QueryContextRef,
-        table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
         shutdown_rx: oneshot::Receiver<()>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        Ok(Self {
             config: Arc::new(TaskConfig {
                 flow_id,
                 query: query.to_string(),
-                plan: Arc::new(plan),
                 time_window_expr,
                 expire_after,
                 sink_table_name,
                 source_table_names: source_table_names.into_iter().collect(),
-                table_meta,
+                catalog_manager,
+                output_schema: plan.schema().clone(),
+                query_type: determine_query_type(query, &query_ctx)?,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
-        }
+        })
     }
 
-    /// Test execute, for check syntax or such
-    pub async fn check_execute(
-        &self,
-        engine: &QueryEngineRef,
-        frontend_client: &Arc<FrontendClient>,
-    ) -> Result<Option<(u32, Duration)>, Error> {
-        // use current time to test get a dirty time window, which should be safe
-        let start = SystemTime::now();
-        let ts = Timestamp::new_second(
-            start
-                .duration_since(UNIX_EPOCH)
+    /// mark time window range (now - expire_after, now) as dirty (or (0, now) if expire_after not set)
+    ///
+    /// useful for flush_flow to flush dirty time windows range
+    pub fn mark_all_windows_as_dirty(&self) -> Result<(), Error> {
+        let now = SystemTime::now();
+        let now = Timestamp::new_second(
+            now.duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_secs() as _,
+        );
+        let lower_bound = self
+            .config
+            .expire_after
+            .map(|e| now.sub_duration(Duration::from_secs(e as _)))
+            .transpose()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+            .unwrap_or(Timestamp::new_second(0));
+        debug!(
+            "Flow {} mark range ({:?}, {:?}) as dirty",
+            self.config.flow_id, lower_bound, now
         );
         self.state
             .write()
             .unwrap()
             .dirty_time_windows
-            .add_lower_bounds(vec![ts].into_iter());
+            .add_window(lower_bound, Some(now));
+        Ok(())
+    }
 
+    /// Create sink table if not exists
+    pub async fn check_or_create_sink_table(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+    ) -> Result<Option<(u32, Duration)>, Error> {
         if !self.is_table_exist(&self.config.sink_table_name).await? {
             let create_table = self.gen_create_table_expr(engine.clone()).await?;
             info!(
@@ -143,18 +192,14 @@ impl BatchingTask {
                 self.config.sink_table_name.join(".")
             );
         }
-        self.gen_exec_once(engine, frontend_client).await
+
+        Ok(None)
     }
 
     async fn is_table_exist(&self, table_name: &[String; 3]) -> Result<bool, Error> {
         self.config
-            .table_meta
-            .table_name_manager()
-            .exists(TableNameKey {
-                catalog: &table_name[0],
-                schema: &table_name[1],
-                table: &table_name[2],
-            })
+            .catalog_manager
+            .table_exists(&table_name[0], &table_name[1], &table_name[2], None)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
@@ -166,8 +211,10 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine).await? {
+            debug!("Generate new query: {}", new_query);
             self.execute_logical_plan(frontend_client, &new_query).await
         } else {
+            debug!("Generate no query");
             Ok(None)
         }
     }
@@ -176,67 +223,35 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
     ) -> Result<Option<LogicalPlan>, Error> {
-        let full_table_name = self.config.sink_table_name.clone().join(".");
-
-        let table_id = self
-            .config
-            .table_meta
-            .table_name_manager()
-            .get(common_meta::key::table_name::TableNameKey::new(
-                &self.config.sink_table_name[0],
-                &self.config.sink_table_name[1],
-                &self.config.sink_table_name[2],
-            ))
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: full_table_name.clone(),
-            })?
-            .map(|t| t.table_id())
-            .with_context(|| TableNotFoundSnafu {
-                name: full_table_name.clone(),
-            })?;
-
-        let table = self
-            .config
-            .table_meta
-            .table_info_manager()
-            .get(table_id)
-            .await
-            .with_context(|_| TableNotFoundMetaSnafu {
-                msg: full_table_name.clone(),
-            })?
-            .with_context(|| TableNotFoundSnafu {
-                name: full_table_name.clone(),
-            })?
-            .into_inner();
-
-        let schema: datatypes::schema::Schema = table
-            .table_info
-            .meta
-            .schema
-            .clone()
-            .try_into()
-            .with_context(|_| DatatypesSnafu {
-                extra: format!(
-                    "Failed to convert schema from raw schema, raw_schema={:?}",
-                    table.table_info.meta.schema
-                ),
-            })?;
-
-        let df_schema = Arc::new(schema.arrow_schema().clone().try_into().with_context(|_| {
-            DatafusionSnafu {
-                context: format!(
-                    "Failed to convert arrow schema to datafusion schema, arrow_schema={:?}",
-                    schema.arrow_schema()
-                ),
-            }
-        })?);
+        let (table, df_schema) = get_table_info_df_schema(
+            self.config.catalog_manager.clone(),
+            self.config.sink_table_name.clone(),
+        )
+        .await?;
 
         let new_query = self
-            .gen_query_with_time_window(engine.clone(), &table.table_info.meta)
+            .gen_query_with_time_window(engine.clone(), &table.meta.schema)
             .await?;
 
         let insert_into = if let Some((new_query, _column_cnt)) = new_query {
+            // first check if all columns in input query exists in sink table
+            // since insert into ref to names in record batch generate by given query
+            let table_columns = df_schema
+                .columns()
+                .into_iter()
+                .map(|c| c.name)
+                .collect::<BTreeSet<_>>();
+            for column in new_query.schema().columns() {
+                ensure!(
+                    table_columns.contains(column.name()),
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Column {} not found in sink table with columns {:?}",
+                            column, table_columns
+                        ),
+                    }
+                );
+            }
             // update_at& time index placeholder (if exists) should have default value
             LogicalPlan::Dml(DmlStatement::new(
                 datafusion_common::TableReference::Full {
@@ -251,6 +266,9 @@ impl BatchingTask {
         } else {
             return Ok(None);
         };
+        let insert_into = insert_into.recompute_schema().context(DatafusionSnafu {
+            context: "Failed to recompute schema",
+        })?;
         Ok(Some(insert_into))
     }
 
@@ -259,14 +277,11 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         expr: CreateTableExpr,
     ) -> Result<(), Error> {
-        let db_client = frontend_client.get_database_client().await?;
-        db_client
-            .database
-            .create(expr.clone())
-            .await
-            .with_context(|_| InvalidRequestSnafu {
-                context: format!("Failed to create table with expr: {:?}", expr),
-            })?;
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        frontend_client
+            .create(expr.clone(), catalog, schema)
+            .await?;
         Ok(())
     }
 
@@ -277,27 +292,78 @@ impl BatchingTask {
     ) -> Result<Option<(u32, Duration)>, Error> {
         let instant = Instant::now();
         let flow_id = self.config.flow_id;
-        let db_client = frontend_client.get_database_client().await?;
-        let peer_addr = db_client.peer.addr;
+
         debug!(
-            "Executing flow {flow_id}(expire_after={:?} secs) on {:?} with query {}",
-            self.config.expire_after, peer_addr, &plan
+            "Executing flow {flow_id}(expire_after={:?} secs) with query {}",
+            self.config.expire_after, &plan
         );
 
-        let timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
-            .with_label_values(&[flow_id.to_string().as_str()])
-            .start_timer();
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
 
-        let message = DFLogicalSubstraitConvertor {}
-            .encode(plan, DefaultSerializer)
-            .context(SubstraitEncodeLogicalPlanSnafu)?;
+        // fix all table ref by make it fully qualified, i.e. "table_name" => "catalog_name.schema_name.table_name"
+        let fixed_plan = plan
+            .clone()
+            .transform_down_with_subqueries(|p| {
+                if let LogicalPlan::TableScan(mut table_scan) = p {
+                    let resolved = table_scan.table_name.resolve(catalog, schema);
+                    table_scan.table_name = resolved.into();
+                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+                } else {
+                    Ok(Transformed::no(p))
+                }
+            })
+            .with_context(|_| DatafusionSnafu {
+                context: format!("Failed to fix table ref in logical plan, plan={:?}", plan),
+            })?
+            .data;
 
-        let req = api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
-            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
-        });
+        let expanded_plan = CountWildcardRule::new()
+            .analyze(fixed_plan.clone(), &Default::default())
+            .with_context(|_| DatafusionSnafu {
+                context: format!(
+                    "Failed to expand wildcard in logical plan, plan={:?}",
+                    fixed_plan
+                ),
+            })?;
 
-        let res = db_client.database.handle(req).await;
-        drop(timer);
+        let plan = expanded_plan;
+        let mut peer_desc = None;
+
+        let res = {
+            let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
+                .with_label_values(&[flow_id.to_string().as_str()])
+                .start_timer();
+
+            // hack and special handling the insert logical plan
+            let req = if let Some((insert_to, insert_plan)) =
+                breakup_insert_plan(&plan, catalog, schema)
+            {
+                let message = DFLogicalSubstraitConvertor {}
+                    .encode(&insert_plan, DefaultSerializer)
+                    .context(SubstraitEncodeLogicalPlanSnafu)?;
+                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                    query: Some(api::v1::query_request::Query::InsertIntoPlan(
+                        api::v1::InsertIntoPlan {
+                            table_name: Some(insert_to),
+                            logical_plan: message.to_vec(),
+                        },
+                    )),
+                })
+            } else {
+                let message = DFLogicalSubstraitConvertor {}
+                    .encode(&plan, DefaultSerializer)
+                    .context(SubstraitEncodeLogicalPlanSnafu)?;
+
+                api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+                    query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+                })
+            };
+
+            frontend_client
+                .handle(req, catalog, schema, &mut peer_desc)
+                .await
+        };
 
         let elapsed = instant.elapsed();
         if let Ok(affected_rows) = &res {
@@ -307,19 +373,22 @@ impl BatchingTask {
             );
         } else if let Err(err) = &res {
             warn!(
-                "Failed to execute Flow {flow_id} on frontend {}, result: {err:?}, elapsed: {:?} with query: {}",
-                peer_addr, elapsed, &plan
+                "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
+                peer_desc, elapsed, &plan
             );
         }
 
         // record slow query
         if elapsed >= SLOW_QUERY_THRESHOLD {
             warn!(
-                "Flow {flow_id} on frontend {} executed for {:?} before complete, query: {}",
-                peer_addr, elapsed, &plan
+                "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
+                peer_desc, elapsed, &plan
             );
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
-                .with_label_values(&[flow_id.to_string().as_str(), &plan.to_string(), &peer_addr])
+                .with_label_values(&[
+                    flow_id.to_string().as_str(),
+                    &peer_desc.unwrap_or_default().to_string(),
+                ])
                 .observe(elapsed.as_secs_f64());
         }
 
@@ -328,12 +397,7 @@ impl BatchingTask {
             .unwrap()
             .after_query_exec(elapsed, res.is_ok());
 
-        let res = res.context(InvalidRequestSnafu {
-            context: format!(
-                "Failed to execute query for flow={}: \'{}\'",
-                self.config.flow_id, &plan
-            ),
-        })?;
+        let res = res?;
 
         Ok(Some((res, elapsed)))
     }
@@ -347,32 +411,54 @@ impl BatchingTask {
         frontend_client: Arc<FrontendClient>,
     ) {
         loop {
-            let mut new_query = None;
-            let mut gen_and_exec = async || {
-                new_query = self.gen_insert_plan(&engine).await?;
-                if let Some(new_query) = &new_query {
-                    self.execute_logical_plan(&frontend_client, new_query).await
-                } else {
-                    Ok(None)
+            // first check if shutdown signal is received
+            // if so, break the loop
+            {
+                let mut state = self.state.write().unwrap();
+                match state.shutdown_rx.try_recv() {
+                    Ok(()) => break,
+                    Err(TryRecvError::Closed) => {
+                        warn!(
+                            "Unexpected shutdown flow {}, shutdown anyway",
+                            self.config.flow_id
+                        );
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => (),
+                }
+            }
+
+            let new_query = match self.gen_insert_plan(&engine).await {
+                Ok(new_query) => new_query,
+                Err(err) => {
+                    common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
+                    // also sleep for a little while before try again to prevent flooding logs
+                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    continue;
                 }
             };
-            match gen_and_exec().await {
+
+            let res = if let Some(new_query) = &new_query {
+                self.execute_logical_plan(&frontend_client, new_query).await
+            } else {
+                Ok(None)
+            };
+
+            match res {
                 // normal execute, sleep for some time before doing next query
                 Ok(Some(_)) => {
                     let sleep_until = {
-                        let mut state = self.state.write().unwrap();
-                        match state.shutdown_rx.try_recv() {
-                            Ok(()) => break,
-                            Err(TryRecvError::Closed) => {
-                                warn!(
-                                    "Unexpected shutdown flow {}, shutdown anyway",
-                                    self.config.flow_id
-                                );
-                                break;
-                            }
-                            Err(TryRecvError::Empty) => (),
-                        }
-                        state.get_next_start_query_time(Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT))
+                        let state = self.state.write().unwrap();
+
+                        state.get_next_start_query_time(
+                            self.config.flow_id,
+                            &self
+                                .config
+                                .time_window_expr
+                                .as_ref()
+                                .and_then(|t| *t.time_window_size()),
+                            Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT),
+                        )
                     };
                     tokio::time::sleep_until(sleep_until).await;
                 }
@@ -386,14 +472,18 @@ impl BatchingTask {
                     continue;
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
-                Err(err) => match new_query {
-                    Some(query) => {
-                        common_telemetry::error!(err; "Failed to execute query for flow={} with query: {query}", self.config.flow_id)
+                Err(err) => {
+                    match new_query {
+                        Some(query) => {
+                            common_telemetry::error!(err; "Failed to execute query for flow={} with query: {query}", self.config.flow_id)
+                        }
+                        None => {
+                            common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id)
+                        }
                     }
-                    None => {
-                        common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id)
-                    }
-                },
+                    // also sleep for a little while before try again to prevent flooding logs
+                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                }
             }
         }
     }
@@ -418,7 +508,7 @@ impl BatchingTask {
     async fn gen_query_with_time_window(
         &self,
         engine: QueryEngineRef,
-        sink_table_meta: &RawTableMeta,
+        sink_table_schema: &Arc<Schema>,
     ) -> Result<Option<(LogicalPlan, usize)>, Error> {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let start = SystemTime::now();
@@ -432,7 +522,7 @@ impl BatchingTask {
             .unwrap_or(u64::MIN);
 
         let low_bound = Timestamp::new_second(low_bound as i64);
-        let schema_len = self.config.plan.schema().fields().len();
+        let schema_len = self.config.output_schema.fields().len();
 
         let expire_time_window_bound = self
             .config
@@ -441,100 +531,108 @@ impl BatchingTask {
             .map(|expr| expr.eval(low_bound))
             .transpose()?;
 
-        let new_plan = {
-            let expr = {
-                match expire_time_window_bound {
-                    Some((Some(l), Some(u))) => {
-                        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
-                            reason: format!("Can't get window size from {u:?} - {l:?}"),
-                        })?;
-                        let col_name = self
-                            .config
-                            .time_window_expr
-                            .as_ref()
-                            .map(|expr| expr.column_name.clone())
-                            .with_context(|| UnexpectedSnafu {
-                                reason: format!(
-                                    "Flow id={:?}, Failed to get column name from time window expr",
-                                    self.config.flow_id
-                                ),
-                            })?;
-
-                        self.state
-                            .write()
-                            .unwrap()
-                            .dirty_time_windows
-                            .gen_filter_exprs(
-                                &col_name,
-                                Some(l),
-                                window_size,
-                                self.config.flow_id,
-                                Some(self),
-                            )?
-                    }
-                    _ => {
-                        // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
-                        debug!(
-                            "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
-                        );
-
-                        let mut add_auto_column =
-                            AddAutoColumnRewriter::new(sink_table_meta.schema.clone());
-                        let plan = self
-                            .config
-                            .plan
-                            .deref()
-                            .clone()
-                            .rewrite(&mut add_auto_column)
-                            .with_context(|_| DatafusionSnafu {
-                                context: format!("Failed to rewrite plan {:?}", self.config.plan),
-                            })?
-                            .data;
-                        let schema_len = plan.schema().fields().len();
-
-                        // since no time window lower/upper bound is found, just return the original query(with auto columns)
-                        return Ok(Some((plan, schema_len)));
-                    }
-                }
-            };
-
+        let (Some((Some(l), Some(u))), QueryType::Sql) =
+            (expire_time_window_bound, &self.config.query_type)
+        else {
+            // either no time window or not a sql query, then just use the original query
+            // use sink_table_meta to add to query the `update_at` and `__ts_placeholder` column's value too for compatibility reason
             debug!(
-                "Flow id={:?}, Generated filter expr: {:?}",
-                self.config.flow_id,
-                expr.as_ref()
-                    .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
-                        context: format!("Failed to generate filter expr from {expr:?}"),
-                    }))
-                    .transpose()?
-                    .map(|s| s.to_string())
+                "Flow id = {:?}, can't get window size: precise_lower_bound={expire_time_window_bound:?}, using the same query", self.config.flow_id
             );
+            // clean dirty time window too, this could be from create flow's check_execute
+            self.state.write().unwrap().dirty_time_windows.clean();
 
-            let Some(expr) = expr else {
-                // no new data, hence no need to update
-                debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
-                return Ok(None);
-            };
+            // TODO(discord9): not add auto column for tql query?
+            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
 
-            let mut add_filter = AddFilterRewriter::new(expr);
-            let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_meta.schema.clone());
-            // make a not optimized plan for clearer unparse
             let plan = sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false)
                 .await?;
-            plan.clone()
-                .rewrite(&mut add_filter)
-                .and_then(|p| p.data.rewrite(&mut add_auto_column))
+
+            let plan = plan
+                .clone()
+                .rewrite(&mut add_auto_column)
                 .with_context(|_| DatafusionSnafu {
-                    context: format!("Failed to rewrite plan {plan:?}"),
+                    context: format!("Failed to rewrite plan:\n {}\n", plan),
                 })?
-                .data
+                .data;
+            let schema_len = plan.schema().fields().len();
+
+            // since no time window lower/upper bound is found, just return the original query(with auto columns)
+            return Ok(Some((plan, schema_len)));
         };
+
+        debug!(
+            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
+            self.config.flow_id, l, u
+        );
+        let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
+            reason: format!("Can't get window size from {u:?} - {l:?}"),
+        })?;
+        let col_name = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .map(|expr| expr.column_name.clone())
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "Flow id={:?}, Failed to get column name from time window expr",
+                    self.config.flow_id
+                ),
+            })?;
+
+        let expr = self
+            .state
+            .write()
+            .unwrap()
+            .dirty_time_windows
+            .gen_filter_exprs(
+                &col_name,
+                Some(l),
+                window_size,
+                DirtyTimeWindows::MAX_FILTER_NUM,
+                self.config.flow_id,
+                Some(self),
+            )?;
+
+        debug!(
+            "Flow id={:?}, Generated filter expr: {:?}",
+            self.config.flow_id,
+            expr.as_ref()
+                .map(|expr| expr_to_sql(expr).with_context(|_| DatafusionSnafu {
+                    context: format!("Failed to generate filter expr from {expr:?}"),
+                }))
+                .transpose()?
+                .map(|s| s.to_string())
+        );
+
+        let Some(expr) = expr else {
+            // no new data, hence no need to update
+            debug!("Flow id={:?}, no new data, not update", self.config.flow_id);
+            return Ok(None);
+        };
+
+        let mut add_filter = AddFilterRewriter::new(expr);
+        let mut add_auto_column = AddAutoColumnRewriter::new(sink_table_schema.clone());
+
+        let plan =
+            sql_to_df_plan(query_ctx.clone(), engine.clone(), &self.config.query, false).await?;
+        let rewrite = plan
+            .clone()
+            .rewrite(&mut add_filter)
+            .and_then(|p| p.data.rewrite(&mut add_auto_column))
+            .with_context(|_| DatafusionSnafu {
+                context: format!("Failed to rewrite plan:\n {}\n", plan),
+            })?
+            .data;
+        // only apply optimize after complex rewrite is done
+        let new_plan = apply_df_optimizer(rewrite).await?;
 
         Ok(Some((new_plan, schema_len)))
     }
 }
 
 // auto created table have a auto added column `update_at`, and optional have a `AUTO_CREATED_PLACEHOLDER_TS_COL` column for time index placeholder if no timestamp column is specified
-// TODO(discord9): unit test
+// TODO(discord9): for now no default value is set for auto added column for compatibility reason with streaming mode, but this might change in favor of simpler code?
 fn create_table_with_expr(
     plan: &LogicalPlan,
     sink_table_name: &[String; 3],
@@ -558,11 +656,7 @@ fn create_table_with_expr(
         AUTO_CREATED_UPDATE_AT_TS_COL,
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
-    )
-    .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
-    .context(DatatypesSnafu {
-        extra: "Failed to build column `update_at TimestampMillisecond default now()`",
-    })?;
+    );
     column_schemas.push(update_at_schema);
 
     let time_index = if let Some(time_index) = first_time_stamp {
@@ -574,16 +668,7 @@ fn create_table_with_expr(
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
-            .with_time_index(true)
-            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
-                Timestamp::new_millisecond(0),
-            ))))
-            .context(DatatypesSnafu {
-                extra: format!(
-                    "Failed to build column `{} TimestampMillisecond TIME INDEX default 0`",
-                    AUTO_CREATED_PLACEHOLDER_TS_COL
-                ),
-            })?,
+            .with_time_index(true),
         );
         AUTO_CREATED_PLACEHOLDER_TS_COL.to_string()
     };
@@ -675,20 +760,14 @@ mod test {
             AUTO_CREATED_UPDATE_AT_TS_COL,
             ConcreteDataType::timestamp_millisecond_datatype(),
             true,
-        )
-        .with_default_constraint(Some(ColumnDefaultConstraint::Function(NOW_FN.to_string())))
-        .unwrap();
+        );
 
         let ts_placeholder_schema = ColumnSchema::new(
             AUTO_CREATED_PLACEHOLDER_TS_COL,
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
-        .with_time_index(true)
-        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Timestamp(
-            Timestamp::new_millisecond(0),
-        ))))
-        .unwrap();
+        .with_time_index(true);
 
         let testcases = vec![
             TestCase {

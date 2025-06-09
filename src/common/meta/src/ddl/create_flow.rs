@@ -36,10 +36,10 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::{add_peer_context_if_needed, handle_retry_error};
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
-use crate::instruction::{CacheIdent, CreateFlow};
+use crate::error::{self, Result, UnexpectedSnafu};
+use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::flow_info::FlowInfoValue;
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
@@ -70,6 +70,7 @@ impl CreateFlowProcedure {
                 query_context,
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
+                did_replace: false,
                 flow_type: None,
             },
         }
@@ -171,7 +172,7 @@ impl CreateFlowProcedure {
         }
         self.data.state = CreateFlowState::CreateFlows;
         // determine flow type
-        self.data.flow_type = Some(determine_flow_type(&self.data.task));
+        self.data.flow_type = Some(get_flow_type_from_options(&self.data.task)?);
 
         Ok(Status::executing(true))
     }
@@ -196,8 +197,8 @@ impl CreateFlowProcedure {
             });
         }
         info!(
-            "Creating flow({:?}) on flownodes with peers={:?}",
-            self.data.flow_id, self.data.peers
+            "Creating flow({:?}, type={:?}) on flownodes with peers={:?}",
+            self.data.flow_id, self.data.flow_type, self.data.peers
         );
         join_all(create_flow)
             .await
@@ -224,6 +225,7 @@ impl CreateFlowProcedure {
                 .update_flow_metadata(flow_id, prev_flow_value, &flow_info, flow_routes)
                 .await?;
             info!("Replaced flow metadata for flow {flow_id}");
+            self.data.did_replace = true;
         } else {
             self.context
                 .flow_metadata_manager
@@ -240,22 +242,43 @@ impl CreateFlowProcedure {
         debug_assert!(self.data.state == CreateFlowState::InvalidateFlowCache);
         // Safety: The flow id must be allocated.
         let flow_id = self.data.flow_id.unwrap();
+        let did_replace = self.data.did_replace;
         let ctx = Context {
             subject: Some("Invalidate flow cache by creating flow".to_string()),
         };
 
+        let mut caches = vec![];
+
+        // if did replaced, invalidate the flow cache with drop the old flow
+        if did_replace {
+            let old_flow_info = self.data.prev_flow_info_value.as_ref().unwrap();
+
+            // only drop flow is needed, since flow name haven't changed, and flow id already invalidated below
+            caches.extend([CacheIdent::DropFlow(DropFlow {
+                flow_id,
+                source_table_ids: old_flow_info.source_table_ids.clone(),
+                flow_part2node_id: old_flow_info.flownode_ids().clone().into_iter().collect(),
+            })]);
+        }
+
+        let (_flow_info, flow_routes) = (&self.data).into();
+        let flow_part2peers = flow_routes
+            .into_iter()
+            .map(|(part_id, route)| (part_id, route.peer))
+            .collect();
+
+        caches.extend([
+            CacheIdent::CreateFlow(CreateFlow {
+                flow_id,
+                source_table_ids: self.data.source_table_ids.clone(),
+                partition_to_peer_mapping: flow_part2peers,
+            }),
+            CacheIdent::FlowId(flow_id),
+        ]);
+
         self.context
             .cache_invalidator
-            .invalidate(
-                &ctx,
-                &[
-                    CacheIdent::CreateFlow(CreateFlow {
-                        source_table_ids: self.data.source_table_ids.clone(),
-                        flownodes: self.data.peers.clone(),
-                    }),
-                    CacheIdent::FlowId(flow_id),
-                ],
-            )
+            .invalidate(&ctx, &caches)
             .await?;
 
         Ok(Status::done_with_output(flow_id))
@@ -281,7 +304,7 @@ impl Procedure for CreateFlowProcedure {
             CreateFlowState::CreateMetadata => self.on_create_metadata().await,
             CreateFlowState::InvalidateFlowCache => self.on_broadcast().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -306,8 +329,20 @@ impl Procedure for CreateFlowProcedure {
     }
 }
 
-pub fn determine_flow_type(_flow_task: &CreateFlowTask) -> FlowType {
-    FlowType::Batching
+pub fn get_flow_type_from_options(flow_task: &CreateFlowTask) -> Result<FlowType> {
+    let flow_type = flow_task
+        .flow_options
+        .get(FlowType::FLOW_TYPE_KEY)
+        .map(|s| s.as_str());
+    match flow_type {
+        Some(FlowType::BATCHING) => Ok(FlowType::Batching),
+        Some(FlowType::STREAMING) => Ok(FlowType::Streaming),
+        Some(unknown) => UnexpectedSnafu {
+            err_msg: format!("Unknown flow type: {}", unknown),
+        }
+        .fail(),
+        None => Ok(FlowType::Batching),
+    }
 }
 
 /// The state of [CreateFlowProcedure].
@@ -324,7 +359,7 @@ pub enum CreateFlowState {
 }
 
 /// The type of flow.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlowType {
     /// The flow is a batching task.
     Batching,
@@ -365,6 +400,10 @@ pub struct CreateFlowData {
     /// For verify if prev value is consistent when need to update flow metadata.
     /// only set when `or_replace` is true.
     pub(crate) prev_flow_info_value: Option<DeserializedValueWithBytes<FlowInfoValue>>,
+    /// Only set to true when replace actually happened.
+    /// This is used to determine whether to invalidate the cache.
+    #[serde(default)]
+    pub(crate) did_replace: bool,
     pub(crate) flow_type: Option<FlowType>,
 }
 
@@ -437,6 +476,7 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name,
             flownode_ids,
             catalog_name,
+            query_context: Some(value.query_context.clone()),
             flow_name,
             raw_sql: sql,
             expire_after,

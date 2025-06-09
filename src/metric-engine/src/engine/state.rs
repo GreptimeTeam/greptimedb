@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use common_time::timestamp::TimeUnit;
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
@@ -31,6 +32,7 @@ pub struct PhysicalRegionState {
     physical_columns: HashMap<String, ColumnId>,
     primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
+    time_index_unit: TimeUnit,
 }
 
 impl PhysicalRegionState {
@@ -38,12 +40,14 @@ impl PhysicalRegionState {
         physical_columns: HashMap<String, ColumnId>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
+        time_index_unit: TimeUnit,
     ) -> Self {
         Self {
             logical_regions: HashSet::new(),
             physical_columns,
             primary_key_encoding,
             options,
+            time_index_unit,
         }
     }
 
@@ -89,11 +93,17 @@ impl MetricEngineState {
         physical_columns: HashMap<String, ColumnId>,
         primary_key_encoding: PrimaryKeyEncoding,
         options: PhysicalRegionOptions,
+        time_index_unit: TimeUnit,
     ) {
         let physical_region_id = to_data_region_id(physical_region_id);
         self.physical_regions.insert(
             physical_region_id,
-            PhysicalRegionState::new(physical_columns, primary_key_encoding, options),
+            PhysicalRegionState::new(
+                physical_columns,
+                primary_key_encoding,
+                options,
+                time_index_unit,
+            ),
         );
     }
 
@@ -176,6 +186,15 @@ impl MetricEngineState {
 
     pub fn exist_physical_region(&self, physical_region_id: RegionId) -> bool {
         self.physical_regions.contains_key(&physical_region_id)
+    }
+
+    pub fn physical_region_time_index_unit(
+        &self,
+        physical_region_id: RegionId,
+    ) -> Option<TimeUnit> {
+        self.physical_regions
+            .get(&physical_region_id)
+            .map(|state| state.time_index_unit)
     }
 
     pub fn get_primary_key_encoding(

@@ -14,6 +14,7 @@
 
 pub mod builder;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
@@ -22,15 +23,17 @@ use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     ApplyOutput, IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
+use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::index::inverted_index::{CachedInvertedIndexBlobReader, InvertedIndexCacheRef};
+use crate::cache::index::result_cache::PredicateKey;
 use crate::error::{
     ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
@@ -67,6 +70,9 @@ pub(crate) struct InvertedIndexApplier {
 
     /// Puffin metadata cache.
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
+
+    /// Predicate key. Used to identify the predicate and fetch result from cache.
+    predicate_key: PredicateKey,
 }
 
 pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
@@ -79,6 +85,7 @@ impl InvertedIndexApplier {
         store: ObjectStore,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
+        predicates: BTreeMap<ColumnId, Vec<Predicate>>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
@@ -91,6 +98,7 @@ impl InvertedIndexApplier {
             puffin_manager_factory,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
+            predicate_key: PredicateKey::new_inverted(Arc::new(predicates)),
         }
     }
 
@@ -218,6 +226,11 @@ impl InvertedIndexApplier {
             .await
             .context(PuffinBuildReaderSnafu)
     }
+
+    /// Returns the predicate key.
+    pub fn predicate_key(&self) -> &PredicateKey {
+        &self.predicate_key
+    }
 }
 
 impl Drop for InvertedIndexApplier {
@@ -276,6 +289,7 @@ mod tests {
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
+            Default::default(),
         );
         let output = sst_index_applier.apply(file_id, None).await.unwrap();
         assert_eq!(
@@ -323,6 +337,7 @@ mod tests {
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
+            Default::default(),
         );
         let res = sst_index_applier.apply(file_id, None).await;
         assert!(format!("{:?}", res.unwrap_err()).contains("Blob not found"));

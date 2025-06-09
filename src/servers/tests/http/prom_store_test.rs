@@ -17,7 +17,6 @@ use std::sync::Arc;
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
 };
-use api::v1::greptime_request::Request;
 use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use axum::Router;
@@ -30,10 +29,9 @@ use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
 use servers::http::test_helpers::TestClient;
-use servers::http::{HttpOptions, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::prom_store;
 use servers::prom_store::{snappy_compress, Metrics};
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
@@ -41,19 +39,6 @@ use tokio::sync::mpsc;
 
 struct DummyInstance {
     tx: mpsc::Sender<(String, Vec<u8>)>,
-}
-
-#[async_trait]
-impl GrpcQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(
-        &self,
-        _query: Request,
-        _ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
-        unimplemented!()
-    }
 }
 
 #[async_trait]
@@ -135,11 +120,10 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         ..Default::default()
     };
 
-    let is_strict_mode = false;
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
-        .with_prom_handler(instance, true, is_strict_mode)
+        .with_prom_handler(instance, None, true, PromValidationMode::Unchecked)
         .build();
     server.build(server.make_app()).unwrap()
 }

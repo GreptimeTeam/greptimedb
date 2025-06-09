@@ -14,7 +14,7 @@
 
 pub mod builder;
 
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -22,7 +22,7 @@ use std::time::Duration;
 use clap::ValueEnum;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -61,22 +62,18 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::lease::lookup_datanode_peer;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
 use crate::region::supervisor::RegionSupervisorTickerRef;
-use crate::selector::{Selector, SelectorType};
+use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::{become_follower, become_leader, StateRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const FLOW_ID_SEQ: &str = "flow_id";
-pub const METASRV_HOME: &str = "./greptimedb_data/metasrv";
-
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-pub const DEFAULT_META_TABLE_NAME: &str = "greptime_metakv";
-#[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-pub const DEFAULT_META_ELECTION_LOCK_ID: u64 = 1;
+pub const METASRV_DATA_DIR: &str = "metasrv";
 
 // The datastores that implements metadata kvbackend.
 #[derive(Clone, Debug, PartialEq, Serialize, Default, Deserialize, ValueEnum)]
@@ -95,7 +92,7 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
     /// The address the server listens on.
@@ -110,6 +107,11 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// Whether to allow region failover on local WAL.
+    ///
+    /// If it's true, the region failover will be allowed even if the local WAL is used.
+    /// Note that this option is not recommended to be set to true, because it may lead to data loss during failover.
+    pub allow_region_failover_on_local_wal: bool,
     /// The HTTP server options.
     pub http: HttpOptions,
     /// The logging options.
@@ -160,6 +162,47 @@ pub struct MetasrvOptions {
     pub node_max_idle_time: Duration,
 }
 
+impl fmt::Debug for MetasrvOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("MetasrvOptions");
+        debug_struct
+            .field("bind_addr", &self.bind_addr)
+            .field("server_addr", &self.server_addr)
+            .field("store_addrs", &self.sanitize_store_addrs())
+            .field("selector", &self.selector)
+            .field("use_memory_store", &self.use_memory_store)
+            .field("enable_region_failover", &self.enable_region_failover)
+            .field(
+                "allow_region_failover_on_local_wal",
+                &self.allow_region_failover_on_local_wal,
+            )
+            .field("http", &self.http)
+            .field("logging", &self.logging)
+            .field("procedure", &self.procedure)
+            .field("failure_detector", &self.failure_detector)
+            .field("datanode", &self.datanode)
+            .field("enable_telemetry", &self.enable_telemetry)
+            .field("data_home", &self.data_home)
+            .field("wal", &self.wal)
+            .field("export_metrics", &self.export_metrics)
+            .field("store_key_prefix", &self.store_key_prefix)
+            .field("max_txn_ops", &self.max_txn_ops)
+            .field("flush_stats_factor", &self.flush_stats_factor)
+            .field("tracing", &self.tracing)
+            .field("backend", &self.backend);
+
+        #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+        debug_struct.field("meta_table_name", &self.meta_table_name);
+
+        #[cfg(feature = "pg_kvbackend")]
+        debug_struct.field("meta_election_lock_id", &self.meta_election_lock_id);
+
+        debug_struct
+            .field("node_max_idle_time", &self.node_max_idle_time)
+            .finish()
+    }
+}
+
 const DEFAULT_METASRV_ADDR_PORT: &str = "3002";
 
 impl Default for MetasrvOptions {
@@ -172,11 +215,9 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            allow_region_failover_on_local_wal: false,
             http: HttpOptions::default(),
-            logging: LoggingOptions {
-                dir: format!("{METASRV_HOME}/logs"),
-                ..Default::default()
-            },
+            logging: LoggingOptions::default(),
             procedure: ProcedureConfig {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),
@@ -188,7 +229,7 @@ impl Default for MetasrvOptions {
             failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeClientOptions::default(),
             enable_telemetry: true,
-            data_home: METASRV_HOME.to_string(),
+            data_home: DEFAULT_DATA_HOME.to_string(),
             wal: MetasrvWalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
             store_key_prefix: String::new(),
@@ -197,9 +238,9 @@ impl Default for MetasrvOptions {
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            meta_table_name: DEFAULT_META_TABLE_NAME.to_string(),
+            meta_table_name: common_meta::kv_backend::DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]
-            meta_election_lock_id: DEFAULT_META_ELECTION_LOCK_ID,
+            meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
         }
     }
@@ -241,6 +282,13 @@ impl MetasrvOptions {
         if self.server_addr.is_empty() {
             common_telemetry::debug!("detect local IP is not supported on Android");
         }
+    }
+
+    fn sanitize_store_addrs(&self) -> Vec<String> {
+        self.store_addrs
+            .iter()
+            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+            .collect()
     }
 }
 
@@ -331,6 +379,8 @@ pub struct SelectorContext {
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
+pub type RegionStatAwareSelectorRef =
+    Arc<dyn RegionStatAwareSelector<Context = SelectorContext, Output = Vec<(RegionId, Peer)>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {
@@ -407,6 +457,7 @@ pub struct Metasrv {
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
+    wal_prune_ticker: Option<WalPruneTickerRef>,
 
     plugins: Plugins,
 }
@@ -415,7 +466,7 @@ impl Metasrv {
     pub async fn try_start(&self) -> Result<()> {
         if self
             .started
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             warn!("Metasrv already started");
@@ -460,6 +511,9 @@ impl Metasrv {
             )));
             if let Some(region_supervisor_ticker) = &self.region_supervisor_ticker {
                 leadership_change_notifier.add_listener(region_supervisor_ticker.clone() as _);
+            }
+            if let Some(wal_prune_ticker) = &self.wal_prune_ticker {
+                leadership_change_notifier.add_listener(wal_prune_ticker.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
@@ -509,7 +563,7 @@ impl Metasrv {
                 let started = self.started.clone();
                 let node_info = self.node_info();
                 let _handle = common_runtime::spawn_global(async move {
-                    while started.load(Ordering::Relaxed) {
+                    while started.load(Ordering::Acquire) {
                         let res = election.register_candidate(&node_info).await;
                         if let Err(e) = res {
                             warn!(e; "Metasrv register candidate error");
@@ -523,7 +577,7 @@ impl Metasrv {
                 let election = election.clone();
                 let started = self.started.clone();
                 let _handle = common_runtime::spawn_global(async move {
-                    while started.load(Ordering::Relaxed) {
+                    while started.load(Ordering::Acquire) {
                         let res = election.campaign().await;
                         if let Err(e) = res {
                             warn!(e; "Metasrv election error");
@@ -558,11 +612,23 @@ impl Metasrv {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.started.store(false, Ordering::Relaxed);
+        if self
+            .started
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            warn!("Metasrv already stopped");
+            return Ok(());
+        }
+
         self.procedure_manager
             .stop()
             .await
-            .context(StopProcedureManagerSnafu)
+            .context(StopProcedureManagerSnafu)?;
+
+        info!("Metasrv stopped");
+
+        Ok(())
     }
 
     pub fn start_time_ms(&self) -> u64 {
@@ -579,8 +645,9 @@ impl Metasrv {
         }
     }
 
-    /// Lookup a peer by peer_id, return it only when it's alive.
-    pub(crate) async fn lookup_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
+    /// Looks up a datanode peer by peer_id, returning it only when it's alive.
+    /// A datanode is considered alive when it's still within the lease period.
+    pub(crate) async fn lookup_datanode_peer(&self, peer_id: u64) -> Result<Option<Peer>> {
         lookup_datanode_peer(
             peer_id,
             &self.meta_peer_client,

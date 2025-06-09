@@ -44,7 +44,6 @@ explain analyze SELECT count(*) FROM system_metrics;
 |_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(system_REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(system_REDACTED
-|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SeqScan: region=REDACTED, partition_count=1 (1 memtable ranges, 0 file 0 ranges) REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|

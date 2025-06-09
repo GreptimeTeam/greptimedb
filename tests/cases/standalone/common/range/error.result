@@ -54,7 +54,11 @@ Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the 
 -- 2.2 no align param
 SELECT min(val) RANGE '5s' FROM host;
 
-Error: 3000(PlanQuery), Error during planning: Missing argument in range select query
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: ALIGN argument cannot be omitted in the range select query
+
+SELECT min(val) RANGE '5s' FILL PREV FROM host;
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: ALIGN argument cannot be omitted in the range select query
 
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';

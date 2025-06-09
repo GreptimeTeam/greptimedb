@@ -15,19 +15,33 @@
 use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
+use api::region::RegionResponse;
+use api::v1::meta::Peer;
+use api::v1::region::sync_request::ManifestInfo;
+use api::v1::region::{region_request, MetricManifestInfo, RegionRequest, SyncRequest};
 use api::v1::{ColumnDataType, SemanticType};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
+use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::region_engine::RegionManifestInfo;
+use store_api::storage::RegionId;
+use tokio::sync::mpsc;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
-use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
-use crate::ddl::test_util::{create_logical_table, create_physical_table};
+use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
+use crate::ddl::test_util::{
+    create_logical_table, create_physical_table, create_physical_table_metadata,
+    test_create_physical_table_task,
+};
 use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
+use crate::error::Result;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
 
 fn make_alter_logical_table_add_column_task(
@@ -405,5 +419,80 @@ async fn test_on_part_duplicate_alter_request() {
             "new_col_2".to_string(),
             "ts".to_string()
         ]
+    );
+}
+
+fn alters_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
+    if let region_request::Body::Alters(_) = request.body.unwrap() {
+        let mut response = RegionResponse::new(0);
+        // Default region id for physical table.
+        let region_id = RegionId::new(1000, 1);
+        response.extensions.insert(
+            MANIFEST_INFO_EXTENSION_KEY.to_string(),
+            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::metric(1, 0, 2, 0))])
+                .unwrap(),
+        );
+        return Ok(response);
+    }
+
+    Ok(RegionResponse::new(0))
+}
+
+#[tokio::test]
+async fn test_on_submit_alter_region_request() {
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let handler = DatanodeWatcher::new(tx).with_handler(alters_request_handler);
+    let node_manager = Arc::new(MockDatanodeManager::new(handler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let mut create_physical_table_task = test_create_physical_table_task("phy");
+    let phy_id = 1000u32;
+    let region_routes = vec![RegionRoute {
+        region: Region::new_test(RegionId::new(phy_id, 1)),
+        leader_peer: Some(Peer::empty(1)),
+        follower_peers: vec![Peer::empty(5)],
+        leader_state: None,
+        leader_down_since: None,
+    }];
+    create_physical_table_task.set_table_id(phy_id);
+    create_physical_table_metadata(
+        &ddl_context,
+        create_physical_table_task.table_info.clone(),
+        TableRouteValue::Physical(PhysicalTableRouteValue::new(region_routes)),
+    )
+    .await;
+    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+
+    let tasks = vec![
+        make_alter_logical_table_add_column_task(None, "table1", vec!["new_col".to_string()]),
+        make_alter_logical_table_add_column_task(None, "table2", vec!["mew_col".to_string()]),
+    ];
+
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
+    procedure.on_prepare().await.unwrap();
+    procedure.on_submit_alter_region_requests().await.unwrap();
+    let mut results = Vec::new();
+    for _ in 0..2 {
+        let result = rx.try_recv().unwrap();
+        results.push(result);
+    }
+    rx.try_recv().unwrap_err();
+    let (peer, request) = results.remove(0);
+    assert_eq!(peer.id, 1);
+    assert_matches!(request.body.unwrap(), region_request::Body::Alters(_));
+    let (peer, request) = results.remove(0);
+    assert_eq!(peer.id, 5);
+    assert_matches!(
+        request.body.unwrap(),
+        region_request::Body::Sync(SyncRequest {
+            manifest_info: Some(ManifestInfo::MetricManifestInfo(MetricManifestInfo {
+                data_manifest_version: 1,
+                metadata_manifest_version: 2,
+                ..
+            })),
+            ..
+        })
     );
 }

@@ -18,13 +18,15 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
+    RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use pipeline::{GreptimePipelineParams, PipelineWay, SchemaInfo, SelectInfo};
+use pipeline::{
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineWay, SchemaInfo, SelectInfo,
+};
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
@@ -33,6 +35,7 @@ use crate::error::{
     IncompatibleSchemaSnafu, NotSupportedSnafu, PipelineSnafu, Result,
     UnsupportedJsonDataTypeForTagSnafu,
 };
+use crate::http::event::PipelineIngestRequest;
 use crate::otlp::trace::attributes::OtlpAnyValue;
 use crate::otlp::utils::{bytes_to_hex_string, key_value_to_jsonb};
 use crate::pipeline::run_pipeline;
@@ -54,49 +57,34 @@ pub async fn to_grpc_insert_requests(
     table_name: String,
     query_ctx: &QueryContextRef,
     pipeline_handler: PipelineHandlerRef,
-) -> Result<(RowInsertRequests, usize)> {
+) -> Result<ContextReq> {
     match pipeline {
         PipelineWay::OtlpLogDirect(select_info) => {
             let rows = parse_export_logs_service_request_to_rows(request, select_info)?;
-            let len = rows.rows.len();
             let insert_request = RowInsertRequest {
                 rows: Some(rows),
                 table_name,
             };
-            Ok((
-                RowInsertRequests {
-                    inserts: vec![insert_request],
-                },
-                len,
-            ))
+
+            Ok(ContextReq::default_opt_with_reqs(vec![insert_request]))
         }
         PipelineWay::Pipeline(pipeline_def) => {
             let data = parse_export_logs_service_request(request);
             let array = pipeline::json_array_to_map(data).context(PipelineSnafu)?;
 
-            let inserts = run_pipeline(
+            let pipeline_ctx =
+                PipelineContext::new(&pipeline_def, &pipeline_params, query_ctx.channel());
+            run_pipeline(
                 &pipeline_handler,
-                &pipeline_def,
-                &pipeline_params,
-                array,
-                table_name,
+                &pipeline_ctx,
+                PipelineIngestRequest {
+                    table: table_name,
+                    values: array,
+                },
                 query_ctx,
                 true,
             )
-            .await?;
-            let len = inserts
-                .iter()
-                .map(|insert| {
-                    insert
-                        .rows
-                        .as_ref()
-                        .map(|rows| rows.rows.len())
-                        .unwrap_or(0)
-                })
-                .sum();
-
-            let insert_requests = RowInsertRequests { inserts };
-            Ok((insert_requests, len))
+            .await
         }
         _ => NotSupportedSnafu {
             feat: "Unsupported pipeline for logs",

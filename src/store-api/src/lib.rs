@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,12 +14,16 @@
 
 //! Storage related APIs
 
+#![feature(let_chains)]
+#![feature(iterator_try_collect)]
+
 pub mod codec;
 pub mod data_source;
 pub mod logstore;
 pub mod manifest;
 pub mod metadata;
 pub mod metric_engine_consts;
+mod metrics;
 pub mod mito_engine_options;
 pub mod path_utils;
 pub mod region_engine;

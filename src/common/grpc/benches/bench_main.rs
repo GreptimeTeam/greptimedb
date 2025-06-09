@@ -14,8 +14,10 @@
 
 use criterion::criterion_main;
 
+mod bench_flight_decoder;
 mod channel_manager;
 
 criterion_main! {
-    channel_manager::benches
+    channel_manager::benches,
+    bench_flight_decoder::benches
 }

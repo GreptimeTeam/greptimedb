@@ -52,7 +52,7 @@ impl FlightRecordBatchStream {
             rx,
             join_handle,
             done: false,
-            encoder: FlightEncoder::default(),
+            encoder: FlightEncoder::with_compression_disabled(),
         }
     }
 
@@ -60,7 +60,7 @@ impl FlightRecordBatchStream {
         mut recordbatches: SendableRecordBatchStream,
         mut tx: Sender<TonicResult<FlightMessage>>,
     ) {
-        let schema = recordbatches.schema();
+        let schema = recordbatches.schema().arrow_schema().clone();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
             warn!(e; "stop sending Flight data");
             return;
@@ -69,7 +69,12 @@ impl FlightRecordBatchStream {
         while let Some(batch_or_err) = recordbatches.next().in_current_span().await {
             match batch_or_err {
                 Ok(recordbatch) => {
-                    if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
+                    if let Err(e) = tx
+                        .send(Ok(FlightMessage::RecordBatch(
+                            recordbatch.into_df_record_batch(),
+                        )))
+                        .await
+                    {
                         warn!(e; "stop sending Flight data");
                         return;
                     }
@@ -167,20 +172,20 @@ mod test {
         let decoder = &mut FlightDecoder::default();
         let mut flight_messages = raw_data
             .into_iter()
-            .map(|x| decoder.try_decode(x).unwrap())
+            .map(|x| decoder.try_decode(&x).unwrap())
             .collect::<Vec<FlightMessage>>();
         assert_eq!(flight_messages.len(), 2);
 
         match flight_messages.remove(0) {
             FlightMessage::Schema(actual_schema) => {
-                assert_eq!(actual_schema, schema);
+                assert_eq!(&actual_schema, schema.arrow_schema());
             }
             _ => unreachable!(),
         }
 
         match flight_messages.remove(0) {
-            FlightMessage::Recordbatch(actual_recordbatch) => {
-                assert_eq!(actual_recordbatch, recordbatch);
+            FlightMessage::RecordBatch(actual_recordbatch) => {
+                assert_eq!(&actual_recordbatch, recordbatch.df_record_batch());
             }
             _ => unreachable!(),
         }

@@ -54,9 +54,14 @@ impl TestEnv {
 
     /// Returns a new env with specific `prefix` for test.
     pub async fn with_prefix(prefix: &str) -> Self {
+        Self::with_prefix_and_config(prefix, EngineConfig::default()).await
+    }
+
+    /// Returns a new env with specific `prefix` and `config` for test.
+    pub async fn with_prefix_and_config(prefix: &str, config: EngineConfig) -> Self {
         let mut mito_env = MitoTestEnv::with_prefix(prefix);
         let mito = mito_env.create_engine(MitoConfig::default()).await;
-        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
+        let metric = MetricEngine::try_new(mito.clone(), config).unwrap();
         Self {
             mito_env,
             mito,
@@ -84,7 +89,7 @@ impl TestEnv {
             .mito_env
             .create_follower_engine(MitoConfig::default())
             .await;
-        let metric = MetricEngine::new(mito.clone(), EngineConfig::default());
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
 
         let region_id = self.default_physical_region_id();
         debug!("opening default physical region: {region_id}");

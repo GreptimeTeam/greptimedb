@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
-use common_meta::region_registry::LeaderRegion;
+use common_meta::region_registry::{LeaderRegion, LeaderRegionManifestInfo};
 use store_api::region_engine::RegionRole;
 
 use crate::error::Result;
@@ -44,7 +44,7 @@ impl HeartbeatHandler for CollectLeaderRegionHandler {
                 continue;
             }
 
-            let manifest = stat.region_manifest.into();
+            let manifest = LeaderRegionManifestInfo::from_region_stat(stat);
             let value = LeaderRegion {
                 datanode_id: current_stat.id,
                 manifest,
@@ -122,6 +122,8 @@ mod tests {
             manifest_size: 0,
             sst_size: 0,
             index_size: 0,
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
         }
     }
 
@@ -161,6 +163,7 @@ mod tests {
                 manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 1,
                     flushed_entry_id: 0,
+                    topic_latest_entry_id: 0,
                 },
             })
         );
@@ -192,6 +195,7 @@ mod tests {
                 manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 2,
                     flushed_entry_id: 0,
+                    topic_latest_entry_id: 0,
                 },
             })
         );
@@ -224,6 +228,7 @@ mod tests {
                 manifest: LeaderRegionManifestInfo::Mito {
                     manifest_version: 2,
                     flushed_entry_id: 0,
+                    topic_latest_entry_id: 0,
                 },
             })
         );

@@ -21,32 +21,6 @@ jobs:
         run: sudo apt-get install -y jq
 
       # Make the check.sh script executable
-      - name: Make check.sh executable
-        run: chmod +x grafana/check.sh
-
-      # Run the check.sh script
-      - name: Run check.sh
-        run: ./grafana/check.sh
-
-      # Only run summary.sh for pull_request events (not for merge queues or final pushes)
-      - name: Check if this is a pull request
-        id: check-pr
+      - name: Check grafana dashboards
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "is_pull_request=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_pull_request=false" >> $GITHUB_OUTPUT
-          fi
-
-      # Make the summary.sh script executable
-      - name: Make summary.sh executable
-        if: steps.check-pr.outputs.is_pull_request == 'true'
-        run: chmod +x grafana/summary.sh
-
-      # Run the summary.sh script and add its output to the GitHub Job Summary
-      - name: Run summary.sh and add to Job Summary
-        if: steps.check-pr.outputs.is_pull_request == 'true'
-        run: |
-          SUMMARY=$(./grafana/summary.sh)
-          echo "### Summary of Grafana Panels" >> $GITHUB_STEP_SUMMARY
-          echo "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+          make check-dashboards

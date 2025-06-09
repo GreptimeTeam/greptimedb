@@ -22,9 +22,8 @@ use std::sync::{Arc, Mutex};
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
-use common_recordbatch::SendableRecordBatchStream;
+use common_error::ext::BoxedError;
+use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType};
@@ -451,6 +450,13 @@ pub struct RegionStatistic {
     /// The details of the region.
     #[serde(default)]
     pub manifest: RegionManifestInfo,
+    /// The latest entry id of the region's remote WAL since last flush.
+    /// For metric engine, there're two latest entry ids, one for data and one for metadata.
+    /// TODO(weny): remove this two fields and use single instead.
+    #[serde(default)]
+    pub data_topic_latest_entry_id: u64,
+    #[serde(default)]
+    pub metadata_topic_latest_entry_id: u64,
 }
 
 /// The manifest info of a region.
@@ -548,6 +554,16 @@ impl RegionManifestInfo {
                 ..
             } => Some(*metadata_flushed_entry_id),
         }
+    }
+
+    /// Encodes a list of ([RegionId], [RegionManifestInfo]) to a byte array.
+    pub fn encode_list(manifest_infos: &[(RegionId, Self)]) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(manifest_infos)
+    }
+
+    /// Decodes a list of ([RegionId], [RegionManifestInfo]) from a byte array.
+    pub fn decode_list(value: &[u8]) -> serde_json::Result<Vec<(RegionId, Self)>> {
+        serde_json::from_slice(value)
     }
 }
 
@@ -817,12 +833,10 @@ impl RegionScanner for SinglePartitionScanner {
         _partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         let mut stream = self.stream.lock().unwrap();
-        stream.take().ok_or_else(|| {
-            BoxedError::new(PlainError::new(
-                "Not expected to run ExecutionPlan more than once".to_string(),
-                StatusCode::Unexpected,
-            ))
-        })
+        let result = stream
+            .take()
+            .or_else(|| Some(Box::pin(EmptyRecordBatchStream::new(self.schema.clone()))));
+        Ok(result.unwrap())
     }
 
     fn has_predicate(&self) -> bool {

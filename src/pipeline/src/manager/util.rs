@@ -19,7 +19,6 @@ use datatypes::timestamp::TimestampNanosecond;
 use crate::error::{InvalidPipelineVersionSnafu, Result};
 use crate::table::{
     PIPELINE_TABLE_CREATED_AT_COLUMN_NAME, PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME,
-    PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME,
 };
 use crate::PipelineVersion;
 
@@ -34,15 +33,8 @@ pub fn to_pipeline_version(version_str: Option<&str>) -> Result<PipelineVersion>
     }
 }
 
-pub(crate) fn prepare_dataframe_conditions(
-    schema: &str,
-    name: &str,
-    version: PipelineVersion,
-) -> Expr {
-    let mut conditions = vec![
-        col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name)),
-        col(PIPELINE_TABLE_PIPELINE_SCHEMA_COLUMN_NAME).eq(lit(schema)),
-    ];
+pub(crate) fn prepare_dataframe_conditions(name: &str, version: PipelineVersion) -> Expr {
+    let mut conditions = vec![col(PIPELINE_TABLE_PIPELINE_NAME_COLUMN_NAME).eq(lit(name))];
 
     if let Some(v) = version {
         conditions
@@ -60,6 +52,13 @@ pub(crate) fn generate_pipeline_cache_key(
     match version {
         Some(version) => format!("{}/{}/{}", schema, name, i64::from(version)),
         None => format!("{}/{}/latest", schema, name),
+    }
+}
+
+pub(crate) fn generate_pipeline_cache_key_suffix(name: &str, version: PipelineVersion) -> String {
+    match version {
+        Some(version) => format!("/{}/{}", name, i64::from(version)),
+        None => format!("/{}/latest", name),
     }
 }
 

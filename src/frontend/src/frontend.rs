@@ -17,8 +17,9 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
-use common_telemetry::logging::{LoggingOptions, TracingOptions};
+use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::grpc::GrpcOptions;
@@ -37,7 +38,7 @@ use crate::service_config::{
     PromStoreOptions,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FrontendOptions {
     pub node_id: Option<String>,
@@ -58,7 +59,9 @@ pub struct FrontendOptions {
     pub user_provider: Option<String>,
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
+    pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
+    pub slow_query: Option<SlowQueryOptions>,
 }
 
 impl Default for FrontendOptions {
@@ -82,7 +85,9 @@ impl Default for FrontendOptions {
             user_provider: None,
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
+            query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
+            slow_query: Some(SlowQueryOptions::default()),
         }
     }
 }
@@ -103,7 +108,7 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         if let Some(t) = &self.heartbeat_task {
             t.start().await?;
         }
@@ -125,7 +130,7 @@ impl Frontend {
             .context(error::StartServerSnafu)
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.servers
             .shutdown_all()
             .await

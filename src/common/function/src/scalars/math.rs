@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod clamp;
+pub mod clamp;
 mod modulo;
 mod pow;
 mod rate;
@@ -20,7 +20,7 @@ mod rate;
 use std::fmt;
 use std::sync::Arc;
 
-pub use clamp::ClampFunction;
+pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
 use common_query::error::{GeneralDataFusionSnafu, Result};
 use common_query::prelude::Signature;
 use datafusion::error::DataFusionError;
@@ -44,6 +44,8 @@ impl MathFunction {
         registry.register(Arc::new(RateFunction));
         registry.register(Arc::new(RangeFunction));
         registry.register(Arc::new(ClampFunction));
+        registry.register(Arc::new(ClampMinFunction));
+        registry.register(Arc::new(ClampMaxFunction));
     }
 }
 

@@ -21,7 +21,7 @@ use snafu::{ensure, ResultExt};
 use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::utils::handle_retry_error;
+use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::DdlContext;
 use crate::error::{Result, SchemaNotFoundSnafu};
 use crate::instruction::CacheIdent;
@@ -148,7 +148,7 @@ impl Procedure for AlterDatabaseProcedure {
             AlterDatabaseState::UpdateMetadata => self.on_update_metadata().await,
             AlterDatabaseState::InvalidateSchemaCache => self.on_invalidate_schema_cache().await,
         }
-        .map_err(handle_retry_error)
+        .map_err(map_to_procedure_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {

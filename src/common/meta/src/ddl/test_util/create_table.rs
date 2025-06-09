@@ -18,7 +18,9 @@ use api::v1::column_def::try_as_column_schema;
 use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
 use chrono::DateTime;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO2_ENGINE};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO2_ENGINE, MITO_ENGINE,
+};
 use datatypes::schema::RawSchema;
 use derive_builder::Builder;
 use store_api::storage::TableId;
@@ -164,6 +166,7 @@ pub fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask 
         .time_index("ts")
         .primary_keys(["host".into()])
         .table_name(name)
+        .engine(MITO_ENGINE)
         .build()
         .unwrap()
         .into();

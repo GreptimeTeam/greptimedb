@@ -9,6 +9,7 @@ mock = []
 pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
 mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
 testing = ["common-wal/testing"]
+enterprise = ["common-meta/enterprise"]
 
 [lints]
 workspace = true
@@ -38,6 +39,7 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
+common-workload.workspace = true
 dashmap.workspace = true
 datatypes.workspace = true
 deadpool = { workspace = true, optional = true }
@@ -83,6 +85,7 @@ chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
+common-wal = { workspace = true, features = ["testing"] }
 session.workspace = true
 tracing = "0.1"
 tracing-subscriber.workspace = true

@@ -19,6 +19,7 @@ use common_error::status_code::{convert_tonic_code_to_status_code, StatusCode};
 use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_MSG};
 use common_macro::stack_trace_debug;
 use snafu::{location, Location, Snafu};
+use tonic::metadata::errors::InvalidMetadataValue;
 use tonic::{Code, Status};
 
 #[derive(Snafu)]
@@ -109,11 +110,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse ascii string: {}", value))]
-    InvalidAscii {
-        value: String,
+    #[snafu(display("Invalid Tonic metadata value"))]
+    InvalidTonicMetadataValue {
+        #[snafu(source)]
+        error: InvalidMetadataValue,
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Failed to convert Schema"))]
+    ConvertSchema {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
     },
 }
 
@@ -134,8 +143,8 @@ impl ErrorExt for Error {
             | Error::ConvertFlightData { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
-
-            Error::InvalidAscii { .. } => StatusCode::InvalidArguments,
+            Error::InvalidTonicMetadataValue { .. } => StatusCode::InvalidArguments,
+            Error::ConvertSchema { source, .. } => source.status_code(),
         }
     }
 

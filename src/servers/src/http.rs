@@ -130,6 +130,7 @@ pub struct HttpServer {
 
     // server configs
     options: HttpOptions,
+    bind_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,11 +146,23 @@ pub struct HttpOptions {
 
     pub body_limit: ReadableSize,
 
-    pub is_strict_mode: bool,
+    /// Validation mode while decoding Prometheus remote write requests.
+    pub prom_validation_mode: PromValidationMode,
 
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromValidationMode {
+    /// Force UTF8 validation
+    Strict,
+    /// Allow lossy UTF8 strings
+    Lossy,
+    /// Do not validate UTF8 strings.
+    Unchecked,
 }
 
 impl Default for HttpOptions {
@@ -159,9 +172,9 @@ impl Default for HttpOptions {
             timeout: Duration::from_secs(0),
             disable_dashboard: false,
             body_limit: DEFAULT_BODY_LIMIT,
-            is_strict_mode: false,
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
+            prom_validation_mode: PromValidationMode::Strict,
         }
     }
 }
@@ -553,13 +566,15 @@ impl HttpServerBuilder {
     pub fn with_prom_handler(
         self,
         handler: PromStoreProtocolHandlerRef,
+        pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
-        is_strict_mode: bool,
+        prom_validation_mode: PromValidationMode,
     ) -> Self {
         let state = PromStoreState {
             prom_store_handler: handler,
+            pipeline_handler,
             prom_store_with_metric_engine,
-            is_strict_mode,
+            prom_validation_mode,
         };
 
         Self {
@@ -687,6 +702,7 @@ impl HttpServerBuilder {
             shutdown_tx: Mutex::new(None),
             plugins: self.plugins,
             router: StdMutex::new(self.router),
+            bind_addr: None,
         }
     }
 }
@@ -930,6 +946,10 @@ impl HttpServer {
             .route("/logs", routing::post(event::log_ingester))
             .route(
                 "/pipelines/{pipeline_name}",
+                routing::get(event::query_pipeline),
+            )
+            .route(
+                "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
             )
             .route(
@@ -947,6 +967,10 @@ impl HttpServer {
     fn route_pipelines<S>(log_state: LogState) -> Router<S> {
         Router::new()
             .route("/ingest", routing::post(event::log_ingester))
+            .route(
+                "/pipelines/{pipeline_name}",
+                routing::get(event::query_pipeline),
+            )
             .route(
                 "/pipelines/{pipeline_name}",
                 routing::post(event::add_pipeline),
@@ -1091,7 +1115,7 @@ impl Server for HttpServer {
         Ok(())
     }
 
-    async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
+    async fn start(&mut self, listening: SocketAddr) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let serve = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
@@ -1147,11 +1171,17 @@ impl Server for HttpServer {
                 error!(e; "Failed to shutdown http server");
             }
         });
-        Ok(listening)
+
+        self.bind_addr = Some(listening);
+        Ok(())
     }
 
     fn name(&self) -> &str {
         HTTP_SERVER
+    }
+
+    fn bind_addr(&self) -> Option<SocketAddr> {
+        self.bind_addr
     }
 }
 
@@ -1161,7 +1191,6 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use api::v1::greptime_request::Request;
     use arrow_ipc::reader::FileReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
@@ -1183,24 +1212,10 @@ mod test {
     use super::*;
     use crate::error::Error;
     use crate::http::test_helpers::TestClient;
-    use crate::query_handler::grpc::GrpcQueryHandler;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
-    }
-
-    #[async_trait]
-    impl GrpcQueryHandler for DummyInstance {
-        type Error = Error;
-
-        async fn do_query(
-            &self,
-            _query: Request,
-            _ctx: QueryContextRef,
-        ) -> std::result::Result<Output, Self::Error> {
-            unimplemented!()
-        }
     }
 
     #[async_trait]

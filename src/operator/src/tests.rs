@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod kv_backend;
 mod partition_manager;
 
+pub(crate) use kv_backend::prepare_mocked_backend;
 pub(crate) use partition_manager::{create_partition_rule_manager, new_test_table_info};

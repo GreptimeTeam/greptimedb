@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::{Error, Result};
 use crate::etl::value::Value;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -64,5 +65,17 @@ impl IntoIterator for Array {
 impl From<Vec<Value>> for Array {
     fn from(values: Vec<Value>) -> Self {
         Array { values }
+    }
+}
+
+impl TryFrom<Vec<serde_json::Value>> for Array {
+    type Error = Error;
+
+    fn try_from(value: Vec<serde_json::Value>) -> Result<Self> {
+        let values = value
+            .into_iter()
+            .map(|v| v.try_into())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Array { values })
     }
 }

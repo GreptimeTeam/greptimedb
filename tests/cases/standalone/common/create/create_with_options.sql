@@ -57,8 +57,7 @@ engine=mito
 with(
     'ttl'='7d',
     'compaction.type'='twcs',
-    'compaction.twcs.max_active_window_runs'='2',
-    'compaction.twcs.max_inactive_window_runs'='2',
+    'compaction.twcs.trigger_file_num'='2',
     'compaction.twcs.time_window'='1d',
     'index.inverted_index.ignore_column_ids'='1,2,3',
     'index.inverted_index.segment_row_count'='512',
@@ -76,4 +75,4 @@ create table if not exists invalid_compaction(
     PRIMARY KEY(host)
 )
 engine=mito
-with('compaction.type'='twcs', 'compaction.twcs.max_active_window_runs'='8d');
+with('compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='8d');

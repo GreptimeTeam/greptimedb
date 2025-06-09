@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use axum::Router;
 use common_query::Output;
@@ -26,7 +25,6 @@ use servers::error::{self, Result};
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::opentsdb::codec::DataPoint;
-use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
@@ -34,19 +32,6 @@ use tokio::sync::mpsc;
 
 struct DummyInstance {
     tx: mpsc::Sender<String>,
-}
-
-#[async_trait]
-impl GrpcQueryHandler for DummyInstance {
-    type Error = crate::Error;
-
-    async fn do_query(
-        &self,
-        _query: Request,
-        _ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error> {
-        unimplemented!()
-    }
 }
 
 #[async_trait]

@@ -14,21 +14,25 @@
 
 use api::v1::WalEntry;
 use async_stream::stream;
+use common_telemetry::tracing::warn;
 use futures::StreamExt;
 use object_store::Buffer;
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
 
-use crate::error::{CorruptedEntrySnafu, DecodeWalSnafu, Result};
+use crate::error::{DecodeWalSnafu, Result};
 use crate::wal::raw_entry_reader::RawEntryReader;
 use crate::wal::{EntryId, WalEntryStream};
 
+/// Decodes the [Entry] into [WalEntry].
+///
+/// The caller must ensure the [Entry] is complete.
 pub(crate) fn decode_raw_entry(raw_entry: Entry) -> Result<(EntryId, WalEntry)> {
     let entry_id = raw_entry.entry_id();
     let region_id = raw_entry.region_id();
-    ensure!(raw_entry.is_complete(), CorruptedEntrySnafu { region_id });
+    debug_assert!(raw_entry.is_complete());
     let buffer = into_buffer(raw_entry);
     let wal_entry = WalEntry::decode(buffer).context(DecodeWalSnafu { region_id })?;
     Ok((entry_id, wal_entry))
@@ -58,7 +62,7 @@ impl WalEntryReader for NoopEntryReader {
     }
 }
 
-/// A Reader reads the [RawEntry] from [RawEntryReader] and decodes [RawEntry] into [WalEntry].
+/// A Reader reads the [Entry] from [RawEntryReader] and decodes [Entry] into [WalEntry].
 pub struct LogStoreEntryReader<R> {
     reader: R,
 }
@@ -75,11 +79,15 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
         let mut stream = reader.read(ns, start_id)?;
 
         let stream = stream! {
-            let mut buffered_entry = None;
+            let mut buffered_entry: Option<Entry> = None;
             while let Some(next_entry) = stream.next().await {
                 match buffered_entry.take() {
                     Some(entry) => {
-                        yield decode_raw_entry(entry);
+                        if entry.is_complete() {
+                            yield decode_raw_entry(entry);
+                        } else {
+                            warn!("Ignoring incomplete entry: {}", entry);
+                        }
                         buffered_entry = Some(next_entry?);
                     },
                     None => {
@@ -91,6 +99,8 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
                 // Ignores tail corrupted data.
                 if entry.is_complete() {
                     yield decode_raw_entry(entry);
+                } else {
+                    warn!("Ignoring incomplete entry: {}", entry);
                 }
             }
         };
@@ -101,7 +111,6 @@ impl<R: RawEntryReader> WalEntryReader for LogStoreEntryReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
 
     use api::v1::{Mutation, OpType, WalEntry};
     use futures::TryStreamExt;
@@ -110,7 +119,6 @@ mod tests {
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
 
-    use crate::error;
     use crate::test_util::wal_util::MockRawEntryStream;
     use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 
@@ -125,6 +133,7 @@ mod tests {
                 rows: None,
                 write_hint: None,
             }],
+            bulk_entries: vec![],
         };
         let encoded_entry = wal_entry.encode_to_vec();
         let parts = encoded_entry
@@ -140,7 +149,7 @@ mod tests {
                     headers: vec![MultiplePartHeader::First, MultiplePartHeader::Last],
                     parts,
                 }),
-                // The tail corrupted data.
+                // The tail incomplete entry.
                 Entry::MultiplePart(MultiplePartEntry {
                     provider: provider.clone(),
                     region_id: RegionId::new(1, 1),
@@ -170,6 +179,7 @@ mod tests {
         let provider = Provider::kafka_provider("my_topic".to_string());
         let raw_entry_stream = MockRawEntryStream {
             entries: vec![
+                // The incomplete entry.
                 Entry::MultiplePart(MultiplePartEntry {
                     provider: provider.clone(),
                     region_id: RegionId::new(1, 1),
@@ -188,12 +198,12 @@ mod tests {
         };
 
         let mut reader = LogStoreEntryReader::new(raw_entry_stream);
-        let err = reader
+        let entries = reader
             .read(&provider, 0)
             .unwrap()
             .try_collect::<Vec<_>>()
             .await
-            .unwrap_err();
-        assert_matches!(err, error::Error::CorruptedEntry { .. });
+            .unwrap();
+        assert!(entries.is_empty());
     }
 }
