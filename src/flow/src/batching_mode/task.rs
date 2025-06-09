@@ -61,7 +61,8 @@ use crate::error::{
     SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
 };
 use crate::{Error, FlowId};
 
@@ -79,6 +80,14 @@ pub struct TaskConfig {
     pub source_table_names: HashSet<[String; 3]>,
     catalog_manager: CatalogManagerRef,
     query_type: QueryType,
+}
+
+impl TaskConfig {
+    pub fn time_window_size(&self) -> Option<Duration> {
+        self.time_window_expr
+            .as_ref()
+            .and_then(|expr| *expr.time_window_size())
+    }
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -334,11 +343,53 @@ impl BatchingTask {
             })?;
 
         let plan = expanded_plan;
-        let mut peer_desc = None;
+
+        let db = frontend_client
+            .get_random_active_frontend(catalog, schema)
+            .await?;
+        let peer_desc = db.peer.clone();
+
+        let (tx, mut rx) = oneshot::channel();
+        let peer_inner = peer_desc.clone();
+        let window_size_pretty = format!(
+            "{}s",
+            self.config.time_window_size().unwrap_or_default().as_secs()
+        );
+        let inner_window_size_pretty = window_size_pretty.clone();
+        let flow_id = self.config.flow_id;
+        let slow_query_metric_task = tokio::task::spawn(async move {
+            tokio::time::sleep(SLOW_QUERY_THRESHOLD).await;
+            METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT
+                .with_label_values(&[
+                    flow_id.to_string().as_str(),
+                    &peer_inner.to_string(),
+                    inner_window_size_pretty.as_str(),
+                ])
+                .add(1.0);
+            while rx.try_recv() == Err(TryRecvError::Empty) {
+                // sleep for a while before next update
+                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+            }
+            METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT
+                .with_label_values(&[
+                    flow_id.to_string().as_str(),
+                    &peer_inner.to_string(),
+                    inner_window_size_pretty.as_str(),
+                ])
+                .sub(1.0);
+        });
+        self.state.write().unwrap().slow_query_metric_task = Some(slow_query_metric_task);
 
         let res = {
             let _timer = METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME
-                .with_label_values(&[flow_id.to_string().as_str()])
+                .with_label_values(&[
+                    flow_id.to_string().as_str(),
+                    format!(
+                        "{}s",
+                        self.config.time_window_size().unwrap_or_default().as_secs()
+                    )
+                    .as_str(),
+                ])
                 .start_timer();
 
             // hack and special handling the insert logical plan
@@ -367,10 +418,12 @@ impl BatchingTask {
             };
 
             frontend_client
-                .handle(req, catalog, schema, &mut peer_desc, Some(self))
+                .handle(req, catalog, schema, Some(db.peer), Some(self))
                 .await
         };
 
+        // signaling the slow query metric task to stop
+        let _ = tx.send(());
         let elapsed = instant.elapsed();
         if let Ok(affected_rows) = &res {
             debug!(
@@ -393,7 +446,12 @@ impl BatchingTask {
             METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY
                 .with_label_values(&[
                     flow_id.to_string().as_str(),
-                    &peer_desc.unwrap_or_default().to_string(),
+                    &peer_desc.to_string(),
+                    format!(
+                        "{}s",
+                        self.config.time_window_size().unwrap_or_default().as_secs()
+                    )
+                    .as_str(),
                 ])
                 .observe(elapsed.as_secs_f64());
         }

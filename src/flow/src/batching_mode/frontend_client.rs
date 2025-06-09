@@ -286,7 +286,7 @@ impl FrontendClient {
 
     /// Get the frontend with recent enough(less than 1 minute from now) `last_activity_ts`
     /// and is able to process query
-    async fn get_random_active_frontend(
+    pub(crate) async fn get_random_active_frontend(
         &self,
         catalog: &str,
         schema: &str,
@@ -382,7 +382,7 @@ impl FrontendClient {
             }),
             catalog,
             schema,
-            &mut None,
+            None,
             task,
         )
         .await
@@ -394,16 +394,28 @@ impl FrontendClient {
         req: api::v1::greptime_request::Request,
         catalog: &str,
         schema: &str,
-        peer_desc: &mut Option<PeerDesc>,
+        use_peer: Option<Peer>,
         task: Option<&BatchingTask>,
     ) -> Result<u32, Error> {
         match self {
-            FrontendClient::Distributed { fe_stats, .. } => {
-                let db = self.get_random_active_frontend(catalog, schema).await?;
-
-                *peer_desc = Some(PeerDesc::Dist {
-                    peer: db.peer.clone(),
-                });
+            FrontendClient::Distributed {
+                fe_stats, chnl_mgr, ..
+            } => {
+                let db = if let Some(peer) = use_peer {
+                    DatabaseWithPeer::new(
+                        Database::new(
+                            catalog,
+                            schema,
+                            Client::with_manager_and_urls(
+                                chnl_mgr.clone(),
+                                vec![peer.addr.clone()],
+                            ),
+                        ),
+                        peer,
+                    )
+                } else {
+                    self.get_random_active_frontend(catalog, schema).await?
+                };
 
                 let flow_id = task.map(|t| t.config.flow_id).unwrap_or_default();
                 let _guard = fe_stats.observe(&db.peer.addr, flow_id);
