@@ -252,9 +252,7 @@ impl ElectionPgClient {
             .build()
         })?;
 
-        result.with_context(|_| PostgresExecutionSnafu {
-            sql: sql.to_string(),
-        })
+        result.context(PostgresExecutionSnafu { sql })
     }
 
     /// Returns the result of the query.
@@ -275,9 +273,7 @@ impl ElectionPgClient {
             .build()
         })?;
 
-        result.with_context(|_| PostgresExecutionSnafu {
-            sql: sql.to_string(),
-        })
+        result.context(PostgresExecutionSnafu { sql })
     }
 }
 
@@ -431,7 +427,7 @@ impl Election for PgElection {
         let mut keep_alive_interval = tokio::time::interval(self.meta_lease_ttl / 2);
         keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        self.pg_client.write().await.maybe_init_client().await?;
+        self.maybe_init_client().await?;
         loop {
             let res = self
                 .pg_client
@@ -457,10 +453,10 @@ impl Election for PgElection {
         }
     }
 
-    async fn reset_compaign(&self) {
+    async fn reset_campaign(&self) {
         self.is_leader.store(false, Ordering::Relaxed);
         if let Err(err) = self.pg_client.write().await.reset_client().await {
-            error!("Failed to reset client: {:?}", err);
+            error!(err; "Failed to reset client");
         }
     }
 

@@ -270,6 +270,8 @@ pub async fn metasrv_builder(
         (None, BackendImpl::PostgresStore) => {
             use std::time::Duration;
 
+            use common_meta::distributed_time_constants::POSTGRES_KEEP_ALIVE_SECS;
+
             use crate::election::rds::postgres::ElectionPgClient;
 
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
@@ -277,8 +279,12 @@ pub async fn metasrv_builder(
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
 
+            let mut cfg = Config::new();
+            cfg.keepalives = Some(true);
+            cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
             // We use a separate pool for election since we need a different session keep-alive idle time.
-            let pool = create_postgres_pool(&opts.store_addrs).await?;
+            let pool = create_postgres_pool_with(&opts.store_addrs, cfg).await?;
+
             let election_client =
                 ElectionPgClient::new(pool, execution_timeout, meta_lease_ttl, statement_timeout)?;
             let election = PgElection::with_pg_client(
@@ -383,11 +389,24 @@ pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
 }
 
 #[cfg(feature = "pg_kvbackend")]
+/// Creates a pool for the Postgres backend.
+///
+/// It only use first store addr to create a pool.
 pub async fn create_postgres_pool(store_addrs: &[String]) -> Result<deadpool_postgres::Pool> {
+    create_postgres_pool_with(store_addrs, Config::new()).await
+}
+
+#[cfg(feature = "pg_kvbackend")]
+/// Creates a pool for the Postgres backend.
+///
+/// It only use first store addr to create a pool, and use the given config to create a pool.
+pub async fn create_postgres_pool_with(
+    store_addrs: &[String],
+    mut cfg: Config,
+) -> Result<deadpool_postgres::Pool> {
     let postgres_url = store_addrs.first().context(error::InvalidArgumentsSnafu {
         err_msg: "empty store addrs",
     })?;
-    let mut cfg = Config::new();
     cfg.url = Some(postgres_url.to_string());
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1), NoTls)
