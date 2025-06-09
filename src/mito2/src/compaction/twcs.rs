@@ -202,6 +202,8 @@ impl Picker for TwcsPicker {
 struct Window {
     start: Timestamp,
     end: Timestamp,
+    // Mapping from file sequence to file groups. Files with the same sequence is considered
+    // created from the same compaction task.
     files: HashMap<Option<NonZeroU64>, FileGroup>,
     time_window: i64,
     overlapping: bool,
@@ -211,9 +213,7 @@ impl Window {
     /// Creates a new [Window] with given file.
     fn new_with_file(file: FileHandle) -> Self {
         let (start, end) = file.time_range();
-        let files = [(file.meta_ref().sequence, FileGroup::new_with_file(file))]
-            .into_iter()
-            .collect();
+        let files = HashMap::from([(file.meta_ref().sequence, FileGroup::new_with_file(file))]);
         Self {
             start,
             end,

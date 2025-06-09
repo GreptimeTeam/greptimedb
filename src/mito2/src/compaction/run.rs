@@ -126,6 +126,7 @@ pub trait Item: Ranged + Clone {
     fn size(&self) -> usize;
 }
 
+/// A group of files that are created by the same compaction task.
 #[derive(Debug, Clone)]
 pub struct FileGroup {
     files: SmallVec<[FileHandle; 2]>,
