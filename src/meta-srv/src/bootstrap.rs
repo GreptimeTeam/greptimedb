@@ -31,8 +31,6 @@ use common_meta::kv_backend::rds::MySqlStore;
 #[cfg(feature = "pg_kvbackend")]
 use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-#[cfg(feature = "pg_kvbackend")]
-use common_telemetry::error;
 use common_telemetry::info;
 #[cfg(feature = "pg_kvbackend")]
 use deadpool_postgres::{Config, Runtime};
@@ -270,22 +268,35 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "pg_kvbackend")]
         (None, BackendImpl::PostgresStore) => {
+            use std::time::Duration;
+
+            use crate::election::rds::postgres::ElectionPgClient;
+
+            let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
+            let execution_timeout = Duration::from_secs(META_LEASE_SECS);
+            let statement_timeout = Duration::from_secs(META_LEASE_SECS);
+            let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
+
+            // We use a separate pool for election since we need a different session keep-alive idle time.
             let pool = create_postgres_pool(&opts.store_addrs).await?;
-            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
-                .await
-                .context(error::KvBackendSnafu)?;
-            // Client for election should be created separately since we need a different session keep-alive idle time.
-            let election_client = create_postgres_client(opts).await?;
+            let election_client =
+                ElectionPgClient::new(pool, execution_timeout, meta_lease_ttl, statement_timeout)?;
             let election = PgElection::with_pg_client(
                 opts.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
-                CANDIDATE_LEASE_SECS,
-                META_LEASE_SECS,
+                candidate_lease_ttl,
+                meta_lease_ttl,
                 &opts.meta_table_name,
                 opts.meta_election_lock_id,
             )
             .await?;
+
+            let pool = create_postgres_pool(&opts.store_addrs).await?;
+            let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
+                .await
+                .context(error::KvBackendSnafu)?;
+
             (kv_backend, Some(election))
         }
         #[cfg(feature = "mysql_kvbackend")]
@@ -369,26 +380,6 @@ pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
     Client::connect(&etcd_endpoints, None)
         .await
         .context(error::ConnectEtcdSnafu)
-}
-
-#[cfg(feature = "pg_kvbackend")]
-async fn create_postgres_client(opts: &MetasrvOptions) -> Result<tokio_postgres::Client> {
-    let postgres_url = opts
-        .store_addrs
-        .first()
-        .context(error::InvalidArgumentsSnafu {
-            err_msg: "empty store addrs",
-        })?;
-    let (client, connection) = tokio_postgres::connect(postgres_url, NoTls)
-        .await
-        .context(error::ConnectPostgresSnafu)?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            error!(e; "connection error");
-        }
-    });
-    Ok(client)
 }
 
 #[cfg(feature = "pg_kvbackend")]
