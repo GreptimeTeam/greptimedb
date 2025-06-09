@@ -53,6 +53,8 @@ pub struct TaskState {
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
     /// Task handle
     pub(crate) task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Slow Query metrics update task handle
+    pub(crate) slow_query_metric_task: Option<tokio::task::JoinHandle<()>>,
 
     /// min run interval in seconds
     pub(crate) min_run_interval: Option<u64>,
@@ -69,6 +71,7 @@ impl TaskState {
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
+            slow_query_metric_task: None,
             min_run_interval: None,
             max_filter_num: None,
         }
@@ -248,11 +251,17 @@ impl DirtyTimeWindows {
         };
 
         METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
-            .with_label_values(&[flow_id.to_string().as_str()])
+            .with_label_values(&[
+                flow_id.to_string().as_str(),
+                format!("{}", window_size).as_str(),
+            ])
             .observe(first_nth.len() as f64);
 
         METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT
-            .with_label_values(&[flow_id.to_string().as_str()])
+            .with_label_values(&[
+                flow_id.to_string().as_str(),
+                format!("{}", window_size).as_str(),
+            ])
             .observe(self.windows.len() as f64);
 
         let full_time_range = first_nth
@@ -266,7 +275,10 @@ impl DirtyTimeWindows {
             })
             .num_seconds() as f64;
         METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE
-            .with_label_values(&[flow_id.to_string().as_str()])
+            .with_label_values(&[
+                flow_id.to_string().as_str(),
+                format!("{}", window_size).as_str(),
+            ])
             .observe(full_time_range);
 
         let mut expr_lst = vec![];
