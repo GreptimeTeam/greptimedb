@@ -14,12 +14,13 @@
 
 pub mod builder;
 
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
 use common_config::Configurable;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_telemetry::{info, warn};
 use common_wal::config::DatanodeWalConfig;
 use datanode::datanode::Datanode;
@@ -246,6 +247,14 @@ impl StartCommand {
                 info!("The wal dir of raft-engine is altered to {wal_dir}");
             }
             raft_engine_config.dir.replace(wal_dir.clone());
+        }
+
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(&opts.storage.data_home)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
         }
 
         if let Some(http_addr) = &self.http_addr {

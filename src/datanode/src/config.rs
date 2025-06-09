@@ -18,7 +18,7 @@ use core::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
@@ -35,9 +35,6 @@ use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::gb(5);
-
-/// Default data home in file storage
-const DEFAULT_DATA_HOME: &str = "./greptimedb_data";
 
 /// Object storage config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
