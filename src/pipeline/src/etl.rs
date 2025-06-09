@@ -47,8 +47,6 @@ const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
 const TABLESUFFIX: &str = "table_suffix";
 
-// pub type PipelineMap = std::collections::BTreeMap<String, Value>;
-
 pub enum Content<'a> {
     Json(&'a str),
     Yaml(&'a str),
