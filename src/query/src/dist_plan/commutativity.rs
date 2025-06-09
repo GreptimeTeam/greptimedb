@@ -120,13 +120,15 @@ pub fn step_aggr_to_upper_aggr(aggr_plan: &LogicalPlan) -> datafusion_common::Re
 /// on frontend call `calc(merge(state))` to get the final result.
 ///
 pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
-    let step_action = HashMap::from([
-        ("sum", ("sum", "sum")),
-        ("count", ("count", "sum")),
-        ("min", ("min", "min")),
-        ("max", ("max", "max")),
-        ("uddsketch_state", ("uddsketch_merge", "")),
-        ("hll", ("hll_merge", "")),
+    let step_action = HashSet::from([
+        "sum",
+        "count",
+        "min",
+        "max",
+        "first_value",
+        "last_value",
+        UDDSKETCH_STATE_NAME,
+        HLL_NAME,
     ]);
     aggr_exprs.iter().all(|expr| {
         if let Some(aggr_func) = get_aggr_func(expr) {
@@ -134,7 +136,7 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
                 // Distinct aggregate functions are not steppable(yet).
                 return false;
             }
-            step_action.contains_key(aggr_func.func.name())
+            step_action.contains(aggr_func.func.name())
         } else {
             false
         }
