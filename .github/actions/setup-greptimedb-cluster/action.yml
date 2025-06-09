@@ -10,13 +10,13 @@ inputs:
   meta-replicas:
     default: 2
     description: "Number of Metasrv replicas"
-  image-registry: 
+  image-registry:
     default: "docker.io"
     description: "Image registry"
-  image-repository: 
+  image-repository:
     default: "greptime/greptimedb"
     description: "Image repository"
-  image-tag: 
+  image-tag:
     default: "latest"
     description: 'Image tag'
   etcd-endpoints:
@@ -32,12 +32,12 @@ runs:
   steps:
   - name: Install GreptimeDB operator
     uses: nick-fields/retry@v3
-    with: 
+    with:
       timeout_minutes: 3
       max_attempts: 3
       shell: bash
       command: |
-        helm repo add greptime https://greptimeteam.github.io/helm-charts/ 
+        helm repo add greptime https://greptimeteam.github.io/helm-charts/
         helm repo update
         helm upgrade \
           --install \
@@ -48,7 +48,7 @@ runs:
           --wait-for-jobs
   - name: Install GreptimeDB cluster
     shell: bash
-    run: | 
+    run: |
       helm upgrade \
         --install my-greptimedb \
         --set meta.etcdEndpoints=${{ inputs.etcd-endpoints }} \
@@ -59,7 +59,7 @@ runs:
         --set base.podTemplate.main.resources.requests.cpu=50m \
         --set base.podTemplate.main.resources.requests.memory=256Mi \
         --set base.podTemplate.main.resources.limits.cpu=2000m \
-        --set base.podTemplate.main.resources.limits.memory=2Gi \
+        --set base.podTemplate.main.resources.limits.memory=4Gi \
         --set frontend.replicas=${{ inputs.frontend-replicas }} \
         --set datanode.replicas=${{ inputs.datanode-replicas }} \
         --set meta.replicas=${{ inputs.meta-replicas }} \
@@ -72,7 +72,7 @@ runs:
   - name: Wait for GreptimeDB
     shell: bash
     run: |
-      while true; do 
+      while true; do
         PHASE=$(kubectl -n my-greptimedb get gtc my-greptimedb -o jsonpath='{.status.clusterPhase}')
         if [ "$PHASE" == "Running" ]; then
           echo "Cluster is ready"
@@ -86,10 +86,10 @@ runs:
   - name: Print GreptimeDB info
     if: always()
     shell: bash
-    run: | 
+    run: |
       kubectl get all --show-labels -n my-greptimedb
   - name: Describe Nodes
     if: always()
     shell: bash
-    run: | 
+    run: |
       kubectl describe nodes
