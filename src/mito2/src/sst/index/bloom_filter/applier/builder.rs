@@ -115,11 +115,12 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     fn traverse_and_collect(&mut self, expr: &Expr) {
         let res = match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
-                Operator::And | Operator::Or => {
+                Operator::And => {
                     self.traverse_and_collect(left);
                     self.traverse_and_collect(right);
                     Ok(())
                 }
+                Operator::Or => self.collect_or_expression(left, right),
                 Operator::Eq => self.collect_eq(left, right),
                 _ => Ok(()),
             },
@@ -129,6 +130,75 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
         if let Err(err) = res {
             warn!(err; "Failed to collect bloom filter predicates, ignore it. expr: {expr}");
+        }
+    }
+
+    /// Collects OR expressions, but only if they involve the same column.
+    /// OR expressions across different columns cannot be efficiently handled by bloom filters.
+    fn collect_or_expression(&mut self, left: &Expr, right: &Expr) -> Result<()> {
+        // Try to collect all equality expressions from this OR tree that reference the same column
+        let mut or_predicates: BTreeMap<String, BTreeSet<Bytes>> = BTreeMap::new();
+
+        if !self.collect_or_eq_values(left, &mut or_predicates)? {
+            return Ok(()); // Contains non-equality expressions, skip
+        }
+        if !self.collect_or_eq_values(right, &mut or_predicates)? {
+            return Ok(()); // Contains non-equality expressions, skip
+        }
+
+        // Only collect predicates if all OR branches reference the same column
+        if or_predicates.len() == 1 {
+            let (column_name, values) = or_predicates.into_iter().next().unwrap();
+            let Some((column_id, _)) = self.column_id_and_type(&column_name)? else {
+                return Ok(());
+            };
+
+            self.predicates
+                .entry(column_id)
+                .or_default()
+                .list
+                .extend(values);
+        }
+        // If OR involves multiple columns, we don't collect any predicates
+        // as bloom filters cannot efficiently handle cross-column OR operations
+
+        Ok(())
+    }
+
+    /// Recursively collect equality values from an OR expression tree.
+    /// Returns true if all expressions are equality expressions on columns, false otherwise.
+    fn collect_or_eq_values(
+        &self,
+        expr: &Expr,
+        or_predicates: &mut BTreeMap<String, BTreeSet<Bytes>>,
+    ) -> Result<bool> {
+        match expr {
+            Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+                Operator::Or => {
+                    let left_ok = self.collect_or_eq_values(left, or_predicates)?;
+                    let right_ok = self.collect_or_eq_values(right, or_predicates)?;
+                    Ok(left_ok && right_ok)
+                }
+                Operator::Eq => {
+                    let Some((col, lit)) = Self::eq_expr_col_lit(left, right)? else {
+                        return Ok(false);
+                    };
+                    if lit.is_null() {
+                        return Ok(false);
+                    }
+                    let Some((_, data_type)) = self.column_id_and_type(&col.name)? else {
+                        return Ok(false);
+                    };
+                    let value = encode_lit(lit, data_type)?;
+                    or_predicates
+                        .entry(col.name.clone())
+                        .or_default()
+                        .insert(value);
+                    Ok(true)
+                }
+                _ => Ok(false), // Non-equality operators not supported
+            },
+            _ => Ok(false), // Non-binary expressions not supported in OR chains
         }
     }
 
@@ -417,17 +487,36 @@ mod tests {
         let expr = col("column1")
             .eq(lit("value1"))
             .or(col("column2").eq(lit("value2")));
-        let result = builder().build(&[expr]).unwrap().unwrap();
-        assert_eq!(result.predicates.len(), 1); // column2's datatype doesn't match
-        assert_eq!(result.predicates.get(&1).unwrap().list.len(), 1);
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_none()); // OR across different columns should not collect predicates
 
         // Test with non or chain
         let expr = col("column1")
             .eq(lit("value1"))
             .or(col("column1").gt_eq(lit("value2")));
-        let result = builder().build(&[expr]).unwrap().unwrap();
-        assert_eq!(result.predicates.len(), 1);
-        assert_eq!(result.predicates.get(&1).unwrap().list.len(), 1); // gt_eq is not supported
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_none()); // OR with non-equality should not collect predicates
+
+        // Test OR within same column only (should work)
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .or(col("column1").eq(lit("value2")));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_some());
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(predicates.get(&1).unwrap().list.len(), 2);
+
+        // Test that AND expressions still work with separate collection
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .and(col("column2").eq(lit(42i64)));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_some());
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 2); // Both columns should have predicates
+        assert_eq!(predicates.get(&1).unwrap().list.len(), 1);
+        assert_eq!(predicates.get(&2).unwrap().list.len(), 1);
     }
 
     #[test]
@@ -563,5 +652,75 @@ mod tests {
         let predicates = result.unwrap().predicates;
         let column_predicates = predicates.get(&1).unwrap();
         assert_eq!(column_predicates.list.len(), 3);
+    }
+
+    #[test]
+    fn test_cross_column_or_bug_fix() {
+        let (_d, factory) =
+            PuffinManagerFactory::new_for_test_block("test_cross_column_or_bug_fix_");
+        let metadata = test_region_metadata();
+        let builder = || {
+            BloomFilterIndexApplierBuilder::new(
+                "test".to_string(),
+                test_object_store(),
+                &metadata,
+                factory.clone(),
+            )
+        };
+
+        // This is the core bug case: OR across different columns
+        // Previously this would incorrectly collect predicates for both columns
+        // and treat them as AND conditions during application
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .or(col("column2").eq(lit(42i64)));
+        let result = builder().build(&[expr]).unwrap();
+        // The fix: no predicates should be collected for cross-column OR
+        assert!(
+            result.is_none(),
+            "Cross-column OR should not collect any predicates"
+        );
+
+        // Complex mixed case: (col1 = a OR col1 = b) AND (col1 = x OR col2 = y)
+        // Only the first part should be collected since the second part spans columns
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .or(col("column1").eq(lit("value2")))
+            .and(
+                col("column1")
+                    .eq(lit("value3"))
+                    .or(col("column2").eq(lit(42i64))),
+            );
+        let result = builder().build(&[expr]).unwrap();
+        // Should collect only the pure same-column OR part
+        assert!(result.is_some());
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 1); // Only column1 should have predicates
+        assert!(predicates.contains_key(&1));
+        assert!(!predicates.contains_key(&2)); // column2 should not have predicates
+        let column1_predicates = predicates.get(&1).unwrap();
+        assert_eq!(column1_predicates.list.len(), 2); // "value1" and "value2"
+
+        // Verify that pure same-column ORs still work correctly
+        let expr = col("column1")
+            .eq(lit("a"))
+            .or(col("column1").eq(lit("b")))
+            .or(col("column1").eq(lit("c")));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_some());
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(predicates.get(&1).unwrap().list.len(), 3);
+
+        // Verify that AND expressions across columns still work
+        let expr = col("column1")
+            .eq(lit("value1"))
+            .and(col("column2").eq(lit(42i64)));
+        let result = builder().build(&[expr]).unwrap();
+        assert!(result.is_some());
+        let predicates = result.unwrap().predicates;
+        assert_eq!(predicates.len(), 2); // Both columns should have predicates
+        assert!(predicates.contains_key(&1));
+        assert!(predicates.contains_key(&2));
     }
 }
