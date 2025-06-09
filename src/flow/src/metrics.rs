@@ -31,22 +31,29 @@ lazy_static! {
     pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME: HistogramVec = register_histogram_vec!(
         "greptime_flow_batching_engine_query_time_secs",
         "flow batching engine query time(seconds)",
-        &["flow_id"],
+        &["flow_id", "time_window_granularity"],
         vec![0.0, 5., 10., 20., 40., 80., 160., 320., 640.,]
     )
     .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY: HistogramVec = register_histogram_vec!(
         "greptime_flow_batching_engine_slow_query_secs",
-        "flow batching engine slow query(seconds)",
-        &["flow_id", "peer"],
+        "flow batching engine slow query(seconds), updated after query finished",
+        &["flow_id", "peer", "time_window_granularity"],
         vec![60., 2. * 60., 3. * 60., 5. * 60., 10. * 60.]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT: GaugeVec =
+        register_gauge_vec!(
+            "greptime_flow_batching_engine_real_time_slow_query_number",
+            "flow batching engine real time slow query number, updated in real time",
+            &["flow_id", "peer", "time_window_granularity"],
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT: HistogramVec =
         register_histogram_vec!(
             "greptime_flow_batching_engine_stalled_query_window_cnt",
             "flow batching engine stalled query time window count",
-            &["flow_id"],
+            &["flow_id", "time_window_granularity"],
             vec![0.0, 5., 10., 20., 40.]
         )
         .unwrap();
@@ -54,7 +61,7 @@ lazy_static! {
         register_histogram_vec!(
             "greptime_flow_batching_engine_query_window_cnt",
             "flow batching engine query time window count",
-            &["flow_id"],
+            &["flow_id", "time_window_granularity"],
             vec![0.0, 5., 10., 20., 40.]
         )
         .unwrap();
@@ -62,7 +69,7 @@ lazy_static! {
         register_histogram_vec!(
             "greptime_flow_batching_engine_query_time_range_secs",
             "flow batching engine query time range(seconds)",
-            &["flow_id"],
+            &["flow_id", "time_window_granularity"],
             vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
         .unwrap();
