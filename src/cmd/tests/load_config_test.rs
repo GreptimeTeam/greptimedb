@@ -95,7 +95,7 @@ fn test_load_datanode_example_config() {
                 ..Default::default()
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
@@ -148,7 +148,7 @@ fn test_load_frontend_example_config() {
                 },
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
@@ -195,7 +195,7 @@ fn test_load_metasrv_example_config() {
                 },
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },

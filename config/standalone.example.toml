@@ -750,13 +750,11 @@ default_ratio = 1.0
 ## @toml2docs:none-default
 #+ sample_ratio = 1.0
 
-## The datanode can export its metrics and send to Prometheus compatible service (e.g. send to `greptimedb` itself) from remote-write API.
+## The standalone can export its metrics and send to Prometheus compatible service (e.g. `greptimedb`) from remote-write API.
 ## This is only used for `greptimedb` to export its own metrics internally. It's different from prometheus scrape.
 [export_metrics]
-
 ## whether enable export metrics.
 enable = false
-
 ## The interval of export metrics.
 write_interval = "30s"
 
@@ -767,7 +765,7 @@ write_interval = "30s"
 db = "greptime_metrics"
 
 [export_metrics.remote_write]
-## The url the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
+## The prometheus remote write endpoint that the metrics send to. The url example can be: `http://127.0.0.1:4000/v1/prometheus/write?db=greptime_metrics`.
 url = ""
 
 ## HTTP headers of Prometheus remote-write carry.
