@@ -582,6 +582,7 @@ impl Metasrv {
                         if let Err(e) = res {
                             warn!(e; "Metasrv election error");
                         }
+                        election.reset_campaign().await;
                         info!("Metasrv re-initiate election");
                     }
                     info!("Metasrv stopped");

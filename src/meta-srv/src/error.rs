@@ -748,21 +748,31 @@ pub enum Error {
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to execute via postgres"))]
+    #[snafu(display("Failed to execute via postgres, sql: {}", sql))]
     PostgresExecution {
         #[snafu(source)]
         error: tokio_postgres::Error,
+        sql: String,
         #[snafu(implicit)]
         location: Location,
     },
 
     #[cfg(feature = "pg_kvbackend")]
-    #[snafu(display("Failed to connect to Postgres"))]
-    ConnectPostgres {
-        #[snafu(source)]
-        error: tokio_postgres::Error,
+    #[snafu(display("Failed to get Postgres client"))]
+    GetPostgresClient {
         #[snafu(implicit)]
         location: Location,
+        #[snafu(source)]
+        error: deadpool::managed::PoolError<tokio_postgres::Error>,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Sql execution timeout, sql: {}, duration: {:?}", sql, duration))]
+    SqlExecutionTimeout {
+        #[snafu(implicit)]
+        location: Location,
+        sql: String,
+        duration: std::time::Duration,
     },
 
     #[cfg(feature = "pg_kvbackend")]
@@ -1005,9 +1015,10 @@ impl ErrorExt for Error {
             Error::LookupPeer { source, .. } => source.status_code(),
             #[cfg(feature = "pg_kvbackend")]
             Error::CreatePostgresPool { .. }
+            | Error::GetPostgresClient { .. }
             | Error::GetPostgresConnection { .. }
             | Error::PostgresExecution { .. }
-            | Error::ConnectPostgres { .. } => StatusCode::Internal,
+            | Error::SqlExecutionTimeout { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
