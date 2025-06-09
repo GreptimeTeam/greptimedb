@@ -24,7 +24,6 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, SEPARATOR_NAME,
 };
 use crate::etl::value::{Array, Value};
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_JOIN: &str = "join";
 
@@ -95,14 +94,14 @@ impl Processor for JoinProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(Value::Array(arr)) => {
                     let result = self.process(arr)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), result);
+                    val.insert(output_index.to_string(), result)?;
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

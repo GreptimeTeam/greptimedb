@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::BufRead;
 use std::str::FromStr;
@@ -34,10 +35,10 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
-    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap,
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value as PipelineValue,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Deserializer, Map, Value};
+use serde_json::{json, Deserializer, Map, Value as JsonValue};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
@@ -106,7 +107,7 @@ pub(crate) struct PipelineIngestRequest {
     /// The table where the log data will be written to.
     pub table: String,
     /// The log data to be ingested.
-    pub values: Vec<PipelineMap>,
+    pub values: Vec<PipelineValue>,
 }
 
 pub struct PipelineContent(String);
@@ -284,18 +285,18 @@ pub async fn delete_pipeline(
 /// Transform NDJSON array into a single array
 /// always return an array
 fn transform_ndjson_array_factory(
-    values: impl IntoIterator<Item = Result<Value, serde_json::Error>>,
+    values: impl IntoIterator<Item = Result<JsonValue, serde_json::Error>>,
     ignore_error: bool,
-) -> Result<Vec<Value>> {
+) -> Result<Vec<JsonValue>> {
     values
         .into_iter()
         .try_fold(Vec::with_capacity(100), |mut acc_array, item| match item {
             Ok(item_value) => {
                 match item_value {
-                    Value::Array(item_array) => {
+                    JsonValue::Array(item_array) => {
                         acc_array.extend(item_array);
                     }
-                    Value::Object(_) => {
+                    JsonValue::Object(_) => {
                         acc_array.push(item_value);
                     }
                     _ => {
@@ -320,7 +321,7 @@ fn transform_ndjson_array_factory(
 
 /// Dryrun pipeline with given data
 async fn dryrun_pipeline_inner(
-    value: Vec<PipelineMap>,
+    value: Vec<PipelineValue>,
     pipeline: Arc<pipeline::Pipeline>,
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
@@ -356,24 +357,27 @@ async fn dryrun_pipeline_inner(
                     .iter()
                     .map(|cs| {
                         let mut map = Map::new();
-                        map.insert(name_key.to_string(), Value::String(cs.column_name.clone()));
+                        map.insert(
+                            name_key.to_string(),
+                            JsonValue::String(cs.column_name.clone()),
+                        );
                         map.insert(
                             data_type_key.to_string(),
-                            Value::String(cs.datatype().as_str_name().to_string()),
+                            JsonValue::String(cs.datatype().as_str_name().to_string()),
                         );
                         map.insert(
                             colume_type_key.to_string(),
-                            Value::String(cs.semantic_type().as_str_name().to_string()),
+                            JsonValue::String(cs.semantic_type().as_str_name().to_string()),
                         );
                         map.insert(
                             "fulltext".to_string(),
-                            Value::Bool(
+                            JsonValue::Bool(
                                 cs.options
                                     .clone()
                                     .is_some_and(|x| x.options.contains_key("fulltext")),
                             ),
                         );
-                        Value::Object(map)
+                        JsonValue::Object(map)
                     })
                     .collect::<Vec<_>>();
 
@@ -401,26 +405,26 @@ async fn dryrun_pipeline_inner(
                                             "data_type".to_string(),
                                             schema[idx][data_type_key].clone(),
                                         );
-                                        Value::Object(map)
+                                        JsonValue::Object(map)
                                     })
-                                    .unwrap_or(Value::Null)
+                                    .unwrap_or(JsonValue::Null)
                             })
                             .collect()
                     })
                     .collect();
 
                 let mut result = Map::new();
-                result.insert("schema".to_string(), Value::Array(schema));
-                result.insert("rows".to_string(), Value::Array(rows));
-                result.insert("table_name".to_string(), Value::String(table_name));
-                let result = Value::Object(result);
+                result.insert("schema".to_string(), JsonValue::Array(schema));
+                result.insert("rows".to_string(), JsonValue::Array(rows));
+                result.insert("table_name".to_string(), JsonValue::String(table_name));
+                let result = JsonValue::Object(result);
                 Some(result)
             } else {
                 None
             }
         })
         .collect();
-    Ok(Json(Value::Array(results)).into_response())
+    Ok(Json(JsonValue::Array(results)).into_response())
 }
 
 /// Dryrun pipeline with given data
@@ -480,7 +484,7 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
 /// Parse the data with given content type
 /// If the content type is invalid, return error
 /// content type is one of application/json, text/plain, application/x-ndjson
-fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<PipelineMap>> {
+fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<PipelineValue>> {
     if let Ok(content_type) = ContentType::from_str(&data_type) {
         extract_pipeline_value_by_content_type(content_type, Bytes::from(data), false)
     } else {
@@ -709,7 +713,7 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 }
 
 impl EventPayloadResolver<'_> {
-    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<PipelineMap>> {
+    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<PipelineValue>> {
         match self.inner {
             EventPayloadResolverInner::Json => {
                 pipeline::json_array_to_map(transform_ndjson_array_factory(
@@ -754,9 +758,9 @@ impl EventPayloadResolver<'_> {
                     .lines()
                     .filter_map(|line| line.ok().filter(|line| !line.is_empty()))
                     .map(|line| {
-                        let mut map = PipelineMap::new();
-                        map.insert("message".to_string(), pipeline::Value::String(line));
-                        map
+                        let mut map = BTreeMap::new();
+                        map.insert("message".to_string(), PipelineValue::String(line));
+                        PipelineValue::Map(map.into())
                     })
                     .collect::<Vec<_>>();
                 Ok(result)
@@ -769,7 +773,7 @@ fn extract_pipeline_value_by_content_type(
     content_type: ContentType,
     payload: Bytes,
     ignore_errors: bool,
-) -> Result<Vec<PipelineMap>> {
+) -> Result<Vec<PipelineValue>> {
     EventPayloadResolver::try_from(&content_type).and_then(|resolver| {
         resolver
             .parse_payload(payload, ignore_errors)
@@ -878,28 +882,28 @@ mod tests {
     #[test]
     fn test_transform_ndjson() {
         let s = "{\"a\": 1}\n{\"b\": 2}";
-        let a = Value::Array(
+        let a = JsonValue::Array(
             transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
 
         let s = "{\"a\": 1}";
-        let a = Value::Array(
+        let a = JsonValue::Array(
             transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}]";
-        let a = Value::Array(
+        let a = JsonValue::Array(
             transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
         .to_string();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}, {\"b\": 2}]";
-        let a = Value::Array(
+        let a = JsonValue::Array(
             transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
         .to_string();
@@ -928,10 +932,12 @@ mod tests {
             extract_pipeline_value_by_content_type(NDJSON_CONTENT_TYPE.clone(), payload, true);
         assert!(fail_only_wrong.is_ok());
 
-        let mut map1 = PipelineMap::new();
-        map1.insert("a".to_string(), pipeline::Value::Uint64(1));
-        let mut map2 = PipelineMap::new();
-        map2.insert("c".to_string(), pipeline::Value::Uint64(1));
+        let mut map1 = BTreeMap::new();
+        map1.insert("a".to_string(), PipelineValue::Uint64(1));
+        let map1 = PipelineValue::Map(map1.into());
+        let mut map2 = BTreeMap::new();
+        map2.insert("c".to_string(), PipelineValue::Uint64(1));
+        let map2 = PipelineValue::Map(map2.into());
         assert_eq!(fail_only_wrong.unwrap(), vec![map1, map2]);
     }
 }

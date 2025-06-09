@@ -15,12 +15,14 @@
 use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
 
-use crate::error::{Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result};
+use crate::error::{
+    Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result, ValueMustBeMapSnafu,
+};
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME, TYPE_NAME,
 };
-use crate::{PipelineMap, Processor};
+use crate::{Processor, Value};
 
 pub(crate) const PROCESSOR_SELECT: &str = "select";
 const INCLUDE_KEY: &str = "include";
@@ -96,27 +98,29 @@ impl Processor for SelectProcessor {
         true
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+        let v_map = val.as_map_mut().context(ValueMustBeMapSnafu)?;
+
         match self.select_type {
             SelectType::Include => {
-                let mut include_key_set = HashSet::with_capacity(val.len());
+                let mut include_key_set = HashSet::with_capacity(v_map.len());
                 for field in self.fields.iter() {
                     // If the field has a target, move the value to the target
                     let field_name = field.input_field();
                     if let Some(target_name) = field.target_field() {
-                        if let Some(v) = val.remove(field_name) {
-                            val.insert(target_name.to_string(), v);
+                        if let Some(v) = v_map.remove(field_name) {
+                            v_map.insert(target_name.to_string(), v);
                         }
                         include_key_set.insert(target_name);
                     } else {
                         include_key_set.insert(field_name);
                     }
                 }
-                val.retain(|k, _| include_key_set.contains(k.as_str()));
+                v_map.retain(|k, _| include_key_set.contains(k.as_str()));
             }
             SelectType::Exclude => {
                 for field in self.fields.iter() {
-                    val.remove(field.input_field());
+                    v_map.remove(field.input_field());
                 }
             }
         }
@@ -127,9 +131,11 @@ impl Processor for SelectProcessor {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::select::{SelectProcessor, SelectType};
-    use crate::{PipelineMap, Processor, Value};
+    use crate::{Map, Processor, Value};
 
     #[test]
     fn test_select() {
@@ -138,13 +144,14 @@ mod test {
             select_type: SelectType::Include,
         };
 
-        let mut p = PipelineMap::new();
+        let mut p = BTreeMap::new();
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(p);
+        let result = processor.exec_mut(Value::Map(Map { values: p }));
         assert!(result.is_ok());
-        let p = result.unwrap();
+        let mut result = result.unwrap();
+        let p = result.as_map_mut().unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello"), Some(&Value::String("world".to_string())));
     }
@@ -156,13 +163,14 @@ mod test {
             select_type: SelectType::Include,
         };
 
-        let mut p = PipelineMap::new();
+        let mut p = BTreeMap::new();
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(p);
+        let result = processor.exec_mut(Value::Map(Map { values: p }));
         assert!(result.is_ok());
-        let p = result.unwrap();
+        let mut result = result.unwrap();
+        let p = result.as_map_mut().unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello3"), Some(&Value::String("world".to_string())));
     }
@@ -174,13 +182,14 @@ mod test {
             select_type: SelectType::Exclude,
         };
 
-        let mut p = PipelineMap::new();
+        let mut p = BTreeMap::new();
         p.insert("hello".to_string(), Value::String("world".to_string()));
         p.insert("hello2".to_string(), Value::String("world2".to_string()));
 
-        let result = processor.exec_mut(p);
+        let result = processor.exec_mut(Value::Map(Map { values: p }));
         assert!(result.is_ok());
-        let p = result.unwrap();
+        let mut result = result.unwrap();
+        let p = result.as_map_mut().unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p.get("hello"), None);
         assert_eq!(p.get("hello2"), Some(&Value::String("world2".to_string())));

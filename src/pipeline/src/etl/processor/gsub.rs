@@ -25,7 +25,6 @@ use crate::etl::processor::{
     IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_GSUB: &str = "gsub";
 
@@ -118,7 +117,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -134,7 +133,7 @@ impl crate::etl::processor::Processor for GsubProcessor {
                 Some(v) => {
                     let result = self.process(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), result);
+                    val.insert(output_index.to_string(), result)?;
                 }
             }
         }

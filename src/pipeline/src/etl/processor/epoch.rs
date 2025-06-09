@@ -29,7 +29,6 @@ use crate::etl::value::time::{
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
 use crate::etl::value::{Timestamp, Value};
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -167,7 +166,7 @@ impl Processor for EpochProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -183,7 +182,7 @@ impl Processor for EpochProcessor {
                 Some(v) => {
                     let timestamp = self.parse(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), Value::Timestamp(timestamp));
+                    val.insert(output_index.to_string(), Value::Timestamp(timestamp))?;
                 }
             }
         }

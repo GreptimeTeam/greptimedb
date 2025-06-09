@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use crate::etl::value::Value;
-use crate::PipelineMap;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Map {
-    pub values: PipelineMap,
+    pub values: BTreeMap<String, Value>,
 }
 
 impl Map {
@@ -36,14 +37,14 @@ impl Map {
     }
 }
 
-impl From<PipelineMap> for Map {
-    fn from(values: PipelineMap) -> Self {
+impl From<BTreeMap<String, Value>> for Map {
+    fn from(values: BTreeMap<String, Value>) -> Self {
         Self { values }
     }
 }
 
 impl std::ops::Deref for Map {
-    type Target = PipelineMap;
+    type Target = BTreeMap<String, Value>;
 
     fn deref(&self) -> &Self::Target {
         &self.values

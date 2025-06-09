@@ -31,7 +31,6 @@ use crate::etl::processor::{
     Processor, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME, PATTERNS_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DISSECT: &str = "dissect";
 
@@ -601,14 +600,14 @@ impl Processor for DissectProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(Value::String(val_str)) => {
                     let r = self.process(val_str)?;
                     for (k, v) in r {
-                        val.insert(k, v);
+                        val.insert(k, v)?;
                     }
                 }
                 Some(Value::Null) | None => {

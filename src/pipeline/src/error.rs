@@ -734,6 +734,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Top level value must be map"))]
+    ValueMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
         #[snafu(source)]
@@ -803,6 +809,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             CastType { .. } => StatusCode::Unexpected,
+            ValueMustBeMap { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
