@@ -42,6 +42,7 @@ use crate::error::{
     ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
     UnexpectedSnafu, UnsupportedSnafu,
 };
+use crate::metrics::METRIC_FLOW_ROWS;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
@@ -155,6 +156,10 @@ impl BatchingEngine {
                         let Some(expr) = &task.config.time_window_expr else {
                             continue;
                         };
+                        let row_cnt: usize = entry.iter().map(|rows| rows.rows.len()).sum();
+                        METRIC_FLOW_ROWS
+                            .with_label_values(&[&format!("{}-batching-in", task.config.flow_id)])
+                            .inc_by(row_cnt as u64);
                         let involved_time_windows = expr.handle_rows(entry.clone()).await?;
                         let mut state = task.state.write().unwrap();
                         state
