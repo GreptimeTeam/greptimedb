@@ -50,6 +50,7 @@ impl MetaCommand {
     }
 }
 
+/// Subcommand for metadata snapshot operations. such as save, restore and info.
 #[derive(Subcommand)]
 pub enum MetaSnapshotCommand {
     /// Export metadata snapshot tool.
