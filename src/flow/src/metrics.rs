@@ -66,11 +66,25 @@ lazy_static! {
             vec![0.0, 60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
         .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_flow_batching_start_query_count",
+            "flow batching engine started query count",
+            &["flow_id"],
+        )
+        .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_flow_batching_error_count",
+            "flow batching engine error count per flow id",
+            &["flow_id"],
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(
         "greptime_flow_processed_rows",
-        "Count of rows flowing through the system",
+        "Count of rows flowing through the system.",
         &["direction"]
     )
     .unwrap();
