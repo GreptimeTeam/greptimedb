@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::flow::{FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequest, FlowRequest, FlowResponse};
 use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
@@ -64,6 +64,14 @@ pub trait MockFlownodeHandler: Sync + Send + Clone {
         &self,
         _peer: &Peer,
         _requests: InsertRequests,
+    ) -> Result<FlowResponse> {
+        unimplemented!()
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        _peer: &Peer,
+        _req: DirtyWindowRequest,
     ) -> Result<FlowResponse> {
         unimplemented!()
     }
@@ -133,6 +141,10 @@ impl<T: MockFlownodeHandler> Flownode for MockNode<T> {
 
     async fn handle_inserts(&self, requests: InsertRequests) -> Result<FlowResponse> {
         self.handler.handle_inserts(&self.peer, requests).await
+    }
+
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse> {
+        self.handler.handle_mark_window_dirty(&self.peer, req).await
     }
 }
 

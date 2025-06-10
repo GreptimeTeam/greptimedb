@@ -31,6 +31,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
 use datatypes::value::Value;
 use futures::TryStreamExt;
+use greptime_proto::v1::flow::DirtyWindowRequest;
 use itertools::Itertools;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
@@ -819,6 +820,11 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .map(|_| Default::default())
             .map_err(to_meta_err(snafu::location!()))
     }
+
+    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
+        // todo: implement
+        unimplemented!()
+    }
 }
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
@@ -925,6 +931,11 @@ impl common_meta::node_manager::Flownode for StreamingEngine {
             .await
             .map(|_| Default::default())
             .map_err(to_meta_err(snafu::location!()))
+    }
+
+    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
+        // todo: implement
+        unimplemented!()
     }
 }
 

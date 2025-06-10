@@ -23,7 +23,6 @@ use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::metadata::TableId;
 use table::table_name::TableName;
 use table::TableRef;
 

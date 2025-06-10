@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::flow::{FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::region::InsertRequests;
 use common_error::ext::BoxedError;
 use common_meta::node_manager::Flownode;
@@ -40,6 +40,16 @@ impl Flownode for FlowRequester {
         request: InsertRequests,
     ) -> common_meta::error::Result<FlowResponse> {
         self.handle_inserts_inner(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
+    }
+
+    async fn handle_mark_window_dirty(
+        &self,
+        req: DirtyWindowRequest,
+    ) -> common_meta::error::Result<FlowResponse> {
+        self.handle_mark_window_dirty(req)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
@@ -82,6 +92,22 @@ impl FlowRequester {
 
         let response = client
             .handle_mirror_request(requests)
+            .await
+            .or_else(|e| {
+                let code = e.code();
+                let err: crate::error::Error = e.into();
+                Err(BoxedError::new(err)).context(FlowServerSnafu { addr, code })
+            })?
+            .into_inner();
+        Ok(response)
+    }
+
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse> {
+        let (addr, mut client) = self.client.raw_flow_client()?;
+        let response = client
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![req],
+            })
             .await
             .or_else(|e| {
                 let code = e.code();

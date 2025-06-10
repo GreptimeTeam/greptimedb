@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::flow::{FlowRequest, FlowResponse};
+use api::v1::flow::{DirtyWindowRequest, FlowRequest, FlowResponse};
 use api::v1::region::{InsertRequests, RegionRequest};
 pub use common_base::AffectedRows;
 use common_query::request::QueryRequest;
@@ -42,6 +42,9 @@ pub trait Flownode: Send + Sync {
     async fn handle(&self, request: FlowRequest) -> Result<FlowResponse>;
 
     async fn handle_inserts(&self, request: InsertRequests) -> Result<FlowResponse>;
+
+    /// Handles requests to mark time window as dirty.
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> Result<FlowResponse>;
 }
 
 pub type FlownodeRef = Arc<dyn Flownode>;
