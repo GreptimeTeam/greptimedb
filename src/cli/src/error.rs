@@ -249,7 +249,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    
+
     #[snafu(display("File path invalid: {}", msg))]
     InvalidFilePath {
         msg: String,
