@@ -50,6 +50,7 @@ use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
+use servers::grpc::FlightCompression;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
@@ -80,6 +81,7 @@ use crate::event_listener::RegionServerEventListenerRef;
 #[derive(Clone)]
 pub struct RegionServer {
     inner: Arc<RegionServerInner>,
+    flight_compression: FlightCompression,
 }
 
 pub struct RegionStat {
@@ -93,6 +95,7 @@ impl RegionServer {
         query_engine: QueryEngineRef,
         runtime: Runtime,
         event_listener: RegionServerEventListenerRef,
+        flight_compression: FlightCompression,
     ) -> Self {
         Self::with_table_provider(
             query_engine,
@@ -101,6 +104,7 @@ impl RegionServer {
             Arc::new(DummyTableProviderFactory),
             0,
             Duration::from_millis(0),
+            flight_compression,
         )
     }
 
@@ -111,6 +115,7 @@ impl RegionServer {
         table_provider_factory: TableProviderFactoryRef,
         max_concurrent_queries: usize,
         concurrent_query_limiter_timeout: Duration,
+        flight_compression: FlightCompression,
     ) -> Self {
         Self {
             inner: Arc::new(RegionServerInner::new(
@@ -123,6 +128,7 @@ impl RegionServer {
                     concurrent_query_limiter_timeout,
                 ),
             )),
+            flight_compression,
         }
     }
 
@@ -536,7 +542,11 @@ impl FlightCraft for RegionServer {
             .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
             .await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result, tracing_context));
+        let stream = Box::pin(FlightRecordBatchStream::new(
+            result,
+            tracing_context,
+            self.flight_compression,
+        ));
         Ok(Response::new(stream))
     }
 }

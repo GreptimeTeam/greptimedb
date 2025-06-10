@@ -1025,6 +1025,7 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 max_recv_message_size = "512MiB"
 max_send_message_size = "512MiB"
+flight_compression = "arrow_ipc"
 runtime_size = 8
 
 [grpc.tls]

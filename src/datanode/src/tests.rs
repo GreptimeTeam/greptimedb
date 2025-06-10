@@ -29,6 +29,7 @@ use query::dataframe::DataFrame;
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
 use query::{QueryEngine, QueryEngineContext};
+use servers::grpc::FlightCompression;
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
@@ -98,6 +99,7 @@ pub fn mock_region_server() -> RegionServer {
         Arc::new(MockQueryEngine),
         Runtime::builder().build().unwrap(),
         Box::new(NoopRegionServerEventListener),
+        FlightCompression::default(),
     )
 }
 

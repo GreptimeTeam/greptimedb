@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 
 use crate::error;
 use crate::grpc::flight::TonicResult;
+use crate::grpc::FlightCompression;
 
 #[pin_project(PinnedDrop)]
 pub struct FlightRecordBatchStream {
@@ -41,18 +42,27 @@ pub struct FlightRecordBatchStream {
 }
 
 impl FlightRecordBatchStream {
-    pub fn new(recordbatches: SendableRecordBatchStream, tracing_context: TracingContext) -> Self {
+    pub fn new(
+        recordbatches: SendableRecordBatchStream,
+        tracing_context: TracingContext,
+        compression: FlightCompression,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle = common_runtime::spawn_global(async move {
             Self::flight_data_stream(recordbatches, tx)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
                 .await
         });
+        let encoder = if compression.arrow_compression() {
+            FlightEncoder::default()
+        } else {
+            FlightEncoder::with_compression_disabled()
+        };
         Self {
             rx,
             join_handle,
             done: false,
-            encoder: FlightEncoder::with_compression_disabled(),
+            encoder,
         }
     }
 
@@ -161,7 +171,11 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])
             .unwrap()
             .as_stream();
-        let mut stream = FlightRecordBatchStream::new(recordbatches, TracingContext::default());
+        let mut stream = FlightRecordBatchStream::new(
+            recordbatches,
+            TracingContext::default(),
+            FlightCompression::default(),
+        );
 
         let mut raw_data = Vec::with_capacity(2);
         raw_data.push(stream.next().await.unwrap().unwrap());
