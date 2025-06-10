@@ -316,7 +316,7 @@ impl StreamingEngine {
             );
 
             METRIC_FLOW_ROWS
-                .with_label_values(&["out"])
+                .with_label_values(&["out-streaming"])
                 .inc_by(total_rows as u64);
 
             let now = self.tick_manager.tick();
