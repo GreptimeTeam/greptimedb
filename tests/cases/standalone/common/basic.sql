@@ -37,7 +37,7 @@ insert into foo (host, cpu) values ('host2', 2.2);
 
 insert into foo (host) values ('host3');
 
-select * from foo;
+select * from foo order by ts;
 
 CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
 
@@ -63,11 +63,11 @@ INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 
 SELECT * FROM system_metrics;
 
-select * from foo;
+select * from foo order by host asc;
 
-SELECT * from t1;
+SELECT * from t1 order by ts desc;
 
-SELECT * from t2;
+SELECT * from t2 order by ts desc;
 
 DROP TABLE t1;
 

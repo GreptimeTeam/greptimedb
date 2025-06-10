@@ -67,7 +67,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 +------+---------------------+
 | rate | time_window         |
@@ -97,7 +98,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 +------+---------------------+
 | rate | time_window         |
@@ -128,7 +130,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 +-------------------+---------------------+
 | rate              | time_window         |
@@ -160,7 +163,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 +--------------------+---------------------+
 | rate               | time_window         |

@@ -35,12 +35,13 @@ use crate::error::{
     TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
     TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu,
 };
+use crate::etl::ctx_req::ContextOpt;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
 use crate::etl::PipelineMap;
-use crate::{from_pipeline_map_to_opt, PipelineContext};
+use crate::PipelineContext;
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -185,8 +186,8 @@ impl GreptimeTransformer {
         }
     }
 
-    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(String, Row)> {
-        let opt = from_pipeline_map_to_opt(pipeline_map);
+    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(ContextOpt, Row)> {
+        let opt = ContextOpt::from_pipeline_map_to_opt(pipeline_map);
 
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
@@ -519,7 +520,7 @@ fn resolve_value(
 fn identity_pipeline_inner(
     pipeline_maps: Vec<PipelineMap>,
     pipeline_ctx: &PipelineContext<'_>,
-) -> Result<(SchemaInfo, HashMap<String, Vec<Row>>)> {
+) -> Result<(SchemaInfo, HashMap<ContextOpt, Vec<Row>>)> {
     let mut schema_info = SchemaInfo::default();
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
@@ -544,7 +545,7 @@ fn identity_pipeline_inner(
     let len = pipeline_maps.len();
 
     for mut pipeline_map in pipeline_maps {
-        let opt = from_pipeline_map_to_opt(&mut pipeline_map);
+        let opt = ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map);
         let row = values_to_row(&mut schema_info, pipeline_map, pipeline_ctx)?;
 
         opt_map
@@ -578,7 +579,7 @@ pub fn identity_pipeline(
     array: Vec<PipelineMap>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
-) -> Result<HashMap<String, Rows>> {
+) -> Result<HashMap<ContextOpt, Rows>> {
     let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
         array
             .into_iter()
@@ -609,7 +610,7 @@ pub fn identity_pipeline(
                     },
                 )
             })
-            .collect::<HashMap<String, Rows>>()
+            .collect::<HashMap<ContextOpt, Rows>>()
     })
 }
 
@@ -761,7 +762,7 @@ mod tests {
             assert!(rows.is_ok());
             let mut rows = rows.unwrap();
             assert!(rows.len() == 1);
-            let rows = rows.remove("").unwrap();
+            let rows = rows.remove(&ContextOpt::default()).unwrap();
             assert_eq!(rows.schema.len(), 8);
             assert_eq!(rows.rows.len(), 2);
             assert_eq!(8, rows.rows[0].values.len());
@@ -799,7 +800,7 @@ mod tests {
                     }
 
                     assert!(rows.len() == 1);
-                    let rows = rows.remove("").unwrap();
+                    let rows = rows.remove(&ContextOpt::default()).unwrap();
 
                     Rows {
                         schema: schema.schema,

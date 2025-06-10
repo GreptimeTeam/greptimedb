@@ -56,6 +56,7 @@ use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
+use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
@@ -190,7 +191,10 @@ impl GreptimeDbClusterBuilder {
                 max_running_procedures: 128,
             },
             wal: self.metasrv_wal_config.clone(),
-            server_addr: "127.0.0.1:3002".to_string(),
+            grpc: GrpcOptions {
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

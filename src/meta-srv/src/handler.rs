@@ -375,7 +375,7 @@ impl HeartbeatMailbox {
 
     /// Parses the [Instruction] from [MailboxMessage].
     #[cfg(test)]
-    pub(crate) fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
+    pub fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
         let Payload::Json(payload) =
             msg.payload
                 .as_ref()

@@ -24,7 +24,7 @@ use table::metadata::TableId;
 use crate::error::{DatanodeTableInfoNotFoundSnafu, InvalidMetadataSnafu, Result};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{
-    MetadataKey, MetadataValue, RegionDistribution, DATANODE_TABLE_KEY_PATTERN,
+    MetadataKey, MetadataValue, RegionDistribution, RegionRoleSet, DATANODE_TABLE_KEY_PATTERN,
     DATANODE_TABLE_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
@@ -118,23 +118,31 @@ impl Display for DatanodeTableKey {
 pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
+    #[serde(default)]
+    pub follower_regions: Vec<RegionNumber>,
     #[serde(flatten)]
     pub region_info: RegionInfo,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, region_info: RegionInfo) -> Self {
+    pub fn new(table_id: TableId, region_role_set: RegionRoleSet, region_info: RegionInfo) -> Self {
+        let RegionRoleSet {
+            leader_regions,
+            follower_regions,
+        } = region_role_set;
+
         Self {
             table_id,
-            regions,
+            regions: leader_regions,
+            follower_regions,
             region_info,
             version: 0,
         }
     }
 }
 
-/// Decodes `KeyValue` to ((),`DatanodeTableValue`)
+/// Decodes [`KeyValue`] to [`DatanodeTableValue`].
 pub fn datanode_table_value_decoder(kv: KeyValue) -> Result<DatanodeTableValue> {
     DatanodeTableValue::try_from_raw_value(&kv.value)
 }
@@ -373,10 +381,11 @@ mod tests {
         let value = DatanodeTableValue {
             table_id: 42,
             regions: vec![1, 2, 3],
+            follower_regions: vec![],
             region_info: RegionInfo::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"follower_regions":[],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
@@ -467,6 +476,7 @@ mod tests {
         let table_value = DatanodeTableValue {
             table_id: 1,
             regions: vec![],
+            follower_regions: vec![],
             region_info,
             version: 1,
         };

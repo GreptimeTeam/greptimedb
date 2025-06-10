@@ -250,6 +250,11 @@ jobs:
           name: unstable-fuzz-logs
           path: /tmp/unstable-greptime/
           retention-days: 3
+      - name: Describe pods
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
 
   build-greptime-ci:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
@@ -405,6 +410,11 @@ jobs:
         shell: bash
         run: |
           kubectl describe nodes
+      - name: Describe pod
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
       - name: Export kind logs
         if: failure()
         shell: bash
@@ -554,6 +564,11 @@ jobs:
         shell: bash
         run: |
           kubectl describe nodes
+      - name: Describe pods
+        if: failure()
+        shell: bash
+        run: |
+          kubectl describe pod -n my-greptimedb
       - name: Export kind logs
         if: failure()
         shell: bash

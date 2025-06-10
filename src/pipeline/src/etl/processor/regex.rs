@@ -192,7 +192,7 @@ impl Processor for RegexProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, val: &mut PipelineMap) -> Result<()> {
+    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
         for field in self.fields.iter() {
             let index = field.input_field();
             let prefix = field.target_or_input_field();
@@ -220,7 +220,7 @@ impl Processor for RegexProcessor {
             }
         }
 
-        Ok(())
+        Ok(val)
     }
 }
 #[cfg(test)]

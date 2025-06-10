@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
-use common_telemetry::logging::TracingOptions;
+use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_version::{short_version, version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::BackendImpl;
@@ -29,7 +30,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, App};
 
 type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 
@@ -236,12 +237,20 @@ impl StartCommand {
             tokio_console_addr: global_options.tokio_console_addr.clone(),
         };
 
+        #[allow(deprecated)]
         if let Some(addr) = &self.rpc_bind_addr {
             opts.bind_addr.clone_from(addr);
+            opts.grpc.bind_addr.clone_from(addr);
+        } else if !opts.bind_addr.is_empty() {
+            opts.grpc.bind_addr.clone_from(&opts.bind_addr);
         }
 
+        #[allow(deprecated)]
         if let Some(addr) = &self.rpc_server_addr {
             opts.server_addr.clone_from(addr);
+            opts.grpc.server_addr.clone_from(addr);
+        } else if !opts.server_addr.is_empty() {
+            opts.grpc.server_addr.clone_from(&opts.server_addr);
         }
 
         if let Some(addrs) = &self.store_addrs {
@@ -274,6 +283,14 @@ impl StartCommand {
             opts.data_home.clone_from(data_home);
         }
 
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(&opts.data_home)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
+        }
+
         if !self.store_key_prefix.is_empty() {
             opts.store_key_prefix.clone_from(&self.store_key_prefix)
         }
@@ -302,13 +319,15 @@ impl StartCommand {
             None,
             None,
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);
 
         let plugin_opts = opts.plugins;
         let mut opts = opts.component;
-        opts.detect_server_addr();
+        opts.grpc.detect_server_addr();
 
         info!("Metasrv options: {:#?}", opts);
 
@@ -352,7 +371,7 @@ mod tests {
         };
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
-        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
+        assert_eq!("127.0.0.1:3002".to_string(), options.grpc.bind_addr);
         assert_eq!(vec!["127.0.0.1:2380".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LoadBased, options.selector);
     }
@@ -385,8 +404,8 @@ mod tests {
         };
 
         let options = cmd.load_options(&Default::default()).unwrap().component;
-        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
+        assert_eq!("127.0.0.1:3002".to_string(), options.grpc.bind_addr);
+        assert_eq!("127.0.0.1:3002".to_string(), options.grpc.server_addr);
         assert_eq!(vec!["127.0.0.1:2379".to_string()], options.store_addrs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
@@ -498,10 +517,10 @@ mod tests {
                 let opts = command.load_options(&Default::default()).unwrap().component;
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.bind_addr, "127.0.0.1:14002");
+                assert_eq!(opts.grpc.bind_addr, "127.0.0.1:14002");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.server_addr, "127.0.0.1:3002");
+                assert_eq!(opts.grpc.server_addr, "127.0.0.1:3002");
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(opts.http.addr, "127.0.0.1:14000");

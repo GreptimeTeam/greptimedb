@@ -30,13 +30,16 @@ pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecord
 use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
-use datatypes::prelude::VectorRef;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::prelude::{ConcreteDataType, VectorRef};
+use datatypes::scalars::{ScalarVector, ScalarVectorBuilder};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::types::json_type_value_to_string;
+use datatypes::vectors::{BinaryVector, StringVectorBuilder};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {
@@ -56,6 +59,146 @@ pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
 pub struct OrderOption {
     pub name: String,
     pub options: SortOptions,
+}
+
+/// A wrapper that maps a [RecordBatchStream] to a new [RecordBatchStream] by applying a function to each [RecordBatch].
+///
+/// The mapper function is applied to each [RecordBatch] in the stream.
+/// The schema of the new [RecordBatchStream] is the same as the schema of the inner [RecordBatchStream] after applying the schema mapper function.
+/// The output ordering of the new [RecordBatchStream] is the same as the output ordering of the inner [RecordBatchStream].
+/// The metrics of the new [RecordBatchStream] is the same as the metrics of the inner [RecordBatchStream] if it is not `None`.
+pub struct SendableRecordBatchMapper {
+    inner: SendableRecordBatchStream,
+    /// The mapper function is applied to each [RecordBatch] in the stream.
+    /// The original schema and the mapped schema are passed to the mapper function.
+    mapper: fn(RecordBatch, &SchemaRef, &SchemaRef) -> Result<RecordBatch>,
+    /// The schema of the new [RecordBatchStream] is the same as the schema of the inner [RecordBatchStream] after applying the schema mapper function.
+    schema: SchemaRef,
+    /// Whether the mapper function is applied to each [RecordBatch] in the stream.
+    apply_mapper: bool,
+}
+
+/// Maps the json type to string in the batch.
+///
+/// The json type is mapped to string by converting the json value to string.
+/// The batch is updated to have the same number of columns as the original batch,
+/// but with the json type mapped to string.
+pub fn map_json_type_to_string(
+    batch: RecordBatch,
+    original_schema: &SchemaRef,
+    mapped_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let mut vectors = Vec::with_capacity(original_schema.column_schemas().len());
+    for (vector, schema) in batch.columns.iter().zip(original_schema.column_schemas()) {
+        if let ConcreteDataType::Json(j) = schema.data_type {
+            let mut string_vector_builder = StringVectorBuilder::with_capacity(vector.len());
+            let binary_vector = vector
+                .as_any()
+                .downcast_ref::<BinaryVector>()
+                .with_context(|| error::DowncastVectorSnafu {
+                    from_type: schema.data_type.clone(),
+                    to_type: ConcreteDataType::binary_datatype(),
+                })?;
+            for value in binary_vector.iter_data() {
+                let Some(value) = value else {
+                    string_vector_builder.push(None);
+                    continue;
+                };
+                let string_value =
+                    json_type_value_to_string(value, &j.format).with_context(|_| {
+                        error::CastVectorSnafu {
+                            from_type: schema.data_type.clone(),
+                            to_type: ConcreteDataType::string_datatype(),
+                        }
+                    })?;
+                string_vector_builder.push(Some(string_value.as_str()));
+            }
+
+            let string_vector = string_vector_builder.finish();
+            vectors.push(Arc::new(string_vector) as VectorRef);
+        } else {
+            vectors.push(vector.clone());
+        }
+    }
+
+    RecordBatch::new(mapped_schema.clone(), vectors)
+}
+
+/// Maps the json type to string in the schema.
+///
+/// The json type is mapped to string by converting the json value to string.
+/// The schema is updated to have the same number of columns as the original schema,
+/// but with the json type mapped to string.
+///
+/// Returns the new schema and whether the schema needs to be mapped to string.
+pub fn map_json_type_to_string_schema(schema: SchemaRef) -> (SchemaRef, bool) {
+    let mut new_columns = Vec::with_capacity(schema.column_schemas().len());
+    let mut apply_mapper = false;
+    for column in schema.column_schemas() {
+        if matches!(column.data_type, ConcreteDataType::Json(_)) {
+            new_columns.push(ColumnSchema::new(
+                column.name.to_string(),
+                ConcreteDataType::string_datatype(),
+                column.is_nullable(),
+            ));
+            apply_mapper = true;
+        } else {
+            new_columns.push(column.clone());
+        }
+    }
+    (Arc::new(Schema::new(new_columns)), apply_mapper)
+}
+
+impl SendableRecordBatchMapper {
+    /// Creates a new [SendableRecordBatchMapper] with the given inner [RecordBatchStream], mapper function, and schema mapper function.
+    pub fn new(
+        inner: SendableRecordBatchStream,
+        mapper: fn(RecordBatch, &SchemaRef, &SchemaRef) -> Result<RecordBatch>,
+        schema_mapper: fn(SchemaRef) -> (SchemaRef, bool),
+    ) -> Self {
+        let (mapped_schema, apply_mapper) = schema_mapper(inner.schema());
+        Self {
+            inner,
+            mapper,
+            schema: mapped_schema,
+            apply_mapper,
+        }
+    }
+}
+
+impl RecordBatchStream for SendableRecordBatchMapper {
+    fn name(&self) -> &str {
+        "SendableRecordBatchMapper"
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.inner.output_ordering()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.inner.metrics()
+    }
+}
+
+impl Stream for SendableRecordBatchMapper {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.apply_mapper {
+            Pin::new(&mut self.inner).poll_next(cx).map(|opt| {
+                opt.map(|result| {
+                    result
+                        .and_then(|batch| (self.mapper)(batch, &self.inner.schema(), &self.schema))
+                })
+            })
+        } else {
+            Pin::new(&mut self.inner).poll_next(cx)
+        }
+    }
 }
 
 /// EmptyRecordBatchStream can be used to create a RecordBatchStream

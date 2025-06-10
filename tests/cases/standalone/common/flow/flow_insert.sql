@@ -39,7 +39,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 -- reordered insert, also test if null is handled correctly
 INSERT INTO
@@ -55,7 +56,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 -- reordered insert
 INSERT INTO
@@ -71,7 +73,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 -- reordered insert
 INSERT INTO
@@ -87,7 +90,8 @@ SELECT
     rate,
     time_window
 FROM
-    approx_rate;
+    approx_rate
+ORDER BY time_window ASC;
 
 DROP TABLE bytes_log;
 

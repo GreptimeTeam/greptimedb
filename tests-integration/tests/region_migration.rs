@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_meta::key::{RegionDistribution, TableMetadataManagerRef};
+use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -166,7 +166,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         to_regions
     );
 
-    let region_id = RegionId::new(table_id, from_regions[0]);
+    let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
@@ -180,7 +180,12 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     info!("Started region procedure: {}!", procedure.unwrap());
 
     // Prepares expected region distribution.
-    to_regions.extend(from_regions);
+    to_regions
+        .leader_regions
+        .extend(from_regions.leader_regions);
+    to_regions
+        .follower_regions
+        .extend(from_regions.follower_regions);
     // Keeps asc order.
     to_regions.sort();
     distribution.insert(to_peer_id, to_regions);
@@ -300,10 +305,10 @@ pub async fn test_metric_table_region_migration_by_sql(
     let (from_peer_id, from_regions) = distribution.pop_first().unwrap();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
-        from_regions[0]
+        from_regions.leader_regions[0]
     );
     let to_peer_id = (from_peer_id + 1) % 3;
-    let region_id = RegionId::new(table_id, from_regions[0]);
+    let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure_id =
         trigger_migration_by_sql(&cluster, region_id.as_u64(), from_peer_id, to_peer_id).await;
@@ -436,7 +441,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         to_regions
     );
 
-    let region_id = RegionId::new(table_id, from_regions[0]);
+    let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure_id =
         trigger_migration_by_sql(&cluster, region_id.as_u64(), from_peer_id, to_peer_id).await;
@@ -558,12 +563,12 @@ pub async fn test_region_migration_multiple_regions(
     let (peer_2, peer_2_regions) = distribution.pop_first().unwrap();
 
     // Picks the peer only contains as from peer.
-    let ((from_peer_id, from_regions), (to_peer_id, mut to_regions)) = if peer_1_regions.len() == 1
-    {
-        ((peer_1, peer_1_regions), (peer_2, peer_2_regions))
-    } else {
-        ((peer_2, peer_2_regions), (peer_1, peer_1_regions))
-    };
+    let ((from_peer_id, from_regions), (to_peer_id, mut to_regions)) =
+        if peer_1_regions.leader_regions.len() == 1 {
+            ((peer_1, peer_1_regions), (peer_2, peer_2_regions))
+        } else {
+            ((peer_2, peer_2_regions), (peer_1, peer_1_regions))
+        };
 
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
@@ -574,7 +579,7 @@ pub async fn test_region_migration_multiple_regions(
         to_regions
     );
 
-    let region_id = RegionId::new(table_id, from_regions[0]);
+    let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
@@ -588,7 +593,12 @@ pub async fn test_region_migration_multiple_regions(
     info!("Started region procedure: {}!", procedure.unwrap());
 
     // Prepares expected region distribution.
-    to_regions.extend(from_regions);
+    to_regions
+        .leader_regions
+        .extend(from_regions.leader_regions);
+    to_regions
+        .follower_regions
+        .extend(from_regions.follower_regions);
     // Keeps asc order.
     to_regions.sort();
     distribution.insert(to_peer_id, to_regions);
@@ -699,7 +709,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     let region_migration_manager = cluster.metasrv.region_migration_manager();
     let (from_peer_id, mut from_regions) = distribution.pop_first().unwrap();
     let to_peer_id = 1;
-    let mut to_regions = Vec::new();
+    let mut to_regions = RegionRoleSet::default();
     info!(
         "Selecting from peer: {from_peer_id}, and regions: {:?}",
         from_regions
@@ -709,7 +719,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         to_regions
     );
 
-    let region_id = RegionId::new(table_id, from_regions[0]);
+    let region_id = RegionId::new(table_id, from_regions.leader_regions[0]);
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
@@ -723,7 +733,9 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     info!("Started region procedure: {}!", procedure.unwrap());
 
     // Prepares expected region distribution.
-    to_regions.push(from_regions.remove(0));
+    to_regions
+        .leader_regions
+        .push(from_regions.leader_regions.remove(0));
     // Keeps asc order.
     to_regions.sort();
     distribution.insert(to_peer_id, to_regions);
@@ -1120,7 +1132,7 @@ async fn find_region_distribution_by_sql(
             distribution
                 .entry(datanode_id)
                 .or_default()
-                .push(region_id.region_number());
+                .add_leader_region(region_id.region_number());
         }
     }
 

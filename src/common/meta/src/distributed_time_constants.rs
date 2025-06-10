@@ -35,6 +35,9 @@ pub const FLOWNODE_LEASE_SECS: u64 = DATANODE_LEASE_SECS;
 /// The lease seconds of metasrv leader.
 pub const META_LEASE_SECS: u64 = 5;
 
+/// The keep-alive interval of the Postgres connection.
+pub const POSTGRES_KEEP_ALIVE_SECS: u64 = 30;
+
 /// In a lease, there are two opportunities for renewal.
 pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
 

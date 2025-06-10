@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -55,7 +56,7 @@ use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::lease::MetaPeerLookupService;
 use crate::metasrv::{
     ElectionRef, Metasrv, MetasrvInfo, MetasrvOptions, RegionStatAwareSelectorRef, SelectTarget,
-    SelectorContext, SelectorRef, FLOW_ID_SEQ, TABLE_ID_SEQ,
+    SelectorContext, SelectorRef, FLOW_ID_SEQ, METASRV_DATA_DIR, TABLE_ID_SEQ,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
@@ -178,8 +179,8 @@ impl MetasrvBuilder {
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
 
         let state = Arc::new(RwLock::new(match election {
-            None => State::leader(options.server_addr.to_string(), true),
-            Some(_) => State::follower(options.server_addr.to_string()),
+            None => State::leader(options.grpc.server_addr.to_string(), true),
+            Some(_) => State::follower(options.grpc.server_addr.to_string()),
         }));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
@@ -202,7 +203,7 @@ impl MetasrvBuilder {
         ));
         let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(kv_backend.clone()));
         let selector_ctx = SelectorContext {
-            server_addr: options.server_addr.clone(),
+            server_addr: options.grpc.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
             flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
             kv_backend: kv_backend.clone(),
@@ -271,7 +272,7 @@ impl MetasrvBuilder {
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             mailbox.clone(),
             MetasrvInfo {
-                server_addr: options.server_addr.clone(),
+                server_addr: options.grpc.server_addr.clone(),
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
@@ -314,7 +315,7 @@ impl MetasrvBuilder {
                 memory_region_keeper.clone(),
                 region_failure_detector_controller.clone(),
                 mailbox.clone(),
-                options.server_addr.clone(),
+                options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
         ));
@@ -389,7 +390,7 @@ impl MetasrvBuilder {
                 client: Arc::new(kafka_client),
                 table_metadata_manager: table_metadata_manager.clone(),
                 leader_region_registry: leader_region_registry.clone(),
-                server_addr: options.server_addr.clone(),
+                server_addr: options.grpc.server_addr.clone(),
                 mailbox: mailbox.clone(),
             };
             let wal_prune_manager = WalPruneManager::new(
@@ -436,7 +437,10 @@ impl MetasrvBuilder {
         };
 
         let enable_telemetry = options.enable_telemetry;
-        let metasrv_home = options.data_home.to_string();
+        let metasrv_home = Path::new(&options.data_home)
+            .join(METASRV_DATA_DIR)
+            .to_string_lossy()
+            .to_string();
 
         Ok(Metasrv {
             state,

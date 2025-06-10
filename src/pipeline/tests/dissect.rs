@@ -274,9 +274,9 @@ transform:
     let yaml_content = pipeline::Content::Yaml(pipeline_yaml);
     let pipeline: pipeline::Pipeline =
         pipeline::parse(&yaml_content).expect("failed to parse pipeline");
-    let mut result = json_to_map(input_value).unwrap();
+    let result = json_to_map(input_value).unwrap();
 
-    let row = pipeline.exec_mut(&mut result);
+    let row = pipeline.exec_mut(result);
 
     assert!(row.is_err());
     assert_eq!(row.err().unwrap().to_string(), "No matching pattern found");

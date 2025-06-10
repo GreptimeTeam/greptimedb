@@ -167,9 +167,7 @@ impl Client {
 
         let client = FlightServiceClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size())
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd);
+            .max_encoding_message_size(self.max_grpc_send_message_size());
 
         Ok(FlightClient { addr, client })
     }
@@ -178,9 +176,7 @@ impl Client {
         let (addr, channel) = self.find_channel()?;
         let client = PbRegionClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
-            .max_encoding_message_size(self.max_grpc_send_message_size())
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd);
+            .max_encoding_message_size(self.max_grpc_send_message_size());
         Ok((addr, client))
     }
 

@@ -26,6 +26,7 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use hyper_util::rt::TokioIo;
+use servers::grpc::GrpcOptions;
 use tonic::codec::CompressionEncoding;
 use tower::service_fn;
 
@@ -47,7 +48,10 @@ pub async fn mock_with_memstore() -> MockInfo {
     let in_memory = Arc::new(MemoryKvBackend::new());
     mock(
         MetasrvOptions {
-            server_addr: "127.0.0.1:3002".to_string(),
+            grpc: GrpcOptions {
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         },
         kv_backend,
@@ -62,7 +66,10 @@ pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
     let kv_backend = EtcdStore::with_endpoints([addr], 128).await.unwrap();
     mock(
         MetasrvOptions {
-            server_addr: "127.0.0.1:3002".to_string(),
+            grpc: GrpcOptions {
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         },
         kv_backend,
@@ -80,7 +87,7 @@ pub async fn mock(
     datanode_clients: Option<Arc<NodeClients>>,
     in_memory: Option<ResettableKvBackendRef>,
 ) -> MockInfo {
-    let server_addr = opts.server_addr.clone();
+    let server_addr = opts.grpc.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
     table_metadata_manager.init().await.unwrap();

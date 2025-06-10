@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::{fs, path};
 
@@ -49,7 +50,9 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
-use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
+use common_telemetry::logging::{
+    LoggingOptions, SlowQueryOptions, TracingOptions, DEFAULT_LOGGING_DIR,
+};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, version};
 use common_wal::config::DatanodeWalConfig;
@@ -83,7 +86,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{error, log_versions, App};
+use crate::{create_resource_limit_metrics, error, log_versions, App};
 
 pub const APP_NAME: &str = "greptime-standalone";
 
@@ -407,6 +410,14 @@ impl StartCommand {
             opts.storage.data_home.clone_from(data_home);
         }
 
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(&opts.storage.data_home)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
+        }
+
         if let Some(addr) = &self.rpc_bind_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
@@ -457,7 +468,9 @@ impl StartCommand {
             None,
             opts.component.slow_query.as_ref(),
         );
+
         log_versions(version(), short_version(), APP_NAME);
+        create_resource_limit_metrics(APP_NAME);
 
         info!("Standalone start command: {:#?}", self);
         info!("Standalone options: {opts:#?}");

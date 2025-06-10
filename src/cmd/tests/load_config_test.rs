@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
-use common_config::Configurable;
+use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_telemetry::logging::{LoggingOptions, DEFAULT_OTLP_ENDPOINT};
+use common_telemetry::logging::{LoggingOptions, DEFAULT_LOGGING_DIR, DEFAULT_OTLP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -32,6 +33,7 @@ use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
+use store_api::path_utils::WAL_DIR;
 
 #[allow(deprecated)]
 #[test]
@@ -56,13 +58,18 @@ fn test_load_datanode_example_config() {
                 metadata_cache_tti: Duration::from_secs(300),
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some("./greptimedb_data/wal".to_string()),
+                dir: Some(
+                    Path::new(DEFAULT_DATA_HOME)
+                        .join(WAL_DIR)
+                        .to_string_lossy()
+                        .to_string(),
+                ),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
             storage: StorageConfig {
-                data_home: "./greptimedb_data/".to_string(),
+                data_home: DEFAULT_DATA_HOME.to_string(),
                 ..Default::default()
             },
             region_engine: vec![
@@ -79,12 +86,16 @@ fn test_load_datanode_example_config() {
             ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
+                dir: Path::new(DEFAULT_DATA_HOME)
+                    .join(DEFAULT_LOGGING_DIR)
+                    .to_string_lossy()
+                    .to_string(),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
@@ -121,6 +132,10 @@ fn test_load_frontend_example_config() {
             }),
             logging: LoggingOptions {
                 level: Some("info".to_string()),
+                dir: Path::new(DEFAULT_DATA_HOME)
+                    .join(DEFAULT_LOGGING_DIR)
+                    .to_string_lossy()
+                    .to_string(),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
@@ -133,7 +148,7 @@ fn test_load_frontend_example_config() {
                 },
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
@@ -160,10 +175,17 @@ fn test_load_metasrv_example_config() {
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
-            data_home: "./greptimedb_data/metasrv/".to_string(),
-            server_addr: "127.0.0.1:3002".to_string(),
+            data_home: DEFAULT_DATA_HOME.to_string(),
+            grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:3002".to_string(),
+                server_addr: "127.0.0.1:3002".to_string(),
+                ..Default::default()
+            },
             logging: LoggingOptions {
-                dir: "./greptimedb_data/logs".to_string(),
+                dir: Path::new(DEFAULT_DATA_HOME)
+                    .join(DEFAULT_LOGGING_DIR)
+                    .to_string_lossy()
+                    .to_string(),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
@@ -177,7 +199,7 @@ fn test_load_metasrv_example_config() {
                 },
             },
             export_metrics: ExportMetricsOption {
-                self_import: Some(Default::default()),
+                self_import: None,
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
@@ -198,7 +220,12 @@ fn test_load_standalone_example_config() {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some("./greptimedb_data/wal".to_string()),
+                dir: Some(
+                    Path::new(DEFAULT_DATA_HOME)
+                        .join(WAL_DIR)
+                        .to_string_lossy()
+                        .to_string(),
+                ),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
@@ -216,11 +243,15 @@ fn test_load_standalone_example_config() {
                 }),
             ],
             storage: StorageConfig {
-                data_home: "./greptimedb_data/".to_string(),
+                data_home: DEFAULT_DATA_HOME.to_string(),
                 ..Default::default()
             },
             logging: LoggingOptions {
                 level: Some("info".to_string()),
+                dir: Path::new(DEFAULT_DATA_HOME)
+                    .join(DEFAULT_LOGGING_DIR)
+                    .to_string_lossy()
+                    .to_string(),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()

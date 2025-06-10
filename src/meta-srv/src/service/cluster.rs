@@ -88,7 +88,7 @@ impl cluster_server::Cluster for Metasrv {
             return Ok(Response::new(resp));
         }
 
-        let leader_addr = &self.options().server_addr;
+        let leader_addr = &self.options().grpc.server_addr;
         let (leader, followers) = match self.election() {
             Some(election) => {
                 let nodes = election.all_candidates().await?;

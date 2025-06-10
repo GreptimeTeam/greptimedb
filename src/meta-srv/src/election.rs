@@ -157,6 +157,11 @@ pub trait Election: Send + Sync {
     /// but only one can be the leader at a time.
     async fn campaign(&self) -> Result<()>;
 
+    /// Resets the campaign.
+    ///
+    /// Reset the client and the leader flag if needed.
+    async fn reset_campaign(&self) {}
+
     /// Returns the leader value for the current election.
     async fn leader(&self) -> Result<Self::Leader>;
 
