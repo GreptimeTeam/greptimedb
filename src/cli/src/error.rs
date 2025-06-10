@@ -244,6 +244,17 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Unsupported memory backend"))]
+    UnsupportedMemoryBackend {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("File path invalid: {}", msg))]
+    InvalidFilePath {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -262,6 +273,8 @@ impl ErrorExt for Error {
             | Error::ConnectEtcd { .. }
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
+            | Error::InvalidFilePath { .. }
+            | Error::UnsupportedMemoryBackend { .. }
             | Error::ParseProxyOpts { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }

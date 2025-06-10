@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,9 +27,12 @@ use meta_srv::bootstrap::create_etcd_client;
 use meta_srv::metasrv::BackendImpl;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
+use crate::error::{
+    InvalidFilePathSnafu, KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu,
+    UnsupportedMemoryBackendSnafu,
+};
 use crate::Tool;
 
 /// Subcommand for metadata snapshot management.
@@ -110,6 +114,9 @@ impl MetaConnection {
                     .await
                     .map_err(BoxedError::new)?)
                 }
+                Some(BackendImpl::MemoryStore) => UnsupportedMemoryBackendSnafu
+                    .fail()
+                    .map_err(BoxedError::new),
                 _ => KvBackendNotSetSnafu { backend: "all" }
                     .fail()
                     .map_err(BoxedError::new),
@@ -390,6 +397,24 @@ impl Tool for MetaInfoTool {
 }
 
 impl MetaInfoCommand {
+    fn decide_object_store_root_for_local_store(
+        file_path: &str,
+    ) -> Result<(&str, &str), BoxedError> {
+        let path = Path::new(file_path);
+        let parent = path
+            .parent()
+            .and_then(|p| p.to_str())
+            .context(InvalidFilePathSnafu { msg: file_path })
+            .map_err(BoxedError::new)?;
+        let file_name = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .context(InvalidFilePathSnafu { msg: file_path })
+            .map_err(BoxedError::new)?;
+        let root = if parent.is_empty() { "." } else { parent };
+        Ok((root, file_name))
+    }
+
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let object_store = self.s3_config.build("").map_err(BoxedError::new)?;
         if let Some(store) = object_store {
@@ -401,10 +426,12 @@ impl MetaInfoCommand {
             };
             Ok(Box::new(tool))
         } else {
-            let object_store = create_local_file_object_store(".")?;
+            let (root, file_name) =
+                Self::decide_object_store_root_for_local_store(&self.file_name)?;
+            let object_store = create_local_file_object_store(root)?;
             let tool = MetaInfoTool {
                 inner: object_store,
-                source_file: self.file_name.clone(),
+                source_file: file_name.to_string(),
                 query_str: self.query_str.clone(),
                 limit: self.limit,
             };
