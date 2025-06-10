@@ -180,6 +180,22 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
             },
             None => return MissingAlterIndexOptionSnafu.fail(),
         },
+        Kind::DropDefaults(o) => {
+            let names = o
+                .drop_defaults
+                .into_iter()
+                .map(|col| {
+                    ensure!(
+                        !col.column_name.is_empty(),
+                        MissingFieldSnafu {
+                            field: "column_name"
+                        }
+                    );
+                    Ok(col.column_name)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            AlterKind::DropDefaults { names }
+        }
     };
 
     let request = AlterTableRequest {
