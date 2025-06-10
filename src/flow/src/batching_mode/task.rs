@@ -61,8 +61,9 @@ use crate::error::{
     SubstraitEncodeLogicalPlanSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME, METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT,
-    METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
+    METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
+    METRIC_FLOW_BATCHING_ENGINE_REAL_TIME_SLOW_QUERY_CNT, METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY,
+    METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT, METRIC_FLOW_ROWS,
 };
 use crate::{Error, FlowId};
 
@@ -430,6 +431,9 @@ impl BatchingTask {
                 "Flow {flow_id} executed, affected_rows: {affected_rows:?}, elapsed: {:?}",
                 elapsed
             );
+            METRIC_FLOW_ROWS
+                .with_label_values(&[format!("{}-out-batching", flow_id).as_str()])
+                .inc_by(*affected_rows as _);
         } else if let Err(err) = &res {
             warn!(
                 "Failed to execute Flow {flow_id} on frontend {:?}, result: {err:?}, elapsed: {:?} with query: {}",
@@ -474,6 +478,7 @@ impl BatchingTask {
         engine: QueryEngineRef,
         frontend_client: Arc<FrontendClient>,
     ) {
+        let flow_id_str = self.config.flow_id.to_string();
         loop {
             // first check if shutdown signal is received
             // if so, break the loop
@@ -491,6 +496,9 @@ impl BatchingTask {
                     Err(TryRecvError::Empty) => (),
                 }
             }
+            METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT
+                .with_label_values(&[&flow_id_str])
+                .inc();
 
             let new_query = match self.gen_insert_plan(&engine).await {
                 Ok(new_query) => new_query,
@@ -537,6 +545,9 @@ impl BatchingTask {
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
                 Err(err) => {
+                    METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
+                        .with_label_values(&[&flow_id_str])
+                        .inc();
                     match new_query {
                         Some(query) => {
                             common_telemetry::error!(err; "Failed to execute query for flow={} with query: {query}", self.config.flow_id)
