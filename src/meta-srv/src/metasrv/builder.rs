@@ -179,8 +179,8 @@ impl MetasrvBuilder {
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
 
         let state = Arc::new(RwLock::new(match election {
-            None => State::leader(options.server_addr.to_string(), true),
-            Some(_) => State::follower(options.server_addr.to_string()),
+            None => State::leader(options.grpc.server_addr.to_string(), true),
+            Some(_) => State::follower(options.grpc.server_addr.to_string()),
         }));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
@@ -203,7 +203,7 @@ impl MetasrvBuilder {
         ));
         let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(kv_backend.clone()));
         let selector_ctx = SelectorContext {
-            server_addr: options.server_addr.clone(),
+            server_addr: options.grpc.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
             flownode_lease_secs: distributed_time_constants::FLOWNODE_LEASE_SECS,
             kv_backend: kv_backend.clone(),
@@ -272,7 +272,7 @@ impl MetasrvBuilder {
         let cache_invalidator = Arc::new(MetasrvCacheInvalidator::new(
             mailbox.clone(),
             MetasrvInfo {
-                server_addr: options.server_addr.clone(),
+                server_addr: options.grpc.server_addr.clone(),
             },
         ));
         let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
@@ -315,7 +315,7 @@ impl MetasrvBuilder {
                 memory_region_keeper.clone(),
                 region_failure_detector_controller.clone(),
                 mailbox.clone(),
-                options.server_addr.clone(),
+                options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
         ));
@@ -390,7 +390,7 @@ impl MetasrvBuilder {
                 client: Arc::new(kafka_client),
                 table_metadata_manager: table_metadata_manager.clone(),
                 leader_region_registry: leader_region_registry.clone(),
-                server_addr: options.server_addr.clone(),
+                server_addr: options.grpc.server_addr.clone(),
                 mailbox: mailbox.clone(),
             };
             let wal_prune_manager = WalPruneManager::new(
