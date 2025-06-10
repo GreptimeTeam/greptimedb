@@ -41,6 +41,7 @@ use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
+use table::TableRef;
 use tokio::sync::mpsc;
 
 use crate::error::Error::UnsupportedAuthScheme;
@@ -149,8 +150,8 @@ impl GreptimeRequestHandler {
             .clone()
             .unwrap_or_else(common_runtime::global_runtime);
         runtime.spawn(async move {
-            // Cached table id
-            let mut table_id: Option<TableId> = None;
+            // Cached table ref
+            let mut table_ref: Option<TableRef> = None;
 
             let mut decoder = FlightDecoder::default();
             while let Some(request) = stream.next().await {
@@ -169,7 +170,7 @@ impl GreptimeRequestHandler {
 
                 let timer = metrics::GRPC_BULK_INSERT_ELAPSED.start_timer();
                 let result = handler
-                    .put_record_batch(&table_name, &mut table_id, &mut decoder, data)
+                    .put_record_batch(&table_name, &mut table_ref, &mut decoder, data)
                     .await
                     .inspect_err(|e| error!(e; "Failed to handle flight record batches"));
                 timer.observe_duration();

@@ -160,15 +160,11 @@ impl GrpcQueryHandler for DummyInstance {
 
     async fn put_record_batch(
         &self,
-        table: &TableName,
-        table_id: &mut Option<TableId>,
-        decoder: &mut FlightDecoder,
-        data: FlightData,
+        _table_name: &TableName,
+        _table_ref: &mut Option<TableRef>,
+        _decoder: &mut FlightDecoder,
+        _data: FlightData,
     ) -> std::result::Result<AffectedRows, Self::Error> {
-        let _ = table;
-        let _ = data;
-        let _ = table_id;
-        let _ = decoder;
         unimplemented!()
     }
 }
