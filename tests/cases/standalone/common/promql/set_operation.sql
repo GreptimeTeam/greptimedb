@@ -325,7 +325,6 @@ insert into cache_miss_with_null_label values
     (4000, "write", null, 2.0);
 
 -- SQLNESS SORT_RESULT 3 1
--- null!=null, so it will returns the empty set.
 tql eval (3, 4, '1s') cache_hit_with_null_label / (cache_miss_with_null_label + cache_hit_with_null_label);
 
 -- SQLNESS SORT_RESULT 3 1
