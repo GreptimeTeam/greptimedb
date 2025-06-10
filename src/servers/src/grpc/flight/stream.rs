@@ -52,7 +52,7 @@ impl FlightRecordBatchStream {
             rx,
             join_handle,
             done: false,
-            encoder: FlightEncoder::with_compression_disabled(),
+            encoder: FlightEncoder::default(),
         }
     }
 
