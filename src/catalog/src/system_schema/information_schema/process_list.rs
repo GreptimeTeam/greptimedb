@@ -20,6 +20,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
 use common_time::{Duration, Timestamp};
+use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -114,7 +115,7 @@ async fn make_process_list(
 ) -> error::Result<RecordBatch> {
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
-    let queries = process_manager.list_all_processes()?;
+    let queries = process_manager.list_all_processes();
 
     let mut id_builder = UInt64VectorBuilder::with_capacity(queries.len());
     let mut database_builder = StringVectorBuilder::with_capacity(queries.len());
@@ -122,32 +123,32 @@ async fn make_process_list(
     let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(queries.len());
     let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(queries.len());
 
-    for process in queries {
-        let row = [
-            (ID, &Value::from(process.query_id())),
-            (DATABASE, &Value::from(process.database())),
-            (QUERY, &Value::from(process.query_string())),
-            (
-                START_TIMESTAMP,
-                &Value::from(Timestamp::new_millisecond(
-                    process.query_start_timestamp_ms(),
-                )),
-            ),
-            (
-                ELAPSED_TIME,
-                &Value::from(Duration::new_millisecond(
-                    current_time - process.query_start_timestamp_ms(),
-                )),
-            ),
-        ];
-        if predicates.eval(&row) {
-            id_builder.push(row[0].1.as_u64());
-            database_builder.push(row[1].1.as_string().as_deref());
-            query_builder.push(row[2].1.as_string().as_deref());
-            start_time_builder.push(row[3].1.as_timestamp().map(|t| t.value().into()));
-            elapsed_time_builder.push(row[4].1.as_duration().map(|d| d.value().into()));
-        }
-    }
+    // for process in queries {
+    //     let row = [
+    //         (ID, &Value::from(process.id)),
+    //         (DATABASE, &Value::from(process.catalog)),
+    //         (QUERY, &Value::from(process.query_string())),
+    //         (
+    //             START_TIMESTAMP,
+    //             &Value::from(Timestamp::new_millisecond(
+    //                 process.query_start_timestamp_ms(),
+    //             )),
+    //         ),
+    //         (
+    //             ELAPSED_TIME,
+    //             &Value::from(Duration::new_millisecond(
+    //                 current_time - process.query_start_timestamp_ms(),
+    //             )),
+    //         ),
+    //     ];
+    //     if predicates.eval(&row) {
+    //         id_builder.push(row[0].1.as_u64());
+    //         database_builder.push(row[1].1.as_string().as_deref());
+    //         query_builder.push(row[2].1.as_string().as_deref());
+    //         start_time_builder.push(row[3].1.as_timestamp().map(|t| t.value().into()));
+    //         elapsed_time_builder.push(row[4].1.as_duration().map(|d| d.value().into()));
+    //     }
+    // }
 
     RecordBatch::new(
         InformationSchemaProcessList::schema(),

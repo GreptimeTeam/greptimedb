@@ -529,7 +529,7 @@ impl StartCommand {
         ));
 
         let process_manager = Arc::new(
-            ProcessManager::new(opts.grpc.server_addr.clone(), kv_backend.clone())
+            ProcessManager::new(opts.grpc.server_addr.clone())
                 .context(error::BuildProcessManagerSnafu)?,
         );
         let catalog_manager = KvBackendCatalogManager::new(
@@ -655,7 +655,7 @@ impl StartCommand {
             node_manager,
         )
         .await
-        .context(error::StartFlownodeSnafu)?;
+        .context(StartFlownodeSnafu)?;
         flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))

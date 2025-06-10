@@ -39,6 +39,7 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use servers::addrs;
 use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -345,8 +346,11 @@ impl StartCommand {
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
 
         let process_manager = Arc::new(
-            ProcessManager::new(opts.grpc.server_addr.clone(), cached_meta_backend.clone())
-                .context(error::BuildProcessManagerSnafu)?,
+            ProcessManager::new(addrs::resolve_addr(
+                &opts.grpc.bind_addr,
+                Some(&opts.grpc.server_addr),
+            ))
+            .context(error::BuildProcessManagerSnafu)?,
         );
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension,
