@@ -838,6 +838,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid time index type: {}", ty))]
+    InvalidTimeIndexType {
+        ty: arrow::datatypes::DataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid process id: {}", id))]
     InvalidProcessId { id: String },
 
@@ -973,6 +980,7 @@ impl ErrorExt for Error {
             Error::ColumnOptions { source, .. } => source.status_code(),
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,
+            Error::InvalidTimeIndexType { .. } => StatusCode::InvalidArguments,
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
         }
