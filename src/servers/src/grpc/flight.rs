@@ -45,7 +45,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::error::{InvalidParameterSnafu, ParseJsonSnafu, Result, ToJsonSnafu};
 pub use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::grpc::greptime_handler::{get_request_type, GreptimeRequestHandler};
-use crate::grpc::TonicResult;
+use crate::grpc::{FlightCompression, TonicResult};
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::http::AUTHORIZATION_HEADER;
 use crate::{error, hint_headers};
@@ -195,9 +195,14 @@ impl FlightCraft for GreptimeRequestHandler {
             protocol = "grpc",
             request_type = get_request_type(&request)
         );
+        let flight_compression = self.flight_compression;
         async {
             let output = self.handle_request(request, hints).await?;
-            let stream = to_flight_data_stream(output, TracingContext::from_current_span());
+            let stream = to_flight_data_stream(
+                output,
+                TracingContext::from_current_span(),
+                flight_compression,
+            );
             Ok(Response::new(stream))
         }
         .trace(span)
@@ -365,14 +370,16 @@ impl Stream for PutRecordBatchRequestStream {
 fn to_flight_data_stream(
     output: Output,
     tracing_context: TracingContext,
+    flight_compression: FlightCompression,
 ) -> TonicStream<FlightData> {
     match output.data {
         OutputData::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(stream, tracing_context);
+            let stream = FlightRecordBatchStream::new(stream, tracing_context, flight_compression);
             Box::pin(stream) as _
         }
         OutputData::RecordBatches(x) => {
-            let stream = FlightRecordBatchStream::new(x.as_stream(), tracing_context);
+            let stream =
+                FlightRecordBatchStream::new(x.as_stream(), tracing_context, flight_compression);
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {

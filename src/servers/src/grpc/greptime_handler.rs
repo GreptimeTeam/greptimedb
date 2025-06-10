@@ -49,7 +49,7 @@ use crate::error::{
     JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result, UnknownHintSnafu,
 };
 use crate::grpc::flight::{PutRecordBatchRequest, PutRecordBatchRequestStream};
-use crate::grpc::TonicResult;
+use crate::grpc::{FlightCompression, TonicResult};
 use crate::metrics;
 use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
@@ -59,6 +59,7 @@ pub struct GreptimeRequestHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
     runtime: Option<Runtime>,
+    pub(crate) flight_compression: FlightCompression,
 }
 
 impl GreptimeRequestHandler {
@@ -66,11 +67,13 @@ impl GreptimeRequestHandler {
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         runtime: Option<Runtime>,
+        flight_compression: FlightCompression,
     ) -> Self {
         Self {
             handler,
             user_provider,
             runtime,
+            flight_compression,
         }
     }
 

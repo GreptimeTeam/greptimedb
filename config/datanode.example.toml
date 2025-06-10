@@ -44,6 +44,12 @@ runtime_size = 8
 max_recv_message_size = "512MB"
 ## The maximum send message size for gRPC server.
 max_send_message_size = "512MB"
+## Compression mode for datanode side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+flight_compression = "arrow_ipc"
 
 ## gRPC server TLS options, see `mysql.tls` section.
 [grpc.tls]

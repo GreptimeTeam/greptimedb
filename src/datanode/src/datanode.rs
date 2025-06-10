@@ -372,6 +372,7 @@ impl DatanodeBuilder {
             opts.max_concurrent_queries,
             //TODO: revaluate the hardcoded timeout on the next version of datanode concurrency limiter.
             Duration::from_millis(100),
+            opts.grpc.flight_compression,
         );
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;

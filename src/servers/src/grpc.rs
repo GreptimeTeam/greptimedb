@@ -66,6 +66,8 @@ pub struct GrpcOptions {
     pub max_recv_message_size: ReadableSize,
     /// Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
+    /// Compression mode in Arrow Flight service.
+    pub flight_compression: FlightCompression,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
@@ -114,6 +116,7 @@ impl Default for GrpcOptions {
             server_addr: String::new(),
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            flight_compression: FlightCompression::ArrowIpc,
             runtime_size: 8,
             tls: TlsOption::default(),
         }
@@ -129,6 +132,30 @@ impl GrpcOptions {
     pub fn with_server_addr(mut self, server_addr: &str) -> Self {
         self.server_addr = server_addr.to_string();
         self
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlightCompression {
+    /// Disable all compression in Arrow Flight service.
+    None,
+    /// Enable only transport layer compression (zstd).
+    Transport,
+    /// Enable only payload compression (lz4)
+    #[default]
+    ArrowIpc,
+    /// Enable all compression.
+    All,
+}
+
+impl FlightCompression {
+    pub fn transport_compression(&self) -> bool {
+        self == &FlightCompression::Transport || self == &FlightCompression::All
+    }
+
+    pub fn arrow_compression(&self) -> bool {
+        self == &FlightCompression::ArrowIpc || self == &FlightCompression::All
     }
 }
 

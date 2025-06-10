@@ -54,6 +54,12 @@ bind_addr = "127.0.0.1:4001"
 server_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Compression mode for frontend side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+flight_compression = "arrow_ipc"
 
 ## gRPC server TLS options, see `mysql.tls` section.
 [grpc.tls]
