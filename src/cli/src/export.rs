@@ -47,6 +47,7 @@ enum ExportTarget {
     #[default]
     All,
 }
+
 /// Command for exporting data from the GreptimeDB.
 #[derive(Debug, Default, Parser)]
 pub struct ExportCommand {
