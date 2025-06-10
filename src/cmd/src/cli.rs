@@ -146,6 +146,7 @@ mod tests {
         let output_dir = tempfile::tempdir().unwrap();
         let cli = cli::Command::parse_from([
             "cli",
+            "data",
             "export",
             "--addr",
             "127.0.0.1:4000",
