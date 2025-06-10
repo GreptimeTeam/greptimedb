@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use ahash::{HashMap, HashMapExt};
+use api::v1::flow::{DirtyWindowRequest, WindowRange};
 use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
@@ -26,10 +29,10 @@ use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
-use common_telemetry::tracing::Instrument;
+use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use table::TableRef;
 
 use crate::insert::Inserter;
@@ -67,7 +70,8 @@ impl Inserter {
                 .unwrap()
                 .name,
         )? {
-            // notify flownode.
+            // notify flownode to update dirty time windows.
+            self.update_flow_dirty_window(table_id, min, max);
         }
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
@@ -237,6 +241,46 @@ impl Inserter {
         crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
+
+    fn update_flow_dirty_window(&self, table_id: TableId, min: i64, max: i64) {
+        let table_flownode_set_cache = self.table_flownode_set_cache.clone();
+        let node_manager = self.node_manager.clone();
+        common_runtime::spawn_global(async move {
+            let result = table_flownode_set_cache
+                .get(table_id)
+                .await
+                .context(error::RequestInsertsSnafu);
+            let flownodes = match result {
+                Ok(flownodes) => flownodes.unwrap_or_default(),
+                Err(e) => {
+                    error!(e; "Failed to get flownodes for table id: {}", table_id);
+                    return;
+                }
+            };
+
+            let peers: HashSet<_> = flownodes.values().cloned().collect();
+            for peer in peers {
+                let node_manager = node_manager.clone();
+                common_runtime::spawn_global(async move {
+                    if let Err(e) = node_manager
+                        .flownode(&peer)
+                        .await
+                        .handle_mark_window_dirty(DirtyWindowRequest {
+                            table_id,
+                            dirty_time_ranges: vec![WindowRange {
+                                start_value: min,
+                                end_value: max,
+                            }],
+                        })
+                        .await
+                        .context(error::RequestInsertsSnafu)
+                    {
+                        error!(e; "Failed to mark time window as dirty, table: {}, min: {}, max: {}", table_id, min, max);
+                    }
+                });
+            }
+        });
+    }
 }
 
 /// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
@@ -275,7 +319,7 @@ fn compute_timestamp_range(
                 .unwrap()
                 .reinterpret_cast::<Int64Type>(),
         },
-        t @ _ => {
+        t => {
             return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
         }
     };
