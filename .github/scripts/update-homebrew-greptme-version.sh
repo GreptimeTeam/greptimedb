@@ -26,7 +26,7 @@ update_homebrew_greptime_version() {
 
   # Commit the changes.
   git add .
-  git commit -m "chore: Update GreptimeDB version to ${VERSION}"
+  git commit -s -m "chore: Update GreptimeDB version to ${VERSION}"
   git push origin $BRANCH_NAME
 
   # Create a Pull Request.
