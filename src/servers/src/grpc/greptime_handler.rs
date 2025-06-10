@@ -40,7 +40,6 @@ use futures_util::StreamExt;
 use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
-use table::metadata::TableId;
 use table::TableRef;
 use tokio::sync::mpsc;
 
