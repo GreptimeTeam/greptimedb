@@ -612,6 +612,9 @@ impl RegionMetadataBuilder {
             AlterKind::UnsetRegionOptions { keys: _ } => {
                 // nothing to be done with RegionMetadata
             }
+            AlterKind::DropDefaults { names } => {
+                self.drop_defaults(names)?;
+            }
         }
         Ok(self)
     }
@@ -822,6 +825,40 @@ impl RegionMetadataBuilder {
                         },
                     )?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn drop_defaults(&mut self, column_names: Vec<String>) -> Result<()> {
+        for name in column_names.iter() {
+            let meta = self
+                .column_metadatas
+                .iter_mut()
+                .find(|col| col.column_schema.name == *name);
+            if let Some(meta) = meta {
+                if !meta.column_schema.is_nullable() {
+                    return InvalidRegionRequestSnafu {
+                        region_id: self.region_id,
+                        err: format!(
+                            "column {name} is not nullable and `default` cannot be dropped",
+                        ),
+                    }
+                    .fail();
+                }
+                meta.column_schema = meta
+                    .column_schema
+                    .clone()
+                    .with_default_constraint(None)
+                    .with_context(|_| CastDefaultValueSnafu {
+                        reason: format!("Failed to drop default : {name:?}"),
+                    })?;
+            } else {
+                return InvalidRegionRequestSnafu {
+                    region_id: self.region_id,
+                    err: format!("column {name} not found",),
+                }
+                .fail();
             }
         }
         Ok(())
@@ -1100,7 +1137,10 @@ fn unset_column_fulltext_options(
 #[cfg(test)]
 mod test {
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
+    use datatypes::schema::{
+        ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend,
+    };
+    use datatypes::value::Value;
 
     use super::*;
 
@@ -1423,6 +1463,19 @@ mod test {
         assert_eq!(names, actual);
     }
 
+    fn get_columns_default_constraint(
+        metadata: &RegionMetadata,
+        name: String,
+    ) -> Option<Option<&ColumnDefaultConstraint>> {
+        metadata.column_metadatas.iter().find_map(|col| {
+            if col.column_schema.name == name {
+                Some(col.column_schema.default_constraint())
+            } else {
+                None
+            }
+        })
+    }
+
     #[test]
     fn test_alter() {
         // a (tag), b (field), c (ts)
@@ -1499,6 +1552,50 @@ mod test {
         // Build returns error as the primary key contains a.
         let err = builder.build().unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+
+        let mut builder: RegionMetadataBuilder = RegionMetadataBuilder::from_existing(metadata);
+        let mut column_metadata = new_column_metadata("g", false, 8);
+        let default_constraint = Some(ColumnDefaultConstraint::Value(Value::from("g")));
+        column_metadata.column_schema = column_metadata
+            .column_schema
+            .with_default_constraint(default_constraint.clone())
+            .unwrap();
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata,
+                    location: None,
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        assert_eq!(
+            get_columns_default_constraint(&metadata, "g".to_string()).unwrap(),
+            default_constraint.as_ref()
+        );
+        check_columns(&metadata, &["a", "b", "f", "c", "d", "g"]);
+
+        let mut builder: RegionMetadataBuilder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropDefaults {
+                names: vec!["g".to_string()],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        assert_eq!(
+            get_columns_default_constraint(&metadata, "g".to_string()).unwrap(),
+            None
+        );
+        check_columns(&metadata, &["a", "b", "f", "c", "d", "g"]);
+
+        let mut builder: RegionMetadataBuilder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropColumns {
+                names: vec!["g".to_string()],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "f", "c", "d"]);
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder

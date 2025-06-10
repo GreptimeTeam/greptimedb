@@ -24,11 +24,11 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
-    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex,
-    SetInverted, SetSkipping, SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName,
-    UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping,
-    UnsetTableOptions,
+    DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
+    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
+    SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions,
+    SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
+    UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -631,6 +631,17 @@ pub(crate) fn to_alter_table_expr(
                 })),
             },
         }),
+        AlterTableOperation::DropDefaults { columns } => {
+            AlterTableKind::DropDefaults(DropDefaults {
+                drop_defaults: columns
+                    .into_iter()
+                    .map(|col| {
+                        let column_name = col.0.to_string();
+                        Ok(api::v1::DropDefault { column_name })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        }
     };
 
     Ok(AlterTableExpr {

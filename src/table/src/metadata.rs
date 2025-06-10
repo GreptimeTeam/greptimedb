@@ -264,6 +264,7 @@ impl TableMeta {
                     self.change_column_skipping_index_options(table_name, column_name, None)
                 }
             },
+            AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
         }
     }
 
@@ -926,8 +927,60 @@ impl TableMeta {
             column_names,
         })
     }
-}
 
+    fn drop_defaults(&self, table_name: &str, column_names: &[String]) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+        let mut columns = Vec::with_capacity(table_schema.num_columns());
+        for column_schema in table_schema.column_schemas() {
+            if let Some(name) = column_names.iter().find(|s| **s == column_schema.name) {
+                // Drop default constraint.
+                ensure!(
+                    column_schema.default_constraint().is_some(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!("column {name} does not have a default value"),
+                    }
+                );
+                if !column_schema.is_nullable() {
+                    return error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column {name} is not nullable and `default` cannot be dropped",
+                        ),
+                    }
+                    .fail();
+                }
+                let new_column_schema = column_schema.clone();
+                let new_column_schema = new_column_schema
+                    .with_default_constraint(None)
+                    .with_context(|_| error::SchemaBuildSnafu {
+                        msg: format!("Table {table_name} cannot drop default values"),
+                    })?;
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!("Table {table_name} cannot drop default values"),
+        })?;
+
+        let _ = meta_builder.schema(Arc::new(new_schema));
+
+        Ok(meta_builder)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
