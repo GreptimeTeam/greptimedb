@@ -2444,7 +2444,7 @@ impl PromPlanner {
         LogicalPlanBuilder::from(left)
             .alias(left_table_ref)
             .context(DataFusionPlanningSnafu)?
-            .join(
+            .join_detailed(
                 right,
                 JoinType::Inner,
                 (
@@ -2458,6 +2458,7 @@ impl PromPlanner {
                         .collect::<Vec<_>>(),
                 ),
                 None,
+                true,
             )
             .context(DataFusionPlanningSnafu)?
             .build()
