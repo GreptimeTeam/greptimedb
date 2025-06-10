@@ -4565,7 +4565,7 @@ mod test {
         \n    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(Millisecond, None), job:Utf8;N, sum(.value):Float64;N]\
         \n      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
         \n        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(Millisecond, None), sum(.value):Float64;N]\
-        \n          EmptyMetric: range=[0..0], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
+        \n          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }

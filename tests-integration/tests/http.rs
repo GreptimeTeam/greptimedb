@@ -667,12 +667,11 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let prom_resp = res.json::<PrometheusJsonResponse>().await;
     assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("TableNotFound")));
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
+    assert_eq!(prom_resp.error_type.unwrap(), "TableNotFound");
+    assert_eq!(
+        prom_resp.error.unwrap(),
+        "Cannot find requested table: greptime.public.up"
+    );
 
     // label values
     // should return error if there is no match[]
