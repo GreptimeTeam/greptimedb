@@ -393,3 +393,7 @@ tql eval(1000, 2000, '300s') sum by (cloud, tag0, tag1) (node_network_transmit_b
 -- Or with unknown label dst_namespace.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(1000, 2000, '300s') sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{src_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0) or sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{dst_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0);
+
+DROP TABLE node_network_transmit_bytes_total;
+
+DROP TABLE test_physical;
