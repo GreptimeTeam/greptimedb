@@ -29,7 +29,7 @@ pub use crate::bench::BenchTableMetadataCommand;
 pub use crate::export::ExportCommand;
 pub use crate::import::ImportCommand;
 pub use crate::meta_snapshot::{
-    MetaCommand, MetaInfoCommand, MetaRestoreCommand, MetaSnapshotCommand,
+    MetaCommand, MetaInfoCommand, MetaRestoreCommand, MetaSaveCommand,
 };
 
 #[async_trait]
