@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use api::v1::flow::{DirtyWindowRequests, FlowResponse};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_meta::ddl::create_flow::FlowType;
@@ -29,8 +30,7 @@ use common_telemetry::{debug, info};
 use common_time::TimeToLive;
 use query::QueryEngineRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
-use table::metadata::TableId;
+use store_api::storage::{RegionId, TableId};
 use tokio::sync::{oneshot, RwLock};
 
 use crate::batching_mode::frontend_client::FrontendClient;
@@ -75,6 +75,118 @@ impl BatchingEngine {
             catalog_manager,
             query_engine,
         }
+    }
+
+    pub async fn handle_mark_dirty_time_window(
+        &self,
+        reqs: DirtyWindowRequests,
+    ) -> Result<FlowResponse, Error> {
+        let table_info_mgr = self.table_meta.table_info_manager();
+
+        let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
+        for r in reqs.requests {
+            let tid = TableId::from(r.table_id);
+            let entry = group_by_table_id.entry(tid).or_default();
+            entry.extend(r.dirty_time_ranges);
+        }
+        let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
+        let table_infos =
+            table_info_mgr
+                .batch_get(&tids)
+                .await
+                .with_context(|_| TableNotFoundMetaSnafu {
+                    msg: format!("Failed to get table info for table ids: {:?}", tids),
+                })?;
+
+        let group_by_table_name = group_by_table_id
+            .into_iter()
+            .filter_map(|(id, rows)| {
+                let table_name = table_infos.get(&id).map(|info| info.table_name());
+                let Some(table_name) = table_name else {
+                    warn!("Failed to get table infos for table id: {:?}", id);
+                    return None;
+                };
+                let table_name = [
+                    table_name.catalog_name,
+                    table_name.schema_name,
+                    table_name.table_name,
+                ];
+                let schema = &table_infos.get(&id).unwrap().table_info.meta.schema;
+                let time_index_unit = schema.column_schemas[schema.timestamp_index.unwrap()]
+                    .data_type
+                    .as_timestamp()
+                    .unwrap()
+                    .unit();
+                Some((table_name, (rows, time_index_unit)))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let group_by_table_name = Arc::new(group_by_table_name);
+
+        let mut handles = Vec::new();
+        let tasks = self.tasks.read().await;
+
+        for (_flow_id, task) in tasks.iter() {
+            let src_table_names = &task.config.source_table_names;
+
+            if src_table_names
+                .iter()
+                .all(|name| !group_by_table_name.contains_key(name))
+            {
+                continue;
+            }
+
+            let group_by_table_name = group_by_table_name.clone();
+            let task = task.clone();
+
+            let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+                let src_table_names = &task.config.source_table_names;
+                let mut all_dirty_windows = vec![];
+                for src_table_name in src_table_names {
+                    if let Some((window_ranges, unit)) = group_by_table_name.get(src_table_name) {
+                        let Some(expr) = &task.config.time_window_expr else {
+                            continue;
+                        };
+                        for window in window_ranges {
+                            let align_start = expr
+                                .eval(common_time::Timestamp::new(window.start_value, *unit))?
+                                .0
+                                .context(UnexpectedSnafu {
+                                    reason: "Failed to eval start value",
+                                })?;
+
+                            let align_end = expr
+                                .eval(common_time::Timestamp::new(window.end_value, *unit))?
+                                .1
+                                .context(UnexpectedSnafu {
+                                    reason: "Failed to eval end value",
+                                })?;
+                            all_dirty_windows.push((align_start, align_end));
+                        }
+                    }
+                }
+                let mut state = task.state.write().unwrap();
+                for (s, e) in all_dirty_windows {
+                    state.dirty_time_windows.add_window(s, Some(e));
+                }
+                Ok(())
+            });
+            handles.push(handle);
+        }
+        drop(tasks);
+        for handle in handles {
+            match handle.await {
+                Err(e) => {
+                    warn!("Failed to handle inserts: {e}");
+                }
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => {
+                    warn!("Failed to handle inserts: {e}");
+                }
+            }
+        }
+
+        Ok(Default::default())
     }
 
     pub async fn handle_inserts_inner(

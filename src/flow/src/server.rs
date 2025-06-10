@@ -17,6 +17,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::flow::DirtyWindowRequests;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
@@ -32,9 +33,7 @@ use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
 use futures::{FutureExt, TryStreamExt};
-use greptime_proto::v1::flow::{
-    flow_server, DirtyWindowRequests, FlowRequest, FlowResponse, InsertRequests,
-};
+use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
@@ -141,17 +140,14 @@ impl flow_server::Flow for FlowService {
 
     async fn handle_mark_dirty_time_window(
         &self,
-        request: Request<DirtyWindowRequests>,
+        reqs: Request<DirtyWindowRequests>,
     ) -> Result<Response<FlowResponse>, Status> {
-        let req = request.into_inner();
-        for req in req.requests {
-            self.dual_engine
-                .handle_mark_window_dirty(req)
-                .await
-                .map(Response::new)
-                .map_err(to_status_with_last_err)?;
-        }
-        Ok(Response::new(FlowResponse::default()))
+        self.dual_engine
+            .batching_engine()
+            .handle_mark_dirty_time_window(reqs.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(to_status_with_last_err)
     }
 }
 
