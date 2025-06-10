@@ -297,7 +297,7 @@ impl MetadataSnapshotManager {
             .context(ReadObjectSnafu { file_path })?;
         let document = Document::from_slice(&filename.extension.format, &data.to_bytes())?;
         let metadata_content = document.into_metadata_content()?.values();
-        let mut results = Vec::with_capacity(limit);
+        let mut results = Vec::with_capacity(limit.unwrap_or(256));
         for kv in metadata_content {
             let key_str = String::from_utf8_lossy(&kv.key);
             if let Some(prefix) = query_str.strip_suffix('*') {
