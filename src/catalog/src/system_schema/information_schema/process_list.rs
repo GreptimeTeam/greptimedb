@@ -20,7 +20,6 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
 use common_time::{Duration, Timestamp};
-use datafusion::logical_expr::UserDefinedLogicalNode;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datatypes::prelude::ConcreteDataType as CDT;
 use datatypes::scalars::ScalarVectorBuilder;
@@ -28,20 +27,23 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
     DurationMillisecondVectorBuilder, StringVectorBuilder, TimestampMillisecondVectorBuilder,
-    UInt64VectorBuilder, VectorRef,
+    VectorRef,
 };
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{self, InternalSnafu};
 use crate::information_schema::Predicates;
-use crate::process_manager::ProcessManager;
+use crate::process_manager::{DisplayProcessId, ProcessManager};
 use crate::system_schema::information_schema::InformationTable;
 
 /// Column names of `information_schema.process_list`
 const ID: &str = "id";
-const DATABASE: &str = "database";
+const CATALOG: &str = "catalog";
+const SCHEMAS: &str = "schemas";
 const QUERY: &str = "query";
+const CLIENT: &str = "client";
+const FRONTEND: &str = "frontend";
 const START_TIMESTAMP: &str = "start_timestamp";
 const ELAPSED_TIME: &str = "elapsed_time";
 
@@ -62,9 +64,12 @@ impl InformationSchemaProcessList {
 
     fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new(ID, CDT::uint64_datatype(), false),
-            ColumnSchema::new(DATABASE, CDT::string_datatype(), false),
+            ColumnSchema::new(ID, CDT::string_datatype(), false),
+            ColumnSchema::new(CATALOG, CDT::string_datatype(), false),
+            ColumnSchema::new(SCHEMAS, CDT::string_datatype(), false),
             ColumnSchema::new(QUERY, CDT::string_datatype(), false),
+            ColumnSchema::new(CLIENT, CDT::string_datatype(), false),
+            ColumnSchema::new(FRONTEND, CDT::string_datatype(), false),
             ColumnSchema::new(
                 START_TIMESTAMP,
                 CDT::timestamp_millisecond_datatype(),
@@ -117,45 +122,63 @@ async fn make_process_list(
     let current_time = current_time_millis();
     let queries = process_manager.list_all_processes();
 
-    let mut id_builder = UInt64VectorBuilder::with_capacity(queries.len());
-    let mut database_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut id_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut catalog_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut schemas_builder = StringVectorBuilder::with_capacity(queries.len());
     let mut query_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut client_builder = StringVectorBuilder::with_capacity(queries.len());
+    let mut frontend_builder = StringVectorBuilder::with_capacity(queries.len());
     let mut start_time_builder = TimestampMillisecondVectorBuilder::with_capacity(queries.len());
     let mut elapsed_time_builder = DurationMillisecondVectorBuilder::with_capacity(queries.len());
 
-    // for process in queries {
-    //     let row = [
-    //         (ID, &Value::from(process.id)),
-    //         (DATABASE, &Value::from(process.catalog)),
-    //         (QUERY, &Value::from(process.query_string())),
-    //         (
-    //             START_TIMESTAMP,
-    //             &Value::from(Timestamp::new_millisecond(
-    //                 process.query_start_timestamp_ms(),
-    //             )),
-    //         ),
-    //         (
-    //             ELAPSED_TIME,
-    //             &Value::from(Duration::new_millisecond(
-    //                 current_time - process.query_start_timestamp_ms(),
-    //             )),
-    //         ),
-    //     ];
-    //     if predicates.eval(&row) {
-    //         id_builder.push(row[0].1.as_u64());
-    //         database_builder.push(row[1].1.as_string().as_deref());
-    //         query_builder.push(row[2].1.as_string().as_deref());
-    //         start_time_builder.push(row[3].1.as_timestamp().map(|t| t.value().into()));
-    //         elapsed_time_builder.push(row[4].1.as_duration().map(|d| d.value().into()));
-    //     }
-    // }
+    for process in queries {
+        let display_id = DisplayProcessId {
+            server_addr: process.frontend.to_string(),
+            id: process.id,
+        }
+        .to_string();
+        let schemas = process.schemas.join(",");
+        let id = Value::from(display_id);
+        let catalog = Value::from(process.catalog);
+        let schemas = Value::from(schemas);
+        let query = Value::from(process.query);
+        let client = Value::from(process.client);
+        let frontend = Value::from(process.frontend);
+        let start_timestamp = Value::from(Timestamp::new_millisecond(process.start_timestamp));
+        let elapsed_time = Value::from(Duration::new_millisecond(
+            current_time - process.start_timestamp,
+        ));
+        let row = [
+            (ID, &id),
+            (CATALOG, &catalog),
+            (SCHEMAS, &schemas),
+            (QUERY, &query),
+            (CLIENT, &client),
+            (FRONTEND, &frontend),
+            (START_TIMESTAMP, &start_timestamp),
+            (ELAPSED_TIME, &elapsed_time),
+        ];
+        if predicates.eval(&row) {
+            id_builder.push(id.as_string().as_deref());
+            catalog_builder.push(catalog.as_string().as_deref());
+            schemas_builder.push(schemas.as_string().as_deref());
+            query_builder.push(query.as_string().as_deref());
+            client_builder.push(client.as_string().as_deref());
+            frontend_builder.push(frontend.as_string().as_deref());
+            start_time_builder.push(start_timestamp.as_timestamp().map(|t| t.value().into()));
+            elapsed_time_builder.push(elapsed_time.as_duration().map(|d| d.value().into()));
+        }
+    }
 
     RecordBatch::new(
         InformationSchemaProcessList::schema(),
         vec![
             Arc::new(id_builder.finish()) as VectorRef,
-            Arc::new(database_builder.finish()) as VectorRef,
+            Arc::new(catalog_builder.finish()) as VectorRef,
+            Arc::new(schemas_builder.finish()) as VectorRef,
             Arc::new(query_builder.finish()) as VectorRef,
+            Arc::new(client_builder.finish()) as VectorRef,
+            Arc::new(frontend_builder.finish()) as VectorRef,
             Arc::new(start_time_builder.finish()) as VectorRef,
             Arc::new(elapsed_time_builder.finish()) as VectorRef,
         ],

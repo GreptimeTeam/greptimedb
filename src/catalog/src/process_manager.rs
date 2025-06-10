@@ -14,17 +14,15 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use api::v1::frontend::ProcessInfo;
-use common_meta::kv_backend::KvBackendRef;
-use common_meta::rpc::store::{BatchDeleteRequest, BatchPutRequest, DeleteRangeRequest};
-use common_meta::rpc::KeyValue;
-use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{debug, info};
 use common_time::util::current_time_millis;
-use snafu::ResultExt;
+use snafu::OptionExt;
 
 use crate::error;
 
@@ -48,7 +46,7 @@ impl ProcessManager {
     pub fn register_query(
         &self,
         catalog: String,
-        schema: Vec<String>,
+        schemas: Vec<String>,
         query: String,
         client: String,
     ) -> u64 {
@@ -56,7 +54,7 @@ impl ProcessManager {
         let process = ProcessInfo {
             id,
             catalog: catalog.clone(),
-            schema,
+            schemas,
             query,
             start_timestamp: current_time_millis(),
             client,
@@ -99,9 +97,40 @@ impl ProcessManager {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DisplayProcessId {
+    pub server_addr: String,
+    pub id: u64,
+}
+
+impl Display for DisplayProcessId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.server_addr, self.id)
+    }
+}
+
+impl TryFrom<&str> for DisplayProcessId {
+    type Error = error::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let mut split = value.split('/');
+        let server_addr = split
+            .next()
+            .context(error::ParseProcessIdSnafu { s: value })?
+            .to_string();
+        let id = split
+            .next()
+            .context(error::ParseProcessIdSnafu { s: value })?;
+        let id = u64::from_str(id)
+            .ok()
+            .context(error::ParseProcessIdSnafu { s: value })?;
+        Ok(DisplayProcessId { server_addr, id })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::process_manager::ProcessManager;
+    use crate::process_manager::{DisplayProcessId, ProcessManager};
 
     #[tokio::test]
     async fn test_register_query() {
@@ -121,5 +150,16 @@ mod tests {
 
         process_manager.deregister_query("public".to_string(), process_id);
         assert_eq!(process_manager.list_all_processes().len(), 0);
+    }
+
+    #[test]
+    fn test_display_process_id() {
+        assert_eq!(
+            DisplayProcessId::try_from("1.1.1.1:3000/123").unwrap(),
+            DisplayProcessId {
+                server_addr: "1.1.1.1:3000".to_string(),
+                id: 123,
+            }
+        );
     }
 }
