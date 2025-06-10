@@ -18,7 +18,6 @@ mod pow;
 mod rate;
 
 use std::fmt;
-use std::sync::Arc;
 
 pub use clamp::{ClampFunction, ClampMaxFunction, ClampMinFunction};
 use common_query::error::{GeneralDataFusionSnafu, Result};
@@ -39,13 +38,13 @@ pub(crate) struct MathFunction;
 
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(ModuloFunction));
-        registry.register(Arc::new(PowFunction));
-        registry.register(Arc::new(RateFunction));
-        registry.register(Arc::new(RangeFunction));
-        registry.register(Arc::new(ClampFunction));
-        registry.register(Arc::new(ClampMinFunction));
-        registry.register(Arc::new(ClampMaxFunction));
+        registry.register_scalar(ModuloFunction);
+        registry.register_scalar(PowFunction);
+        registry.register_scalar(RateFunction);
+        registry.register_scalar(RangeFunction);
+        registry.register_scalar(ClampFunction);
+        registry.register_scalar(ClampMinFunction);
+        registry.register_scalar(ClampMaxFunction);
     }
 }
 

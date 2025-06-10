@@ -19,12 +19,11 @@ use std::time::Duration;
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_function::function::FunctionRef;
-use common_function::scalars::aggregate::AggregateFunctionMetaRef;
+use common_function::function_factory::ScalarFunctionFactory;
 use common_query::Output;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_runtime::Runtime;
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{AggregateUDF, LogicalPlan};
 use query::dataframe::DataFrame;
 use query::planner::LogicalPlanner;
 use query::query_engine::{DescribeResult, QueryEngineState};
@@ -76,9 +75,9 @@ impl QueryEngine for MockQueryEngine {
         unimplemented!()
     }
 
-    fn register_aggregate_function(&self, _func: AggregateFunctionMetaRef) {}
+    fn register_aggregate_function(&self, _func: AggregateUDF) {}
 
-    fn register_function(&self, _func: FunctionRef) {}
+    fn register_scalar_function(&self, _func: ScalarFunctionFactory) {}
 
     fn read_table(&self, _table: TableRef) -> query::error::Result<DataFrame> {
         unimplemented!()

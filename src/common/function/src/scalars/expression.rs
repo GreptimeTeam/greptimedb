@@ -17,8 +17,6 @@ mod ctx;
 mod is_null;
 mod unary;
 
-use std::sync::Arc;
-
 pub use binary::scalar_binary_op;
 pub use ctx::EvalContext;
 pub use unary::scalar_unary_op;
@@ -30,6 +28,6 @@ pub(crate) struct ExpressionFunction;
 
 impl ExpressionFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(IsNullFunction));
+        registry.register_scalar(IsNullFunction);
     }
 }

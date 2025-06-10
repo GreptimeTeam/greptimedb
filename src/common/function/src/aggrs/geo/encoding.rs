@@ -19,9 +19,12 @@ use common_error::status_code::StatusCode;
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{self, InvalidInputStateSnafu, Result};
 use common_query::logical_plan::accumulator::AggrFuncTypeStore;
-use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
+use common_query::logical_plan::{
+    create_aggregate_function, Accumulator, AggregateFunctionCreator,
+};
 use common_query::prelude::AccumulatorCreatorFunction;
 use common_time::Timestamp;
+use datafusion_expr::AggregateUDF;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{ListValue, Value};
 use datatypes::vectors::VectorRef;
@@ -46,6 +49,16 @@ impl JsonPathAccumulator {
             timestamp: Vec::default(),
             timestamp_type,
         }
+    }
+
+    /// Create a new `AggregateUDF` for the `json_encode_path` aggregate function.
+    pub fn uadf_impl() -> AggregateUDF {
+        create_aggregate_function(
+            "json_encode_path".to_string(),
+            3,
+            Arc::new(JsonPathEncodeFunctionCreator::default()),
+        )
+        .into()
     }
 }
 

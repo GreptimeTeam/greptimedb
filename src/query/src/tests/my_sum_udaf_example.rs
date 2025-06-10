@@ -16,11 +16,12 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{CreateAccumulatorSnafu, Result as QueryResult};
 use common_query::logical_plan::accumulator::AggrFuncTypeStore;
-use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
+use common_query::logical_plan::{
+    create_aggregate_function, Accumulator, AggregateFunctionCreator,
+};
 use common_query::prelude::*;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::prelude::*;
@@ -207,11 +208,14 @@ where
 
     let engine = new_query_engine_with_table(testing_table);
 
-    engine.register_aggregate_function(Arc::new(AggregateFunctionMeta::new(
-        "my_sum",
-        1,
-        Arc::new(|| Arc::new(MySumAccumulatorCreator::default())),
-    )));
+    engine.register_aggregate_function(
+        create_aggregate_function(
+            "my_sum".to_string(),
+            1,
+            Arc::new(MySumAccumulatorCreator::default()),
+        )
+        .into(),
+    );
 
     let sql = format!("select MY_SUM({column_name}) as my_sum from {table_name}");
     let batches = exec_selection(engine, &sql).await;

@@ -12,22 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod date_add;
-mod date_format;
-mod date_sub;
-
-use date_add::DateAddFunction;
-use date_format::DateFormatFunction;
-use date_sub::DateSubFunction;
-
 use crate::function_registry::FunctionRegistry;
 
-pub(crate) struct DateFunction;
+mod encoding;
+mod geo_path;
 
-impl DateFunction {
+pub(crate) struct GeoFunction;
+
+impl GeoFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_scalar(DateAddFunction);
-        registry.register_scalar(DateSubFunction);
-        registry.register_scalar(DateFormatFunction);
+        registry.register_aggr(geo_path::GeoPathAccumulator::uadf_impl());
+        registry.register_aggr(encoding::JsonPathAccumulator::uadf_impl());
     }
 }

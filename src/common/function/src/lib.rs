@@ -18,13 +18,14 @@
 mod admin;
 mod flush_flow;
 mod macros;
-pub mod scalars;
 mod system;
 
-pub mod aggr;
+pub mod aggrs;
 pub mod function;
+pub mod function_factory;
 pub mod function_registry;
 pub mod handlers;
 pub mod helper;
+pub mod scalars;
 pub mod state;
 pub mod utils;

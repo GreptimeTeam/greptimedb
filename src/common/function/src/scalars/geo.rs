@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-pub(crate) mod encoding;
 mod geohash;
 mod h3;
-mod helpers;
+pub(crate) mod helpers;
 mod measure;
 mod relation;
 mod s2;
@@ -29,57 +27,57 @@ pub(crate) struct GeoFunctions;
 impl GeoFunctions {
     pub fn register(registry: &FunctionRegistry) {
         // geohash
-        registry.register(Arc::new(geohash::GeohashFunction));
-        registry.register(Arc::new(geohash::GeohashNeighboursFunction));
+        registry.register_scalar(geohash::GeohashFunction);
+        registry.register_scalar(geohash::GeohashNeighboursFunction);
 
         // h3 index
-        registry.register(Arc::new(h3::H3LatLngToCell));
-        registry.register(Arc::new(h3::H3LatLngToCellString));
+        registry.register_scalar(h3::H3LatLngToCell);
+        registry.register_scalar(h3::H3LatLngToCellString);
 
         // h3 index inspection
-        registry.register(Arc::new(h3::H3CellBase));
-        registry.register(Arc::new(h3::H3CellIsPentagon));
-        registry.register(Arc::new(h3::H3StringToCell));
-        registry.register(Arc::new(h3::H3CellToString));
-        registry.register(Arc::new(h3::H3CellCenterLatLng));
-        registry.register(Arc::new(h3::H3CellResolution));
+        registry.register_scalar(h3::H3CellBase);
+        registry.register_scalar(h3::H3CellIsPentagon);
+        registry.register_scalar(h3::H3StringToCell);
+        registry.register_scalar(h3::H3CellToString);
+        registry.register_scalar(h3::H3CellCenterLatLng);
+        registry.register_scalar(h3::H3CellResolution);
 
         // h3 hierarchical grid
-        registry.register(Arc::new(h3::H3CellCenterChild));
-        registry.register(Arc::new(h3::H3CellParent));
-        registry.register(Arc::new(h3::H3CellToChildren));
-        registry.register(Arc::new(h3::H3CellToChildrenSize));
-        registry.register(Arc::new(h3::H3CellToChildPos));
-        registry.register(Arc::new(h3::H3ChildPosToCell));
-        registry.register(Arc::new(h3::H3CellContains));
+        registry.register_scalar(h3::H3CellCenterChild);
+        registry.register_scalar(h3::H3CellParent);
+        registry.register_scalar(h3::H3CellToChildren);
+        registry.register_scalar(h3::H3CellToChildrenSize);
+        registry.register_scalar(h3::H3CellToChildPos);
+        registry.register_scalar(h3::H3ChildPosToCell);
+        registry.register_scalar(h3::H3CellContains);
 
         // h3 grid traversal
-        registry.register(Arc::new(h3::H3GridDisk));
-        registry.register(Arc::new(h3::H3GridDiskDistances));
-        registry.register(Arc::new(h3::H3GridDistance));
-        registry.register(Arc::new(h3::H3GridPathCells));
+        registry.register_scalar(h3::H3GridDisk);
+        registry.register_scalar(h3::H3GridDiskDistances);
+        registry.register_scalar(h3::H3GridDistance);
+        registry.register_scalar(h3::H3GridPathCells);
 
         // h3 measurement
-        registry.register(Arc::new(h3::H3CellDistanceSphereKm));
-        registry.register(Arc::new(h3::H3CellDistanceEuclideanDegree));
+        registry.register_scalar(h3::H3CellDistanceSphereKm);
+        registry.register_scalar(h3::H3CellDistanceEuclideanDegree);
 
         // s2
-        registry.register(Arc::new(s2::S2LatLngToCell));
-        registry.register(Arc::new(s2::S2CellLevel));
-        registry.register(Arc::new(s2::S2CellToToken));
-        registry.register(Arc::new(s2::S2CellParent));
+        registry.register_scalar(s2::S2LatLngToCell);
+        registry.register_scalar(s2::S2CellLevel);
+        registry.register_scalar(s2::S2CellToToken);
+        registry.register_scalar(s2::S2CellParent);
 
         // spatial data type
-        registry.register(Arc::new(wkt::LatLngToPointWkt));
+        registry.register_scalar(wkt::LatLngToPointWkt);
 
         // spatial relation
-        registry.register(Arc::new(relation::STContains));
-        registry.register(Arc::new(relation::STWithin));
-        registry.register(Arc::new(relation::STIntersects));
+        registry.register_scalar(relation::STContains);
+        registry.register_scalar(relation::STWithin);
+        registry.register_scalar(relation::STIntersects);
 
         // spatial measure
-        registry.register(Arc::new(measure::STDistance));
-        registry.register(Arc::new(measure::STDistanceSphere));
-        registry.register(Arc::new(measure::STArea));
+        registry.register_scalar(measure::STDistance);
+        registry.register_scalar(measure::STDistanceSphere);
+        registry.register_scalar(measure::STArea);
     }
 }

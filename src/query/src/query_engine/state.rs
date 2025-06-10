@@ -19,11 +19,10 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_function::function::FunctionRef;
+use common_function::function_factory::ScalarFunctionFactory;
 use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
-use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::state::FunctionState;
 use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
@@ -37,7 +36,7 @@ use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use datafusion_expr::LogicalPlan as DfLogicalPlan;
+use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan};
 use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
 use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::Optimizer;
@@ -70,8 +69,8 @@ pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
     function_state: Arc<FunctionState>,
-    udf_functions: Arc<RwLock<HashMap<String, FunctionRef>>>,
-    aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
+    scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
+    aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
 }
@@ -186,10 +185,10 @@ impl QueryEngineState {
                 procedure_service_handler,
                 flow_service_handler,
             }),
-            aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
+            aggr_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
-            udf_functions: Arc::new(RwLock::new(HashMap::new())),
+            scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -222,38 +221,28 @@ impl QueryEngineState {
         self.session_state().optimize(&plan)
     }
 
-    /// Register an udf function.
-    /// Will override if the function with same name is already registered.
-    pub fn register_function(&self, func: FunctionRef) {
-        let name = func.name().to_string();
-        let x = self
-            .udf_functions
-            .write()
-            .unwrap()
-            .insert(name.clone(), func);
-
-        if x.is_some() {
-            warn!("Already registered udf function '{name}'");
-        }
-    }
-
-    /// Retrieve the udf function by name
-    pub fn udf_function(&self, function_name: &str) -> Option<FunctionRef> {
-        self.udf_functions
+    /// Retrieve the scalar function by name
+    pub fn scalar_function(&self, function_name: &str) -> Option<ScalarFunctionFactory> {
+        self.scalar_functions
             .read()
             .unwrap()
             .get(function_name)
             .cloned()
     }
 
-    /// Retrieve udf function names.
-    pub fn udf_names(&self) -> Vec<String> {
-        self.udf_functions.read().unwrap().keys().cloned().collect()
+    /// Retrieve scalar function names.
+    pub fn scalar_names(&self) -> Vec<String> {
+        self.scalar_functions
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Retrieve the aggregate function by name
-    pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
-        self.aggregate_functions
+    pub fn aggr_function(&self, function_name: &str) -> Option<AggregateUDF> {
+        self.aggr_functions
             .read()
             .unwrap()
             .get(function_name)
@@ -261,13 +250,28 @@ impl QueryEngineState {
     }
 
     /// Retrieve aggregate function names.
-    pub fn udaf_names(&self) -> Vec<String> {
-        self.aggregate_functions
+    pub fn aggr_names(&self) -> Vec<String> {
+        self.aggr_functions
             .read()
             .unwrap()
             .keys()
             .cloned()
             .collect()
+    }
+
+    /// Register an scalar function.
+    /// Will override if the function with same name is already registered.
+    pub fn register_scalar_function(&self, func: ScalarFunctionFactory) {
+        let name = func.name().to_string();
+        let x = self
+            .scalar_functions
+            .write()
+            .unwrap()
+            .insert(name.clone(), func);
+
+        if x.is_some() {
+            warn!("Already registered scalar function '{name}'");
+        }
     }
 
     /// Register an aggregate function.
@@ -278,10 +282,10 @@ impl QueryEngineState {
     /// Panicking consideration: currently the aggregated functions are all statically registered,
     /// user cannot define their own aggregate functions on the fly. So we can panic here. If that
     /// invariant is broken in the future, we should return an error instead of panicking.
-    pub fn register_aggregate_function(&self, func: AggregateFunctionMetaRef) {
-        let name = func.name();
+    pub fn register_aggr_function(&self, func: AggregateUDF) {
+        let name = func.name().to_string();
         let x = self
-            .aggregate_functions
+            .aggr_functions
             .write()
             .unwrap()
             .insert(name.clone(), func);

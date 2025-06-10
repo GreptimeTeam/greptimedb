@@ -38,11 +38,11 @@ use crate::function_registry::FunctionRegistry;
 ///
 /// Usage: matches(`<col>`, `<pattern>`) -> boolean
 #[derive(Clone, Debug, Default)]
-pub(crate) struct MatchesFunction;
+pub struct MatchesFunction;
 
 impl MatchesFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(MatchesFunction));
+        registry.register_scalar(MatchesFunction);
     }
 }
 
