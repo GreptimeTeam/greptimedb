@@ -17,13 +17,20 @@ use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
 use api::v1::ArrowIpc;
+use arrow::array::{
+    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use arrow::datatypes::{DataType, Int64Type, TimeUnit};
+use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
+use common_telemetry::tracing::Instrument;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
+use table::TableRef;
 
 use crate::insert::Inserter;
 use crate::{error, metrics};
@@ -32,10 +39,11 @@ impl Inserter {
     /// Handle bulk insert request.
     pub async fn handle_bulk_insert(
         &self,
-        table_id: TableId,
+        table: TableRef,
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> error::Result<AffectedRows> {
+        let table_id = table.table_info().table_id();
         let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["decode_request"])
             .start_timer();
@@ -48,6 +56,19 @@ impl Inserter {
             return Ok(0);
         };
         decode_timer.observe_duration();
+        if let Some((min, max)) = compute_timestamp_range(
+            &record_batch,
+            &table
+                .table_info()
+                .meta
+                .schema
+                .timestamp_column()
+                .as_ref()
+                .unwrap()
+                .name,
+        )? {
+            // notify flownode.
+        }
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
             .with_label_values(&["raw"])
@@ -216,4 +237,48 @@ impl Inserter {
         crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
+}
+
+/// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
+fn compute_timestamp_range(
+    rb: &RecordBatch,
+    timestamp_index_name: &str,
+) -> error::Result<Option<(i64, i64)>> {
+    let ts_col = rb
+        .column_by_name(timestamp_index_name)
+        .context(error::ColumnNotFoundSnafu {
+            msg: timestamp_index_name,
+        })?;
+    if rb.num_rows() == 0 {
+        return Ok(None);
+    }
+    let primitive = match ts_col.data_type() {
+        DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => ts_col
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Millisecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Microsecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Nanosecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+        },
+        t @ _ => {
+            return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
+        }
+    };
+
+    Ok(arrow::compute::min(&primitive).zip(arrow::compute::max(&primitive)))
 }

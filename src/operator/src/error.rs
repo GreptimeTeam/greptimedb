@@ -837,6 +837,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid time index type: {}", ty))]
+    InvalidTimeIndexType {
+        ty: arrow::datatypes::DataType,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -964,6 +971,7 @@ impl ErrorExt for Error {
             Error::ColumnOptions { source, .. } => source.status_code(),
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,
+            Error::InvalidTimeIndexType { .. } => StatusCode::InvalidArguments,
         }
     }
 
