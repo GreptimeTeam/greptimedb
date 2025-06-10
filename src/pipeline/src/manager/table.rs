@@ -21,7 +21,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::{TableReference, ToDFSchema};
 use datafusion_expr::{col, DmlStatement, LogicalPlan};
@@ -39,7 +39,7 @@ use table::metadata::TableInfo;
 use table::TableRef;
 
 use crate::error::{
-    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu, Error,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
@@ -283,7 +283,27 @@ impl PipelineTable {
             return Ok(pipeline);
         }
 
-        let mut pipeline_vec = self.find_pipeline(name, version).await?;
+        let mut pipeline_vec;
+        match self.find_pipeline(name, version).await {
+            Ok(p) => pipeline_vec = p,
+            Err(e) => {
+                match e {
+                    Error::CollectRecords { .. } => {
+                        // if collect records failed, it means the pipeline table is temporary invalid
+                        // we should use second level cache
+                        warn!(e; "Failed to collect records from pipeline table, using second level cache.");
+                        return self
+                            .cache
+                            .get_second_level_cache(schema, name, version)?
+                            .ok_or(PipelineNotFoundSnafu { name, version }.build());
+                    }
+                    _ => {
+                        // if other error, we should return it
+                        return Err(e);
+                    }
+                }
+            }
+        };
         ensure!(
             !pipeline_vec.is_empty(),
             PipelineNotFoundSnafu { name, version }
