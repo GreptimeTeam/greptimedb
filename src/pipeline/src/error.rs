@@ -809,14 +809,13 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             CastType { .. } => StatusCode::Unexpected,
-            ValueMustBeMap { .. } => StatusCode::Unexpected,
             PipelineTableNotFound { .. } => StatusCode::TableNotFound,
             InsertPipeline { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
-            MultiPipelineWithDiffSchema { .. } => StatusCode::IllegalState,
+            MultiPipelineWithDiffSchema { .. } | ValueMustBeMap { .. } => StatusCode::IllegalState,
             BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),
