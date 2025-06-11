@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use ahash::{HashMap, HashMapExt};
-use api::v1::flow::{DirtyWindowRequest, WindowRange};
+use api::v1::flow::DirtyWindowRequest;
 use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
@@ -59,7 +59,8 @@ impl Inserter {
             return Ok(0);
         };
         decode_timer.observe_duration();
-        if let Some((min, max)) = compute_timestamp_range(
+
+        if let Ok(t) = extract_timestamps(
             &record_batch,
             &table
                 .table_info()
@@ -69,10 +70,14 @@ impl Inserter {
                 .as_ref()
                 .unwrap()
                 .name,
-        )? {
-            // notify flownode to update dirty time windows.
-            self.update_flow_dirty_window(table_id, min, max);
+        )
+        .inspect_err(|e| {
+            error!(e; "Failed to extract timestamps from record batch");
+        }) {
+            // notify flownode to update dirty timestamps.
+            self.update_flow_dirty_window(table_id, t);
         }
+
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
             .with_label_values(&["raw"])
@@ -242,7 +247,7 @@ impl Inserter {
         Ok(rows_inserted)
     }
 
-    fn update_flow_dirty_window(&self, table_id: TableId, min: i64, max: i64) {
+    fn update_flow_dirty_window(&self, table_id: TableId, timestamps: Vec<i64>) {
         let table_flownode_set_cache = self.table_flownode_set_cache.clone();
         let node_manager = self.node_manager.clone();
         common_runtime::spawn_global(async move {
@@ -259,23 +264,22 @@ impl Inserter {
             };
 
             let peers: HashSet<_> = flownodes.values().cloned().collect();
+
             for peer in peers {
                 let node_manager = node_manager.clone();
+                let timestamps = timestamps.clone();
                 common_runtime::spawn_global(async move {
                     if let Err(e) = node_manager
                         .flownode(&peer)
                         .await
                         .handle_mark_window_dirty(DirtyWindowRequest {
                             table_id,
-                            dirty_time_ranges: vec![WindowRange {
-                                start_value: min,
-                                end_value: max,
-                            }],
+                            timestamps,
                         })
                         .await
                         .context(error::RequestInsertsSnafu)
                     {
-                        error!(e; "Failed to mark time window as dirty, table: {}, min: {}, max: {}", table_id, min, max);
+                        error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
                     }
                 });
             }
@@ -284,17 +288,14 @@ impl Inserter {
 }
 
 /// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
-fn compute_timestamp_range(
-    rb: &RecordBatch,
-    timestamp_index_name: &str,
-) -> error::Result<Option<(i64, i64)>> {
+fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Result<Vec<i64>> {
     let ts_col = rb
         .column_by_name(timestamp_index_name)
         .context(error::ColumnNotFoundSnafu {
             msg: timestamp_index_name,
         })?;
     if rb.num_rows() == 0 {
-        return Ok(None);
+        return Ok(vec![]);
     }
     let primitive = match ts_col.data_type() {
         DataType::Timestamp(unit, _) => match unit {
@@ -323,6 +324,5 @@ fn compute_timestamp_range(
             return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
         }
     };
-
-    Ok(arrow::compute::min(&primitive).zip(arrow::compute::max(&primitive)))
+    Ok(primitive.iter().flatten().collect())
 }
