@@ -21,7 +21,7 @@ use api::v1::{
 };
 use common_query::OutputData;
 use common_recordbatch::util as record_util;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, info};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::{TableReference, ToDFSchema};
 use datafusion_expr::{col, DmlStatement, LogicalPlan};
@@ -46,6 +46,7 @@ use crate::error::{
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::pipeline_cache::PipelineCache;
 use crate::manager::{PipelineInfo, PipelineVersion};
+use crate::metrics::METRIC_PIPELINE_TABLE_FIND_COUNT;
 use crate::util::prepare_dataframe_conditions;
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -285,13 +286,20 @@ impl PipelineTable {
 
         let mut pipeline_vec;
         match self.find_pipeline(name, version).await {
-            Ok(p) => pipeline_vec = p,
+            Ok(p) => {
+                METRIC_PIPELINE_TABLE_FIND_COUNT
+                    .with_label_values(&["true"])
+                    .inc();
+                pipeline_vec = p;
+            }
             Err(e) => {
                 match e {
                     Error::CollectRecords { .. } => {
                         // if collect records failed, it means the pipeline table is temporary invalid
-                        // we should use failover cache cache
-                        warn!(e; "Failed to collect records from pipeline table, using second level cache.");
+                        // we should use failover cache
+                        METRIC_PIPELINE_TABLE_FIND_COUNT
+                            .with_label_values(&["false"])
+                            .inc();
                         return self
                             .cache
                             .get_failover_cache(schema, name, version)?

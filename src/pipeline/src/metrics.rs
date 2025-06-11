@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use lazy_static::lazy_static;
-use prometheus::{register_histogram_vec, HistogramVec};
+use prometheus::{register_counter_vec, register_histogram_vec, CounterVec, HistogramVec};
 
 lazy_static! {
     pub static ref METRIC_PIPELINE_CREATE_HISTOGRAM: HistogramVec = register_histogram_vec!(
@@ -31,6 +31,12 @@ lazy_static! {
     pub static ref METRIC_PIPELINE_RETRIEVE_HISTOGRAM: HistogramVec = register_histogram_vec!(
         "greptime_pipeline_retrieve_duration_seconds",
         "Histogram of the pipeline retrieval duration",
+        &["success"]
+    )
+    .unwrap();
+    pub static ref METRIC_PIPELINE_TABLE_FIND_COUNT: CounterVec = register_counter_vec!(
+        "greptime_pipeline_table_find_count",
+        "Count of pipeline table find operations",
         &["success"]
     )
     .unwrap();
