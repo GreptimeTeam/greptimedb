@@ -42,7 +42,7 @@ use crate::error::{
     ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
     UnexpectedSnafu, UnsupportedSnafu,
 };
-use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW_RANGE;
+use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
@@ -163,10 +163,11 @@ impl BatchingEngine {
                 let flow_id_label = task.config.flow_id.to_string();
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
-                    METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW_RANGE
-                        .with_label_values(&[&flow_id_label])
-                        .observe(e.sub(&s).unwrap_or_default().num_seconds() as f64);
                 }
+
+                METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW
+                    .with_label_values(&[&flow_id_label])
+                    .set(state.dirty_time_windows.len() as f64);
                 Ok(())
             });
             handles.push(handle);

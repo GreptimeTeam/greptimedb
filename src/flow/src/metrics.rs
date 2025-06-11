@@ -58,12 +58,11 @@ lazy_static! {
             vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
         .unwrap();
-    pub static ref METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW_RANGE: HistogramVec =
-        register_histogram_vec!(
-            "greptime_flow_batching_engine_bulk_mark_time_window_range_secs",
-            "flow batching engine query time window range marked by bulk memtable in seconds",
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW: GaugeVec =
+        register_gauge_vec!(
+            "greptime_flow_batching_engine_bulk_mark_time_window",
+            "flow batching engine query time window count marked by bulk inserts",
             &["flow_id"],
-            vec![0.0, 60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
         .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT: IntCounterVec =

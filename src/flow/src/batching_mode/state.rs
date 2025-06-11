@@ -156,6 +156,11 @@ impl DirtyTimeWindows {
         self.windows.clear();
     }
 
+    /// Number of dirty windows.
+    pub fn len(&self) -> usize {
+        self.windows.len()
+    }
+
     /// Generate all filter expressions consuming all time windows
     ///
     /// there is two limits:
