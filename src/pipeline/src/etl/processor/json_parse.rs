@@ -22,7 +22,7 @@ use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::{json_to_map, PipelineMap, Processor, Value};
+use crate::{json_to_map, Processor, Value};
 
 pub(crate) const PROCESSOR_JSON_PARSE: &str = "json_parse";
 
@@ -77,7 +77,7 @@ impl JsonParseProcessor {
         };
         let parsed: serde_json::Value = serde_json::from_str(json_str).context(JsonParseSnafu)?;
         match parsed {
-            serde_json::Value::Object(_) => Ok(Value::Map(json_to_map(parsed)?.into())),
+            serde_json::Value::Object(_) => Ok(json_to_map(parsed)?),
             serde_json::Value::Array(arr) => Ok(Value::Array(arr.try_into()?)),
             _ => ProcessorUnsupportedValueSnafu {
                 processor: self.kind(),
@@ -97,14 +97,14 @@ impl Processor for JsonParseProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed);
+                    val.insert(output_index.to_string(), processed)?;
                 }
                 None => {
                     if !self.ignore_missing {

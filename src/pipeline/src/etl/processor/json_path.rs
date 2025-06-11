@@ -21,8 +21,8 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, PipelineMap, Processor, FIELDS_NAME,
-    FIELD_NAME, IGNORE_MISSING_NAME, JSON_PATH_NAME, JSON_PATH_RESULT_INDEX_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
+    IGNORE_MISSING_NAME, JSON_PATH_NAME, JSON_PATH_RESULT_INDEX_NAME,
 };
 use crate::Value;
 
@@ -125,14 +125,14 @@ impl Processor for JsonPathProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed);
+                    val.insert(output_index.to_string(), processed)?;
                 }
                 None => {
                     if !self.ignore_missing {

@@ -21,7 +21,7 @@ use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
     AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, PipelineMap, TransformedOutput,
+    PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
@@ -116,7 +116,7 @@ async fn run_custom_pipeline(
     } = pipeline_req;
     let arr_len = pipeline_maps.len();
     let mut transformed_map = HashMap::new();
-    let mut dispatched: BTreeMap<DispatchedTo, Vec<PipelineMap>> = BTreeMap::new();
+    let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
     let mut auto_map = HashMap::new();
     let mut auto_map_ts_keys = HashMap::new();
 

@@ -30,7 +30,6 @@ use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::Value;
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 
@@ -102,7 +101,7 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
@@ -118,7 +117,7 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
                 Some(v) => {
                     let result = self.process(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), result);
+                    val.insert(output_index.to_string(), result)?;
                 }
             }
         }

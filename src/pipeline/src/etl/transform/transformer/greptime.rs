@@ -14,7 +14,7 @@
 
 pub mod coerce;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
@@ -29,19 +29,19 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use serde_json::Number;
 use session::context::Channel;
+use snafu::OptionExt;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
     TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
-    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu,
+    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::ctx_req::ContextOpt;
 use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
-use crate::etl::PipelineMap;
-use crate::PipelineContext;
+use crate::{Map, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -186,8 +186,8 @@ impl GreptimeTransformer {
         }
     }
 
-    pub fn transform_mut(&self, pipeline_map: &mut PipelineMap) -> Result<(ContextOpt, Row)> {
-        let opt = ContextOpt::from_pipeline_map_to_opt(pipeline_map);
+    pub fn transform_mut(&self, pipeline_map: &mut Value) -> Result<(ContextOpt, Row)> {
+        let opt = ContextOpt::from_pipeline_map_to_opt(pipeline_map)?;
 
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
@@ -337,7 +337,7 @@ fn resolve_number_schema(
     )
 }
 
-fn calc_ts(p_ctx: &PipelineContext, values: &PipelineMap) -> Result<Option<ValueData>> {
+fn calc_ts(p_ctx: &PipelineContext, values: &Value) -> Result<Option<ValueData>> {
     match p_ctx.channel {
         Channel::Prometheus => Ok(Some(ValueData::TimestampMillisecondValue(
             values
@@ -362,7 +362,7 @@ fn calc_ts(p_ctx: &PipelineContext, values: &PipelineMap) -> Result<Option<Value
 
 fn values_to_row(
     schema_info: &mut SchemaInfo,
-    values: PipelineMap,
+    values: Value,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
@@ -381,6 +381,8 @@ fn values_to_row(
     let ts_column_name = custom_ts
         .as_ref()
         .map_or(DEFAULT_GREPTIME_TIMESTAMP_COLUMN, |ts| ts.get_column_name());
+
+    let values = values.into_map().context(ValueMustBeMapSnafu)?;
 
     for (column_name, value) in values {
         if column_name == ts_column_name {
@@ -518,7 +520,7 @@ fn resolve_value(
 }
 
 fn identity_pipeline_inner(
-    pipeline_maps: Vec<PipelineMap>,
+    pipeline_maps: Vec<Value>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<(SchemaInfo, HashMap<ContextOpt, Vec<Row>>)> {
     let mut schema_info = SchemaInfo::default();
@@ -545,7 +547,7 @@ fn identity_pipeline_inner(
     let len = pipeline_maps.len();
 
     for mut pipeline_map in pipeline_maps {
-        let opt = ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map);
+        let opt = ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map)?;
         let row = values_to_row(&mut schema_info, pipeline_map, pipeline_ctx)?;
 
         opt_map
@@ -576,7 +578,7 @@ fn identity_pipeline_inner(
 /// 4. The pipeline will return an error if the same column datatype is mismatched
 /// 5. The pipeline will analyze the schema of each json record and merge them to get the final schema.
 pub fn identity_pipeline(
-    array: Vec<PipelineMap>,
+    array: Vec<Value>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<HashMap<ContextOpt, Rows>> {
@@ -584,7 +586,7 @@ pub fn identity_pipeline(
         array
             .into_iter()
             .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
-            .collect::<Result<Vec<PipelineMap>>>()?
+            .collect::<Result<Vec<Value>>>()?
     } else {
         array
     };
@@ -618,21 +620,22 @@ pub fn identity_pipeline(
 ///
 /// The `max_nested_levels` parameter is used to limit the nested levels of the JSON object.
 /// The error will be returned if the nested levels is greater than the `max_nested_levels`.
-pub fn flatten_object(object: PipelineMap, max_nested_levels: usize) -> Result<PipelineMap> {
-    let mut flattened = PipelineMap::new();
+pub fn flatten_object(object: Value, max_nested_levels: usize) -> Result<Value> {
+    let mut flattened = BTreeMap::new();
+    let object = object.into_map().context(ValueMustBeMapSnafu)?;
 
     if !object.is_empty() {
         // it will use recursion to flatten the object.
         do_flatten_object(&mut flattened, None, object, 1, max_nested_levels)?;
     }
 
-    Ok(flattened)
+    Ok(Value::Map(Map { values: flattened }))
 }
 
 fn do_flatten_object(
-    dest: &mut PipelineMap,
+    dest: &mut BTreeMap<String, Value>,
     base: Option<&str>,
-    object: PipelineMap,
+    object: BTreeMap<String, Value>,
     current_level: usize,
     max_nested_levels: usize,
 ) -> Result<()> {

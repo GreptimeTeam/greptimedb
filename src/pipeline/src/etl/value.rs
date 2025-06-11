@@ -16,6 +16,7 @@ pub mod array;
 pub mod map;
 pub mod time;
 
+use std::collections::BTreeMap;
 use std::result::Result as StdResult;
 
 pub use array::Array;
@@ -30,15 +31,16 @@ pub use time::Timestamp;
 
 use crate::error::{
     Error, Result, UnsupportedNumberTypeSnafu, ValueDefaultValueUnsupportedSnafu,
-    ValueInvalidResolutionSnafu, ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu,
-    ValueParseTypeSnafu, ValueUnsupportedYamlTypeSnafu, ValueYamlKeyMustBeStringSnafu,
+    ValueInvalidResolutionSnafu, ValueMustBeMapSnafu, ValueParseBooleanSnafu, ValueParseFloatSnafu,
+    ValueParseIntSnafu, ValueParseTypeSnafu, ValueUnsupportedYamlTypeSnafu,
+    ValueYamlKeyMustBeStringSnafu,
 };
-use crate::etl::PipelineMap;
+
+pub type PipelineMap = Value;
 
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Value {
     // as value: null
@@ -70,6 +72,47 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Value::Map(map) => map.get(key),
+            _ => None,
+        }
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Self> {
+        match self {
+            Value::Map(map) => map.get_mut(key),
+            _ => None,
+        }
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        match self {
+            Value::Map(map) => map.remove(key),
+            _ => None,
+        }
+    }
+
+    pub fn extend(&mut self, other: Map) -> Result<()> {
+        match self {
+            Value::Map(map) => {
+                map.extend(other);
+                Ok(())
+            }
+            _ => ValueMustBeMapSnafu.fail(),
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: Value) -> Result<()> {
+        match self {
+            Value::Map(map) => {
+                map.insert(key, value);
+                Ok(())
+            }
+            _ => ValueMustBeMapSnafu.fail(),
+        }
+    }
+
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
@@ -236,13 +279,6 @@ impl Value {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&Self> {
-        match self {
-            Value::Map(map) => map.get(key),
-            _ => None,
-        }
-    }
-
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(v) => Some(v),
@@ -285,6 +321,20 @@ impl Value {
             Value::Int32(v) => Some(*v as f64),
             Value::Int16(v) => Some(*v as f64),
             Value::Int8(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    pub fn as_map_mut(&mut self) -> Option<&mut BTreeMap<String, Self>> {
+        match self {
+            Value::Map(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    pub fn into_map(self) -> Option<BTreeMap<String, Self>> {
+        match self {
+            Value::Map(map) => Some(map.values),
             _ => None,
         }
     }
@@ -388,7 +438,7 @@ impl TryFrom<simd_json::value::OwnedValue> for Value {
                 Ok(Value::Array(Array { values: re }))
             }
             simd_json::OwnedValue::Object(map) => {
-                let mut values = PipelineMap::new();
+                let mut values = BTreeMap::new();
                 for (k, v) in map.into_iter() {
                     values.insert(k, Value::try_from(v)?);
                 }
@@ -425,7 +475,7 @@ impl TryFrom<serde_json::Value> for Value {
                 Ok(Value::Array(Array { values }))
             }
             serde_json::Value::Object(v) => {
-                let mut values = PipelineMap::new();
+                let mut values = BTreeMap::new();
                 for (k, v) in v {
                     values.insert(k, Value::try_from(v)?);
                 }
@@ -456,7 +506,7 @@ impl TryFrom<&yaml_rust::Yaml> for Value {
                 Ok(Value::Array(Array { values }))
             }
             yaml_rust::Yaml::Hash(v) => {
-                let mut values = PipelineMap::new();
+                let mut values = BTreeMap::new();
                 for (k, v) in v {
                     let key = k
                         .as_str()

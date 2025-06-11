@@ -22,9 +22,7 @@ use api::v1::RowInsertRequest;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::debug;
-use pipeline::{
-    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, PipelineMap, Value,
-};
+use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
@@ -338,7 +336,7 @@ impl PromWriteRequest {
 /// let's keep it that way for now.
 pub struct PromSeriesProcessor {
     pub(crate) use_pipeline: bool,
-    pub(crate) table_values: BTreeMap<String, Vec<PipelineMap>>,
+    pub(crate) table_values: BTreeMap<String, Vec<Value>>,
 
     // optional fields for pipeline
     pub(crate) pipeline_handler: Option<PipelineHandlerRef>,
@@ -374,8 +372,8 @@ impl PromSeriesProcessor {
         &mut self,
         series: &mut PromTimeSeries,
     ) -> Result<(), DecodeError> {
-        let mut vec_pipeline_map: Vec<PipelineMap> = Vec::new();
-        let mut pipeline_map = PipelineMap::new();
+        let mut vec_pipeline_map: Vec<Value> = Vec::new();
+        let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
             let name = String::from_utf8(l.name.to_vec())
                 .map_err(|_| DecodeError::new("invalid utf-8"))?;
@@ -391,10 +389,10 @@ impl PromSeriesProcessor {
             pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
             pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
             if one_sample {
-                vec_pipeline_map.push(pipeline_map);
+                vec_pipeline_map.push(Value::Map(pipeline_map.into()));
                 break;
             } else {
-                vec_pipeline_map.push(pipeline_map.clone());
+                vec_pipeline_map.push(Value::Map(pipeline_map.clone().into()));
             }
         }
 

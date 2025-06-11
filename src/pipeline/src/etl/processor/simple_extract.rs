@@ -20,7 +20,7 @@ use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, KEY_NAME,
 };
-use crate::{PipelineMap, Processor, Value};
+use crate::{Processor, Value};
 
 pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
 
@@ -98,14 +98,14 @@ impl Processor for SimpleExtractProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed);
+                    val.insert(output_index.to_string(), processed)?;
                 }
                 None => {
                     if !self.ignore_missing {

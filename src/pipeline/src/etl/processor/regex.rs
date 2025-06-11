@@ -18,6 +18,8 @@ const PATTERNS_NAME: &str = "patterns";
 
 pub(crate) const PROCESSOR_REGEX: &str = "regex";
 
+use std::collections::BTreeMap;
+
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
@@ -33,7 +35,6 @@ use crate::etl::processor::{
     FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
 use crate::etl::value::Value;
-use crate::etl::PipelineMap;
 
 lazy_static! {
     static ref GROUPS_NAME_REGEX: Regex = Regex::new(r"\(\?P?<([[:word:]]+)>.+?\)").unwrap();
@@ -167,8 +168,8 @@ impl RegexProcessor {
         Ok(())
     }
 
-    fn process(&self, prefix: &str, val: &str) -> Result<PipelineMap> {
-        let mut result = PipelineMap::new();
+    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<String, Value>> {
+        let mut result = BTreeMap::new();
         for gr in self.patterns.iter() {
             if let Some(captures) = gr.regex.captures(val) {
                 for group in gr.groups.iter() {
@@ -192,14 +193,14 @@ impl Processor for RegexProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             let prefix = field.target_or_input_field();
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let result = self.process(prefix, s)?;
-                    val.extend(result);
+                    val.extend(result.into())?;
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {
@@ -269,7 +270,7 @@ ignore_missing: false"#;
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
         let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
-        let temporary_map: PipelineMap = [
+        let temporary_map: BTreeMap<String, Value> = [
             ("breadcrumbs_parent", Value::String(cc.to_string())),
             ("breadcrumbs_edge", Value::String(cg.to_string())),
             ("breadcrumbs_origin", Value::String(co.to_string())),

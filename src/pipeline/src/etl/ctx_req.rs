@@ -18,9 +18,11 @@ use std::sync::Arc;
 use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use session::context::{QueryContext, QueryContextRef};
+use snafu::OptionExt;
 
+use crate::error::{Result, ValueMustBeMapSnafu};
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::PipelineMap;
+use crate::Value;
 
 const GREPTIME_AUTO_CREATE_TABLE: &str = "greptime_auto_create_table";
 const GREPTIME_TTL: &str = "greptime_ttl";
@@ -71,7 +73,8 @@ pub struct ContextOpt {
 }
 
 impl ContextOpt {
-    pub fn from_pipeline_map_to_opt(pipeline_map: &mut PipelineMap) -> Self {
+    pub fn from_pipeline_map_to_opt(pipeline_map: &mut Value) -> Result<Self> {
+        let pipeline_map = pipeline_map.as_map_mut().context(ValueMustBeMapSnafu)?;
         let mut opt = Self::default();
         for k in PIPELINE_HINT_KEYS {
             if let Some(v) = pipeline_map.remove(k) {
@@ -101,13 +104,13 @@ impl ContextOpt {
                 }
             }
         }
-        opt
+        Ok(opt)
     }
 
     pub(crate) fn resolve_table_suffix(
         &mut self,
         table_suffix: Option<&TableSuffixTemplate>,
-        pipeline_map: &PipelineMap,
+        pipeline_map: &Value,
     ) -> Option<String> {
         self.table_suffix
             .take()
