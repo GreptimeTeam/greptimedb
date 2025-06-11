@@ -259,7 +259,7 @@ impl QueryTraceParams {
             ..Default::default()
         };
 
-        if let Some(max_duration) = query_params.max_duration {
+        if let Some(max_duration) = query_params.max_duration.filter(|d| !d.is_empty()) {
             let duration = humantime::parse_duration(&max_duration).map_err(|e| {
                 InvalidJaegerQuerySnafu {
                     reason: format!("parse maxDuration '{}' failed: {}", max_duration, e),
@@ -269,7 +269,7 @@ impl QueryTraceParams {
             internal_query_params.max_duration = Some(duration.as_nanos() as u64);
         }
 
-        if let Some(min_duration) = query_params.min_duration {
+        if let Some(min_duration) = query_params.min_duration.filter(|d| !d.is_empty()) {
             let duration = humantime::parse_duration(&min_duration).map_err(|e| {
                 InvalidJaegerQuerySnafu {
                     reason: format!("parse minDuration '{}' failed: {}", min_duration, e),
