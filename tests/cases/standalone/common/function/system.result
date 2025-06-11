@@ -14,3 +14,21 @@ SELECT version();
 
 ++|version()|++|VERSION|++
 
+-- SQLNESS REPLACE \d+ PID
+SELECT pg_backend_pid();
+
++------------------+
+| pg_backend_pid() |
++------------------+
+| PID                |
++------------------+
+
+-- SQLNESS REPLACE \d+ PID
+SELECT connection_id();
+
++-----------------+
+| connection_id() |
++-----------------+
+| PID               |
++-----------------+
+

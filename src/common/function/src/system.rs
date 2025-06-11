@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use build::BuildFunction;
 use database::{
-    CurrentSchemaFunction, DatabaseFunction, ReadPreferenceFunction, SessionUserFunction,
+    ConnectionIdFunction, CurrentSchemaFunction, DatabaseFunction, PgBackendPidFunction,
+    ReadPreferenceFunction, SessionUserFunction,
 };
 use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
@@ -42,6 +43,8 @@ impl SystemFunction {
         registry.register_scalar(DatabaseFunction);
         registry.register_scalar(SessionUserFunction);
         registry.register_scalar(ReadPreferenceFunction);
+        registry.register_scalar(PgBackendPidFunction);
+        registry.register_scalar(ConnectionIdFunction);
         registry.register_scalar(TimezoneFunction);
         registry.register_async(Arc::new(ProcedureStateFunction));
         PGCatalogFunction::register(registry);

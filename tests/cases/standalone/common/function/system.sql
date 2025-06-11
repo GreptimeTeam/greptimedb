@@ -9,3 +9,9 @@ SELECT build();
 -- SQLNESS REPLACE (\d+\.\d+\.\d+) VERSION
 -- SQLNESS REPLACE [\s\-]+
 SELECT version();
+
+-- SQLNESS REPLACE \d+ PID
+SELECT pg_backend_pid();
+
+-- SQLNESS REPLACE \d+ PID
+SELECT connection_id();
