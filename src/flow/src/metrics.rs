@@ -35,6 +35,13 @@ lazy_static! {
         vec![0.0, 5., 10., 20., 40., 80., 160., 320., 640.,]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_WAIT_TIME: HistogramVec = register_histogram_vec!(
+        "greptime_flow_batching_engine_wait_time_secs",
+        "flow batching engine wait time between query(seconds)",
+        &["flow_id", "time_window_size"],
+        vec![0.0, 5., 10., 20., 40., 80., 160., 320., 640.,]
+    )
+    .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY: HistogramVec = register_histogram_vec!(
         "greptime_flow_batching_engine_slow_query_secs",
         "flow batching engine slow query(seconds)",
