@@ -149,7 +149,7 @@ struct PlanRewriter {
     level: usize,
     /// Simulated stack for the `rewrite` recursion
     stack: Vec<(LogicalPlan, usize)>,
-    /// Stages to be expanded
+    /// Stages to be expanded, will be added as parent node of merge scan one by one
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
     /// Partition columns of the table in current pass
@@ -203,9 +203,9 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(changed_plan) = transformer(plan)
                 {
-                    debug!("PlanRewriter: transformed plan: {changed_plan} from {plan}");
-                    self.update_column_requirements(&changed_plan);
-                    self.stage.push(changed_plan);
+                    debug!("PlanRewriter: transformed plan: {changed_plan:#?} from {plan}");
+                    self.update_column_requirements(&changed_plan.last().unwrap());
+                    self.stage.extend(changed_plan.into_iter().rev());
                     self.expand_on_next_call = expand_on_parent;
                 }
             }
