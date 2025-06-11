@@ -31,8 +31,9 @@ use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE,
     METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE,
 };
 use crate::{Error, FlowId};
 
@@ -280,9 +281,24 @@ impl DirtyTimeWindows {
                 }
             })
             .num_seconds() as f64;
-        METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE
             .with_label_values(&[flow_id.to_string().as_str()])
             .observe(full_time_range);
+
+        let stalled_time_range =
+            self.windows
+                .iter()
+                .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                    if let Some(end) = end {
+                        acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+                    } else {
+                        acc
+                    }
+                });
+
+        METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(stalled_time_range.num_seconds() as f64);
 
         let mut expr_lst = vec![];
         for (start, end) in to_be_query.into_iter() {
