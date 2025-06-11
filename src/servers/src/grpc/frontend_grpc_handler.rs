@@ -14,7 +14,7 @@
 
 use api::v1::frontend::frontend_server::Frontend;
 use api::v1::frontend::{ListProcessRequest, ListProcessResponse};
-use common_frontend::ProcessManagerRef;
+use catalog::process_manager::ProcessManagerRef;
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]

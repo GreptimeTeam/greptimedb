@@ -23,3 +23,4 @@ pub(crate) mod metrics;
 pub mod server;
 pub mod service_config;
 pub(crate) mod slow_query_recorder;
+mod stream_wrapper;

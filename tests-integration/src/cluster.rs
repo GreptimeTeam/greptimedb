@@ -25,6 +25,7 @@ use cache::{
 };
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::process_manager::ProcessManager;
 use client::client_manager::NodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -396,6 +397,7 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
+        let server_addr = options.grpc.server_addr.clone();
         let instance = FrontendBuilder::new(
             options,
             cached_meta_backend.clone(),
@@ -403,7 +405,7 @@ impl GreptimeDbClusterBuilder {
             catalog_manager,
             datanode_clients,
             meta_client,
-            None,
+            Arc::new(ProcessManager::new(server_addr, None)),
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()

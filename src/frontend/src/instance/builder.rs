@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_frontend::ProcessManagerRef;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
@@ -55,7 +55,7 @@ pub struct FrontendBuilder {
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
-    process_manager: Option<ProcessManagerRef>,
+    process_manager: ProcessManagerRef,
 }
 
 impl FrontendBuilder {
@@ -67,7 +67,7 @@ impl FrontendBuilder {
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
-        process_manager: Option<ProcessManagerRef>,
+        process_manager: ProcessManagerRef,
     ) -> Self {
         Self {
             options,

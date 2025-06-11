@@ -14,34 +14,11 @@
 
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-use std::sync::Arc;
 
-use greptime_proto::v1::frontend::ProcessInfo;
 use snafu::OptionExt;
 
 pub mod error;
 pub mod selector;
-
-pub type ProcessManagerRef = Arc<dyn ProcessManager>;
-
-#[async_trait::async_trait]
-pub trait ProcessManager: Send + Sync {
-    fn register_query(
-        &self,
-        catalog: String,
-        schemas: Vec<String>,
-        query: String,
-        client: String,
-    ) -> u64;
-
-    fn deregister_query(&self, catalog: String, id: u64);
-
-    fn deregister_all_queries(&self);
-
-    fn local_processes(&self, catalog: Option<&str>) -> error::Result<Vec<ProcessInfo>>;
-
-    async fn list_all_processes(&self, catalog: Option<&str>) -> error::Result<Vec<ProcessInfo>>;
-}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DisplayProcessId {

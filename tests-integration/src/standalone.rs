@@ -20,6 +20,7 @@ use cache::{
 };
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::process_manager::ProcessManager;
 use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
 use common_base::Plugins;
@@ -233,6 +234,8 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap(),
         );
 
+        let server_addr = opts.frontend_options().grpc.server_addr.clone();
+
         let instance = FrontendBuilder::new(
             opts.frontend_options(),
             kv_backend.clone(),
@@ -240,7 +243,7 @@ impl GreptimeDbStandaloneBuilder {
             catalog_manager.clone(),
             node_manager.clone(),
             ddl_task_executor.clone(),
-            None,
+            Arc::new(ProcessManager::new(server_addr, None)),
         )
         .with_plugin(plugins)
         .try_build()

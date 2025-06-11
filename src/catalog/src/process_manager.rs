@@ -15,47 +15,45 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use api::v1::frontend::{ListProcessRequest, ProcessInfo};
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_frontend::ProcessManager;
 use common_telemetry::{debug, info};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 
-use crate::error;
+pub type ProcessManagerRef = Arc<ProcessManager>;
 
-pub struct MetaProcessManager {
+pub struct ProcessManager {
     server_addr: String,
     next_id: AtomicU64,
     catalogs: RwLock<HashMap<String, HashMap<u64, ProcessInfo>>>,
     frontend_selector: Option<MetaClientSelector>,
 }
 
-impl MetaProcessManager {
-    /// Create a [MetaProcessManager] instance with server address and kv client.
-    pub fn new(server_addr: String, meta_client: Option<MetaClientRef>) -> error::Result<Self> {
+impl ProcessManager {
+    /// Create a [ProcessManager] instance with server address and kv client.
+    pub fn new(server_addr: String, meta_client: Option<MetaClientRef>) -> Self {
         let frontend_selector = meta_client.map(MetaClientSelector::new);
-        Ok(Self {
+        Self {
             server_addr,
             next_id: Default::default(),
             catalogs: Default::default(),
             frontend_selector,
-        })
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl ProcessManager for MetaProcessManager {
+impl ProcessManager {
     /// Registers a submitted query.
-    fn register_query(
-        &self,
+    pub fn register_query(
+        self: &Arc<Self>,
         catalog: String,
         schemas: Vec<String>,
         query: String,
         client: String,
-    ) -> u64 {
+    ) -> Ticket {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let process = ProcessInfo {
             id,
@@ -69,14 +67,18 @@ impl ProcessManager for MetaProcessManager {
         self.catalogs
             .write()
             .unwrap()
-            .entry(catalog)
+            .entry(catalog.clone())
             .or_default()
             .insert(id, process);
-        id
+        Ticket {
+            catalog,
+            manager: self.clone(),
+            id,
+        }
     }
 
     /// De-register a query from process list.
-    fn deregister_query(&self, catalog: String, id: u64) {
+    pub fn deregister_query(&self, catalog: String, id: u64) {
         if let Entry::Occupied(mut o) = self.catalogs.write().unwrap().entry(catalog) {
             let process = o.get_mut().remove(&id);
             debug!("Deregister process: {:?}", process);
@@ -86,13 +88,13 @@ impl ProcessManager for MetaProcessManager {
         }
     }
 
-    fn deregister_all_queries(&self) {
+    pub fn deregister_all_queries(&self) {
         self.catalogs.write().unwrap().clear();
         info!("All queries on {} has been deregistered", self.server_addr);
     }
 
     /// List local running processes in given catalog.
-    fn local_processes(
+    pub fn local_processes(
         &self,
         catalog: Option<&str>,
     ) -> common_frontend::error::Result<Vec<ProcessInfo>> {
@@ -112,7 +114,7 @@ impl ProcessManager for MetaProcessManager {
         Ok(result)
     }
 
-    async fn list_all_processes(
+    pub async fn list_all_processes(
         &self,
         catalog: Option<&str>,
     ) -> common_frontend::error::Result<Vec<ProcessInfo>> {
@@ -130,16 +132,29 @@ impl ProcessManager for MetaProcessManager {
     }
 }
 
+pub struct Ticket {
+    pub(crate) catalog: String,
+    pub(crate) manager: ProcessManagerRef,
+    pub(crate) id: u64,
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        self.manager
+            .deregister_query(std::mem::take(&mut self.catalog), self.id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use common_frontend::ProcessManager;
+    use std::sync::Arc;
 
-    use crate::process_manager::MetaProcessManager;
+    use crate::process_manager::ProcessManager;
 
     #[tokio::test]
     async fn test_register_query() {
-        let process_manager = MetaProcessManager::new("127.0.0.1:8000".to_string(), None).unwrap();
-        let process_id = process_manager.register_query(
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+        let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
@@ -149,10 +164,10 @@ mod tests {
         let running_processes = process_manager.local_processes(None).unwrap();
         assert_eq!(running_processes.len(), 1);
         assert_eq!(&running_processes[0].frontend, "127.0.0.1:8000");
-        assert_eq!(running_processes[0].id, process_id);
+        assert_eq!(running_processes[0].id, ticket.id);
         assert_eq!(&running_processes[0].query, "SELECT * FROM table");
 
-        process_manager.deregister_query("public".to_string(), process_id);
+        drop(ticket);
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
     }
 }

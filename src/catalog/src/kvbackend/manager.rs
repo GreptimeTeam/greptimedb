@@ -22,7 +22,6 @@ use common_catalog::consts::{
     PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
-use common_frontend::ProcessManagerRef;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
@@ -52,6 +51,7 @@ use crate::error::{
 };
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
+use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;

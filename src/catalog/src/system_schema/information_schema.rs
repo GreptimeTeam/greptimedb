@@ -34,7 +34,6 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
-use common_frontend::ProcessManagerRef;
 use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -53,6 +52,7 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::{Error, Result};
+use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
