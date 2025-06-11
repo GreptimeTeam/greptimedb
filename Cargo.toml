@@ -49,6 +49,7 @@ members = [
     "src/meta-client",
     "src/meta-srv",
     "src/metric-engine",
+    "src/mito-codec",
     "src/mito2",
     "src/object-store",
     "src/operator",
@@ -274,6 +275,7 @@ log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
 metric-engine = { path = "src/metric-engine" }
+mito-codec = { path = "src/mito-codec" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
