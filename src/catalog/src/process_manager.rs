@@ -121,7 +121,7 @@ impl ProcessManager {
         let mut processes = vec![];
         if let Some(remote_frontend_selector) = self.frontend_selector.as_ref() {
             let frontends = remote_frontend_selector
-                .select(|node| &node.peer.addr != &self.server_addr)
+                .select(|node| node.peer.addr != self.server_addr)
                 .await?;
             for mut f in frontends {
                 processes.extend(

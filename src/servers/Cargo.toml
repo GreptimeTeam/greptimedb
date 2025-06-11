@@ -37,8 +37,8 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
-common-grpc.workspace = true
 common-frontend.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
 common-meta.workspace = true

@@ -302,13 +302,6 @@ pub enum Error {
         location: Location,
         source: common_meta::error::Error,
     },
-
-    #[snafu(display("Failed to build ProcessManager"))]
-    BuildProcessManager {
-        #[snafu(implicit)]
-        location: Location,
-        source: catalog::error::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -364,7 +357,6 @@ impl ErrorExt for Error {
             }
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
-            Error::BuildProcessManager { source, .. } => source.status_code(),
         }
     }
 
