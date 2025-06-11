@@ -202,7 +202,10 @@ pub trait JaegerQueryHandler {
         end_time: Option<i64>,
     ) -> Result<Output>;
 
-    /// Get trace by trace id. It's used for `/api/traces/{trace_id}` API.
+    /// Retrieves a trace by its unique identifier.
+    ///
+    /// This method is used to handle requests to the `/api/traces/{trace_id}` endpoint.
+    /// It accepts optional `start_time` and `end_time` parameters in nanoseconds to filter the trace data within a specific time range.
     async fn get_trace(
         &self,
         ctx: QueryContextRef,

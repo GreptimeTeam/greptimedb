@@ -31,12 +31,12 @@ use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::SessionStateBuilder;
 use datafusion_expr::{col, lit, lit_timestamp_nano, wildcard, Expr, SortExpr};
-use datatypes::value::transform_value_ref_to_json_value;
+use datatypes::value::ValueRef;
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
     CatalogSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult,
-    TableNotFoundSnafu, ToJsonSnafu,
+    TableNotFoundSnafu,
 };
 use servers::http::jaeger::{QueryTraceParams, JAEGER_QUERY_TABLE_NAME_KEY};
 use servers::otlp::trace::{
@@ -99,7 +99,7 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
         }
 
-        // It's equivalent to
+        // It's equivalent to the following SQL query:
         //
         // ```
         // SELECT DISTINCT span_name, span_kind
@@ -139,7 +139,7 @@ impl JaegerQueryHandler for Instance {
         start_time: Option<i64>,
         end_time: Option<i64>,
     ) -> ServerResult<Output> {
-        // It's equivalent to
+        // It's equivalent to the following SQL query:
         //
         // ```
         // SELECT
@@ -158,13 +158,11 @@ impl JaegerQueryHandler for Instance {
         let mut filters = vec![col(TRACE_ID_COLUMN).eq(lit(trace_id))];
 
         if let Some(start_time) = start_time {
-            // Microseconds to nanoseconds.
-            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time * 1_000)));
+            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));
         }
 
         if let Some(end_time) = end_time {
-            // Microseconds to nanoseconds.
-            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time * 1_000)));
+            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
         Ok(query_trace_table(
@@ -186,8 +184,6 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
-        let selects = vec![wildcard()];
-
         let mut filters = vec![];
 
         // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
@@ -213,11 +209,27 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(DURATION_NANO_COLUMN).lt_eq(lit(max_duration)));
         }
 
+        // Get all distinct trace ids that match the filters.
+        // It's equivalent to the following SQL query:
+        //
+        // ```
+        // SELECT DISTINCT trace_id
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   service_name = '{service_name}' AND
+        //   operation_name = '{operation_name}' AND
+        //   timestamp >= {start_time} AND
+        //   timestamp <= {end_time} AND
+        //   duration >= {min_duration} AND
+        //   duration <= {max_duration}
+        // LIMIT {limit}
+        // ```.
         let output = query_trace_table(
             ctx.clone(),
             self.catalog_manager(),
             self.query_engine(),
-            selects,
+            vec![wildcard()],
             filters,
             vec![],
             Some(query_params.limit.unwrap_or(DEFAULT_LIMIT)),
@@ -226,20 +238,40 @@ impl JaegerQueryHandler for Instance {
         )
         .await?;
 
-        let trace_ids = output_to_trace_ids(output).await?;
-
-        let selects = vec![wildcard()];
-
+        // Get all traces that match the trace ids from the previous query.
+        // It's equivalent to the following SQL query:
+        //
+        // ```
+        // SELECT *
+        // FROM
+        //   {db}.{trace_table}
+        // WHERE
+        //   trace_id IN ({trace_ids}) AND
+        //   timestamp >= {start_time} AND
+        //   timestamp <= {end_time}
+        // ```
         let mut filters = vec![col(TRACE_ID_COLUMN).in_list(
-            trace_ids.iter().map(|id| lit(id)).collect::<Vec<Expr>>(),
+            trace_ids_from_output(output)
+                .await?
+                .iter()
+                .map(lit)
+                .collect::<Vec<Expr>>(),
             false,
         )];
+
+        if let Some(start_time) = query_params.start_time {
+            filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));
+        }
+
+        if let Some(end_time) = query_params.end_time {
+            filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
+        }
 
         Ok(query_trace_table(
             ctx,
             self.catalog_manager(),
             self.query_engine(),
-            selects,
+            vec![wildcard()],
             filters,
             vec![],
             None,
@@ -486,52 +518,33 @@ fn tags_filters(
     }
 }
 
-async fn output_to_trace_ids(output: Output) -> ServerResult<Vec<String>> {
+// Get trace ids from the output in recordbatches.
+async fn trace_ids_from_output(output: Output) -> ServerResult<Vec<String>> {
     if let OutputData::Stream(stream) = output.data {
         let schema = stream.schema().clone();
         let recordbatches = util::collect(stream)
             .await
             .context(CollectRecordbatchSnafu)?;
 
-        if recordbatches.is_empty() {
-            Ok(vec![])
-        } else {
-            let num_rows = recordbatches.iter().map(|r| r.num_rows()).sum::<usize>();
-            let mut rows = Vec::with_capacity(num_rows);
-            let schemas = schema.column_schemas();
-            let num_cols = schema.column_schemas().len();
-            rows.resize_with(num_rows, || Vec::with_capacity(num_cols));
-
-            let mut finished_row_cursor = 0;
-            for recordbatch in recordbatches {
-                for (col_idx, col) in recordbatch.columns().iter().enumerate() {
-                    // safety here: schemas length is equal to the number of columns in the recordbatch
-                    let schema = &schemas[col_idx];
-                    for row_idx in 0..recordbatch.num_rows() {
-                        let value = transform_value_ref_to_json_value(col.get_ref(row_idx), schema)
-                            .context(ToJsonSnafu)?;
-                        rows[row_idx + finished_row_cursor].push(value);
-                    }
-                }
-                finished_row_cursor += recordbatch.num_rows();
-            }
-
+        // Only contains `trace_id` column in string type.
+        if !recordbatches.is_empty()
+            && schema.num_columns() == 1
+            && schema.contains_column(TRACE_ID_COLUMN)
+        {
             let mut trace_ids = vec![];
-
-            for row in rows.into_iter() {
-                for (idx, cell) in row.into_iter().enumerate() {
-                    let column_name = &schemas[idx].name;
-                    if column_name == TRACE_ID_COLUMN {
-                        if let JsonValue::String(trace_id) = cell {
-                            trace_ids.push(trace_id);
+            for recordbatch in recordbatches {
+                for col in recordbatch.columns().iter() {
+                    for row_idx in 0..recordbatch.num_rows() {
+                        if let ValueRef::String(value) = col.get_ref(row_idx) {
+                            trace_ids.push(value.to_string());
                         }
                     }
                 }
             }
 
-            Ok(trace_ids)
+            return Ok(trace_ids);
         }
-    } else {
-        Ok(vec![])
     }
+
+    Ok(vec![])
 }

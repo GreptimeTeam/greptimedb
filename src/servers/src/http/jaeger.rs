@@ -410,8 +410,12 @@ pub async fn handle_get_trace(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
+    // Convert start time and end time from microseconds to nanoseconds.
+    let start_time = query_params.start.map(|start| start * 1000);
+    let end_time = query_params.end.map(|end| end * 1000);
+
     let output = match handler
-        .get_trace(query_ctx, &trace_id, query_params.start, query_params.end)
+        .get_trace(query_ctx, &trace_id, start_time, end_time)
         .await
     {
         Ok(output) => output,
