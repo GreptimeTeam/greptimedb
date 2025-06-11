@@ -154,6 +154,7 @@ where
             ServerGrpcQueryHandlerAdapter::arc(self.instance.clone()),
             user_provider.clone(),
             runtime,
+            opts.grpc.flight_compression,
         );
 
         let grpc_server = builder

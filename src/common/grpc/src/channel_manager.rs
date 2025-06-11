@@ -296,6 +296,8 @@ pub struct ChannelConfig {
     pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
     pub max_send_message_size: ReadableSize,
+    pub send_compression: bool,
+    pub accept_compression: bool,
 }
 
 impl Default for ChannelConfig {
@@ -316,6 +318,8 @@ impl Default for ChannelConfig {
             client_tls: None,
             max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            send_compression: false,
+            accept_compression: false,
         }
     }
 }
@@ -566,6 +570,8 @@ mod tests {
                 client_tls: None,
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+                send_compression: false,
+                accept_compression: false,
             },
             default_cfg
         );
@@ -610,6 +616,8 @@ mod tests {
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+                send_compression: false,
+                accept_compression: false,
             },
             cfg
         );

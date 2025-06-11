@@ -49,7 +49,16 @@ impl NodeManager for NodeClients {
     async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
         let client = self.get_client(datanode).await;
 
-        Arc::new(RegionRequester::new(client))
+        let ChannelConfig {
+            send_compression,
+            accept_compression,
+            ..
+        } = self.channel_manager.config();
+        Arc::new(RegionRequester::new(
+            client,
+            *send_compression,
+            *accept_compression,
+        ))
     }
 
     async fn flownode(&self, flownode: &Peer) -> FlownodeRef {

@@ -46,6 +46,8 @@ use crate::{metrics, Client, Error};
 #[derive(Debug)]
 pub struct RegionRequester {
     client: Client,
+    send_compression: bool,
+    accept_compression: bool,
 }
 
 #[async_trait]
@@ -89,12 +91,18 @@ impl Datanode for RegionRequester {
 }
 
 impl RegionRequester {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(client: Client, send_compression: bool, accept_compression: bool) -> Self {
+        Self {
+            client,
+            send_compression,
+            accept_compression,
+        }
     }
 
     pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
-        let mut flight_client = self.client.make_flight_client()?;
+        let mut flight_client = self
+            .client
+            .make_flight_client(self.send_compression, self.accept_compression)?;
         let response = flight_client
             .mut_inner()
             .do_get(ticket)
