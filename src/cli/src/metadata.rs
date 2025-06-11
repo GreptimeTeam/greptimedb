@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
 mod control;
 mod snapshot;
-mod common;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;

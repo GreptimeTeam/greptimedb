@@ -16,8 +16,11 @@ use std::cmp::min;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
+use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoKey;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -25,6 +28,7 @@ use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use common_meta::rpc::store::RangeRequest;
 use futures::TryStreamExt;
 
+use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
 use crate::metadata::control::utils::{decode_key_value, json_fromatter};
 use crate::Tool;
@@ -48,14 +52,20 @@ impl GetCommand {
 /// Get key-value pairs from the metadata store.
 #[derive(Debug, Default, Parser)]
 pub struct GetKeyCommand {
+    /// The key to get from the metadata store. If empty, returns all key-value pairs.
     #[clap(default_value = "")]
     key: String,
-    #[clap(flatten)]
-    store: StoreConfig,
+
+    /// Whether to perform a prefix query. If true, returns all key-value pairs where the key starts with the given prefix.
     #[clap(long, default_value = "false")]
     prefix: bool,
+
+    /// The maximum number of key-value pairs to return. If 0, returns all key-value pairs.
     #[clap(long, default_value = "0")]
     limit: u64,
+
+    #[clap(flatten)]
+    store: StoreConfig,
 }
 
 impl GetKeyCommand {
@@ -111,16 +121,40 @@ impl Tool for GetKeyTool {
 /// Get table metadata from the metadata store via table id.
 #[derive(Debug, Default, Parser)]
 pub struct GetTableCommand {
-    table_id: u32,
-    #[clap(flatten)]
-    store: StoreConfig,
+    /// Get table metadata by table id.
+    #[clap(long)]
+    table_id: Option<u32>,
+
+    /// Get table metadata by table name.
+    #[clap(long)]
+    table_name: Option<String>,
+
+    /// The schema name of the table.
+    #[clap(long)]
+    schema_name: Option<String>,
+
+    /// Pretty print the output.
     #[clap(long, default_value = "false")]
     pretty: bool,
+
+    #[clap(flatten)]
+    store: StoreConfig,
+}
+
+impl GetTableCommand {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.table_id.is_none() && self.table_name.is_none() {
+            return Err("You must specify either --table-id or --table-name.".to_string());
+        }
+        Ok(())
+    }
 }
 
 struct GetTableTool {
     kvbackend: KvBackendRef,
-    table_id: u32,
+    table_id: Option<u32>,
+    table_name: Option<String>,
+    schema_name: Option<String>,
     pretty: bool,
 }
 
@@ -128,17 +162,41 @@ struct GetTableTool {
 impl Tool for GetTableTool {
     async fn do_work(&self) -> Result<(), BoxedError> {
         let table_metadata_manager = TableMetadataManager::new(self.kvbackend.clone());
+        let table_name_manager = table_metadata_manager.table_name_manager();
         let table_info_manager = table_metadata_manager.table_info_manager();
         let table_route_manager = table_metadata_manager.table_route_manager();
 
+        let table_id = if let Some(table_name) = &self.table_name {
+            let catalog = DEFAULT_CATALOG_NAME.to_string();
+            let schema_name = self
+                .schema_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+            let key = TableNameKey::new(&catalog, &schema_name, table_name);
+
+            let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
+            else {
+                println!(
+                    "Table({}) not found",
+                    format_full_table_name(&catalog, &schema_name, table_name)
+                );
+                return Ok(());
+            };
+
+            table_name.table_id()
+        } else {
+            // Safety: we have validated that table_id or table_name is not None
+            self.table_id.unwrap()
+        };
+
         let table_info = table_info_manager
-            .get(self.table_id)
+            .get(table_id)
             .await
             .map_err(BoxedError::new)?;
         if let Some(table_info) = table_info {
             println!(
                 "{}\n{}",
-                TableInfoKey::new(self.table_id),
+                TableInfoKey::new(table_id),
                 json_fromatter(self.pretty, &*table_info)
             );
         } else {
@@ -147,13 +205,13 @@ impl Tool for GetTableTool {
 
         let table_route = table_route_manager
             .table_route_storage()
-            .get(self.table_id)
+            .get(table_id)
             .await
             .map_err(BoxedError::new)?;
         if let Some(table_route) = table_route {
             println!(
                 "{}\n{}",
-                TableRouteKey::new(self.table_id),
+                TableRouteKey::new(table_id),
                 json_fromatter(self.pretty, &table_route)
             );
         } else {
@@ -166,10 +224,15 @@ impl Tool for GetTableTool {
 
 impl GetTableCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        self.validate()
+            .map_err(|e| InvalidArgumentsSnafu { msg: e }.build())
+            .map_err(BoxedError::new)?;
         let kvbackend = self.store.build().await?;
         Ok(Box::new(GetTableTool {
             kvbackend,
             table_id: self.table_id,
+            table_name: self.table_name.clone(),
+            schema_name: self.schema_name.clone(),
             pretty: self.pretty,
         }))
     }

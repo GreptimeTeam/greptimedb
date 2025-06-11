@@ -261,11 +261,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build meta client"))]
-    BuildMetaClient {
+    #[snafu(display("Invalid arguments: {}", msg))]
+    InvalidArguments {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
-        source: meta_client::error::Error,
     },
 }
 
@@ -287,6 +287,7 @@ impl ErrorExt for Error {
             | Error::EmptyResult { .. }
             | Error::InvalidFilePath { .. }
             | Error::UnsupportedMemoryBackend { .. }
+            | Error::InvalidArguments { .. }
             | Error::ParseProxyOpts { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
@@ -296,7 +297,6 @@ impl ErrorExt for Error {
             Error::ParseSql { source, .. } | Error::PlanStatement { source, .. } => {
                 source.status_code()
             }
-            Error::BuildMetaClient { source, .. } => source.status_code(),
 
             Error::SerdeJson { .. }
             | Error::FileIo { .. }
