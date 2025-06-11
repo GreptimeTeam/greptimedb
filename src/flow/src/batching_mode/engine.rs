@@ -88,7 +88,7 @@ impl BatchingEngine {
         for r in reqs.requests {
             let tid = TableId::from(r.table_id);
             let entry = group_by_table_id.entry(tid).or_default();
-            entry.extend(r.dirty_time_ranges);
+            entry.extend(r.timestamps);
         }
         let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
         let table_infos =
@@ -101,7 +101,7 @@ impl BatchingEngine {
 
         let group_by_table_name = group_by_table_id
             .into_iter()
-            .filter_map(|(id, rows)| {
+            .filter_map(|(id, timestamps)| {
                 let table_name = table_infos.get(&id).map(|info| info.table_name());
                 let Some(table_name) = table_name else {
                     warn!("Failed to get table infos for table id: {:?}", id);
@@ -118,7 +118,7 @@ impl BatchingEngine {
                     .as_timestamp()
                     .unwrap()
                     .unit();
-                Some((table_name, (rows, time_index_unit)))
+                Some((table_name, (timestamps, time_index_unit)))
             })
             .collect::<HashMap<_, _>>();
 
@@ -144,35 +144,28 @@ impl BatchingEngine {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = vec![];
                 for src_table_name in src_table_names {
-                    if let Some((window_ranges, unit)) = group_by_table_name.get(src_table_name) {
+                    if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
                             continue;
                         };
-                        for window in window_ranges {
+                        for timestamp in timestamps {
                             let align_start = expr
-                                .eval(common_time::Timestamp::new(window.start_value, *unit))?
+                                .eval(common_time::Timestamp::new(*timestamp, *unit))?
                                 .0
                                 .context(UnexpectedSnafu {
                                     reason: "Failed to eval start value",
                                 })?;
-
-                            let align_end = expr
-                                .eval(common_time::Timestamp::new(window.end_value, *unit))?
-                                .1
-                                .context(UnexpectedSnafu {
-                                    reason: "Failed to eval end value",
-                                })?;
-                            all_dirty_windows.push((align_start, align_end));
+                            all_dirty_windows.push(align_start);
                         }
                     }
                 }
                 let mut state = task.state.write().unwrap();
                 let flow_id_label = task.config.flow_id.to_string();
-                for (s, e) in all_dirty_windows {
+                for timestamp in all_dirty_windows {
+                    state.dirty_time_windows.add_window(timestamp, None);
                     METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW_RANGE
                         .with_label_values(&[&flow_id_label])
                         .observe(e.sub(&s).unwrap_or_default().num_seconds() as f64);
-                    state.dirty_time_windows.add_window(s, Some(e));
                 }
                 Ok(())
             });
