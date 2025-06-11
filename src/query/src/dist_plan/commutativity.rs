@@ -33,7 +33,7 @@ use crate::dist_plan::MergeScanLogicalPlan;
 /// Projection:
 ///     Aggregate:
 ///
-/// from Aggregate [gby: [a,b,c], aggr]
+/// from Aggregate
 pub fn step_aggr_to_upper_aggr(
     aggr_plan: &LogicalPlan,
 ) -> datafusion_common::Result<Vec<LogicalPlan>> {
@@ -54,9 +54,8 @@ pub fn step_aggr_to_upper_aggr(
                 "Aggregate function not found".to_string(),
             ));
         };
-        let col_name = aggr_expr.name_for_alias()?;
-        let input_column =
-            Expr::Column(datafusion_common::Column::new_unqualified(col_name.clone()));
+        let col_name = aggr_expr.qualified_name();
+        let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
         let upper_func = match aggr_func.func.name() {
             "sum" | "min" | "max" | "last_value" | "first_value" => {
                 // aggr_calc(aggr_merge(input_column))) as col_name
