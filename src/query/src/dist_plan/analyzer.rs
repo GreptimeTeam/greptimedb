@@ -204,7 +204,10 @@ impl PlanRewriter {
                     && let Some(changed_plan) = transformer(plan)
                 {
                     debug!("PlanRewriter: transformed plan: {changed_plan:#?} from {plan}");
-                    self.update_column_requirements(&changed_plan.last().unwrap());
+                    if let Some(last_stage) = changed_plan.last() {
+                        // update the column requirements from the last stage
+                        self.update_column_requirements(last_stage);
+                    }
                     self.stage.extend(changed_plan.into_iter().rev());
                     self.expand_on_next_call = expand_on_parent;
                 }
