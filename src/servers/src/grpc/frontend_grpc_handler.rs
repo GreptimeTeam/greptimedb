@@ -32,9 +32,15 @@ impl FrontendGrpcHandler {
 impl Frontend for FrontendGrpcHandler {
     async fn list_process(
         &self,
-        _request: Request<ListProcessRequest>,
+        request: Request<ListProcessRequest>,
     ) -> Result<Response<ListProcessResponse>, Status> {
-        let processes = self.process_manager.local_processes(None).unwrap();
+        let list_process_request = request.into_inner();
+        let catalog = if list_process_request.catalog.is_empty() {
+            None
+        } else {
+            Some(list_process_request.catalog.as_str())
+        };
+        let processes = self.process_manager.local_processes(catalog).unwrap();
         Ok(Response::new(ListProcessResponse { processes }))
     }
 }

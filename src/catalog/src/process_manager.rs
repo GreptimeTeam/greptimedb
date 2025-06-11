@@ -124,7 +124,13 @@ impl ProcessManager {
                 .select(|node| &node.peer.addr != &self.server_addr)
                 .await?;
             for mut f in frontends {
-                processes.extend(f.list_process(ListProcessRequest {}).await?.processes);
+                processes.extend(
+                    f.list_process(ListProcessRequest {
+                        catalog: catalog.unwrap_or_default().to_string(),
+                    })
+                    .await?
+                    .processes,
+                );
             }
         }
         processes.extend(self.local_processes(catalog)?);
