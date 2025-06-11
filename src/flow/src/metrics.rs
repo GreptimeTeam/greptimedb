@@ -42,6 +42,14 @@ lazy_static! {
         vec![60., 2. * 60., 3. * 60., 5. * 60., 10. * 60.]
     )
     .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_STALLED_QUERY_WINDOW_CNT: HistogramVec =
+        register_histogram_vec!(
+            "greptime_flow_batching_engine_stalled_query_window_cnt",
+            "flow batching engine stalled query time window count",
+            &["flow_id"],
+            vec![0.0, 5., 10., 20., 40.]
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT: HistogramVec =
         register_histogram_vec!(
             "greptime_flow_batching_engine_query_window_cnt",

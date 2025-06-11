@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use api::v1::flow::{
-    flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
+    flow_request, AdjustFlow, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
@@ -33,6 +33,7 @@ use datatypes::value::Value;
 use futures::TryStreamExt;
 use greptime_proto::v1::flow::DirtyWindowRequest;
 use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use session::context::QueryContextBuilder;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
@@ -822,6 +823,25 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     affected_rows: row as u64,
                     ..Default::default()
                 })
+            }
+            Some(flow_request::Body::Adjust(AdjustFlow { flow_id, options })) => {
+                #[derive(Debug, Serialize, Deserialize)]
+                struct Options {
+                    min_run_interval_secs: u64,
+                    max_filter_num_per_query: usize,
+                }
+                let options: Options = serde_json::from_str(&options).with_context(|_| {
+                    common_meta::error::DeserializeFromJsonSnafu { input: options }
+                })?;
+                self.batching_engine
+                    .adjust_flow(
+                        flow_id.unwrap().id as u64,
+                        options.min_run_interval_secs,
+                        options.max_filter_num_per_query,
+                    )
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
+                Ok(Default::default())
             }
             other => common_meta::error::InvalidFlowRequestBodySnafu { body: other }.fail(),
         }
