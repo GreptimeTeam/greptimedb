@@ -13,26 +13,18 @@
 // limitations under the License.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
-use common_meta::kv_backend::chroot::ChrootKvBackend;
-use common_meta::kv_backend::etcd::EtcdStore;
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::snapshot::MetadataSnapshotManager;
-use meta_srv::bootstrap::create_etcd_client;
-use meta_srv::metasrv::BackendImpl;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{
-    InvalidFilePathSnafu, KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu,
-    UnsupportedMemoryBackendSnafu,
-};
+use crate::error::{InvalidFilePathSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
+use crate::metadata::common::StoreConfig;
 use crate::Tool;
 
 /// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
@@ -52,85 +44,6 @@ impl SnapshotCommand {
             SnapshotCommand::Save(cmd) => cmd.build().await,
             SnapshotCommand::Restore(cmd) => cmd.build().await,
             SnapshotCommand::Info(cmd) => cmd.build().await,
-        }
-    }
-}
-
-#[derive(Debug, Default, Parser)]
-struct MetaConnection {
-    /// The endpoint of store. one of etcd, pg or mysql.
-    #[clap(long, alias = "store-addr", value_delimiter = ',', num_args = 1..)]
-    store_addrs: Vec<String>,
-    /// The database backend.
-    #[clap(long, value_enum)]
-    backend: Option<BackendImpl>,
-    #[clap(long, default_value = "")]
-    store_key_prefix: String,
-    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-    #[clap(long,default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
-    meta_table_name: String,
-    #[clap(long, default_value = "128")]
-    max_txn_ops: usize,
-}
-
-impl MetaConnection {
-    pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
-        let max_txn_ops = self.max_txn_ops;
-        let store_addrs = &self.store_addrs;
-        if store_addrs.is_empty() {
-            KvBackendNotSetSnafu { backend: "all" }
-                .fail()
-                .map_err(BoxedError::new)
-        } else {
-            let kvbackend = match self.backend {
-                Some(BackendImpl::EtcdStore) => {
-                    let etcd_client = create_etcd_client(store_addrs)
-                        .await
-                        .map_err(BoxedError::new)?;
-                    Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
-                }
-                #[cfg(feature = "pg_kvbackend")]
-                Some(BackendImpl::PostgresStore) => {
-                    let table_name = &self.meta_table_name;
-                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs)
-                        .await
-                        .map_err(BoxedError::new)?;
-                    Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(
-                        pool,
-                        table_name,
-                        max_txn_ops,
-                    )
-                    .await
-                    .map_err(BoxedError::new)?)
-                }
-                #[cfg(feature = "mysql_kvbackend")]
-                Some(BackendImpl::MysqlStore) => {
-                    let table_name = &self.meta_table_name;
-                    let pool = meta_srv::bootstrap::create_mysql_pool(store_addrs)
-                        .await
-                        .map_err(BoxedError::new)?;
-                    Ok(common_meta::kv_backend::rds::MySqlStore::with_mysql_pool(
-                        pool,
-                        table_name,
-                        max_txn_ops,
-                    )
-                    .await
-                    .map_err(BoxedError::new)?)
-                }
-                Some(BackendImpl::MemoryStore) => UnsupportedMemoryBackendSnafu
-                    .fail()
-                    .map_err(BoxedError::new),
-                _ => KvBackendNotSetSnafu { backend: "all" }
-                    .fail()
-                    .map_err(BoxedError::new),
-            };
-            if self.store_key_prefix.is_empty() {
-                kvbackend
-            } else {
-                let chroot_kvbackend =
-                    ChrootKvBackend::new(self.store_key_prefix.as_bytes().to_vec(), kvbackend?);
-                Ok(Arc::new(chroot_kvbackend))
-            }
         }
     }
 }
@@ -200,9 +113,9 @@ impl S3Config {
 /// The snapshot file will be in binary format.
 #[derive(Debug, Default, Parser)]
 pub struct SaveCommand {
-    /// The connection to the metadata store.
+    /// The store configuration.
     #[clap(flatten)]
-    connection: MetaConnection,
+    store: StoreConfig,
     /// The s3 config.
     #[clap(flatten)]
     s3_config: S3Config,
@@ -227,7 +140,7 @@ fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError>
 
 impl SaveCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        let kvbackend = self.connection.build().await?;
+        let kvbackend = self.store.build().await?;
         let output_dir = &self.output_dir;
         let object_store = self.s3_config.build(output_dir).map_err(BoxedError::new)?;
         if let Some(store) = object_store {
@@ -270,9 +183,9 @@ impl Tool for MetaSnapshotTool {
 /// depending on the provided configuration.
 #[derive(Debug, Default, Parser)]
 pub struct RestoreCommand {
-    /// The connection to the metadata store.
+    /// The store configuration.
     #[clap(flatten)]
-    connection: MetaConnection,
+    store: StoreConfig,
     /// The s3 config.
     #[clap(flatten)]
     s3_config: S3Config,
@@ -288,7 +201,7 @@ pub struct RestoreCommand {
 
 impl RestoreCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        let kvbackend = self.connection.build().await?;
+        let kvbackend = self.store.build().await?;
         let input_dir = &self.input_dir;
         let object_store = self.s3_config.build(input_dir).map_err(BoxedError::new)?;
         if let Some(store) = object_store {

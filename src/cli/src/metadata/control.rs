@@ -12,31 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod control;
-mod snapshot;
-mod common;
+mod get;
+mod utils;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;
+use get::GetCommand;
 
-use crate::metadata::control::ControlCommand;
-use crate::metadata::snapshot::SnapshotCommand;
 use crate::Tool;
 
-/// Command for managing metadata operations, including saving metadata snapshots and restoring metadata from snapshots.
+/// Subcommand for metadata control.
 #[derive(Subcommand)]
-pub enum MetadataCommand {
+pub enum ControlCommand {
+    /// Get the metadata from the metasrv.
     #[clap(subcommand)]
-    Snapshot(SnapshotCommand),
-    #[clap(subcommand)]
-    Control(ControlCommand),
+    Get(GetCommand),
 }
 
-impl MetadataCommand {
+impl ControlCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            MetadataCommand::Snapshot(cmd) => cmd.build().await,
-            MetadataCommand::Control(cmd) => cmd.build().await,
+            ControlCommand::Get(cmd) => cmd.build().await,
         }
     }
 }
