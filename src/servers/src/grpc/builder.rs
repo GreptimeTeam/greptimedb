@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::frontend::frontend_server::FrontendServer;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::flow::flow_client::FlowClient as PbFlowClient;
+use api::v1::frontend::frontend_client::FrontendClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
 use api::v1::region::region_client::RegionClient as PbRegionClient;
@@ -188,6 +189,16 @@ impl Client {
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd);
         Ok((addr, client))
+    }
+
+    pub fn frontend_client(&self) -> Result<FrontendClient<Channel>> {
+        let (_, channel) = self.find_channel()?;
+        let client = FrontendClient::new(channel)
+            .max_decoding_message_size(self.max_grpc_recv_message_size())
+            .max_encoding_message_size(self.max_grpc_send_message_size())
+            .accept_compressed(CompressionEncoding::Zstd)
+            .send_compressed(CompressionEncoding::Zstd);
+        Ok(client)
     }
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {

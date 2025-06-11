@@ -86,14 +86,21 @@ impl ProcessManager {
         info!("All queries on {} has been deregistered", self.server_addr);
     }
 
-    /// List all running processes in cluster.
-    pub fn list_all_processes(&self) -> Vec<ProcessInfo> {
-        self.catalogs
-            .read()
-            .unwrap()
-            .values()
-            .flat_map(|v| v.values().cloned())
-            .collect()
+    /// List local running processes in given catalog.
+    pub fn local_processes(&self, catalog: Option<&str>) -> Vec<ProcessInfo> {
+        let catalogs = self.catalogs.read().unwrap();
+        if let Some(catalog) = catalog {
+            if let Some(catalogs) = catalogs.get(catalog) {
+                catalogs.values().cloned().collect()
+            } else {
+                vec![]
+            }
+        } else {
+            catalogs
+                .values()
+                .flat_map(|v| v.values().cloned())
+                .collect()
+        }
     }
 }
 
@@ -142,14 +149,14 @@ mod tests {
             "".to_string(),
         );
 
-        let running_processes = process_manager.list_all_processes();
+        let running_processes = process_manager.local_processes(None);
         assert_eq!(running_processes.len(), 1);
         assert_eq!(&running_processes[0].frontend, "127.0.0.1:8000");
         assert_eq!(running_processes[0].id, process_id);
         assert_eq!(&running_processes[0].query, "SELECT * FROM table");
 
         process_manager.deregister_query("public".to_string(), process_id);
-        assert_eq!(process_manager.list_all_processes().len(), 0);
+        assert_eq!(process_manager.local_processes(None).len(), 0);
     }
 
     #[test]

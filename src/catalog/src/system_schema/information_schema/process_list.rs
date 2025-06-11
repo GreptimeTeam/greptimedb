@@ -120,7 +120,7 @@ async fn make_process_list(
 ) -> error::Result<RecordBatch> {
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
-    let queries = process_manager.list_all_processes();
+    let queries = process_manager.local_processes(None);
 
     let mut id_builder = StringVectorBuilder::with_capacity(queries.len());
     let mut catalog_builder = StringVectorBuilder::with_capacity(queries.len());

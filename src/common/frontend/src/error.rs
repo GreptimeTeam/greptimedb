@@ -16,6 +16,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
+use tonic::Status;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -27,6 +28,29 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to send gRPC request"))]
+    Grpc {
+        source: client::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to list nodes from metasrv"))]
+    Meta {
+        source: meta_client::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+impl From<Status> for Error {
+    fn from(value: Status) -> Self {
+        Self::Grpc {
+            source: client::error::Error::from(value),
+            location: Location::default(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -36,6 +60,8 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             External { source, .. } => source.status_code(),
+            Grpc { source, .. } => source.status_code(),
+            Meta { source, .. } => source.status_code(),
         }
     }
 

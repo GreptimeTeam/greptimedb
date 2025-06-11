@@ -2292,9 +2292,16 @@ name = "common-frontend"
 version = "0.15.0"
 dependencies = [
  "async-trait",
+ "client",
  "common-error",
+ "common-grpc",
  "common-macro",
+ "common-meta",
+ "greptime-proto",
+ "meta-client",
  "snafu 0.8.5",
+ "tokio",
+ "tonic 0.12.3",
 ]
 
 [[package]]
@@ -4701,6 +4708,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-function",
  "common-grpc",
  "common-macro",
