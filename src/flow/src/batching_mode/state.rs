@@ -32,6 +32,7 @@ use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_WAIT_TIME,
 };
 use crate::{Error, FlowId};
 
@@ -102,8 +103,19 @@ impl TaskState {
             })
             .unwrap_or(last_duration);
 
+        METRIC_FLOW_BATCHING_ENGINE_WAIT_TIME
+            .with_label_values(&[
+                flow_id.to_string().as_str(),
+                time_window_size
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    .to_string()
+                    .as_str(),
+            ])
+            .observe(next_duration.as_secs_f64());
+
         // if have dirty time window, execute immediately to clean dirty time window
-        if self.dirty_time_windows.windows.is_empty() {
+        /*if self.dirty_time_windows.windows.is_empty() {
             self.last_update_time + next_duration
         } else {
             debug!(
@@ -113,7 +125,9 @@ impl TaskState {
                 self.dirty_time_windows.windows
             );
             Instant::now()
-        }
+        }*/
+
+        self.last_update_time + next_duration
     }
 }
 
