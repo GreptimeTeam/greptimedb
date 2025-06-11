@@ -287,7 +287,7 @@ impl Database {
         let mut request = tonic::Request::new(request);
         Self::put_hints(request.metadata_mut(), hints)?;
 
-        let mut client = self.client.make_flight_client()?;
+        let mut client = self.client.make_flight_client(false, false)?;
 
         let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
@@ -409,7 +409,7 @@ impl Database {
             MetadataValue::from_str(db_to_put).context(InvalidTonicMetadataValueSnafu)?,
         );
 
-        let mut client = self.client.make_flight_client()?;
+        let mut client = self.client.make_flight_client(false, false)?;
         let response = client.mut_inner().do_put(request).await?;
         let response = response
             .into_inner()

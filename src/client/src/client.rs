@@ -162,12 +162,23 @@ impl Client {
             .as_bytes() as usize
     }
 
-    pub fn make_flight_client(&self) -> Result<FlightClient> {
+    pub fn make_flight_client(
+        &self,
+        send_compression: bool,
+        accept_compression: bool,
+    ) -> Result<FlightClient> {
         let (addr, channel) = self.find_channel()?;
 
-        let client = FlightServiceClient::new(channel)
+        let mut client = FlightServiceClient::new(channel)
             .max_decoding_message_size(self.max_grpc_recv_message_size())
             .max_encoding_message_size(self.max_grpc_send_message_size());
+        // todo(hl): support compression methods.
+        if send_compression {
+            client = client.send_compressed(CompressionEncoding::Zstd);
+        }
+        if accept_compression {
+            client = client.accept_compressed(CompressionEncoding::Zstd);
+        }
 
         Ok(FlightClient { addr, client })
     }

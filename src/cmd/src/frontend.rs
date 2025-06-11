@@ -364,12 +364,16 @@ impl StartCommand {
 
         // frontend to datanode need not timeout.
         // Some queries are expected to take long time.
-        let channel_config = ChannelConfig {
+        let mut channel_config = ChannelConfig {
             timeout: None,
             tcp_nodelay: opts.datanode.client.tcp_nodelay,
             connect_timeout: Some(opts.datanode.client.connect_timeout),
             ..Default::default()
         };
+        if opts.grpc.flight_compression.transport_compression() {
+            channel_config.accept_compression = true;
+            channel_config.send_compression = true;
+        }
         let client = NodeClients::new(channel_config);
 
         let instance = FrontendBuilder::new(
