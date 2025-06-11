@@ -1550,7 +1550,7 @@ mod tests {
                     end: Some(1738726754642422),
                     max_duration: Some("100ms".to_string()),
                     min_duration: Some("50ms".to_string()),
-                    limit: Some(10),
+                    limit: Some("10".to_string()),
                     tags: Some("{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".to_string()),
                     ..Default::default()
                 },
