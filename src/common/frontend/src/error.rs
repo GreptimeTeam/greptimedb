@@ -41,6 +41,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to invoke list process service"))]
+    ListProcess {
+        #[snafu(source)]
+        error: tonic::Status,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to invoke list process service"))]
+    CreateChannel {
+        source: common_grpc::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -51,7 +66,8 @@ impl ErrorExt for Error {
         match self {
             External { source, .. } => source.status_code(),
             Meta { source, .. } => source.status_code(),
-            Error::ParseProcessId { .. } => StatusCode::InvalidArguments,
+            ParseProcessId { .. } => StatusCode::InvalidArguments,
+            ListProcess { .. } | CreateChannel { .. } => StatusCode::External,
         }
     }
 

@@ -20,6 +20,7 @@ use greptime_proto::v1::frontend::{frontend_client, ListProcessRequest, ListProc
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
 
+use crate::error;
 use crate::error::{MetaSnafu, Result};
 
 pub type FrontendClientPtr = Box<dyn FrontendClient>;
@@ -36,7 +37,7 @@ impl FrontendClient for frontend_client::FrontendClient<tonic::transport::channe
             tonic::transport::channel::Channel,
         >::list_process(self, req)
         .await
-        .unwrap()
+        .context(error::ListProcessSnafu)?
         .into_inner();
         Ok(response)
     }
@@ -68,16 +69,18 @@ impl FrontendSelector for MetaClientSelector {
             .map_err(Box::new)
             .context(MetaSnafu)?;
 
-        let res = nodes
+        nodes
             .into_iter()
             .filter(predicate)
             .map(|node| {
-                let channel = self.channel_manager.get(node.peer.addr).unwrap();
+                let channel = self
+                    .channel_manager
+                    .get(node.peer.addr)
+                    .context(error::CreateChannelSnafu)?;
                 let client = frontend_client::FrontendClient::new(channel);
-                Box::new(client) as FrontendClientPtr
+                Ok(Box::new(client) as FrontendClientPtr)
             })
-            .collect::<Vec<_>>();
-        Ok(res)
+            .collect::<Result<Vec<_>>>()
     }
 }
 
@@ -90,31 +93,6 @@ impl MetaClientSelector {
         Self {
             meta_client,
             channel_manager,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::vec;
-
-    use meta_client::client::MetaClientBuilder;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_meta_client_selector() {
-        let mut meta_client = MetaClientBuilder::frontend_default_options().build();
-        meta_client
-            .start(vec!["192.168.50.164:3002"])
-            .await
-            .unwrap();
-        let selector = MetaClientSelector::new(Arc::new(meta_client));
-        let clients = selector.select(|_| true).await.unwrap();
-        for mut client in clients {
-            let resp = client.list_process(ListProcessRequest {}).await;
-            println!("{:?}", resp);
         }
     }
 }

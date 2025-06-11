@@ -156,6 +156,10 @@ impl Instance {
     pub fn inserter(&self) -> &InserterRef {
         &self.inserter
     }
+
+    pub fn process_manager(&self) -> &ProcessManagerRef {
+        &self.process_manager
+    }
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
