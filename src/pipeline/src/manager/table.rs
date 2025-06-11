@@ -290,11 +290,11 @@ impl PipelineTable {
                 match e {
                     Error::CollectRecords { .. } => {
                         // if collect records failed, it means the pipeline table is temporary invalid
-                        // we should use second level cache
+                        // we should use failover cache cache
                         warn!(e; "Failed to collect records from pipeline table, using second level cache.");
                         return self
                             .cache
-                            .get_second_level_cache(schema, name, version)?
+                            .get_failover_cache(schema, name, version)?
                             .ok_or(PipelineNotFoundSnafu { name, version }.build());
                     }
                     _ => {
