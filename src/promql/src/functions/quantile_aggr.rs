@@ -40,8 +40,8 @@ pub struct QuantileAccumulator {
 
 /// Create a quantile `AggregateUDF` for PromQL quantile operator,
 /// which calculates φ-quantile (0 ≤ φ ≤ 1) over dimensions
-pub fn quantile_udaf() -> Arc<AggregateUDF> {
-    Arc::new(create_udaf(
+pub fn quantile_udaf() -> AggregateUDF {
+    create_udaf(
         QUANTILE_NAME,
         // Input type: (φ, values)
         vec![DataType::Float64, DataType::Float64],
@@ -63,7 +63,7 @@ pub fn quantile_udaf() -> Arc<AggregateUDF> {
             )]
             .into(),
         )]),
-    ))
+    )
 }
 
 impl QuantileAccumulator {

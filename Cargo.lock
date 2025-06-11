@@ -2336,6 +2336,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "promql",
  "s2",
  "serde",
  "serde_json",
