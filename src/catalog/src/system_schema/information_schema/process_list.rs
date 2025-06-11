@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID;
 use common_error::ext::BoxedError;
+use common_frontend::{DisplayProcessId, ProcessManagerRef};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_time::util::current_time_millis;
@@ -30,7 +31,6 @@ use datatypes::vectors::{
     VectorRef,
 };
 use snafu::ResultExt;
-use common_frontend::{DisplayProcessId, ProcessManagerRef};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{self, InternalSnafu};

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_frontend::ProcessManagerRef;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::ddl::ProcedureExecutorRef;
@@ -36,7 +37,7 @@ use pipeline::pipeline_operator::PipelineOperator;
 use query::region_query::RegionQueryHandlerFactoryRef;
 use query::QueryEngineFactory;
 use snafu::OptionExt;
-use common_frontend::ProcessManagerRef;
+
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::instance::region_query::FrontendRegionQueryHandler;

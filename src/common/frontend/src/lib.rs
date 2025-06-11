@@ -25,7 +25,7 @@ pub mod selector;
 pub type ProcessManagerRef = Arc<dyn ProcessManager>;
 
 #[async_trait::async_trait]
-pub trait ProcessManager: Send+Sync {
+pub trait ProcessManager: Send + Sync {
     fn register_query(
         &self,
         catalog: String,

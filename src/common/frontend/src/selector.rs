@@ -25,7 +25,7 @@ use crate::error::{MetaSnafu, Result};
 pub type FrontendClientPtr = Box<dyn FrontendClient>;
 
 #[async_trait::async_trait]
-pub trait FrontendClient: Send  {
+pub trait FrontendClient: Send {
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse>;
 }
 

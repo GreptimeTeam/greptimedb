@@ -35,6 +35,7 @@ use client::OutputData;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_frontend::ProcessManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -71,7 +72,6 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
-use common_frontend::ProcessManagerRef;
 pub use standalone::StandaloneDatanodeManager;
 
 use crate::error::{

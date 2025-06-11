@@ -22,6 +22,7 @@ use common_catalog::consts::{
     PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
+use common_frontend::ProcessManagerRef;
 use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
@@ -44,7 +45,7 @@ use table::table_name::TableName;
 use table::TableRef;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
-use common_frontend::ProcessManagerRef;
+
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,

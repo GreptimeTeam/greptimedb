@@ -22,6 +22,7 @@ use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_frontend::ProcessManager;
 use common_telemetry::{debug, info};
 use common_time::util::current_time_millis;
+use meta_client::MetaClientRef;
 
 use crate::error;
 
@@ -34,12 +35,13 @@ pub struct MetaProcessManager {
 
 impl MetaProcessManager {
     /// Create a [MetaProcessManager] instance with server address and kv client.
-    pub fn new(server_addr: String) -> error::Result<Self> {
+    pub fn new(server_addr: String, meta_client: Option<MetaClientRef>) -> error::Result<Self> {
+        let frontend_selector = meta_client.map(MetaClientSelector::new);
         Ok(Self {
             server_addr,
             next_id: Default::default(),
             catalogs: Default::default(),
-            frontend_selector: None,
+            frontend_selector,
         })
     }
 }
@@ -136,7 +138,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_query() {
-        let process_manager = MetaProcessManager::new("127.0.0.1:8000".to_string()).unwrap();
+        let process_manager = MetaProcessManager::new("127.0.0.1:8000".to_string(), None).unwrap();
         let process_id = process_manager.register_query(
             "public".to_string(),
             vec!["test".to_string()],

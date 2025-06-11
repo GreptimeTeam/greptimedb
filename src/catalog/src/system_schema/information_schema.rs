@@ -34,6 +34,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
 use common_error::ext::ErrorExt;
+use common_frontend::ProcessManagerRef;
 use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -43,7 +44,6 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
-use common_frontend::ProcessManagerRef;
 use process_list::InformationSchemaProcessList;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
