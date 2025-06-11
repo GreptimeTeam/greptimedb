@@ -835,8 +835,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
     }
 
     async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
-        // todo: implement
-        unimplemented!()
+        unreachable!()
     }
 }
 
@@ -947,8 +946,7 @@ impl common_meta::node_manager::Flownode for StreamingEngine {
     }
 
     async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
-        // todo: implement
-        unimplemented!()
+        unreachable!()
     }
 }
 
