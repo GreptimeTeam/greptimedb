@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 
 use client::{Output, OutputData, OutputMeta};
@@ -23,7 +24,7 @@ use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
-use common_datasource::object_store::{build_backend, parse_url};
+use common_datasource::object_store::{build_backend, parse_url, FS_SCHEMA};
 use common_datasource::util::find_dir_and_filename;
 use common_query::{OutputCost, OutputRows};
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
@@ -46,17 +47,16 @@ use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use crate::error::{self, IntoVectorsSnafu, Result};
+use crate::error::{self, IntoVectorsSnafu, PathNotFoundSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 const DEFAULT_READ_BUFFER: usize = 256 * 1024;
-
 enum FileMetadata {
     Parquet {
         schema: SchemaRef,
@@ -96,7 +96,11 @@ impl StatementExecutor {
         &self,
         req: &CopyTableRequest,
     ) -> Result<(ObjectStore, Vec<Entry>)> {
-        let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+        let (schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+
+        if schema.to_uppercase() == FS_SCHEMA {
+            ensure!(Path::new(&path).exists(), PathNotFoundSnafu { path });
+        }
 
         let object_store =
             build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
