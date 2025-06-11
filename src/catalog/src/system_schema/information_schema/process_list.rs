@@ -30,11 +30,11 @@ use datatypes::vectors::{
     VectorRef,
 };
 use snafu::ResultExt;
+use common_frontend::{DisplayProcessId, ProcessManagerRef};
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::error::{self, InternalSnafu};
 use crate::information_schema::Predicates;
-use crate::process_manager::{DisplayProcessId, ProcessManager};
 use crate::system_schema::information_schema::InformationTable;
 
 /// Column names of `information_schema.process_list`
@@ -51,11 +51,11 @@ const ELAPSED_TIME: &str = "elapsed_time";
 /// queries in current cluster.
 pub struct InformationSchemaProcessList {
     schema: SchemaRef,
-    process_manager: Arc<ProcessManager>,
+    process_manager: ProcessManagerRef,
 }
 
 impl InformationSchemaProcessList {
-    pub fn new(process_manager: Arc<ProcessManager>) -> Self {
+    pub fn new(process_manager: ProcessManagerRef) -> Self {
         Self {
             schema: Self::schema(),
             process_manager,
@@ -115,12 +115,12 @@ impl InformationTable for InformationSchemaProcessList {
 
 /// Build running process list.
 async fn make_process_list(
-    process_manager: Arc<ProcessManager>,
+    process_manager: ProcessManagerRef,
     request: ScanRequest,
 ) -> error::Result<RecordBatch> {
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
-    let queries = process_manager.local_processes(None);
+    let queries = process_manager.local_processes(None).unwrap();
 
     let mut id_builder = StringVectorBuilder::with_capacity(queries.len());
     let mut catalog_builder = StringVectorBuilder::with_capacity(queries.len());

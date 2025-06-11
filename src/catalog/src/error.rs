@@ -277,13 +277,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to parse process id: {}", s))]
-    ParseProcessId {
-        s: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 impl Error {
@@ -352,7 +345,6 @@ impl ErrorExt for Error {
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
             }
-            Error::ParseProcessId { .. } => StatusCode::Internal,
         }
     }
 

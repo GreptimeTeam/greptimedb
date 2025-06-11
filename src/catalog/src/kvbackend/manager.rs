@@ -44,14 +44,13 @@ use table::table_name::TableName;
 use table::TableRef;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
-
+use common_frontend::ProcessManagerRef;
 use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
-use crate::process_manager::ProcessManager;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;
@@ -85,7 +84,7 @@ impl KvBackendCatalogManager {
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
         procedure_manager: Option<ProcedureManagerRef>,
-        process_manager: Option<Arc<ProcessManager>>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             information_extension,
@@ -423,7 +422,7 @@ struct SystemCatalog {
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
     backend: KvBackendRef,
-    process_manager: Option<Arc<ProcessManager>>,
+    process_manager: Option<ProcessManagerRef>,
 }
 
 impl SystemCatalog {

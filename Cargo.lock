@@ -1623,6 +1623,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-frontend",
  "common-macro",
  "common-meta",
  "common-procedure",
@@ -2292,7 +2293,6 @@ name = "common-frontend"
 version = "0.15.0"
 dependencies = [
  "async-trait",
- "client",
  "common-error",
  "common-grpc",
  "common-macro",
@@ -11143,6 +11143,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-mem-prof",

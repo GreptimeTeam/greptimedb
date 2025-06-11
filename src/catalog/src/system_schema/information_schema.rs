@@ -43,6 +43,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
+use common_frontend::ProcessManagerRef;
 use process_list::InformationSchemaProcessList;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
@@ -52,7 +53,6 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::{Error, Result};
-use crate::process_manager::ProcessManager;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -116,7 +116,7 @@ macro_rules! setup_memory_table {
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
-    process_manager: Option<Arc<ProcessManager>>,
+    process_manager: Option<ProcessManagerRef>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
 }
@@ -225,7 +225,7 @@ impl InformationSchemaProvider {
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
-        process_manager: Option<Arc<ProcessManager>>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> Self {
         let mut provider = Self {
             catalog_name,

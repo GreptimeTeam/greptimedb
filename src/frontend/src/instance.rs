@@ -30,7 +30,6 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::process_manager::ProcessManager;
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
@@ -72,6 +71,7 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
+use common_frontend::ProcessManagerRef;
 pub use standalone::StandaloneDatanodeManager;
 
 use crate::error::{
@@ -98,7 +98,7 @@ pub struct Instance {
     slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
     #[allow(dead_code)]
-    process_manager: Option<Arc<ProcessManager>>,
+    process_manager: Option<ProcessManagerRef>,
 }
 
 impl Instance {

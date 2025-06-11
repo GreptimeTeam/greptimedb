@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
-use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -44,7 +43,7 @@ use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
 use tracing_appender::non_blocking::WorkerGuard;
-
+use catalog::process_manager::MetaProcessManager;
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{create_resource_limit_metrics, log_versions, App};
@@ -346,7 +345,7 @@ impl StartCommand {
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
 
         let process_manager = Arc::new(
-            ProcessManager::new(addrs::resolve_addr(
+            MetaProcessManager::new(addrs::resolve_addr(
                 &opts.grpc.bind_addr,
                 Some(&opts.grpc.server_addr),
             ))

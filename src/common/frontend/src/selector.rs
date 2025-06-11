@@ -14,19 +14,18 @@
 
 use std::time::Duration;
 
-use client::Client;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::cluster::{ClusterInfo, Role};
+use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
 use greptime_proto::v1::frontend::{frontend_client, ListProcessRequest, ListProcessResponse};
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
 
-use crate::error::{GrpcSnafu, MetaSnafu, Result};
+use crate::error::{MetaSnafu, Result};
 
 pub type FrontendClientPtr = Box<dyn FrontendClient>;
 
 #[async_trait::async_trait]
-pub trait FrontendClient {
+pub trait FrontendClient: Send  {
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse>;
 }
 
@@ -35,10 +34,9 @@ impl FrontendClient for frontend_client::FrontendClient<tonic::transport::channe
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse> {
         let response: ListProcessResponse = frontend_client::FrontendClient::<
             tonic::transport::channel::Channel,
-        >::list_process(&mut self, req)
+        >::list_process(self, req)
         .await
-        .map_err(client::error::Error::from)
-        .context(GrpcSnafu)?
+        .unwrap()
         .into_inner();
         Ok(response)
     }
@@ -46,7 +44,9 @@ impl FrontendClient for frontend_client::FrontendClient<tonic::transport::channe
 
 #[async_trait::async_trait]
 pub trait FrontendSelector {
-    async fn select_all(&self) -> Result<Vec<FrontendClientPtr>>;
+    async fn select<F>(&self, predicate: F) -> Result<Vec<FrontendClientPtr>>
+    where
+        F: Fn(&NodeInfo) -> bool + Send;
 }
 
 #[derive(Debug, Clone)]
@@ -57,22 +57,26 @@ pub struct MetaClientSelector {
 
 #[async_trait::async_trait]
 impl FrontendSelector for MetaClientSelector {
-    async fn select_all(&self) -> Result<Vec<FrontendClientPtr>> {
+    async fn select<F>(&self, predicate: F) -> Result<Vec<FrontendClientPtr>>
+    where
+        F: Fn(&NodeInfo) -> bool + Send,
+    {
         let nodes = self
             .meta_client
             .list_nodes(Some(Role::Frontend))
             .await
+            .map_err(Box::new)
             .context(MetaSnafu)?;
 
         let res = nodes
             .into_iter()
+            .filter(predicate)
             .map(|node| {
-                Client::with_manager_and_urls(self.channel_manager.clone(), vec![node.peer.addr])
-                    .frontend_client()
-                    .map(|c| Box::new(c) as FrontendClientPtr)
+                let channel = self.channel_manager.get(node.peer.addr).unwrap();
+                let client = frontend_client::FrontendClient::new(channel);
+                Box::new(client) as FrontendClientPtr
             })
-            .collect::<client::Result<Vec<_>>>()
-            .context(GrpcSnafu)?;
+            .collect::<Vec<_>>();
         Ok(res)
     }
 }
@@ -107,7 +111,7 @@ mod tests {
             .await
             .unwrap();
         let selector = MetaClientSelector::new(Arc::new(meta_client));
-        let clients = selector.select_all().await.unwrap();
+        let clients = selector.select(|_| true).await.unwrap();
         for mut client in clients {
             let resp = client.list_process(ListProcessRequest {}).await;
             println!("{:?}", resp);

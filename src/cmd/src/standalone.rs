@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtension;
 use catalog::kvbackend::KvBackendCatalogManager;
-use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
 use common_base::readable_size::ReadableSize;
@@ -84,7 +83,7 @@ use servers::tls::{TlsMode, TlsOption};
 use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tracing_appender::non_blocking::WorkerGuard;
-
+use catalog::process_manager::MetaProcessManager;
 use crate::error::{Result, StartFlownodeSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{create_resource_limit_metrics, error, log_versions, App};
@@ -529,7 +528,7 @@ impl StartCommand {
         ));
 
         let process_manager = Arc::new(
-            ProcessManager::new(opts.grpc.server_addr.clone())
+            MetaProcessManager::new(opts.grpc.server_addr.clone())
                 .context(error::BuildProcessManagerSnafu)?,
         );
         let catalog_manager = KvBackendCatalogManager::new(
