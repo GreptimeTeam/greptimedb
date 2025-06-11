@@ -35,38 +35,23 @@ use crate::error::{
 };
 use crate::Tool;
 
-/// Subcommand for metadata snapshot management.
+/// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
 #[derive(Subcommand)]
-pub enum MetaCommand {
-    #[clap(subcommand)]
-    Snapshot(MetaSnapshotCommand),
+pub enum SnapshotCommand {
+    /// Save a snapshot of the current metadata state to a specified location.
+    Save(SaveCommand),
+    /// Restore metadata from a snapshot.
+    Restore(RestoreCommand),
+    /// Explore metadata from a snapshot.
+    Info(InfoCommand),
 }
 
-impl MetaCommand {
+impl SnapshotCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            MetaCommand::Snapshot(cmd) => cmd.build().await,
-        }
-    }
-}
-
-/// Subcommand for metadata snapshot operations. such as save, restore and info.
-#[derive(Subcommand)]
-pub enum MetaSnapshotCommand {
-    /// Export metadata snapshot tool.
-    Save(MetaSaveCommand),
-    /// Restore metadata snapshot tool.
-    Restore(MetaRestoreCommand),
-    /// Explore metadata from metadata snapshot.
-    Info(MetaInfoCommand),
-}
-
-impl MetaSnapshotCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        match self {
-            MetaSnapshotCommand::Save(cmd) => cmd.build().await,
-            MetaSnapshotCommand::Restore(cmd) => cmd.build().await,
-            MetaSnapshotCommand::Info(cmd) => cmd.build().await,
+            SnapshotCommand::Save(cmd) => cmd.build().await,
+            SnapshotCommand::Restore(cmd) => cmd.build().await,
+            SnapshotCommand::Info(cmd) => cmd.build().await,
         }
     }
 }
@@ -214,7 +199,7 @@ impl S3Config {
 /// It will dump the metadata snapshot to local file or s3 bucket.
 /// The snapshot file will be in binary format.
 #[derive(Debug, Default, Parser)]
-pub struct MetaSaveCommand {
+pub struct SaveCommand {
     /// The connection to the metadata store.
     #[clap(flatten)]
     connection: MetaConnection,
@@ -240,7 +225,7 @@ fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError>
     Ok(object_store)
 }
 
-impl MetaSaveCommand {
+impl SaveCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.connection.build().await?;
         let output_dir = &self.output_dir;
@@ -262,7 +247,7 @@ impl MetaSaveCommand {
     }
 }
 
-pub struct MetaSnapshotTool {
+struct MetaSnapshotTool {
     inner: MetadataSnapshotManager,
     target_file: String,
 }
@@ -278,11 +263,13 @@ impl Tool for MetaSnapshotTool {
     }
 }
 
-/// Restore metadata snapshot tool.
-/// This tool is used to restore metadata snapshot from etcd, pg or mysql.
-/// It will restore the metadata snapshot from local file or s3 bucket.
+/// Restore metadata from a snapshot file.
+///
+/// This command restores the metadata state from a previously saved snapshot.
+/// The snapshot can be loaded from either a local file system or an S3 bucket,
+/// depending on the provided configuration.
 #[derive(Debug, Default, Parser)]
-pub struct MetaRestoreCommand {
+pub struct RestoreCommand {
     /// The connection to the metadata store.
     #[clap(flatten)]
     connection: MetaConnection,
@@ -299,7 +286,7 @@ pub struct MetaRestoreCommand {
     force: bool,
 }
 
-impl MetaRestoreCommand {
+impl RestoreCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.connection.build().await?;
         let input_dir = &self.input_dir;
@@ -323,7 +310,7 @@ impl MetaRestoreCommand {
     }
 }
 
-pub struct MetaRestoreTool {
+struct MetaRestoreTool {
     inner: MetadataSnapshotManager,
     source_file: String,
     force: bool,
@@ -372,9 +359,12 @@ impl Tool for MetaRestoreTool {
     }
 }
 
-/// Explore metadata from metadata snapshot.
+/// Explore metadata from a snapshot file.
+///
+/// This command allows filtering the metadata by a specific key and limiting the number of results.
+/// It prints the filtered metadata to the console.
 #[derive(Debug, Default, Parser)]
-pub struct MetaInfoCommand {
+pub struct InfoCommand {
     /// The s3 config.
     #[clap(flatten)]
     s3_config: S3Config,
@@ -389,7 +379,7 @@ pub struct MetaInfoCommand {
     limit: Option<usize>,
 }
 
-pub struct MetaInfoTool {
+struct MetaInfoTool {
     inner: ObjectStore,
     source_file: String,
     inspect_key: String,
@@ -415,7 +405,7 @@ impl Tool for MetaInfoTool {
     }
 }
 
-impl MetaInfoCommand {
+impl InfoCommand {
     fn decide_object_store_root_for_local_store(
         file_path: &str,
     ) -> Result<(&str, &str), BoxedError> {

@@ -12,25 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
-use cli::{BenchTableMetadataCommand, DataCommand, MetadataCommand, Tool};
+mod snapshot;
+
+use clap::Subcommand;
 use common_error::ext::BoxedError;
 
-#[derive(Parser)]
-pub enum SubCommand {
-    Bench(BenchTableMetadataCommand),
+use crate::metadata::snapshot::SnapshotCommand;
+use crate::Tool;
+
+/// Command for managing metadata operations, including saving metadata snapshots and restoring metadata from snapshots.
+#[derive(Subcommand)]
+pub enum MetadataCommand {
     #[clap(subcommand)]
-    Data(DataCommand),
-    #[clap(subcommand)]
-    Meta(MetadataCommand),
+    Snapshot(SnapshotCommand),
 }
 
-impl SubCommand {
-    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+impl MetadataCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            SubCommand::Bench(cmd) => cmd.build().await,
-            SubCommand::Data(cmd) => cmd.build().await,
-            SubCommand::Meta(cmd) => cmd.build().await,
+            MetadataCommand::Snapshot(cmd) => cmd.build().await,
         }
     }
 }
