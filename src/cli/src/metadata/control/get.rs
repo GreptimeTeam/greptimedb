@@ -142,9 +142,14 @@ pub struct GetTableCommand {
 }
 
 impl GetTableCommand {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), BoxedError> {
         if self.table_id.is_none() && self.table_name.is_none() {
-            return Err("You must specify either --table-id or --table-name.".to_string());
+            return Err(BoxedError::new(
+                InvalidArgumentsSnafu {
+                    msg: "You must specify either --table-id or --table-name.",
+                }
+                .build(),
+            ));
         }
         Ok(())
     }
@@ -224,9 +229,7 @@ impl Tool for GetTableTool {
 
 impl GetTableCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        self.validate()
-            .map_err(|e| InvalidArgumentsSnafu { msg: e }.build())
-            .map_err(BoxedError::new)?;
+        self.validate()?;
         let kvbackend = self.store.build().await?;
         Ok(Box::new(GetTableTool {
             kvbackend,
