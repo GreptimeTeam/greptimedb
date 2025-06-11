@@ -30,4 +30,6 @@ TQL EVAL (0, 15, '5s') quantile(0.5, test) by (idc);
 
 TQL EVAL (0, 15, '5s') quantile(0.5, sum(test) by (idc));
 
+TQL EVAL (0, 15, '5s') quantile(0.25 + 0.1 + 0.15, sum(test) by (idc));
+
 DROP TABLE test;
