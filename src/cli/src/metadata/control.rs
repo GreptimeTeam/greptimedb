@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
-use cli::{BenchTableMetadataCommand, DataCommand, MetadataCommand, Tool};
-use common_error::ext::BoxedError;
+mod get;
+mod utils;
 
-#[derive(Parser)]
-pub enum SubCommand {
-    Bench(BenchTableMetadataCommand),
+use clap::Subcommand;
+use common_error::ext::BoxedError;
+use get::GetCommand;
+
+use crate::Tool;
+
+/// Subcommand for metadata control.
+#[derive(Subcommand)]
+pub enum ControlCommand {
+    /// Get the metadata from the metasrv.
     #[clap(subcommand)]
-    Data(DataCommand),
-    #[clap(subcommand)]
-    Meta(MetadataCommand),
+    Get(GetCommand),
 }
 
-impl SubCommand {
-    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+impl ControlCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            SubCommand::Bench(cmd) => cmd.build().await,
-            SubCommand::Data(cmd) => cmd.build().await,
-            SubCommand::Meta(cmd) => cmd.build().await,
+            ControlCommand::Get(cmd) => cmd.build().await,
         }
     }
 }

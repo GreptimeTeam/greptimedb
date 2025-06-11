@@ -12,25 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
-use cli::{BenchTableMetadataCommand, DataCommand, MetadataCommand, Tool};
+mod export;
+mod import;
+
+use clap::Subcommand;
 use common_error::ext::BoxedError;
 
-#[derive(Parser)]
-pub enum SubCommand {
-    Bench(BenchTableMetadataCommand),
-    #[clap(subcommand)]
-    Data(DataCommand),
-    #[clap(subcommand)]
-    Meta(MetadataCommand),
+use crate::data::export::ExportCommand;
+use crate::data::import::ImportCommand;
+use crate::Tool;
+
+/// Command for data operations including exporting data from and importing data into GreptimeDB.
+#[derive(Subcommand)]
+pub enum DataCommand {
+    Export(ExportCommand),
+    Import(ImportCommand),
 }
 
-impl SubCommand {
+impl DataCommand {
     pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
         match self {
-            SubCommand::Bench(cmd) => cmd.build().await,
-            SubCommand::Data(cmd) => cmd.build().await,
-            SubCommand::Meta(cmd) => cmd.build().await,
+            DataCommand::Export(cmd) => cmd.build().await,
+            DataCommand::Import(cmd) => cmd.build().await,
         }
     }
 }

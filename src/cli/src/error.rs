@@ -30,6 +30,7 @@ pub enum Error {
         location: Location,
         msg: String,
     },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         #[snafu(implicit)]
@@ -228,22 +229,25 @@ pub enum Error {
         #[snafu(source)]
         error: ObjectStoreError,
     },
+
     #[snafu(display("S3 config need be set"))]
     S3ConfigNotSet {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Output directory not set"))]
     OutputDirNotSet {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("KV backend not set: {}", backend))]
-    KvBackendNotSet {
-        backend: String,
+
+    #[snafu(display("Empty store addresses"))]
+    EmptyStoreAddrs {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Unsupported memory backend"))]
     UnsupportedMemoryBackend {
         #[snafu(implicit)]
@@ -252,6 +256,13 @@ pub enum Error {
 
     #[snafu(display("File path invalid: {}", msg))]
     InvalidFilePath {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid arguments: {}", msg))]
+    InvalidArguments {
         msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -276,6 +287,7 @@ impl ErrorExt for Error {
             | Error::EmptyResult { .. }
             | Error::InvalidFilePath { .. }
             | Error::UnsupportedMemoryBackend { .. }
+            | Error::InvalidArguments { .. }
             | Error::ParseProxyOpts { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
@@ -296,7 +308,7 @@ impl ErrorExt for Error {
             Error::OpenDal { .. } => StatusCode::Internal,
             Error::S3ConfigNotSet { .. }
             | Error::OutputDirNotSet { .. }
-            | Error::KvBackendNotSet { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyStoreAddrs { .. } => StatusCode::InvalidArguments,
 
             Error::BuildRuntime { source, .. } => source.status_code(),
 
