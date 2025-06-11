@@ -19,7 +19,8 @@ use common_function::aggrs::approximate::hll::{HllState, HLL_NAME};
 use common_function::aggrs::approximate::uddsketch::{UddSketchState, UDDSKETCH_STATE_NAME};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
+use datafusion_common::Column;
+use datafusion_expr::{Expr, LogicalPlan, Projection, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
@@ -28,19 +29,26 @@ use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan}
 use crate::dist_plan::MergeScanLogicalPlan;
 
 /// generate the upper aggregation plan that will execute on the frontend.
-pub fn step_aggr_to_upper_aggr(aggr_plan: &LogicalPlan) -> datafusion_common::Result<LogicalPlan> {
-    let LogicalPlan::Aggregate(aggr) = aggr_plan else {
+/// Basically a logical plan resembling the following:
+/// Projection:
+///     Aggregate:
+///
+/// from Aggregate [gby: [a,b,c], aggr]
+pub fn step_aggr_to_upper_aggr(
+    aggr_plan: &LogicalPlan,
+) -> datafusion_common::Result<Vec<LogicalPlan>> {
+    let LogicalPlan::Aggregate(input_aggr) = aggr_plan else {
         return Err(datafusion_common::DataFusionError::Plan(
             "step_aggr_to_upper_aggr only accepts Aggregate plan".to_string(),
         ));
     };
-    if !is_all_aggr_exprs_steppable(&aggr.aggr_expr) {
+    if !is_all_aggr_exprs_steppable(&input_aggr.aggr_expr) {
         return Err(datafusion_common::DataFusionError::NotImplemented(
             "Some aggregate expressions are not steppable".to_string(),
         ));
     }
     let mut upper_aggr_expr = vec![];
-    for aggr_expr in &aggr.aggr_expr {
+    for aggr_expr in &input_aggr.aggr_expr {
         let Some(aggr_func) = get_aggr_func(aggr_expr) else {
             return Err(datafusion_common::DataFusionError::NotImplemented(
                 "Aggregate function not found".to_string(),
@@ -93,26 +101,50 @@ pub fn step_aggr_to_upper_aggr(aggr_plan: &LogicalPlan) -> datafusion_common::Re
         }
 
         // make the column name the same, so parent can recognize it
-        upper_aggr_expr.push(new_aggr_expr.alias(col_name));
+        upper_aggr_expr.push(new_aggr_expr);
     }
-    let mut new_aggr = aggr.clone();
-    new_aggr.aggr_expr = upper_aggr_expr;
-    // group by expr also need alias to avoid duplicated computing
+    let mut new_aggr = input_aggr.clone();
+    // use lower aggregate plan as input, this will be replace by merge scan plan later
+    new_aggr.input = Arc::new(LogicalPlan::Aggregate(input_aggr.clone()));
 
+    new_aggr.aggr_expr = upper_aggr_expr;
+
+    // group by expr also need to be all ref by column to avoid duplicated computing
     let mut new_group_expr = new_aggr.group_expr.clone();
     for expr in &mut new_group_expr {
         if let Expr::Column(_) = expr {
             // already a column, no need to change
             continue;
         }
-        let col_name = expr.name_for_alias()?;
-        let input_column =
-            Expr::Column(datafusion_common::Column::new_unqualified(col_name.clone()));
-        *expr = input_column.alias(col_name);
+        let col_name = expr.qualified_name();
+        let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
+        *expr = input_column;
     }
-    new_aggr.group_expr = new_group_expr;
+    new_aggr.group_expr = new_group_expr.clone();
+
+    let mut new_projection_exprs = new_group_expr;
+    // the upper aggr expr need to be aliased to the input aggr expr's name,
+    // so that the parent plan can recognize it.
+    for (lower_aggr_expr, upper_aggr_expr) in
+        input_aggr.aggr_expr.iter().zip(new_aggr.aggr_expr.iter())
+    {
+        let lower_col_name = lower_aggr_expr.name_for_alias()?;
+        let (table, col_name) = upper_aggr_expr.qualified_name();
+        let aggr_out_column = Column::new(table, col_name);
+        let aliased_output_aggr_expr = Expr::Column(aggr_out_column).alias(lower_col_name);
+        debug!("lower_aggr_expr: {lower_aggr_expr:?}, upper_aggr_expr: {upper_aggr_expr:?}, aliased_output_aggr_expr: {aliased_output_aggr_expr:?}");
+        new_projection_exprs.push(aliased_output_aggr_expr);
+    }
+    let upper_aggr_plan = LogicalPlan::Aggregate(new_aggr);
+    debug!("Before recompute schema: {upper_aggr_plan:#?}");
+    let upper_aggr_plan = upper_aggr_plan.recompute_schema()?;
+    debug!("After recompute schema: {upper_aggr_plan:#?}");
+    // create a projection on top of the new aggregate plan
+    let new_projection =
+        Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
+    let projection = LogicalPlan::Projection(new_projection);
     // return the new logical plan
-    Ok(LogicalPlan::Aggregate(new_aggr))
+    Ok(vec![projection, upper_aggr_plan])
 }
 
 /// Check if the given aggregate expression is steppable.
@@ -174,7 +206,8 @@ pub enum Commutativity {
     PartialCommutative,
     ConditionalCommutative(Option<Transformer>),
     TransformedCommutative {
-        transformer: Option<Transformer>,
+        /// Return plans from parent to child order
+        transformer: Option<StageTransformer>,
         /// whether the transformer changes the child to parent
         expand_on_parent: bool,
     },
@@ -210,7 +243,10 @@ impl Categorizer {
                     debug!("Plan is steppable: {plan}");
                     return Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
-                            step_aggr_to_upper_aggr(plan).ok()
+                            debug!("Before Step optimize: {plan}");
+                            let ret = step_aggr_to_upper_aggr(plan);
+                            debug!("After Step Optimize: {ret:#?}");
+                            ret.ok()
                         })),
                         expand_on_parent: true,
                     };
@@ -376,6 +412,8 @@ impl Categorizer {
 }
 
 pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
+
+pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<Vec<LogicalPlan>>>;
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
     Some(plan.clone())
