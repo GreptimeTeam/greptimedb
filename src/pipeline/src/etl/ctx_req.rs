@@ -67,9 +67,22 @@ pub struct ContextOpt {
     physical_table: Option<String>,
     skip_wal: Option<String>,
 
+    // reset the schema in query context
+    schema: Option<String>,
+
     // pipeline options, not set in query context
     // can be removed before the end of the pipeline execution
     table_suffix: Option<String>,
+}
+
+impl ContextOpt {
+    pub fn set_physical_table(&mut self, physical_table: String) {
+        self.physical_table = Some(physical_table);
+    }
+
+    pub fn set_schema(&mut self, schema: String) {
+        self.schema = Some(schema);
+    }
 }
 
 impl ContextOpt {
@@ -177,8 +190,12 @@ impl ContextReq {
         Self { req: req_map }
     }
 
-    pub fn add_rows(&mut self, opt: ContextOpt, req: RowInsertRequest) {
+    pub fn add_row(&mut self, opt: ContextOpt, req: RowInsertRequest) {
         self.req.entry(opt).or_default().push(req);
+    }
+
+    pub fn add_rows(&mut self, opt: ContextOpt, reqs: impl IntoIterator<Item = RowInsertRequest>) {
+        self.req.entry(opt).or_default().extend(reqs);
     }
 
     pub fn merge(&mut self, other: Self) {
@@ -218,8 +235,11 @@ impl Iterator for ContextReqIter {
     type Item = (QueryContextRef, RowInsertRequests);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (opt, req_vec) = self.opt_req.next()?;
+        let (mut opt, req_vec) = self.opt_req.next()?;
         let mut ctx = self.ctx_template.clone();
+        if let Some(schema) = opt.schema.take() {
+            ctx.set_current_schema(&schema);
+        }
         opt.set_query_context(&mut ctx);
 
         Some((Arc::new(ctx), RowInsertRequests { inserts: req_vec }))

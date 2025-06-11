@@ -91,6 +91,7 @@ macro_rules! http_tests {
                 test_config_api,
                 test_dashboard_path,
                 test_prometheus_remote_write,
+                test_prometheus_remote_special_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
@@ -1296,6 +1297,100 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
         .await;
 
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_special_labels")
+            .await;
+    let client = TestClient::new(app).await;
+
+    // write snappy encoded data
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries_special_labels(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    // create databases
+    let res = client
+        .post("/v1/sql?sql=create database idc3")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/sql?sql=create database idc4")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write data
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // test idc3
+    let expected = "[[\"f1\"],[\"idc3_lo_table\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3",
+        &client,
+        "show tables from idc3;",
+        expected,
+    )
+    .await;
+    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'f1'\\n)\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3_show_create_table",
+        &client,
+        "show create table idc3.idc3_lo_table",
+        expected,
+    )
+    .await;
+    let expected = "[[3000,42.0]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3_select",
+        &client,
+        "select * from idc3.idc3_lo_table",
+        expected,
+    )
+    .await;
+
+    // test idc4
+    let expected = "[[\"f2\"],[\"idc4_local_table\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4",
+        &client,
+        "show tables from idc4;",
+        expected,
+    )
+    .await;
+    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'f2'\\n)\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4_show_create_table",
+        &client,
+        "show create table idc4.idc4_local_table",
+        expected,
+    )
+    .await;
+    let expected = "[[4000,99.0]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4_select",
+        &client,
+        "select * from idc4.idc4_local_table",
+        expected,
+    )
+    .await;
 
     guard.remove_all().await;
 }

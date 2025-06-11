@@ -20,16 +20,25 @@ use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
 use crate::http::PromValidationMode;
 use crate::proto::{decode_string, PromLabel};
 use crate::repeated_field::Clear;
 
+#[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PromCtx {
+    pub schema: Option<String>,
+    pub physical_table: Option<String>,
+}
+
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
 pub(crate) struct TablesBuilder {
-    tables: HashMap<String, TableBuilder>,
+    // tables: HashMap<String, TableBuilder>,
+    // schema -> table -> table_builder
+    tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
 }
 
 impl Clear for TablesBuilder {
@@ -42,21 +51,45 @@ impl TablesBuilder {
     /// Gets table builder with given table name. Creates an empty [TableBuilder] if not exist.
     pub(crate) fn get_or_create_table_builder(
         &mut self,
+        prom_ctx: PromCtx,
         table_name: String,
         label_num: usize,
         row_num: usize,
     ) -> &mut TableBuilder {
         self.tables
+            .entry(prom_ctx)
+            .or_default()
             .entry(table_name)
             .or_insert_with(|| TableBuilder::with_capacity(label_num + 2, row_num))
     }
 
     /// Converts [TablesBuilder] to [RowInsertRequests] and row numbers and clears inner states.
-    pub(crate) fn as_insert_requests(&mut self) -> Vec<RowInsertRequest> {
+    pub(crate) fn as_insert_requests(&mut self) -> ContextReq {
         self.tables
             .drain()
-            .map(|(name, mut table)| table.as_row_insert_request(name))
-            .collect()
+            .map(|(prom, mut tables)| {
+                // create context opt
+                let mut opt = ContextOpt::default();
+                if let Some(physical_table) = prom.physical_table {
+                    opt.set_physical_table(physical_table);
+                }
+                if let Some(schema) = prom.schema {
+                    opt.set_schema(schema);
+                }
+
+                // create and set context req
+                let mut ctx_req = ContextReq::default();
+                let reqs = tables
+                    .drain()
+                    .map(|(table_name, mut table)| table.as_row_insert_request(table_name));
+                ctx_req.add_rows(opt, reqs);
+
+                ctx_req
+            })
+            .fold(ContextReq::default(), |mut req, reqs| {
+                req.merge(reqs);
+                req
+            })
     }
 }
 

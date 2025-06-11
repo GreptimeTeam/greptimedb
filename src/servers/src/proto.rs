@@ -18,7 +18,6 @@ use std::ops::Deref;
 use std::slice;
 
 use api::prom_store::remote::Sample;
-use api::v1::RowInsertRequest;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::debug;
@@ -33,8 +32,8 @@ use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
 use crate::http::PromValidationMode;
 use crate::pipeline::run_pipeline;
-use crate::prom_row_builder::TablesBuilder;
-use crate::prom_store::METRIC_NAME_LABEL_BYTES;
+use crate::prom_row_builder::{PromCtx, TablesBuilder};
+use crate::prom_store::{METRIC_NAME_LABEL_BYTES, PHYSICAL_TABLE_LABEL_BYTES, SCHEMA_LABEL_BYTES};
 use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
 
@@ -144,6 +143,11 @@ fn merge_bytes(value: &mut Bytes, buf: &mut Bytes) -> Result<(), DecodeError> {
 #[derive(Default, Debug)]
 pub struct PromTimeSeries {
     pub table_name: String,
+    // specified using `__database__` label
+    pub schema: Option<String>,
+    // specified using `__physical_table__` label
+    pub physical_table: Option<String>,
+
     pub labels: RepeatedField<PromLabel>,
     pub samples: RepeatedField<Sample>,
 }
@@ -187,10 +191,24 @@ impl PromTimeSeries {
                 if buf.remaining() != limit {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
-                if label.name.deref() == METRIC_NAME_LABEL_BYTES {
-                    self.table_name = decode_string(&label.value, prom_validation_mode)?;
-                    self.labels.truncate(self.labels.len() - 1); // remove last label
+
+                match label.name.deref() {
+                    METRIC_NAME_LABEL_BYTES => {
+                        self.table_name = decode_string(&label.value, prom_validation_mode)?;
+                        self.labels.truncate(self.labels.len() - 1); // remove last label
+                    }
+                    SCHEMA_LABEL_BYTES => {
+                        self.schema = Some(decode_string(&label.value, prom_validation_mode)?);
+                        self.labels.truncate(self.labels.len() - 1); // remove last label
+                    }
+                    PHYSICAL_TABLE_LABEL_BYTES => {
+                        self.physical_table =
+                            Some(decode_string(&label.value, prom_validation_mode)?);
+                        self.labels.truncate(self.labels.len() - 1); // remove last label
+                    }
+                    _ => {}
                 }
+
                 Ok(())
             }
             2u32 => {
@@ -216,7 +234,14 @@ impl PromTimeSeries {
     ) -> Result<(), DecodeError> {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
+
+        let prom_ctx = PromCtx {
+            schema: self.schema.take(),
+            physical_table: self.physical_table.take(),
+        };
+
         let table_data = table_builders.get_or_create_table_builder(
+            prom_ctx,
             std::mem::take(&mut self.table_name),
             label_num,
             row_num,
@@ -267,7 +292,7 @@ impl Clear for PromWriteRequest {
 }
 
 impl PromWriteRequest {
-    pub fn as_row_insert_requests(&mut self) -> Vec<RowInsertRequest> {
+    pub fn as_row_insert_requests(&mut self) -> ContextReq {
         self.table_data.as_insert_requests()
     }
 
@@ -482,11 +507,14 @@ mod tests {
             .unwrap();
 
         let req = prom_write_request.as_row_insert_requests();
+
         let samples = req
-            .iter()
+            .ref_all_req()
             .filter_map(|r| r.rows.as_ref().map(|r| r.rows.len()))
             .sum::<usize>();
-        let prom_rows = RowInsertRequests { inserts: req };
+        let prom_rows = RowInsertRequests {
+            inserts: req.all_req().collect::<Vec<_>>(),
+        };
 
         assert_eq!(expected_samples, samples);
         assert_eq!(expected_rows.inserts.len(), prom_rows.inserts.len());
