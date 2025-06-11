@@ -188,6 +188,9 @@ impl JaegerQueryHandler for Instance {
 
         let mut filters = vec![];
 
+        // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
+        filters.push(col(SERVICE_NAME_COLUMN).eq(lit(query_params.service_name)));
+
         if let Some(operation_name) = query_params.operation_name {
             filters.push(col(SPAN_NAME_COLUMN).eq(lit(operation_name)));
         }
