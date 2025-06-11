@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_function::aggr::{HllState, UddSketchState, HLL_NAME, UDDSKETCH_STATE_NAME};
+use common_function::aggrs::approximate::hll::{HllState, HLL_NAME};
+use common_function::aggrs::approximate::uddsketch::{UddSketchState, UDDSKETCH_STATE_NAME};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};

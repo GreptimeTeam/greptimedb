@@ -14,8 +14,8 @@
 
 use crate::function_registry::FunctionRegistry;
 
-pub(crate) mod hll;
-mod uddsketch;
+pub mod hll;
+pub mod uddsketch;
 
 pub(crate) struct ApproximateFunction;
 
