@@ -15,7 +15,8 @@
 use api::v1::frontend::frontend_server::Frontend;
 use api::v1::frontend::{ListProcessRequest, ListProcessResponse};
 use catalog::process_manager::ProcessManagerRef;
-use tonic::{Request, Response, Status};
+use common_telemetry::error;
+use tonic::{Code, Request, Response, Status};
 
 #[derive(Clone)]
 pub struct FrontendGrpcHandler {
@@ -40,7 +41,12 @@ impl Frontend for FrontendGrpcHandler {
         } else {
             Some(list_process_request.catalog.as_str())
         };
-        let processes = self.process_manager.local_processes(catalog).unwrap();
-        Ok(Response::new(ListProcessResponse { processes }))
+        match self.process_manager.local_processes(catalog) {
+            Ok(processes) => Ok(Response::new(ListProcessResponse { processes })),
+            Err(e) => {
+                error!(e; "Failed to handle list process request");
+                Err(Status::new(Code::Internal, e.to_string()))
+            }
+        }
     }
 }

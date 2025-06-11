@@ -22,6 +22,9 @@ use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_telemetry::{debug, info};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
+use snafu::ResultExt;
+
+use crate::error;
 
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
@@ -94,10 +97,7 @@ impl ProcessManager {
     }
 
     /// List local running processes in given catalog.
-    pub fn local_processes(
-        &self,
-        catalog: Option<&str>,
-    ) -> common_frontend::error::Result<Vec<ProcessInfo>> {
+    pub fn local_processes(&self, catalog: Option<&str>) -> error::Result<Vec<ProcessInfo>> {
         let catalogs = self.catalogs.read().unwrap();
         let result = if let Some(catalog) = catalog {
             if let Some(catalogs) = catalogs.get(catalog) {
@@ -117,18 +117,20 @@ impl ProcessManager {
     pub async fn list_all_processes(
         &self,
         catalog: Option<&str>,
-    ) -> common_frontend::error::Result<Vec<ProcessInfo>> {
+    ) -> error::Result<Vec<ProcessInfo>> {
         let mut processes = vec![];
         if let Some(remote_frontend_selector) = self.frontend_selector.as_ref() {
             let frontends = remote_frontend_selector
                 .select(|node| node.peer.addr != self.server_addr)
-                .await?;
+                .await
+                .context(error::ListProcessSnafu)?;
             for mut f in frontends {
                 processes.extend(
                     f.list_process(ListProcessRequest {
                         catalog: catalog.unwrap_or_default().to_string(),
                     })
-                    .await?
+                    .await
+                    .context(error::ListProcessSnafu)?
                     .processes,
                 );
             }

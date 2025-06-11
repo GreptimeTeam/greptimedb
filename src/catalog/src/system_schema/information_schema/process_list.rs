@@ -122,7 +122,7 @@ async fn make_process_list(
     let predicates = Predicates::from_scan_request(&Some(request));
     let current_time = current_time_millis();
     // todo(hl): find a way to extract user catalog to filter queries from other users.
-    let queries = process_manager.local_processes(None).unwrap();
+    let queries = process_manager.local_processes(None)?;
 
     let mut id_builder = StringVectorBuilder::with_capacity(queries.len());
     let mut catalog_builder = StringVectorBuilder::with_capacity(queries.len());
