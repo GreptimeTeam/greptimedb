@@ -50,10 +50,18 @@ lazy_static! {
             vec![0.0, 5., 10., 20., 40.]
         )
         .unwrap();
-    pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE: HistogramVec =
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE: HistogramVec =
         register_histogram_vec!(
-            "greptime_flow_batching_engine_query_time_range_secs",
-            "flow batching engine query time range(seconds)",
+            "greptime_flow_batching_engine_query_window_size_secs",
+            "flow batching engine query window size(seconds)",
+            &["flow_id"],
+            vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
+        )
+        .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE: HistogramVec =
+        register_histogram_vec!(
+            "greptime_flow_batching_engine_stalled_window_size_secs",
+            "flow batching engine stalled window size(seconds)",
             &["flow_id"],
             vec![60., 4. * 60., 16. * 60., 64. * 60., 256. * 60.]
         )
