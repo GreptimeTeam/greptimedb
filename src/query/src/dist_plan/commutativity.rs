@@ -100,7 +100,6 @@ pub fn step_aggr_to_upper_aggr(
             *new_aggr_func = upper_func;
         }
 
-        // make the column name the same, so parent can recognize it
         upper_aggr_expr.push(new_aggr_expr);
     }
     let mut new_aggr = input_aggr.clone();
@@ -128,10 +127,11 @@ pub fn step_aggr_to_upper_aggr(
     for (lower_aggr_expr, upper_aggr_expr) in
         input_aggr.aggr_expr.iter().zip(new_aggr.aggr_expr.iter())
     {
-        let lower_col_name = lower_aggr_expr.name_for_alias()?;
+        let lower_col_name = lower_aggr_expr.qualified_name();
         let (table, col_name) = upper_aggr_expr.qualified_name();
         let aggr_out_column = Column::new(table, col_name);
-        let aliased_output_aggr_expr = Expr::Column(aggr_out_column).alias(lower_col_name);
+        let aliased_output_aggr_expr =
+            Expr::Column(aggr_out_column).alias_qualified(lower_col_name.0, lower_col_name.1);
         debug!("lower_aggr_expr: {lower_aggr_expr:?}, upper_aggr_expr: {upper_aggr_expr:?}, aliased_output_aggr_expr: {aliased_output_aggr_expr:?}");
         new_projection_exprs.push(aliased_output_aggr_expr);
     }
