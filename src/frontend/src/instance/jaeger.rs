@@ -215,7 +215,7 @@ impl JaegerQueryHandler for Instance {
             selects,
             filters,
             vec![col(TIMESTAMP_COLUMN).sort(false, false)], // Sort by timestamp in descending order.
-            Some(DEFAULT_LIMIT),
+            Some(query_params.limit.unwrap_or(DEFAULT_LIMIT)),
             query_params.tags,
             vec![],
         )
