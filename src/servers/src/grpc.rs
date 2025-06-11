@@ -139,11 +139,11 @@ impl GrpcOptions {
 #[serde(rename_all = "snake_case")]
 pub enum FlightCompression {
     /// Disable all compression in Arrow Flight service.
+    #[default]
     None,
     /// Enable only transport layer compression (zstd).
     Transport,
     /// Enable only payload compression (lz4)
-    #[default]
     ArrowIpc,
     /// Enable all compression.
     All,

@@ -59,6 +59,7 @@ runtime_size = 8
 ## - `transport`: only enable gRPC transport compression (zstd)
 ## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
 ## - `all`: enable all compression.
+## Default to `none`
 flight_compression = "arrow_ipc"
 
 ## gRPC server TLS options, see `mysql.tls` section.
