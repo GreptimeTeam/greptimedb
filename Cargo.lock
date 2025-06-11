@@ -7316,6 +7316,23 @@ dependencies = [
 [[package]]
 name = "mito-codec"
 version = "0.15.0"
+dependencies = [
+ "api",
+ "bytes",
+ "common-base",
+ "common-decimal",
+ "common-recordbatch",
+ "common-telemetry",
+ "common-time",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "memcomparable",
+ "paste",
+ "serde",
+ "snafu 0.8.5",
+ "store-api",
+]
 
 [[package]]
 name = "mito2"
