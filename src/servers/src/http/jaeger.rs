@@ -215,7 +215,7 @@ pub struct JaegerQueryParams {
     pub operation_name: Option<String>,
 
     /// Limit the return data.
-    pub limit: Option<usize>,
+    pub limit: Option<String>,
 
     /// Start time of the trace in microseconds since unix epoch.
     pub start: Option<i64>,
@@ -299,7 +299,14 @@ impl QueryTraceParams {
             internal_query_params.tags = Some(tags_map);
         }
 
-        internal_query_params.limit = query_params.limit;
+        if let Some(limit) = query_params.limit.filter(|d| !d.is_empty()) {
+            internal_query_params.limit = Some(limit.parse::<usize>().map_err(|e| {
+                InvalidJaegerQuerySnafu {
+                    reason: format!("parse limit '{}' failed: {}", limit, e),
+                }
+                .build()
+            })?);
+        }
 
         Ok(internal_query_params)
     }
