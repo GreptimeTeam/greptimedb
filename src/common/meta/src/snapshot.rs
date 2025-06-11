@@ -14,6 +14,7 @@
 
 pub mod file;
 
+use std::borrow::Cow;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -270,6 +271,49 @@ impl MetadataSnapshotManager {
         );
 
         Ok((filename.to_string(), num_keyvalues as u64))
+    }
+
+    fn format_output(key: Cow<'_, str>, value: Cow<'_, str>) -> String {
+        format!("{} => {}", key, value)
+    }
+
+    pub async fn info(
+        object_store: &ObjectStore,
+        file_path: &str,
+        query_str: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<String>> {
+        let path = Path::new(file_path);
+
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context(InvalidFilePathSnafu { file_path })?;
+
+        let filename = FileName::try_from(file_name)?;
+        let data = object_store
+            .read(file_path)
+            .await
+            .context(ReadObjectSnafu { file_path })?;
+        let document = Document::from_slice(&filename.extension.format, &data.to_bytes())?;
+        let metadata_content = document.into_metadata_content()?.values();
+        let mut results = Vec::with_capacity(limit.unwrap_or(256));
+        for kv in metadata_content {
+            let key_str = String::from_utf8_lossy(&kv.key);
+            if let Some(prefix) = query_str.strip_suffix('*') {
+                if key_str.starts_with(prefix) {
+                    let value_str = String::from_utf8_lossy(&kv.value);
+                    results.push(Self::format_output(key_str, value_str));
+                }
+            } else if key_str == query_str {
+                let value_str = String::from_utf8_lossy(&kv.value);
+                results.push(Self::format_output(key_str, value_str));
+            }
+            if results.len() == limit.unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(results)
     }
 }
 

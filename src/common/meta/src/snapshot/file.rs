@@ -111,6 +111,11 @@ impl MetadataContent {
     pub fn into_iter(self) -> impl Iterator<Item = KeyValue> {
         self.values.into_iter()
     }
+
+    /// Returns the key-value pairs as a vector.
+    pub fn values(self) -> Vec<KeyValue> {
+        self.values
+    }
 }
 
 /// The key-value pair of the backup file.

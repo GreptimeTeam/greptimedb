@@ -20,7 +20,7 @@ mod import;
 mod meta_snapshot;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 pub use database::DatabaseClient;
 use error::Result;
@@ -28,7 +28,7 @@ use error::Result;
 pub use crate::bench::BenchTableMetadataCommand;
 pub use crate::export::ExportCommand;
 pub use crate::import::ImportCommand;
-pub use crate::meta_snapshot::{MetaRestoreCommand, MetaSnapshotCommand};
+pub use crate::meta_snapshot::{MetaCommand, MetaInfoCommand, MetaRestoreCommand, MetaSaveCommand};
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -49,5 +49,21 @@ impl AttachCommand {
     #[allow(dead_code)]
     async fn build(self) -> Result<Box<dyn Tool>> {
         unimplemented!("Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373")
+    }
+}
+
+/// Subcommand for data operations like export and import.
+#[derive(Subcommand)]
+pub enum DataCommand {
+    Export(ExportCommand),
+    Import(ImportCommand),
+}
+
+impl DataCommand {
+    pub async fn build(&self) -> std::result::Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            DataCommand::Export(cmd) => cmd.build().await,
+            DataCommand::Import(cmd) => cmd.build().await,
+        }
     }
 }

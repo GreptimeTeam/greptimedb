@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use common_base::secrets::{ExposeSecret, SecretString};
 use common_error::ext::BoxedError;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
@@ -26,10 +27,50 @@ use meta_srv::bootstrap::create_etcd_client;
 use meta_srv::metasrv::BackendImpl;
 use object_store::services::{Fs, S3};
 use object_store::ObjectStore;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu};
+use crate::error::{
+    InvalidFilePathSnafu, KvBackendNotSetSnafu, OpenDalSnafu, S3ConfigNotSetSnafu,
+    UnsupportedMemoryBackendSnafu,
+};
 use crate::Tool;
+
+/// Subcommand for metadata snapshot management.
+#[derive(Subcommand)]
+pub enum MetaCommand {
+    #[clap(subcommand)]
+    Snapshot(MetaSnapshotCommand),
+}
+
+impl MetaCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            MetaCommand::Snapshot(cmd) => cmd.build().await,
+        }
+    }
+}
+
+/// Subcommand for metadata snapshot operations. such as save, restore and info.
+#[derive(Subcommand)]
+pub enum MetaSnapshotCommand {
+    /// Export metadata snapshot tool.
+    Save(MetaSaveCommand),
+    /// Restore metadata snapshot tool.
+    Restore(MetaRestoreCommand),
+    /// Explore metadata from metadata snapshot.
+    Info(MetaInfoCommand),
+}
+
+impl MetaSnapshotCommand {
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        match self {
+            MetaSnapshotCommand::Save(cmd) => cmd.build().await,
+            MetaSnapshotCommand::Restore(cmd) => cmd.build().await,
+            MetaSnapshotCommand::Info(cmd) => cmd.build().await,
+        }
+    }
+}
+
 #[derive(Debug, Default, Parser)]
 struct MetaConnection {
     /// The endpoint of store. one of etcd, pg or mysql.
@@ -91,6 +132,9 @@ impl MetaConnection {
                     .await
                     .map_err(BoxedError::new)?)
                 }
+                Some(BackendImpl::MemoryStore) => UnsupportedMemoryBackendSnafu
+                    .fail()
+                    .map_err(BoxedError::new),
                 _ => KvBackendNotSetSnafu { backend: "all" }
                     .fail()
                     .map_err(BoxedError::new),
@@ -170,7 +214,7 @@ impl S3Config {
 /// It will dump the metadata snapshot to local file or s3 bucket.
 /// The snapshot file will be in binary format.
 #[derive(Debug, Default, Parser)]
-pub struct MetaSnapshotCommand {
+pub struct MetaSaveCommand {
     /// The connection to the metadata store.
     #[clap(flatten)]
     connection: MetaConnection,
@@ -196,7 +240,7 @@ fn create_local_file_object_store(root: &str) -> Result<ObjectStore, BoxedError>
     Ok(object_store)
 }
 
-impl MetaSnapshotCommand {
+impl MetaSaveCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         let kvbackend = self.connection.build().await?;
         let output_dir = &self.output_dir;
@@ -324,6 +368,92 @@ impl Tool for MetaRestoreTool {
                 .await
                 .map_err(BoxedError::new)?;
             Ok(())
+        }
+    }
+}
+
+/// Explore metadata from metadata snapshot.
+#[derive(Debug, Default, Parser)]
+pub struct MetaInfoCommand {
+    /// The s3 config.
+    #[clap(flatten)]
+    s3_config: S3Config,
+    /// The name of the target snapshot file. we will add the file extension automatically.
+    #[clap(long, default_value = "metadata_snapshot")]
+    file_name: String,
+    /// The query string to filter the metadata.
+    #[clap(long, default_value = "*")]
+    inspect_key: String,
+    /// The limit of the metadata to query.
+    #[clap(long)]
+    limit: Option<usize>,
+}
+
+pub struct MetaInfoTool {
+    inner: ObjectStore,
+    source_file: String,
+    inspect_key: String,
+    limit: Option<usize>,
+}
+
+#[async_trait]
+impl Tool for MetaInfoTool {
+    async fn do_work(&self) -> std::result::Result<(), BoxedError> {
+        let result = MetadataSnapshotManager::info(
+            &self.inner,
+            &self.source_file,
+            &self.inspect_key,
+            self.limit,
+        )
+        .await
+        .map_err(BoxedError::new)?;
+        for item in result {
+            println!("{}", item);
+        }
+        Ok(())
+    }
+}
+
+impl MetaInfoCommand {
+    fn decide_object_store_root_for_local_store(
+        file_path: &str,
+    ) -> Result<(&str, &str), BoxedError> {
+        let path = Path::new(file_path);
+        let parent = path
+            .parent()
+            .and_then(|p| p.to_str())
+            .context(InvalidFilePathSnafu { msg: file_path })
+            .map_err(BoxedError::new)?;
+        let file_name = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .context(InvalidFilePathSnafu { msg: file_path })
+            .map_err(BoxedError::new)?;
+        let root = if parent.is_empty() { "." } else { parent };
+        Ok((root, file_name))
+    }
+
+    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
+        let object_store = self.s3_config.build("").map_err(BoxedError::new)?;
+        if let Some(store) = object_store {
+            let tool = MetaInfoTool {
+                inner: store,
+                source_file: self.file_name.clone(),
+                inspect_key: self.inspect_key.clone(),
+                limit: self.limit,
+            };
+            Ok(Box::new(tool))
+        } else {
+            let (root, file_name) =
+                Self::decide_object_store_root_for_local_store(&self.file_name)?;
+            let object_store = create_local_file_object_store(root)?;
+            let tool = MetaInfoTool {
+                inner: object_store,
+                source_file: file_name.to_string(),
+                inspect_key: self.inspect_key.clone(),
+                limit: self.limit,
+            };
+            Ok(Box::new(tool))
         }
     }
 }
