@@ -485,11 +485,6 @@ impl QueryEngine for DatafusionQueryEngine {
                 if n > 0 {
                     let new_cfg = state.config().clone().with_target_partitions(n as usize);
                     *state.config_mut() = new_cfg;
-                } else {
-                    common_telemetry::warn!(
-                        "Invalid query_parallelism: {}, using default value",
-                        parallelism
-                    );
                 }
             } else {
                 common_telemetry::warn!(
