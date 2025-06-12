@@ -27,7 +27,7 @@ use crate::error::{
     InvalidTimestampSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu, VrlReturnValueSnafu,
 };
 use crate::etl::processor::yaml_string;
-use crate::{PipelineMap, Value as PipelineValue};
+use crate::Value as PipelineValue;
 
 pub(crate) const PROCESSOR_VRL: &str = "vrl";
 const SOURCE: &str = "source";
@@ -62,14 +62,11 @@ impl VrlProcessor {
         Ok(Self { source, program })
     }
 
-    pub fn resolve(&self, m: PipelineMap) -> Result<PipelineValue> {
-        let pipeline_vrl = m
-            .into_iter()
-            .map(|(k, v)| pipeline_value_to_vrl_value(v).map(|v| (KeyString::from(k), v)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
+    pub fn resolve(&self, m: PipelineValue) -> Result<PipelineValue> {
+        let pipeline_vrl = pipeline_value_to_vrl_value(m)?;
 
         let mut target = TargetValue {
-            value: VrlValue::Object(pipeline_vrl),
+            value: pipeline_vrl,
             metadata: VrlValue::Object(BTreeMap::new()),
             secrets: Secrets::default(),
         };
@@ -116,11 +113,11 @@ impl crate::etl::processor::Processor for VrlProcessor {
         true
     }
 
-    fn exec_mut(&self, val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, val: PipelineValue) -> Result<PipelineValue> {
         let val = self.resolve(val)?;
 
         if let PipelineValue::Map(m) = val {
-            Ok(m.values)
+            Ok(PipelineValue::Map(m.values.into()))
         } else {
             VrlRegexValueSnafu.fail()
         }
@@ -244,19 +241,19 @@ del(.user_info)
         assert!(v.is_ok());
         let v = v.unwrap();
 
-        let mut n = PipelineMap::new();
+        let mut n = BTreeMap::new();
         n.insert(
             "name".to_string(),
             PipelineValue::String("certain_name".to_string()),
         );
 
-        let mut m = PipelineMap::new();
+        let mut m = BTreeMap::new();
         m.insert(
             "user_info".to_string(),
             PipelineValue::Map(Map { values: n }),
         );
 
-        let re = v.resolve(m);
+        let re = v.resolve(PipelineValue::Map(Map { values: m }));
         assert!(re.is_ok());
         let re = re.unwrap();
 

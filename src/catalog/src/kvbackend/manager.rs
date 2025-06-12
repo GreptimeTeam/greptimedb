@@ -51,6 +51,7 @@ use crate::error::{
 };
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
+use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
 use crate::system_schema::SystemSchemaProvider;
 use crate::CatalogManager;
@@ -84,6 +85,7 @@ impl KvBackendCatalogManager {
         backend: KvBackendRef,
         cache_registry: LayeredCacheRegistryRef,
         procedure_manager: Option<ProcedureManagerRef>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             information_extension,
@@ -102,12 +104,14 @@ impl KvBackendCatalogManager {
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                     Arc::new(FlowMetadataManager::new(backend.clone())),
+                    process_manager.clone(),
                 )),
                 pg_catalog_provider: Arc::new(PGCatalogProvider::new(
                     DEFAULT_CATALOG_NAME.to_string(),
                     me.clone(),
                 )),
                 backend,
+                process_manager,
             },
             cache_registry,
             procedure_manager,
@@ -419,6 +423,7 @@ struct SystemCatalog {
     information_schema_provider: Arc<InformationSchemaProvider>,
     pg_catalog_provider: Arc<PGCatalogProvider>,
     backend: KvBackendRef,
+    process_manager: Option<ProcessManagerRef>,
 }
 
 impl SystemCatalog {
@@ -486,6 +491,7 @@ impl SystemCatalog {
                         catalog.to_string(),
                         self.catalog_manager.clone(),
                         Arc::new(FlowMetadataManager::new(self.backend.clone())),
+                        self.process_manager.clone(),
                     ))
                 });
             information_schema_provider.table(table_name)

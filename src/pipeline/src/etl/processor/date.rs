@@ -30,7 +30,6 @@ use crate::etl::processor::{
     FIELD_NAME, IGNORE_MISSING_NAME,
 };
 use crate::etl::value::{Timestamp, Value};
-use crate::etl::PipelineMap;
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -198,14 +197,14 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineMap> {
+    fn exec_mut(&self, mut val: Value) -> Result<Value> {
         for field in self.fields.iter() {
             let index = field.input_field();
             match val.get(index) {
                 Some(Value::String(s)) => {
                     let timestamp = self.parse(s)?;
                     let output_key = field.target_or_input_field();
-                    val.insert(output_key.to_string(), Value::Timestamp(timestamp));
+                    val.insert(output_key.to_string(), Value::Timestamp(timestamp))?;
                 }
                 Some(Value::Null) | None => {
                     if !self.ignore_missing {

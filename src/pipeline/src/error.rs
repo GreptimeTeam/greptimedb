@@ -734,6 +734,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Top level value must be map"))]
+    ValueMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
         #[snafu(source)]
@@ -809,7 +815,7 @@ impl ErrorExt for Error {
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
             | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
-            MultiPipelineWithDiffSchema { .. } => StatusCode::IllegalState,
+            MultiPipelineWithDiffSchema { .. } | ValueMustBeMap { .. } => StatusCode::IllegalState,
             BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),
             DataFrame { source, .. } => source.status_code(),

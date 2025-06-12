@@ -19,6 +19,7 @@ mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
+mod process_list;
 pub mod region_peers;
 mod region_statistics;
 mod runtime_metrics;
@@ -42,6 +43,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
+use process_list::InformationSchemaProcessList;
 use store_api::storage::{ScanRequest, TableId};
 use table::metadata::TableType;
 use table::TableRef;
@@ -50,6 +52,7 @@ use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::{Error, Result};
+use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
@@ -113,6 +116,7 @@ macro_rules! setup_memory_table {
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    process_manager: Option<ProcessManagerRef>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
 }
@@ -207,6 +211,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 ),
             ) as _),
+            PROCESS_LIST => self
+                .process_manager
+                .as_ref()
+                .map(|p| Arc::new(InformationSchemaProcessList::new(p.clone())) as _),
             _ => None,
         }
     }
@@ -217,11 +225,13 @@ impl InformationSchemaProvider {
         catalog_name: String,
         catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> Self {
         let mut provider = Self {
             catalog_name,
             catalog_manager,
             flow_metadata_manager,
+            process_manager,
             tables: HashMap::new(),
         };
 
@@ -277,6 +287,9 @@ impl InformationSchemaProvider {
             self.build_table(TABLE_CONSTRAINTS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        if let Some(process_list) = self.build_table(PROCESS_LIST) {
+            tables.insert(PROCESS_LIST.to_string(), process_list);
+        }
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));

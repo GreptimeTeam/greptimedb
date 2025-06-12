@@ -60,7 +60,7 @@ use crate::etl::processor::json_parse::JsonParseProcessor;
 use crate::etl::processor::select::SelectProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
 use crate::etl::processor::vrl::VrlProcessor;
-use crate::etl::PipelineMap;
+use crate::Value;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -125,7 +125,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: PipelineMap) -> Result<PipelineMap>;
+    fn exec_mut(&self, val: Value) -> Result<Value>;
 }
 
 #[derive(Debug)]

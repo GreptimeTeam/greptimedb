@@ -39,13 +39,14 @@ use table::metadata::TableInfo;
 use table::TableRef;
 
 use crate::error::{
-    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu,
+    BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, DataFrameSnafu, Error,
     ExecuteInternalStatementSnafu, InsertPipelineSnafu, InvalidPipelineVersionSnafu,
     MultiPipelineWithDiffSchemaSnafu, PipelineNotFoundSnafu, RecordBatchLenNotMatchSnafu, Result,
 };
 use crate::etl::{parse, Content, Pipeline};
 use crate::manager::pipeline_cache::PipelineCache;
 use crate::manager::{PipelineInfo, PipelineVersion};
+use crate::metrics::METRIC_PIPELINE_TABLE_FIND_COUNT;
 use crate::util::prepare_dataframe_conditions;
 
 pub(crate) const PIPELINE_TABLE_NAME: &str = "pipelines";
@@ -283,7 +284,34 @@ impl PipelineTable {
             return Ok(pipeline);
         }
 
-        let mut pipeline_vec = self.find_pipeline(name, version).await?;
+        let mut pipeline_vec;
+        match self.find_pipeline(name, version).await {
+            Ok(p) => {
+                METRIC_PIPELINE_TABLE_FIND_COUNT
+                    .with_label_values(&["true"])
+                    .inc();
+                pipeline_vec = p;
+            }
+            Err(e) => {
+                match e {
+                    Error::CollectRecords { .. } => {
+                        // if collect records failed, it means the pipeline table is temporary invalid
+                        // we should use failover cache
+                        METRIC_PIPELINE_TABLE_FIND_COUNT
+                            .with_label_values(&["false"])
+                            .inc();
+                        return self
+                            .cache
+                            .get_failover_cache(schema, name, version)?
+                            .ok_or(PipelineNotFoundSnafu { name, version }.build());
+                    }
+                    _ => {
+                        // if other error, we should return it
+                        return Err(e);
+                    }
+                }
+            }
+        };
         ensure!(
             !pipeline_vec.is_empty(),
             PipelineNotFoundSnafu { name, version }

@@ -1001,7 +1001,7 @@ impl ErrorExt for Error {
             }
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             RdsTransactionRetryFailed { .. } => StatusCode::Internal,
-            Error::DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
+            DatanodeTableInfoNotFound { .. } => StatusCode::Internal,
         }
     }
 

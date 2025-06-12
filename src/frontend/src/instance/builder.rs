@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
@@ -54,9 +55,11 @@ pub struct FrontendBuilder {
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
     procedure_executor: ProcedureExecutorRef,
+    process_manager: ProcessManagerRef,
 }
 
 impl FrontendBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         options: FrontendOptions,
         kv_backend: KvBackendRef,
@@ -64,6 +67,7 @@ impl FrontendBuilder {
         catalog_manager: CatalogManagerRef,
         node_manager: NodeManagerRef,
         procedure_executor: ProcedureExecutorRef,
+        process_manager: ProcessManagerRef,
     ) -> Self {
         Self {
             options,
@@ -74,6 +78,7 @@ impl FrontendBuilder {
             node_manager,
             plugins: None,
             procedure_executor,
+            process_manager,
         }
     }
 
@@ -95,7 +100,7 @@ impl FrontendBuilder {
         let kv_backend = self.kv_backend;
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
-
+        let process_manager = self.process_manager;
         let table_route_cache: TableRouteCacheRef =
             self.layered_cache_registry
                 .get()
@@ -216,6 +221,7 @@ impl FrontendBuilder {
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
             slow_query_recorder,
             limiter,
+            process_manager,
         })
     }
 }

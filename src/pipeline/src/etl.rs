@@ -19,6 +19,8 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
+use std::collections::BTreeMap;
+
 use ahash::{HashMap, HashMapExt};
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
@@ -31,7 +33,7 @@ use yaml_rust::YamlLoader;
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
     AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
-    YamlLoadSnafu, YamlParseSnafu,
+    ValueMustBeMapSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::etl::processor::ProcessorKind;
@@ -44,8 +46,6 @@ const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
 const DISPATCHER: &str = "dispatcher";
 const TABLESUFFIX: &str = "table_suffix";
-
-pub type PipelineMap = std::collections::BTreeMap<String, Value>;
 
 pub enum Content<'a> {
     Json(&'a str),
@@ -155,7 +155,7 @@ impl DispatchedTo {
 pub enum PipelineExecOutput {
     Transformed(TransformedOutput),
     AutoTransform(AutoTransformOutput),
-    DispatchedTo(DispatchedTo, PipelineMap),
+    DispatchedTo(DispatchedTo, Value),
 }
 
 #[derive(Debug)]
@@ -163,7 +163,7 @@ pub struct TransformedOutput {
     pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
-    pub pipeline_map: PipelineMap,
+    pub pipeline_map: Value,
 }
 
 #[derive(Debug)]
@@ -171,7 +171,7 @@ pub struct AutoTransformOutput {
     pub table_suffix: Option<String>,
     // ts_column_name -> unit
     pub ts_unit_map: HashMap<String, TimeUnit>,
-    pub pipeline_map: PipelineMap,
+    pub pipeline_map: Value,
 }
 
 impl PipelineExecOutput {
@@ -197,42 +197,42 @@ impl PipelineExecOutput {
     }
 }
 
-pub fn json_to_map(val: serde_json::Value) -> Result<PipelineMap> {
+pub fn json_to_map(val: serde_json::Value) -> Result<Value> {
     match val {
         serde_json::Value::Object(map) => {
-            let mut intermediate_state = PipelineMap::new();
+            let mut intermediate_state = BTreeMap::new();
             for (k, v) in map {
                 intermediate_state.insert(k, Value::try_from(v)?);
             }
-            Ok(intermediate_state)
+            Ok(Value::Map(intermediate_state.into()))
         }
         _ => InputValueMustBeObjectSnafu.fail(),
     }
 }
 
-pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<PipelineMap>> {
+pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<Value>> {
     val.into_iter().map(json_to_map).collect()
 }
 
-pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<PipelineMap> {
+pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<Value> {
     match val {
         simd_json::OwnedValue::Object(map) => {
-            let mut intermediate_state = PipelineMap::new();
+            let mut intermediate_state = BTreeMap::new();
             for (k, v) in map.into_iter() {
                 intermediate_state.insert(k, Value::try_from(v)?);
             }
-            Ok(intermediate_state)
+            Ok(Value::Map(intermediate_state.into()))
         }
         _ => InputValueMustBeObjectSnafu.fail(),
     }
 }
 
-pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<PipelineMap>> {
+pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<Value>> {
     val.into_iter().map(simd_json_to_map).collect()
 }
 
 impl Pipeline {
-    pub fn exec_mut(&self, mut val: PipelineMap) -> Result<PipelineExecOutput> {
+    pub fn exec_mut(&self, mut val: Value) -> Result<PipelineExecOutput> {
         // process
         for processor in self.processors.iter() {
             val = processor.exec_mut(val)?;
@@ -263,7 +263,7 @@ impl Pipeline {
 
             let mut ts_unit_map = HashMap::with_capacity(4);
             // get all ts values
-            for (k, v) in val.iter() {
+            for (k, v) in val.as_map_mut().context(ValueMustBeMapSnafu)? {
                 if let Value::Timestamp(ts) = v {
                     if !ts_unit_map.contains_key(k) {
                         ts_unit_map.insert(k.clone(), ts.get_unit());
@@ -378,8 +378,9 @@ transform:
       type: timestamp, ns
       index: time"#;
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_str)).unwrap();
-        let mut payload = PipelineMap::new();
+        let mut payload = BTreeMap::new();
         payload.insert("message".to_string(), Value::String(message));
+        let payload = Value::Map(payload.into());
         let result = pipeline
             .exec_mut(payload)
             .unwrap()

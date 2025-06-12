@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::frontend::frontend_server::FrontendServer;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::prometheus_gateway_server::PrometheusGatewayServer;
 use api::v1::region::region_server::RegionServer;
@@ -29,6 +30,7 @@ use tonic::transport::{Identity, ServerTlsConfig};
 
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
+use crate::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
@@ -122,6 +124,12 @@ impl GrpcServerBuilder {
             self,
             FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone()))
         );
+        self
+    }
+
+    /// Add handler for Frontend gRPC service.
+    pub fn frontend_grpc_handler(mut self, handler: FrontendGrpcHandler) -> Self {
+        add_service!(self, FrontendServer::new(handler));
         self
     }
 

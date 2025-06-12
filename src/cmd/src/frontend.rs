@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
 use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -38,6 +39,7 @@ use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_client::{MetaClientOptions, MetaClientType};
+use servers::addrs;
 use servers::export_metrics::ExportMetricsTask;
 use servers::tls::{TlsMode, TlsOption};
 use snafu::{OptionExt, ResultExt};
@@ -342,11 +344,17 @@ impl StartCommand {
 
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
+
+        let process_manager = Arc::new(ProcessManager::new(
+            addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
+            Some(meta_client.clone()),
+        ));
         let catalog_manager = KvBackendCatalogManager::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
             None,
+            Some(process_manager.clone()),
         );
 
         let executor = HandlerGroupExecutor::new(vec![
@@ -383,6 +391,7 @@ impl StartCommand {
             catalog_manager,
             Arc::new(client),
             meta_client,
+            process_manager,
         )
         .with_plugin(plugins.clone())
         .with_local_cache_invalidator(layered_cache_registry)

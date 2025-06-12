@@ -20,7 +20,7 @@ use yaml_rust::Yaml;
 use crate::error::{
     Error, InvalidTableSuffixTemplateSnafu, RequiredTableSuffixTemplateSnafu, Result,
 };
-use crate::{PipelineMap, Value};
+use crate::Value;
 
 const REPLACE_KEY: &str = "{}";
 
@@ -47,7 +47,7 @@ pub(crate) struct TableSuffixTemplate {
 }
 
 impl TableSuffixTemplate {
-    pub fn apply(&self, val: &PipelineMap) -> Option<String> {
+    pub fn apply(&self, val: &Value) -> Option<String> {
         let values = self
             .keys
             .iter()

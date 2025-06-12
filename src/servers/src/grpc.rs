@@ -17,6 +17,7 @@ pub mod builder;
 mod cancellation;
 mod database;
 pub mod flight;
+pub mod frontend_grpc_handler;
 pub mod greptime_handler;
 pub mod prom_query_gateway;
 pub mod region_server;

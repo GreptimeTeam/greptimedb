@@ -7,5 +7,13 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 common-error.workspace = true
+common-grpc.workspace = true
 common-macro.workspace = true
+common-meta.workspace = true
+greptime-proto.workspace = true
+meta-client.workspace = true
 snafu.workspace = true
+tonic.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

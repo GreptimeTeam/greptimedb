@@ -21,7 +21,7 @@ use crate::error::{
     ValueRequiredForDispatcherRuleSnafu,
 };
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
-use crate::{PipelineMap, Value};
+use crate::Value;
 
 const FIELD: &str = "field";
 const PIPELINE: &str = "pipeline";
@@ -109,7 +109,7 @@ impl TryFrom<&Yaml> for Dispatcher {
 
 impl Dispatcher {
     /// execute dispatcher and returns matched rule if any
-    pub(crate) fn exec(&self, data: &PipelineMap) -> Option<&Rule> {
+    pub(crate) fn exec(&self, data: &Value) -> Option<&Rule> {
         if let Some(value) = data.get(&self.field) {
             for rule in &self.rules {
                 if rule.value == *value {
@@ -119,7 +119,7 @@ impl Dispatcher {
 
             None
         } else {
-            debug!("field {} not found in keys {:?}", &self.field, data.keys());
+            debug!("field {} not found in keys {:?}", &self.field, data);
             None
         }
     }

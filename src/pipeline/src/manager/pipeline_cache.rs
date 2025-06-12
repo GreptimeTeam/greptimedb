@@ -34,6 +34,9 @@ const PIPELINES_CACHE_TTL: Duration = Duration::from_secs(10);
 pub(crate) struct PipelineCache {
     pipelines: Cache<String, Arc<Pipeline>>,
     original_pipelines: Cache<String, (String, TimestampNanosecond)>,
+    /// If the pipeline table is invalid, we can use this cache to prevent failures when writing logs through the pipeline
+    /// The failover cache never expires, but it will be updated when the pipelines cache is updated.
+    failover_cache: Cache<String, (String, TimestampNanosecond)>,
 }
 
 impl PipelineCache {
@@ -47,6 +50,7 @@ impl PipelineCache {
                 .max_capacity(PIPELINES_CACHE_SIZE)
                 .time_to_live(PIPELINES_CACHE_TTL)
                 .build(),
+            failover_cache: Cache::builder().max_capacity(PIPELINES_CACHE_SIZE).build(),
         }
     }
 
@@ -63,7 +67,7 @@ impl PipelineCache {
             schema,
             name,
             version,
-            pipeline,
+            pipeline.clone(),
             with_latest,
         );
     }
@@ -81,6 +85,14 @@ impl PipelineCache {
             schema,
             name,
             version,
+            pipeline.clone(),
+            with_latest,
+        );
+        insert_cache_generic(
+            &self.failover_cache,
+            schema,
+            name,
+            version,
             pipeline,
             with_latest,
         );
@@ -93,6 +105,15 @@ impl PipelineCache {
         version: PipelineVersion,
     ) -> Result<Option<Arc<Pipeline>>> {
         get_cache_generic(&self.pipelines, schema, name, version)
+    }
+
+    pub(crate) fn get_failover_cache(
+        &self,
+        schema: &str,
+        name: &str,
+        version: PipelineVersion,
+    ) -> Result<Option<(String, TimestampNanosecond)>> {
+        get_cache_generic(&self.failover_cache, schema, name, version)
     }
 
     pub(crate) fn get_pipeline_str_cache(
@@ -125,6 +146,7 @@ impl PipelineCache {
             let k = k.as_str();
             self.pipelines.remove(k);
             self.original_pipelines.remove(k);
+            self.failover_cache.remove(k);
         }
     }
 }
