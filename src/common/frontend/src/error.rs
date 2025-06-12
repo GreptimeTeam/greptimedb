@@ -67,7 +67,8 @@ impl ErrorExt for Error {
             External { source, .. } => source.status_code(),
             Meta { source, .. } => source.status_code(),
             ParseProcessId { .. } => StatusCode::InvalidArguments,
-            ListProcess { .. } | CreateChannel { .. } => StatusCode::External,
+            ListProcess { .. } => StatusCode::External,
+            CreateChannel { source, .. } => source.status_code(),
         }
     }
 
