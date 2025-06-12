@@ -33,7 +33,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use client::OutputData;
-use common_base::cancellation_handle::CancellableFuture;
+use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};

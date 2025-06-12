@@ -285,6 +285,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Meta client is not provided"))]
+    MetaClientMissing {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find frontend node: {}", addr))]
     FrontendNotFound {
         addr: String,
@@ -361,6 +367,7 @@ impl ErrorExt for Error {
             }
             Error::InvokeFrontend { source, .. } => source.status_code(),
             Error::FrontendNotFound { .. } => StatusCode::InvalidArguments,
+            Error::MetaClientMissing { .. } => StatusCode::Internal,
         }
     }
 

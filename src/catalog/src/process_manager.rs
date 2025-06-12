@@ -19,12 +19,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
-use common_base::cancellation_handle::CancellationHandle;
+use common_base::cancellation::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 
@@ -160,24 +160,30 @@ impl ProcessManager {
         if server_addr == self.server_addr {
             if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
                 if let Some(process) = catalogs.remove(&id) {
-                    debug!(
-                        "Stopped process, catalog: {}, id: {:?}",
+                    process.handle.cancel();
+                    info!(
+                        "Killed process, catalog: {}, id: {:?}",
                         process.process.catalog, process.process.id
                     );
-                    return Ok(true);
+                    Ok(true)
+                } else {
+                    debug!("Failed to kill process, id not found: {}", id);
+                    Ok(false)
                 }
+            } else {
+                debug!("Failed to kill process, catalog not found: {}", catalog);
+                Ok(false)
             }
-            Ok(false)
         } else {
             let mut nodes = self
                 .frontend_selector
                 .as_ref()
-                .unwrap()
+                .context(error::MetaClientMissingSnafu)?
                 .select(|node| node.peer.addr == server_addr)
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             ensure!(
-                nodes.is_empty(),
+                !nodes.is_empty(),
                 error::FrontendNotFoundSnafu { addr: server_addr }
             );
 
@@ -206,7 +212,6 @@ impl Drop for Ticket {
     fn drop(&mut self) {
         self.manager
             .deregister_query(std::mem::take(&mut self.catalog), self.id);
-        self.cancellation_handler.cancel();
     }
 }
 
