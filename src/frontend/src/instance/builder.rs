@@ -180,6 +180,7 @@ impl FrontendBuilder {
             local_cache_invalidator,
             inserter.clone(),
             table_route_cache,
+            Some(process_manager.clone()),
         ));
 
         let pipeline_operator = Arc::new(PipelineOperator::new(

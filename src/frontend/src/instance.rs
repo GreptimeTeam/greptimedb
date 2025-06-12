@@ -605,6 +605,8 @@ pub fn check_permission(
         }
         // cursor operations are always allowed once it's created
         Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
+        // User can only kill process in their own catalog.
+        Statement::Kill(_) => {}
     }
     Ok(())
 }

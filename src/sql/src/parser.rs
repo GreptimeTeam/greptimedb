@@ -121,78 +121,87 @@ impl ParserContext<'_> {
     /// Parses parser context to a set of statements.
     pub fn parse_statement(&mut self) -> Result<Statement> {
         match self.parser.peek_token().token {
-            Token::Word(w) => {
-                match w.keyword {
-                    Keyword::CREATE => {
-                        let _ = self.parser.next_token();
-                        self.parse_create()
-                    }
+            Token::Word(w) => match w.keyword {
+                Keyword::CREATE => {
+                    let _ = self.parser.next_token();
+                    self.parse_create()
+                }
 
-                    Keyword::EXPLAIN => {
-                        let _ = self.parser.next_token();
-                        self.parse_explain()
-                    }
+                Keyword::EXPLAIN => {
+                    let _ = self.parser.next_token();
+                    self.parse_explain()
+                }
 
-                    Keyword::SHOW => {
-                        let _ = self.parser.next_token();
-                        self.parse_show()
-                    }
+                Keyword::SHOW => {
+                    let _ = self.parser.next_token();
+                    self.parse_show()
+                }
 
-                    Keyword::DELETE => self.parse_delete(),
+                Keyword::DELETE => self.parse_delete(),
 
-                    Keyword::DESCRIBE | Keyword::DESC => {
-                        let _ = self.parser.next_token();
-                        self.parse_describe()
-                    }
+                Keyword::DESCRIBE | Keyword::DESC => {
+                    let _ = self.parser.next_token();
+                    self.parse_describe()
+                }
 
-                    Keyword::INSERT => self.parse_insert(),
+                Keyword::INSERT => self.parse_insert(),
 
-                    Keyword::REPLACE => self.parse_replace(),
+                Keyword::REPLACE => self.parse_replace(),
 
-                    Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
-                    Keyword::ALTER => self.parse_alter(),
+                Keyword::ALTER => self.parse_alter(),
 
-                    Keyword::DROP => self.parse_drop(),
+                Keyword::DROP => self.parse_drop(),
 
-                    Keyword::COPY => self.parse_copy(),
+                Keyword::COPY => self.parse_copy(),
 
-                    Keyword::TRUNCATE => self.parse_truncate(),
+                Keyword::TRUNCATE => self.parse_truncate(),
 
-                    Keyword::SET => self.parse_set_variables(),
+                Keyword::SET => self.parse_set_variables(),
 
-                    Keyword::ADMIN => self.parse_admin_command(),
+                Keyword::ADMIN => self.parse_admin_command(),
 
-                    Keyword::NoKeyword
-                        if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
-                    {
-                        self.parse_tql()
-                    }
+                Keyword::NoKeyword
+                    if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
+                {
+                    self.parse_tql()
+                }
 
-                    Keyword::DECLARE => self.parse_declare_cursor(),
+                Keyword::DECLARE => self.parse_declare_cursor(),
 
-                    Keyword::FETCH => self.parse_fetch_cursor(),
+                Keyword::FETCH => self.parse_fetch_cursor(),
 
-                    Keyword::CLOSE => self.parse_close_cursor(),
+                Keyword::CLOSE => self.parse_close_cursor(),
 
-                    Keyword::USE => {
-                        let _ = self.parser.next_token();
+                Keyword::USE => {
+                    let _ = self.parser.next_token();
 
-                        let database_name = self.parser.parse_identifier().with_context(|_| {
+                    let database_name = self.parser.parse_identifier().with_context(|_| {
+                        error::UnexpectedSnafu {
+                            expected: "a database name",
+                            actual: self.peek_token_as_string(),
+                        }
+                    })?;
+                    Ok(Statement::Use(
+                        Self::canonicalize_identifier(database_name).value,
+                    ))
+                }
+
+                Keyword::KILL => {
+                    let _ = self.parser.next_token();
+                    let process_id_ident =
+                        self.parser.parse_literal_string().with_context(|_| {
                             error::UnexpectedSnafu {
-                                expected: "a database name",
+                                expected: "process id",
                                 actual: self.peek_token_as_string(),
                             }
                         })?;
-                        Ok(Statement::Use(
-                            Self::canonicalize_identifier(database_name).value,
-                        ))
-                    }
-
-                    // todo(hl) support more statements.
-                    _ => self.unsupported(self.peek_token_as_string()),
+                    Ok(Statement::Kill(process_id_ident))
                 }
-            }
+
+                _ => self.unsupported(self.peek_token_as_string()),
+            },
             Token::LParen => self.parse_query(),
             unexpected => self.unsupported(unexpected.to_string()),
         }

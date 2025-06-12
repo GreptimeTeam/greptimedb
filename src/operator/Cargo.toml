@@ -23,6 +23,7 @@ catalog.workspace = true
 chrono.workspace = true
 client.workspace = true
 common-base.workspace = true
+common-frontend.workspace = true
 common-catalog.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
