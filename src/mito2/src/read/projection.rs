@@ -321,11 +321,11 @@ mod tests {
     use datatypes::arrow::util::pretty;
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+    use mito_codec::test_util::TestRegionMetadataBuilder;
 
     use super::*;
     use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
-    use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     fn new_batch(
         ts_start: i64,
