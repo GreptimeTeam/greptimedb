@@ -531,7 +531,7 @@ mod tests {
                 let value = encoder.decode_value_at(&result, i, &mut offsets).unwrap();
                 decoded.push(value);
             }
-            assert_eq!(data_types.len(), offsets.len(), "offsets: {:?}", offsets);
+            assert_eq!(data_types.len(), offsets.len(), "offsets: {offsets:?}");
             assert_eq!(decoded, row);
         }
     }

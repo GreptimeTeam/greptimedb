@@ -27,7 +27,9 @@ use snafu::{Location, Snafu};
 pub enum Error {
     #[snafu(display("Row value mismatches field data type"))]
     FieldTypeMismatch {
-        source: datatypes::error::Error,
+        // Box the source to reduce the size of the error.
+        #[snafu(source(from(datatypes::error::Error, Box::new)))]
+        source: Box<datatypes::error::Error>,
         #[snafu(implicit)]
         location: Location,
     },
