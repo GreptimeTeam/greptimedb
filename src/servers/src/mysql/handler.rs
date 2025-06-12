@@ -110,6 +110,8 @@ impl MysqlInstanceShim {
                 Some(client_addr),
                 Channel::Mysql,
                 Default::default(),
+                // TODO(sunng87): generate process id properly
+                0,
             )),
             user_provider,
             prepared_stmts: Default::default(),

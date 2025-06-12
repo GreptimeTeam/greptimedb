@@ -113,7 +113,7 @@ impl PgLoginVerifier {
     }
 }
 
-fn set_client_info<C>(client: &C, session: &Session)
+fn set_client_info<C>(client: &mut C, session: &Session)
 where
     C: ClientInfo,
 {
@@ -123,6 +123,10 @@ where
     if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         session.set_schema(current_schema.clone());
     }
+
+    // pass generated process id and secret key to client, this information will
+    // be sent to postgres client for query cancellation.
+    client.set_pid_and_secret_key(session.process_id() as i32, rand::random::<i32>());
     // set userinfo outside
 }
 

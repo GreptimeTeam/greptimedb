@@ -58,12 +58,15 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
-    // The configuration parameter are used to store the parameters that are set by the user
+    /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
-    // Track which protocol the query comes from.
+    /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
+    /// Process id for managing on-going queries
+    #[builder(default)]
+    process_id: u64,
 }
 
 /// This fields hold data that is only valid to current query context
@@ -432,6 +435,10 @@ impl QueryContext {
             .get(&region_id)
             .copied()
     }
+
+    pub fn process_id(&self) -> u64 {
+        self.process_id
+    }
 }
 
 impl QueryContextBuilder {
@@ -453,6 +460,7 @@ impl QueryContextBuilder {
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
+            process_id: self.process_id.unwrap_or_default(),
         }
     }
 
@@ -611,6 +619,7 @@ mod test {
             Some("127.0.0.1:9000".parse().unwrap()),
             Channel::Mysql,
             Default::default(),
+            100,
         );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
@@ -622,6 +631,7 @@ mod test {
         assert_eq!(client_addr.port(), 9000);
 
         assert_eq!("mysql[127.0.0.1:9000]", session.conn_info().to_string());
+        assert_eq!(100, session.process_id());
     }
 
     #[test]
