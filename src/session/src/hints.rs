@@ -18,7 +18,7 @@ pub const HINTS_KEY_PREFIX: &str = "x-greptime-hint-";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 
-pub const HINT_KEYS: [&str; 7] = [
+pub const HINT_KEYS: [&str; 8] = [
     "x-greptime-hint-auto_create_table",
     "x-greptime-hint-ttl",
     "x-greptime-hint-append_mode",
@@ -26,4 +26,6 @@ pub const HINT_KEYS: [&str; 7] = [
     "x-greptime-hint-physical_table",
     "x-greptime-hint-skip_wal",
     "x-greptime-hint-read_preference",
+    // same as `query.parallelism` in query options, but only for this query
+    "x-greptime-hint-query_parallelism",
 ];
