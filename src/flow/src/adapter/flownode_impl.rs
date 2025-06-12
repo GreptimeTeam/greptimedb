@@ -31,6 +31,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
 use datatypes::value::Value;
 use futures::TryStreamExt;
+use greptime_proto::v1::flow::DirtyWindowRequest;
 use itertools::Itertools;
 use session::context::QueryContextBuilder;
 use snafu::{ensure, IntoError, OptionExt, ResultExt};
@@ -46,7 +47,7 @@ use crate::error::{
     IllegalCheckTaskStateSnafu, InsertIntoFlowSnafu, InternalSnafu, JoinTaskSnafu, ListFlowsSnafu,
     NoAvailableFrontendSnafu, SyncCheckTaskSnafu, UnexpectedSnafu,
 };
-use crate::metrics::METRIC_FLOW_TASK_COUNT;
+use crate::metrics::{METRIC_FLOW_ROWS, METRIC_FLOW_TASK_COUNT};
 use crate::repr::{self, DiffRow};
 use crate::{Error, FlowId};
 
@@ -689,6 +690,9 @@ impl FlowEngine for FlowDualEngine {
         let mut to_stream_engine = Vec::with_capacity(request.requests.len());
         let mut to_batch_engine = request.requests;
 
+        let mut batching_row_cnt = 0;
+        let mut streaming_row_cnt = 0;
+
         {
             // not locking this, or recover flows will be starved when also handling flow inserts
             let src_table2flow = self.src_table2flow.read().await;
@@ -698,9 +702,11 @@ impl FlowEngine for FlowDualEngine {
                 let is_in_stream = src_table2flow.in_stream(table_id);
                 let is_in_batch = src_table2flow.in_batch(table_id);
                 if is_in_stream {
+                    streaming_row_cnt += req.rows.as_ref().map(|rs| rs.rows.len()).unwrap_or(0);
                     to_stream_engine.push(req.clone());
                 }
                 if is_in_batch {
+                    batching_row_cnt += req.rows.as_ref().map(|rs| rs.rows.len()).unwrap_or(0);
                     return true;
                 }
                 if !is_in_batch && !is_in_stream {
@@ -712,6 +718,14 @@ impl FlowEngine for FlowDualEngine {
             // drop(src_table2flow);
             // can't use drop due to https://github.com/rust-lang/rust/pull/128846
         }
+
+        METRIC_FLOW_ROWS
+            .with_label_values(&["in-streaming"])
+            .inc_by(streaming_row_cnt as u64);
+
+        METRIC_FLOW_ROWS
+            .with_label_values(&["in-batching"])
+            .inc_by(batching_row_cnt as u64);
 
         let streaming_engine = self.streaming_engine.clone();
         let stream_handler: JoinHandle<Result<(), Error>> =
@@ -819,6 +833,10 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .map(|_| Default::default())
             .map_err(to_meta_err(snafu::location!()))
     }
+
+    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
+        unreachable!()
+    }
 }
 
 /// return a function to convert `crate::error::Error` to `common_meta::error::Error`
@@ -925,6 +943,10 @@ impl common_meta::node_manager::Flownode for StreamingEngine {
             .await
             .map(|_| Default::default())
             .map_err(to_meta_err(snafu::location!()))
+    }
+
+    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
+        unreachable!()
     }
 }
 

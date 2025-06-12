@@ -12,18 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
 use ahash::{HashMap, HashMapExt};
+use api::v1::flow::DirtyWindowRequest;
 use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
 use api::v1::ArrowIpc;
+use arrow::array::{
+    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+use arrow::datatypes::{DataType, Int64Type, TimeUnit};
+use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
+use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
-use table::metadata::TableId;
+use table::metadata::TableInfoRef;
+use table::TableRef;
 
 use crate::insert::Inserter;
 use crate::{error, metrics};
@@ -32,10 +43,12 @@ impl Inserter {
     /// Handle bulk insert request.
     pub async fn handle_bulk_insert(
         &self,
-        table_id: TableId,
+        table: TableRef,
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> error::Result<AffectedRows> {
+        let table_info = table.table_info();
+        let table_id = table_info.table_id();
         let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["decode_request"])
             .start_timer();
@@ -48,6 +61,10 @@ impl Inserter {
             return Ok(0);
         };
         decode_timer.observe_duration();
+
+        // notify flownode to update dirty timestamps if flow is configured.
+        self.maybe_update_flow_dirty_window(table_info, record_batch.clone());
+
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
             .with_label_values(&["raw"])
@@ -216,4 +233,103 @@ impl Inserter {
         crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
+
+    fn maybe_update_flow_dirty_window(&self, table_info: TableInfoRef, record_batch: RecordBatch) {
+        let table_id = table_info.table_id();
+        let table_flownode_set_cache = self.table_flownode_set_cache.clone();
+        let node_manager = self.node_manager.clone();
+        common_runtime::spawn_global(async move {
+            let result = table_flownode_set_cache
+                .get(table_id)
+                .await
+                .context(error::RequestInsertsSnafu);
+            let flownodes = match result {
+                Ok(flownodes) => flownodes.unwrap_or_default(),
+                Err(e) => {
+                    error!(e; "Failed to get flownodes for table id: {}", table_id);
+                    return;
+                }
+            };
+
+            let peers: HashSet<_> = flownodes.values().cloned().collect();
+            if peers.is_empty() {
+                return;
+            }
+
+            let Ok(timestamps) = extract_timestamps(
+                &record_batch,
+                &table_info
+                    .meta
+                    .schema
+                    .timestamp_column()
+                    .as_ref()
+                    .unwrap()
+                    .name,
+            )
+            .inspect_err(|e| {
+                error!(e; "Failed to extract timestamps from record batch");
+            }) else {
+                return;
+            };
+
+            for peer in peers {
+                let node_manager = node_manager.clone();
+                let timestamps = timestamps.clone();
+                common_runtime::spawn_global(async move {
+                    if let Err(e) = node_manager
+                        .flownode(&peer)
+                        .await
+                        .handle_mark_window_dirty(DirtyWindowRequest {
+                            table_id,
+                            timestamps,
+                        })
+                        .await
+                        .context(error::RequestInsertsSnafu)
+                    {
+                        error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
+fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Result<Vec<i64>> {
+    let ts_col = rb
+        .column_by_name(timestamp_index_name)
+        .context(error::ColumnNotFoundSnafu {
+            msg: timestamp_index_name,
+        })?;
+    if rb.num_rows() == 0 {
+        return Ok(vec![]);
+    }
+    let primitive = match ts_col.data_type() {
+        DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => ts_col
+                .as_any()
+                .downcast_ref::<TimestampSecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Millisecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Microsecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+            TimeUnit::Nanosecond => ts_col
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap()
+                .reinterpret_cast::<Int64Type>(),
+        },
+        t => {
+            return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
+        }
+    };
+    Ok(primitive.iter().flatten().collect())
 }

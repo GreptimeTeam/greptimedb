@@ -23,8 +23,8 @@ use common_grpc::flight::FlightDecoder;
 use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use table::metadata::TableId;
 use table::table_name::TableName;
+use table::TableRef;
 
 use crate::error::{self, Result};
 
@@ -45,8 +45,8 @@ pub trait GrpcQueryHandler {
 
     async fn put_record_batch(
         &self,
-        table: &TableName,
-        table_id: &mut Option<TableId>,
+        table_name: &TableName,
+        table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         flight_data: FlightData,
     ) -> std::result::Result<AffectedRows, Self::Error>;
@@ -77,13 +77,13 @@ where
 
     async fn put_record_batch(
         &self,
-        table: &TableName,
-        table_id: &mut Option<TableId>,
+        table_name: &TableName,
+        table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> Result<AffectedRows> {
         self.0
-            .put_record_batch(table, table_id, decoder, data)
+            .put_record_batch(table_name, table_ref, decoder, data)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcRequestSnafu)

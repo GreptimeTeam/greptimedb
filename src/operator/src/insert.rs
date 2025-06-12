@@ -78,7 +78,7 @@ pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
 }
 
 pub type InserterRef = Arc<Inserter>;
