@@ -1,0 +1,150 @@
+CREATE TABLE
+    prom_series (
+        ts TIMESTAMP TIME INDEX,
+        val DOUBLE,
+        host STRING PRIMARY KEY
+    );
+
+Affected Rows: 0
+
+INSERT INTO
+    prom_series (ts, val, host)
+VALUES
+    (0, 0.0, 'p'),
+    (300, 10.0, 'p'),
+    (600, 20.0, 'p'),
+    (900, 30.0, 'p'),
+    (1200, 40.0, 'p'),
+    (1500, 0.0, 'p'),
+    (1800, 10.0, 'p'),
+    (2100, 20.0, 'p'),
+    (2400, 30.0, 'p'),
+    (2700, 40.0, 'p'),
+    (3000, 50.0, 'p');
+
+Affected Rows: 11
+
+-- predict_linear
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 3, '1s') predict_linear(prom_series[3s], 0);
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: Error during planning: Failed to coerce arguments to satisfy a call to 'prom_predict_linear' function: coercion from [Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64] to the signature Exact([Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64]) failed No function matches the given name and argument types 'prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64)'. You might need to add explicit type casts.
+	Candidate functions:
+	prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64)
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 3, '1s') predict_linear(prom_series[3s], 3);
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: Error during planning: Failed to coerce arguments to satisfy a call to 'prom_predict_linear' function: coercion from [Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64] to the signature Exact([Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64]) failed No function matches the given name and argument types 'prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64)'. You might need to add explicit type casts.
+	Candidate functions:
+	prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64)
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 3, '1s') predict_linear(prom_series[3s], 4.2);
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: Error during planning: Failed to coerce arguments to satisfy a call to 'prom_predict_linear' function: coercion from [Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64] to the signature Exact([Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64]) failed No function matches the given name and argument types 'prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Float64)'. You might need to add explicit type casts.
+	Candidate functions:
+	prom_predict_linear(Dictionary(Int64, Timestamp(Millisecond, None)), Dictionary(Int64, Float64), Int64)
+
+-- holt_winters
+-- SQLNESS SORT_RESULT 3 1
+tql eval (10, 10, '1s') holt_winters(prom_series[10s], 0.5, 0.1);
+
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "prom_holt_winters"
+
+DROP TABLE prom_series;
+
+Affected Rows: 0
+
+CREATE TABLE
+    prom_series_q (
+        ts TIMESTAMP TIME INDEX,
+        val DOUBLE,
+        host STRING PRIMARY KEY
+    );
+
+Affected Rows: 0
+
+INSERT INTO
+    prom_series_q (ts, val, host)
+VALUES
+    (1000, 123.45, 'q'),
+    (2000, 234.567, 'q'),
+    (3000, 345.678, 'q'),
+    (4000, 456.789, 'q');
+
+Affected Rows: 4
+
+-- quantile_over_time
+-- SQLNESS SORT_RESULT 3 1
+tql eval (4, 4, '1s') quantile_over_time(0.2 + 0.05, prom_series_q[4s]);
+
+Error: 1004(InvalidArguments), Cannot accept multiple vector as function input, PromQL expr: MatrixSelector(MatrixSelector { vs: VectorSelector { name: Some("prom_series_q"), matchers: Matchers { matchers: [], or_matchers: [] }, offset: None, at: None }, range: 4s })
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (4, 4, '1s') quantile_over_time(0.4 + 0.1, prom_series_q[4s]);
+
+Error: 1004(InvalidArguments), Cannot accept multiple vector as function input, PromQL expr: MatrixSelector(MatrixSelector { vs: VectorSelector { name: Some("prom_series_q"), matchers: Matchers { matchers: [], or_matchers: [] }, offset: None, at: None }, range: 4s })
+
+-- round
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3, 3, '1s') round(prom_series_q);
+
++---------------------+----------------------------+------+
+| ts                  | prom_round(val,Float64(0)) | host |
++---------------------+----------------------------+------+
+| 1970-01-01T00:00:03 | 346.0                      | q    |
++---------------------+----------------------------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 4, '1s') round(prom_series_q, 0.01);
+
++---------------------+-------------------------------+------+
+| ts                  | prom_round(val,Float64(0.01)) | host |
++---------------------+-------------------------------+------+
+| 1970-01-01T00:00:01 | 123.45                        | q    |
+| 1970-01-01T00:00:02 | 234.57                        | q    |
+| 1970-01-01T00:00:03 | 345.68                        | q    |
+| 1970-01-01T00:00:04 | 456.79                        | q    |
++---------------------+-------------------------------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 4, '1s') round(prom_series_q, 0.1);
+
++---------------------+------------------------------+------+
+| ts                  | prom_round(val,Float64(0.1)) | host |
++---------------------+------------------------------+------+
+| 1970-01-01T00:00:01 | 123.5                        | q    |
+| 1970-01-01T00:00:02 | 234.60000000000002           | q    |
+| 1970-01-01T00:00:03 | 345.70000000000005           | q    |
+| 1970-01-01T00:00:04 | 456.8                        | q    |
++---------------------+------------------------------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 4, '1s') round(prom_series_q, 10.0);
+
++---------------------+-----------------------------+------+
+| ts                  | prom_round(val,Float64(10)) | host |
++---------------------+-----------------------------+------+
+| 1970-01-01T00:00:01 | 120.0                       | q    |
+| 1970-01-01T00:00:02 | 230.0                       | q    |
+| 1970-01-01T00:00:03 | 350.0                       | q    |
+| 1970-01-01T00:00:04 | 460.0                       | q    |
++---------------------+-----------------------------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 4, '1s') round(prom_series_q, 100.0);
+
++---------------------+------------------------------+------+
+| ts                  | prom_round(val,Float64(100)) | host |
++---------------------+------------------------------+------+
+| 1970-01-01T00:00:01 | 100.0                        | q    |
+| 1970-01-01T00:00:02 | 200.0                        | q    |
+| 1970-01-01T00:00:03 | 300.0                        | q    |
+| 1970-01-01T00:00:04 | 500.0                        | q    |
++---------------------+------------------------------+------+
+
+DROP TABLE prom_series_q;
+
+Affected Rows: 0
+
