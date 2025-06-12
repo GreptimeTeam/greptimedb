@@ -49,15 +49,16 @@ impl ProcessManager {
 }
 
 impl ProcessManager {
-    /// Registers a submitted query.
+    /// Registers a submitted query. Use the provided id if present.
     pub fn register_query(
         self: &Arc<Self>,
         catalog: String,
         schemas: Vec<String>,
         query: String,
         client: String,
+        id: Option<u64>,
     ) -> Ticket {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
             id,
             catalog: catalog.clone(),
@@ -78,6 +79,11 @@ impl ProcessManager {
             manager: self.clone(),
             id,
         }
+    }
+
+    /// Generates the next process id.
+    pub fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// De-register a query from process list.
@@ -167,6 +173,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "".to_string(),
+            None,
         );
 
         let running_processes = process_manager.local_processes(None).unwrap();

@@ -184,6 +184,7 @@ impl Instance {
             vec![query_ctx.current_schema()],
             stmt.to_string(),
             "unknown".to_string(),
+            None,
         );
 
         let output = match stmt {
