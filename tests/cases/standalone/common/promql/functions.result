@@ -79,12 +79,12 @@ Affected Rows: 4
 -- SQLNESS SORT_RESULT 3 1
 tql eval (4, 4, '1s') quantile_over_time(0.2 + 0.05, prom_series_q[4s]);
 
-Error: 1004(InvalidArguments), Cannot accept multiple vector as function input, PromQL expr: MatrixSelector(MatrixSelector { vs: VectorSelector { name: Some("prom_series_q"), matchers: Matchers { matchers: [], or_matchers: [] }, offset: None, at: None }, range: 4s })
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "prom_quantile_over_time"
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (4, 4, '1s') quantile_over_time(0.4 + 0.1, prom_series_q[4s]);
 
-Error: 1004(InvalidArguments), Cannot accept multiple vector as function input, PromQL expr: MatrixSelector(MatrixSelector { vs: VectorSelector { name: Some("prom_series_q"), matchers: Matchers { matchers: [], or_matchers: [] }, offset: None, at: None }, range: 4s })
+Error: 3001(EngineExecuteQuery), Failed to decode DataFusion plan: This feature is not implemented: Unsupported function name: "prom_quantile_over_time"
 
 -- round
 -- SQLNESS SORT_RESULT 3 1
@@ -109,16 +109,16 @@ tql eval (1, 4, '1s') round(prom_series_q, 0.01);
 +---------------------+-------------------------------+------+
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval (1, 4, '1s') round(prom_series_q, 0.1);
+tql eval (1, 4, '1s') round(prom_series_q, 0.05 + 0.05);
 
-+---------------------+------------------------------+------+
-| ts                  | prom_round(val,Float64(0.1)) | host |
-+---------------------+------------------------------+------+
-| 1970-01-01T00:00:01 | 123.5                        | q    |
-| 1970-01-01T00:00:02 | 234.60000000000002           | q    |
-| 1970-01-01T00:00:03 | 345.70000000000005           | q    |
-| 1970-01-01T00:00:04 | 456.8                        | q    |
-+---------------------+------------------------------+------+
++---------------------+-----------------------------------------------+------+
+| ts                  | prom_round(val,Float64(0.05) + Float64(0.05)) | host |
++---------------------+-----------------------------------------------+------+
+| 1970-01-01T00:00:01 | 123.5                                         | q    |
+| 1970-01-01T00:00:02 | 234.60000000000002                            | q    |
+| 1970-01-01T00:00:03 | 345.70000000000005                            | q    |
+| 1970-01-01T00:00:04 | 456.8                                         | q    |
++---------------------+-----------------------------------------------+------+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (1, 4, '1s') round(prom_series_q, 10.0);
@@ -133,16 +133,16 @@ tql eval (1, 4, '1s') round(prom_series_q, 10.0);
 +---------------------+-----------------------------+------+
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval (1, 4, '1s') round(prom_series_q, 100.0);
+tql eval (1, 4, '1s') round(prom_series_q, 100.0 + 3.0);
 
-+---------------------+------------------------------+------+
-| ts                  | prom_round(val,Float64(100)) | host |
-+---------------------+------------------------------+------+
-| 1970-01-01T00:00:01 | 100.0                        | q    |
-| 1970-01-01T00:00:02 | 200.0                        | q    |
-| 1970-01-01T00:00:03 | 300.0                        | q    |
-| 1970-01-01T00:00:04 | 500.0                        | q    |
-+---------------------+------------------------------+------+
++---------------------+-------------------------------------------+------+
+| ts                  | prom_round(val,Float64(100) + Float64(3)) | host |
++---------------------+-------------------------------------------+------+
+| 1970-01-01T00:00:01 | 103.0                                     | q    |
+| 1970-01-01T00:00:02 | 206.0                                     | q    |
+| 1970-01-01T00:00:03 | 309.0                                     | q    |
+| 1970-01-01T00:00:04 | 412.0                                     | q    |
++---------------------+-------------------------------------------+------+
 
 DROP TABLE prom_series_q;
 

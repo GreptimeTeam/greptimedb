@@ -1395,11 +1395,7 @@ impl PromPlanner {
 
         for arg in args {
             match *arg.clone() {
-                PromExpr::Aggregate(_)
-                | PromExpr::Unary(_)
-                | PromExpr::Binary(_)
-                | PromExpr::Paren(_)
-                | PromExpr::Subquery(_)
+                PromExpr::Subquery(_)
                 | PromExpr::VectorSelector(_)
                 | PromExpr::MatrixSelector(_)
                 | PromExpr::Extension(_)
@@ -1409,13 +1405,10 @@ impl PromPlanner {
                     }
                 }
 
-                PromExpr::NumberLiteral(NumberLiteral { val, .. }) => {
-                    let scalar_value = ScalarValue::Float64(Some(val));
-                    result.literals.push(DfExpr::Literal(scalar_value));
-                }
-                PromExpr::StringLiteral(StringLiteral { val, .. }) => {
-                    let scalar_value = ScalarValue::Utf8(Some(val));
-                    result.literals.push(DfExpr::Literal(scalar_value));
+                _ => {
+                    let expr =
+                        Self::get_param_as_literal_expr(&Some(Box::new(*arg.clone())), None, None)?;
+                    result.literals.push(expr);
                 }
             }
         }
