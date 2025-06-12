@@ -70,7 +70,7 @@ impl ProcessManager {
             client,
             frontend: self.server_addr.clone(),
         };
-        let cancellation_handler = Arc::new(CancellationHandle::new());
+        let cancellation_handler = Arc::new(CancellationHandle::default());
 
         let cancellable_process = CancellableProcess {
             handle: cancellation_handler.clone(),

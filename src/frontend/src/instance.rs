@@ -33,6 +33,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use client::OutputData;
+use common_base::cancellation_handle::CancellableFuture;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -187,51 +188,61 @@ impl Instance {
             None,
         );
 
-        let output = match stmt {
-            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                // TODO: remove this when format is supported in datafusion
-                if let Statement::Explain(explain) = &stmt {
-                    if let Some(format) = explain.format() {
-                        query_ctx.set_explain_format(format.to_string());
+        let query_fut = async {
+            match stmt {
+                Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                    // TODO: remove this when format is supported in datafusion
+                    if let Statement::Explain(explain) = &stmt {
+                        if let Some(format) = explain.format() {
+                            query_ctx.set_explain_format(format.to_string());
+                        }
                     }
+
+                    let stmt = QueryStatement::Sql(stmt);
+                    let plan = self
+                        .statement_executor
+                        .plan(&stmt, query_ctx.clone())
+                        .await?;
+
+                    let QueryStatement::Sql(stmt) = stmt else {
+                        unreachable!()
+                    };
+                    query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+                    self.statement_executor
+                        .exec_plan(plan, query_ctx)
+                        .await
+                        .context(TableOperationSnafu)
                 }
+                Statement::Tql(tql) => {
+                    let plan = self
+                        .statement_executor
+                        .plan_tql(tql.clone(), &query_ctx)
+                        .await?;
 
-                let stmt = QueryStatement::Sql(stmt);
-                let plan = self
-                    .statement_executor
-                    .plan(&stmt, query_ctx.clone())
-                    .await?;
-
-                let QueryStatement::Sql(stmt) = stmt else {
-                    unreachable!()
-                };
-                query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
-
-                self.statement_executor.exec_plan(plan, query_ctx).await
-            }
-            Statement::Tql(tql) => {
-                let plan = self
-                    .statement_executor
-                    .plan_tql(tql.clone(), &query_ctx)
-                    .await?;
-
-                query_interceptor.pre_execute(
-                    &Statement::Tql(tql),
-                    Some(&plan),
-                    query_ctx.clone(),
-                )?;
-
-                self.statement_executor.exec_plan(plan, query_ctx).await
-            }
-            _ => {
-                query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
-
-                self.statement_executor.execute_sql(stmt, query_ctx).await
+                    query_interceptor.pre_execute(
+                        &Statement::Tql(tql),
+                        Some(&plan),
+                        query_ctx.clone(),
+                    )?;
+                    self.statement_executor
+                        .exec_plan(plan, query_ctx)
+                        .await
+                        .context(TableOperationSnafu)
+                }
+                _ => {
+                    query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+                    self.statement_executor
+                        .execute_sql(stmt, query_ctx)
+                        .await
+                        .context(TableOperationSnafu)
+                }
             }
         };
 
-        match output {
-            Ok(output) => {
+        CancellableFuture::new(query_fut, ticket.cancellation_handler.clone())
+            .await
+            .map_err(|_| error::CancelledSnafu.build())?
+            .map(|output| {
                 let Output { meta, data } = output;
 
                 let data = match data {
@@ -240,10 +251,8 @@ impl Instance {
                     }
                     other => other,
                 };
-                Ok(Output { data, meta })
-            }
-            Err(e) => Err(e).context(TableOperationSnafu),
-        }
+                Output { data, meta }
+            })
     }
 }
 

@@ -357,6 +357,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Query has been cancelled"))]
+    Cancelled {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -435,6 +441,8 @@ impl ErrorExt for Error {
             Error::InFlightWriteBytesExceeded { .. } => StatusCode::RateLimited,
 
             Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
+
+            Error::Cancelled { .. } => StatusCode::Cancelled,
         }
     }
 

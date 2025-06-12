@@ -51,7 +51,10 @@ impl Stream for CancellableStreamWrapper {
         }
 
         // on pending, register cancellation waker.
-        this.ticket.cancellation_handler.waker.register(cx.waker());
+        this.ticket
+            .cancellation_handler
+            .waker()
+            .register(cx.waker());
         // check if canceled again.
         if this.ticket.cancellation_handler.is_cancelled() {
             return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
