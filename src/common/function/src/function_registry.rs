@@ -39,7 +39,7 @@ use crate::system::SystemFunction;
 
 #[derive(Default)]
 pub struct FunctionRegistry {
-    functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
+    scalar_functions: RwLock<HashMap<String, ScalarFunctionFactory>>,
     async_functions: RwLock<HashMap<String, AsyncFunctionRef>>,
     aggregate_functions: RwLock<HashMap<String, AggregateUDF>>,
 }
@@ -48,7 +48,7 @@ impl FunctionRegistry {
     pub fn register(&self, func: impl Into<ScalarFunctionFactory>) {
         let func = func.into();
         let _ = self
-            .functions
+            .scalar_functions
             .write()
             .unwrap()
             .insert(func.name().to_string(), func);
@@ -87,13 +87,17 @@ impl FunctionRegistry {
             .collect()
     }
 
-    #[cfg(test)]
-    pub fn get_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
-        self.functions.read().unwrap().get(name).cloned()
+    pub fn get_scalar_function(&self, name: &str) -> Option<ScalarFunctionFactory> {
+        self.scalar_functions.read().unwrap().get(name).cloned()
     }
 
     pub fn scalar_functions(&self) -> Vec<ScalarFunctionFactory> {
-        self.functions.read().unwrap().values().cloned().collect()
+        self.scalar_functions
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn aggregate_functions(&self) -> Vec<AggregateUDF> {
@@ -144,6 +148,11 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     // Approximate functions
     ApproximateFunction::register(&function_registry);
 
+    // PromQL aggregate functions
+    for aggr in promql::functions::aggr_funcs() {
+        function_registry.register_aggr(aggr);
+    }
+
     Arc::new(function_registry)
 });
 
@@ -156,10 +165,10 @@ mod tests {
     fn test_function_registry() {
         let registry = FunctionRegistry::default();
 
-        assert!(registry.get_function("test_and").is_none());
+        assert!(registry.get_scalar_function("test_and").is_none());
         assert!(registry.scalar_functions().is_empty());
         registry.register_scalar(TestAndFunction);
-        let _ = registry.get_function("test_and").unwrap();
+        let _ = registry.get_scalar_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
     }
 }

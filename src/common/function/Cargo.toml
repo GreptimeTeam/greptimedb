@@ -47,6 +47,7 @@ num = "0.4"
 num-traits = "0.2"
 once_cell.workspace = true
 paste.workspace = true
+promql.workspace = true
 s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true

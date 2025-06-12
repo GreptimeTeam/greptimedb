@@ -1948,7 +1948,7 @@ impl PromPlanner {
             token::T_QUANTILE => {
                 let q = Self::get_param_value_as_f64(op, param)?;
                 non_col_args.push(lit(q));
-                quantile_udaf()
+                Arc::new(quantile_udaf())
             }
             token::T_AVG => avg_udaf(),
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf(),

@@ -28,11 +28,6 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::{
-    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, Round,
-    StddevOverTime, StdvarOverTime, SumOverTime,
-};
 use prost::Message;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -117,12 +112,15 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_catalog_list(catalog_list)
             .build();
+
         // Substrait decoder will look up the UDFs in SessionState, so we need to register them
         // Note: the query context must be passed to set the timezone
         // We MUST register the UDFs after we build the session state, otherwise the UDFs will be lost
         // if they have the same name as the default UDFs or their alias.
         // e.g. The default UDF `to_char()` has an alias `date_format()`, if we register a UDF with the name `date_format()`
         // before we build the session state, the UDF will be lost.
+
+        // Scalar functions
         for func in FUNCTION_REGISTRY.scalar_functions() {
             let udf = func.provide(FunctionContext {
                 query_ctx: self.query_ctx.clone(),
@@ -133,35 +131,21 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
                 .context(RegisterUdfSnafu { name: func.name() })?;
         }
 
+        // PromQL range functions
+        for func in promql::functions::range_funcs() {
+            let name = func.name().to_string();
+            session_state
+                .register_udf(Arc::new(func))
+                .context(RegisterUdfSnafu { name })?;
+        }
+
+        // Aggregate functions
         for func in FUNCTION_REGISTRY.aggregate_functions() {
             let name = func.name().to_string();
             session_state
                 .register_udaf(Arc::new(func))
                 .context(RegisterUdfSnafu { name })?;
         }
-
-        let _ = session_state.register_udaf(quantile_udaf());
-
-        let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-        // TODO(ruihang): add quantile_over_time, predict_linear, holt_winters, round
 
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)

@@ -34,6 +34,7 @@ pub use changes::Changes;
 use datafusion::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_expr::{AggregateUDF, ScalarUDF};
 pub use deriv::Deriv;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use holt_winters::HoltWinters;
@@ -43,6 +44,39 @@ pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{quantile_udaf, QUANTILE_NAME};
 pub use resets::Resets;
 pub use round::Round;
+
+/// Range functions for PromQL.
+pub fn range_funcs() -> Vec<ScalarUDF> {
+    vec![
+        IDelta::<false>::scalar_udf(),
+        IDelta::<true>::scalar_udf(),
+        Rate::scalar_udf(),
+        Increase::scalar_udf(),
+        Delta::scalar_udf(),
+        Resets::scalar_udf(),
+        Changes::scalar_udf(),
+        Deriv::scalar_udf(),
+        Round::scalar_udf(),
+        AvgOverTime::scalar_udf(),
+        MinOverTime::scalar_udf(),
+        MaxOverTime::scalar_udf(),
+        SumOverTime::scalar_udf(),
+        CountOverTime::scalar_udf(),
+        LastOverTime::scalar_udf(),
+        AbsentOverTime::scalar_udf(),
+        PresentOverTime::scalar_udf(),
+        StddevOverTime::scalar_udf(),
+        StdvarOverTime::scalar_udf(),
+        QuantileOverTime::scalar_udf(),
+        PredictLinear::scalar_udf(),
+        HoltWinters::scalar_udf(),
+    ]
+}
+
+/// Aggregate functions for PromQL.
+pub fn aggr_funcs() -> Vec<AggregateUDF> {
+    vec![quantile_udaf()]
+}
 
 /// Extracts an array from a `ColumnarValue`.
 ///
