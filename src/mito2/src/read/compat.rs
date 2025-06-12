@@ -20,17 +20,17 @@ use std::sync::Arc;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use mito_codec::row_converter::{
+    build_primary_key_codec, build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec,
+    SortField,
+};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
-use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, Result};
+use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::{Batch, BatchColumn, BatchReader};
-use crate::row_converter::{
-    build_primary_key_codec, build_primary_key_codec_with_fields, CompositeValues, PrimaryKeyCodec,
-    SortField,
-};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -155,7 +155,9 @@ impl CompatPrimaryKey {
             batch.primary_key().len() + self.converter.estimated_size().unwrap_or_default(),
         );
         buffer.extend_from_slice(batch.primary_key());
-        self.converter.encode_values(&self.values, &mut buffer)?;
+        self.converter
+            .encode_values(&self.values, &mut buffer)
+            .context(EncodeSnafu)?;
 
         batch.set_primary_key(buffer);
 
@@ -405,7 +407,10 @@ impl RewritePrimaryKey {
         let values = if let Some(pk_values) = batch.pk_values() {
             pk_values
         } else {
-            let new_pk_values = self.original.decode(batch.primary_key())?;
+            let new_pk_values = self
+                .original
+                .decode(batch.primary_key())
+                .context(DecodeSnafu)?;
             batch.set_pk_values(new_pk_values);
             // Safety: We ensure pk_values is not None.
             batch.pk_values().as_ref().unwrap()
@@ -416,7 +421,9 @@ impl RewritePrimaryKey {
         );
         match values {
             CompositeValues::Dense(values) => {
-                self.new.encode_values(values.as_slice(), &mut buffer)?;
+                self.new
+                    .encode_values(values.as_slice(), &mut buffer)
+                    .context(EncodeSnafu)?;
             }
             CompositeValues::Sparse(values) => {
                 let values = self
@@ -427,7 +434,9 @@ impl RewritePrimaryKey {
                         (*id, value.as_value_ref())
                     })
                     .collect::<Vec<_>>();
-                self.new.encode_value_refs(&values, &mut buffer)?;
+                self.new
+                    .encode_value_refs(&values, &mut buffer)
+                    .context(EncodeSnafu)?;
             }
         }
         batch.set_primary_key(buffer);
@@ -445,12 +454,14 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use mito_codec::row_converter::{
+        DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
+    };
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec};
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].

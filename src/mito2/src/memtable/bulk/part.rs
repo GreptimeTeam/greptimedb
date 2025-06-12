@@ -38,6 +38,8 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
+use mito_codec::key_values::{KeyValue, KeyValuesRef};
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
@@ -47,13 +49,12 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
 
-use crate::error;
-use crate::error::{ComputeArrowSnafu, EncodeMemtableSnafu, NewRecordBatchSnafu, Result};
+use crate::error::{
+    self, ComputeArrowSnafu, EncodeMemtableSnafu, EncodeSnafu, NewRecordBatchSnafu, Result,
+};
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
-use crate::memtable::key_values::{KeyValue, KeyValuesRef};
 use crate::memtable::BoxedBatchIterator;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -354,7 +355,9 @@ fn mutations_to_record_batch(
 
         for row in key_values.iter() {
             pk_buffer.clear();
-            pk_encoder.encode_to_vec(row.primary_keys(), &mut pk_buffer)?;
+            pk_encoder
+                .encode_to_vec(row.primary_keys(), &mut pk_buffer)
+                .context(EncodeSnafu)?;
             pk_builder.append_value(pk_buffer.as_bytes());
             ts_vector.push_value_ref(row.timestamp());
             sequence_builder.append_value(row.sequence());

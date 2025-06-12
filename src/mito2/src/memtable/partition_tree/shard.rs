@@ -17,10 +17,11 @@
 use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{
     DataBatch, DataParts, DataPartsReader, DataPartsReaderBuilder, DATA_INIT_CAP,
 };
@@ -29,7 +30,6 @@ use crate::memtable::partition_tree::merger::{Merger, Node};
 use crate::memtable::partition_tree::shard_builder::ShardBuilderReader;
 use crate::memtable::partition_tree::{PkId, PkIndex, ShardId};
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
-use crate::row_converter::PrimaryKeyFilter;
 
 /// Shard stores data related to the same key dictionary.
 pub struct Shard {

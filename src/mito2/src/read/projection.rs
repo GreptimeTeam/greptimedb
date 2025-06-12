@@ -26,6 +26,7 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use mito_codec::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -33,7 +34,6 @@ use store_api::storage::ColumnId;
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
-use crate::row_converter::{build_primary_key_codec, CompositeValues, PrimaryKeyCodec};
 
 /// Only cache vector when its length `<=` this value.
 const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
@@ -320,11 +320,11 @@ mod tests {
     use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
     use datatypes::arrow::util::pretty;
     use datatypes::value::ValueRef;
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
     use super::*;
     use crate::cache::CacheManager;
     use crate::read::BatchBuilder;
-    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     fn new_batch(

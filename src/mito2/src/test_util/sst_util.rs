@@ -22,6 +22,7 @@ use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Arra
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use datatypes::value::ValueRef;
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
@@ -29,7 +30,6 @@ use store_api::metadata::{
 use store_api::storage::RegionId;
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 

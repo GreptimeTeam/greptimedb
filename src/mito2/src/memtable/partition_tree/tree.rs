@@ -23,8 +23,9 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ValueRef;
-use memcomparable::Serializer;
-use serde::Serialize;
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::sparse::{FieldWithId, SparseEncoder};
+use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
 use snafu::{ensure, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -32,10 +33,9 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{
-    EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result, SerializeFieldSnafu,
+    EncodeSnafu, EncodeSparsePrimaryKeySnafu, PrimaryKeyLengthMismatchSnafu, Result,
 };
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::partition::{
     Partition, PartitionKey, PartitionReader, PartitionRef, ReadPartitionContext,
 };
@@ -46,7 +46,6 @@ use crate::metrics::{PARTITION_TREE_READ_STAGE_ELAPSED, READ_ROWS_TOTAL, READ_ST
 use crate::read::dedup::LastNonNullIter;
 use crate::read::Batch;
 use crate::region::options::MergeMode;
-use crate::row_converter::{PrimaryKeyCodec, SortField};
 
 /// The partition tree.
 pub struct PartitionTree {
@@ -73,15 +72,15 @@ impl PartitionTree {
         config: &PartitionTreeConfig,
         write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> Self {
-        let sparse_encoder = SparseEncoder {
-            fields: metadata
+        let sparse_encoder = SparseEncoder::new(
+            metadata
                 .primary_key_columns()
                 .map(|c| FieldWithId {
                     field: SortField::new(c.column_schema.data_type.clone()),
                     column_id: c.column_id,
                 })
                 .collect(),
-        };
+        );
         let is_partitioned = Partition::has_multi_partitions(&metadata);
         let mut config = config.clone();
         if config.merge_mode == MergeMode::LastNonNull {
@@ -129,7 +128,8 @@ impl PartitionTree {
         } else {
             // For compatibility, use the sparse encoder for dense primary key.
             self.sparse_encoder
-                .encode_to_vec(kv.primary_keys(), buffer)?;
+                .encode_to_vec(kv.primary_keys(), buffer)
+                .context(EncodeSnafu)?;
         }
         Ok(())
     }
@@ -166,7 +166,9 @@ impl PartitionTree {
             if self.is_partitioned {
                 self.encode_sparse_primary_key(&kv, pk_buffer)?;
             } else {
-                self.row_codec.encode_key_value(&kv, pk_buffer)?;
+                self.row_codec
+                    .encode_key_value(&kv, pk_buffer)
+                    .context(EncodeSnafu)?;
             }
 
             // Write rows with
@@ -208,7 +210,9 @@ impl PartitionTree {
         if self.is_partitioned {
             self.encode_sparse_primary_key(&kv, pk_buffer)?;
         } else {
-            self.row_codec.encode_key_value(&kv, pk_buffer)?;
+            self.row_codec
+                .encode_key_value(&kv, pk_buffer)
+                .context(EncodeSnafu)?;
         }
 
         // Write rows with
@@ -433,34 +437,6 @@ impl PartitionTree {
         }
         metrics.partitions_after_pruning = pruned.len();
         pruned
-    }
-}
-
-struct FieldWithId {
-    field: SortField,
-    column_id: ColumnId,
-}
-
-struct SparseEncoder {
-    fields: Vec<FieldWithId>,
-}
-
-impl SparseEncoder {
-    fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'a>>,
-    {
-        let mut serializer = Serializer::new(buffer);
-        for (value, field) in row.zip(self.fields.iter()) {
-            if !value.is_null() {
-                field
-                    .column_id
-                    .serialize(&mut serializer)
-                    .context(SerializeFieldSnafu)?;
-                field.field.serialize(&mut serializer, &value)?;
-            }
-        }
-        Ok(())
     }
 }
 

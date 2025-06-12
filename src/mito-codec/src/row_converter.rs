@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod dense;
-mod sparse;
+pub mod dense;
+pub mod sparse;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -81,7 +81,7 @@ impl CompositeValues {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl CompositeValues {
     pub fn into_sparse(self) -> SparseValues {
         match self {

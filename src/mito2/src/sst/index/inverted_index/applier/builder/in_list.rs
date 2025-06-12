@@ -167,7 +167,7 @@ mod tests {
         };
 
         let res = builder.collect_inlist(&in_list);
-        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(matches!(res, Err(Error::Encode { .. })));
         assert!(builder.output.is_empty());
     }
 

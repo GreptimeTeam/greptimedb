@@ -33,6 +33,7 @@ use datatypes::vectors::{
     TimestampSecondVector, UInt16Vector, UInt16VectorBuilder, UInt64Vector, UInt64VectorBuilder,
     UInt8Vector, UInt8VectorBuilder,
 };
+use mito_codec::key_values::KeyValue;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -44,7 +45,6 @@ use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
 use crate::error;
 use crate::error::Result;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::merger::{DataBatchKey, DataNode, DataSource, Merger};
 use crate::memtable::partition_tree::PkIndex;
 use crate::metrics::{

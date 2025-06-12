@@ -35,17 +35,19 @@ use datatypes::vectors::{
     Helper, TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
     TimestampSecondVector, UInt64Vector, UInt8Vector,
 };
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
-use crate::error;
-use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
+use crate::error::{
+    self, ComputeArrowSnafu, ConvertVectorSnafu, EncodeSnafu, PrimaryKeyLengthMismatchSnafu, Result,
+};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::builder::{FieldBuilder, StringBuilder};
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
@@ -57,7 +59,6 @@ use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 
 /// Initial vector builder capacity.
 const INITIAL_BUILDER_CAPACITY: usize = 4;
@@ -176,7 +177,10 @@ impl TimeSeriesMemtable {
             }
         );
 
-        let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
+        let primary_key_encoded = self
+            .row_codec
+            .encode(kv.primary_keys())
+            .context(EncodeSnafu)?;
 
         let (key_allocated, value_allocated) =
             self.series_set.push_to_series(primary_key_encoded, &kv);
@@ -1107,11 +1111,11 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::{OrderedFloat, Value};
     use datatypes::vectors::{Float64Vector, Int64Vector, TimestampMillisecondVector};
+    use mito_codec::row_converter::SortField;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::SortField;
     use crate::test_util::column_metadata_to_column_schema;
 
     fn schema_for_test() -> RegionMetadataRef {

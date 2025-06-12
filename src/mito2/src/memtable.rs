@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 pub use bulk::part::EncodedBulkPart;
 use common_time::Timestamp;
+use mito_codec::key_values::KeyValue;
+pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -29,8 +31,6 @@ use table::predicate::Predicate;
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::key_values::KeyValue;
-pub use crate::memtable::key_values::KeyValues;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtableBuilder};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
@@ -42,7 +42,6 @@ use crate::sst::file::FileTimeRange;
 
 mod builder;
 pub mod bulk;
-pub mod key_values;
 pub mod partition_tree;
 mod simple_bulk_memtable;
 mod stats;

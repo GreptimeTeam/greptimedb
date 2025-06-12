@@ -22,13 +22,15 @@ use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
+use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
-use crate::error::Result;
-use crate::memtable::key_values::KeyValue;
+use crate::error::{EncodeSnafu, Result};
 use crate::memtable::partition_tree::data::{DataBatch, DataParts, DATA_INIT_CAP};
 use crate::memtable::partition_tree::dedup::DedupReader;
 use crate::memtable::partition_tree::shard::{
@@ -39,7 +41,6 @@ use crate::memtable::partition_tree::{PartitionTreeConfig, PkId};
 use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
 use crate::read::{Batch, BatchBuilder};
-use crate::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// Key of a partition.
 pub type PartitionKey = u32;
@@ -91,7 +92,9 @@ impl Partition {
                     // `primary_key` is sparse, re-encode the full primary key.
                     let sparse_key = primary_key.clone();
                     primary_key.clear();
-                    row_codec.encode_key_value(&key_value, primary_key)?;
+                    row_codec
+                        .encode_key_value(&key_value, primary_key)
+                        .context(EncodeSnafu)?;
                     let pk_id = inner.shard_builder.write_with_key(
                         primary_key,
                         Some(&sparse_key),

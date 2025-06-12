@@ -12,15 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 
 /// Error definitions for mito encoding.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Row value mismatches field data type"))]
-    FieldTypeMismatch { source: datatypes::error::Error },
+    FieldTypeMismatch {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 
     #[snafu(display("Failed to serialize field"))]
     SerializeField {
@@ -54,6 +64,30 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Encode null value"))]
+    IndexEncodeNull {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+
+        match self {
+            FieldTypeMismatch { source, .. } => source.status_code(),
+            SerializeField { .. } | DeserializeField { .. } | IndexEncodeNull { .. } => {
+                StatusCode::InvalidArguments
+            }
+            NotSupportedField { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

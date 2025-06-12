@@ -18,10 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::PrimaryKeyFilter;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::Result;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{
     DataBatch, DataBuffer, DataBufferReader, DataBufferReaderBuilder, DataParts, DATA_INIT_CAP,
 };
@@ -30,7 +31,6 @@ use crate::memtable::partition_tree::shard::Shard;
 use crate::memtable::partition_tree::{PartitionTreeConfig, PkId, PkIndex, ShardId};
 use crate::memtable::stats::WriteMetrics;
 use crate::metrics::PARTITION_TREE_READ_STAGE_ELAPSED;
-use crate::row_converter::PrimaryKeyFilter;
 
 /// Builder to write keys and data to a shard that the key dictionary
 /// is still active.

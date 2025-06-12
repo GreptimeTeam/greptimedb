@@ -18,12 +18,13 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::Value;
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, SparsePrimaryKeyCodec};
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
-use crate::error::Result;
+use crate::error::{DecodeSnafu, Result};
 use crate::memtable::partition_tree::partition::Partition;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, SparsePrimaryKeyCodec};
 
 #[derive(Clone)]
 struct PrimaryKeyFilterInner {
@@ -104,7 +105,9 @@ impl PrimaryKeyFilter for DensePrimaryKeyFilter {
             // index of tag column in primary key
             // Safety: A tag column is always in primary key.
             let index = metadata.primary_key_index(column_id).unwrap();
-            self.codec.decode_value_at(pk, index, &mut self.offsets_buf)
+            self.codec
+                .decode_value_at(pk, index, &mut self.offsets_buf)
+                .context(DecodeSnafu)
         })
     }
 }
@@ -136,7 +139,9 @@ impl PrimaryKeyFilter for SparsePrimaryKeyFilter {
         self.offsets_map.clear();
         self.inner.evaluate_filters(|column_id, _| {
             if let Some(offset) = self.codec.has_column(pk, &mut self.offsets_map, column_id) {
-                self.codec.decode_value_at(pk, offset, column_id)
+                self.codec
+                    .decode_value_at(pk, offset, column_id)
+                    .context(DecodeSnafu)
             } else {
                 Ok(Value::Null)
             }
@@ -155,11 +160,11 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
+    use mito_codec::row_converter::PrimaryKeyCodecExt;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ColumnId, RegionId};
 
     use super::*;
-    use crate::row_converter::PrimaryKeyCodecExt;
 
     fn setup_metadata() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));

@@ -109,7 +109,7 @@ impl TestRegionMetadataBuilder {
 }
 
 /// Creates value for i64.
-pub(crate) fn i64_value(data: i64) -> v1::Value {
+pub fn i64_value(data: i64) -> v1::Value {
     v1::Value {
         value_data: Some(ValueData::I64Value(data)),
     }

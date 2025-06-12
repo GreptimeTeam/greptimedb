@@ -50,16 +50,17 @@ use datatypes::vectors::{
 };
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{
-    ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, InvalidBatchSnafu, Result,
+    ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
+    Result,
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::prune::PruneReader;
-use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 
 /// Storage internal representation of a batch of rows for a primary key (time series).
 ///
@@ -612,7 +613,7 @@ impl Batch {
         column_id: ColumnId,
     ) -> Result<Option<&Value>> {
         if self.pk_values.is_none() {
-            self.pk_values = Some(codec.decode(&self.primary_key)?);
+            self.pk_values = Some(codec.decode(&self.primary_key).context(DecodeSnafu)?);
         }
 
         let pk_values = self.pk_values.as_ref().unwrap();
@@ -1026,12 +1027,12 @@ pub(crate) struct ScannerMetrics {
 
 #[cfg(test)]
 mod tests {
+    use mito_codec::row_converter::{self, build_primary_key_codec_with_fields};
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::error::Error;
-    use crate::row_converter::{self, build_primary_key_codec_with_fields};
     use crate::test_util::new_batch_builder;
 
     fn new_batch(

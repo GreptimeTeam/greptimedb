@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Index codec utilities.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::ValueRef;
 use memcomparable::Serializer;
-use mito_codec::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
-use crate::error::{EncodeSnafu, IndexEncodeNullSnafu, Result};
+use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
+use crate::row_converter::{build_primary_key_codec_with_fields, PrimaryKeyCodec, SortField};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
@@ -57,9 +59,7 @@ impl IndexValueCodec {
         } else {
             buffer.reserve(field.estimated_size());
             let mut serializer = Serializer::new(buffer);
-            field
-                .serialize(&mut serializer, &value)
-                .context(EncodeSnafu)
+            field.serialize(&mut serializer, &value)
         }
     }
 }
@@ -122,11 +122,11 @@ mod tests {
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::Value;
-    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
     use store_api::metadata::ColumnMetadata;
 
     use super::*;
     use crate::error::Error;
+    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
     #[test]
     fn test_encode_value_basic() {
@@ -145,7 +145,7 @@ mod tests {
 
         let mut buffer = Vec::new();
         let res = IndexValueCodec::encode_nonnull_value(value, &field, &mut buffer);
-        assert!(matches!(res, Err(Error::Encode { .. })));
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
     }
 
     #[test]

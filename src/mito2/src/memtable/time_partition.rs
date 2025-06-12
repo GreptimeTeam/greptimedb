@@ -29,6 +29,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
+use mito_codec::key_values::KeyValue;
 use smallvec::{smallvec, SmallVec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -36,7 +37,6 @@ use store_api::metadata::RegionMetadataRef;
 use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 

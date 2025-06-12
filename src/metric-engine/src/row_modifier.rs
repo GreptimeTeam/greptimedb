@@ -18,7 +18,7 @@ use std::hash::Hash;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use datatypes::value::ValueRef;
-use mito2::row_converter::SparsePrimaryKeyCodec;
+use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;

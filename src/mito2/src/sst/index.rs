@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod bloom_filter;
-mod codec;
+// mod codec;
 pub(crate) mod fulltext_index;
 mod indexer;
 pub mod intermediate;

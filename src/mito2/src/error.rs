@@ -42,6 +42,13 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Unexpected data type"))]
+    DataTypeMismatch {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("External error, context: {}", context))]
     External {
         source: BoxedError,
@@ -290,35 +297,6 @@ pub enum Error {
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
-
-    #[snafu(display("Row value mismatches field data type"))]
-    FieldTypeMismatch { source: datatypes::error::Error },
-
-    #[snafu(display("Failed to serialize field"))]
-    SerializeField {
-        #[snafu(source)]
-        error: memcomparable::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Data type: {} does not support serialization/deserialization",
-        data_type,
-    ))]
-    NotSupportedField {
-        data_type: ConcreteDataType,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to deserialize field"))]
-    DeserializeField {
-        #[snafu(source)]
-        error: memcomparable::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
 
     #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
     InvalidParquet {
@@ -1028,6 +1006,20 @@ pub enum Error {
         location: Location,
         source: common_grpc::Error,
     },
+
+    #[snafu(display("Failed to encode"))]
+    Encode {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito_codec::error::Error,
+    },
+
+    #[snafu(display("Failed to decode"))]
+    Decode {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito_codec::error::Error,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1052,6 +1044,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
@@ -1095,7 +1088,6 @@ impl ErrorExt for Error {
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
-            | SerializeField { .. }
             | EncodeMemtable { .. }
             | CreateDir { .. }
             | ReadDataPart { .. }
@@ -1107,9 +1099,7 @@ impl ErrorExt for Error {
 
             WriteParquet { .. } => StatusCode::StorageUnavailable,
             WriteGroup { source, .. } => source.status_code(),
-            FieldTypeMismatch { source, .. } => source.status_code(),
-            NotSupportedField { .. } => StatusCode::Unsupported,
-            DeserializeField { .. } | EncodeSparsePrimaryKey { .. } => StatusCode::Unexpected,
+            EncodeSparsePrimaryKey { .. } => StatusCode::Unexpected,
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
@@ -1181,7 +1171,9 @@ impl ErrorExt for Error {
             ScanSeries { source, .. } => source.status_code(),
 
             ScanMultiTimes { .. } => StatusCode::InvalidArguments,
-            Error::ConvertBulkWalEntry { source, .. } => source.status_code(),
+            ConvertBulkWalEntry { source, .. } => source.status_code(),
+
+            Encode { source, .. } | Decode { source, .. } => source.status_code(),
         }
     }
 

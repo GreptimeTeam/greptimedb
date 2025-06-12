@@ -17,12 +17,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use mito_codec::row_converter::{build_primary_key_codec, DensePrimaryKeyCodec};
 use parquet::file::metadata::ParquetMetaData;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::row_converter::{build_primary_key_codec, DensePrimaryKeyCodec};
 use crate::sst::parquet::file_range::RangeBase;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;

@@ -20,13 +20,13 @@ use std::sync::Arc;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
+use mito_codec::key_values::KeyValue;
 pub use sparse::{SparsePrimaryKeyCodec, SparseValues, COLUMN_ID_ENCODE_SIZE};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
-use crate::memtable::key_values::KeyValue;
 
 /// Row value encoder/decoder.
 pub trait PrimaryKeyCodecExt {

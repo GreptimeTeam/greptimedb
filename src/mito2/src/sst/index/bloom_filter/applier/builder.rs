@@ -22,6 +22,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::bloom_filter::applier::InListPredicate;
 use index::Bytes;
+use mito_codec::index::IndexValueCodec;
+use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
@@ -30,10 +32,8 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
-use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, Result};
-use crate::row_converter::SortField;
+use crate::error::{ColumnNotFoundSnafu, ConvertValueSnafu, EncodeSnafu, Result};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
-use crate::sst::index::codec::IndexValueCodec;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 pub struct BloomFilterIndexApplierBuilder<'a> {
@@ -322,7 +322,8 @@ fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Bytes> {
     let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
     let mut bytes = vec![];
     let field = SortField::new(data_type);
-    IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)?;
+    IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)
+        .context(EncodeSnafu)?;
     Ok(bytes)
 }
 

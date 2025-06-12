@@ -19,6 +19,8 @@ use std::sync::Arc;
 use common_telemetry::{debug, warn};
 use datatypes::schema::SkippingIndexType;
 use index::bloom_filter::creator::BloomFilterCreator;
+use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
+use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -26,14 +28,12 @@ use store_api::storage::ColumnId;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, BloomFilterFinishSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu,
-    PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
+    BiErrorsSnafu, BloomFilterFinishSnafu, EncodeSnafu, IndexOptionsSnafu,
+    OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
 use crate::sst::file::FileId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
-use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -210,7 +210,8 @@ impl BloomFilterIndexer {
                                 v.as_value_ref(),
                                 field,
                                 &mut buf,
-                            )?;
+                            )
+                            .context(EncodeSnafu)?;
                             Ok(buf)
                         })
                         .transpose()?;
@@ -234,11 +235,8 @@ impl BloomFilterIndexer {
                         let elems = (!value.is_null())
                             .then(|| {
                                 let mut buf = vec![];
-                                IndexValueCodec::encode_nonnull_value(
-                                    value,
-                                    &sort_field,
-                                    &mut buf,
-                                )?;
+                                IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
+                                    .context(EncodeSnafu)?;
                                 Ok(buf)
                             })
                             .transpose()?;
@@ -353,6 +351,7 @@ pub(crate) mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin::puffin_manager::{PuffinManager, PuffinReader};
@@ -362,7 +361,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::read::BatchColumn;
-    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     pub fn mock_object_store() -> ObjectStore {

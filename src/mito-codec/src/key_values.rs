@@ -31,7 +31,7 @@ pub struct KeyValues {
     ///
     /// This mutation must be a valid mutation and rows in the mutation
     /// must not be `None`.
-    pub(crate) mutation: Mutation,
+    pub mutation: Mutation,
     /// Key value read helper.
     helper: SparseReadRowHelper,
     /// Primary key encoding hint.
