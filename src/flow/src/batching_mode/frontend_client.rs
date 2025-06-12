@@ -409,7 +409,7 @@ impl FrontendClient {
                 let _guard = fe_stats.observe(&db.peer.addr, flow_id);
 
                 db.database
-                    .handle_with_retry(req.clone(), GRPC_MAX_RETRIES)
+                    .handle_with_retry(req.clone(), GRPC_MAX_RETRIES, &[("query_parallelism", "1")])
                     .await
                     .with_context(|_| InvalidRequestSnafu {
                         context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),

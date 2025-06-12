@@ -95,34 +95,39 @@ impl TaskState {
     /// TODO: Make this behavior configurable.
     pub fn get_next_start_query_time(
         &self,
-        _flow_id: FlowId,
-        _time_window_size: &Option<Duration>,
+        flow_id: FlowId,
+        time_window_size: &Option<Duration>,
         max_timeout: Option<Duration>,
     ) -> Instant {
-        let next_duration = max_timeout
-            .unwrap_or(self.last_query_duration)
-            .min(self.last_query_duration)
-            .max(
-                self.min_run_interval
+        // = last query duration, capped by [max(min_run_interval, time_window_size), max_timeout], note at most `max_timeout`
+        let lower = self.min_run_interval
                     .map(Duration::from_secs)
-                    .unwrap_or(MIN_REFRESH_DURATION),
-            );
+                    .unwrap_or(MIN_REFRESH_DURATION).max(time_window_size.unwrap_or_default());
+        let next_duration = self.last_query_duration.max(lower);
+        let next_duration = if let Some(max_timeout) = max_timeout {
+            next_duration.min(max_timeout)
+        } else {
+            next_duration
+        };
 
-        // if have dirty time window, execute immediately to clean dirty time window
-        /*if self.dirty_time_windows.windows.is_empty() {
+        let cur_dirty_window_size = self.dirty_time_windows.window_size();
+        let max_query_update_range = time_window_size.clone().unwrap_or_default().mul_f64(
+            self.max_filter_num
+                .unwrap_or(DirtyTimeWindows::MAX_FILTER_NUM) as f64,
+        );
+        if cur_dirty_window_size < max_query_update_range {
             self.last_update_time + next_duration
         } else {
+            // if dirty time windows can't be clean up in one query, execute immediately to faster
+            // clean up dirty time windows
             debug!(
-                "Flow id = {}, still have {} dirty time window({:?}), execute immediately",
+                "Flow id = {}, still have too many{} dirty time window({:?}), execute immediately",
                 flow_id,
                 self.dirty_time_windows.windows.len(),
                 self.dirty_time_windows.windows
             );
             Instant::now()
-        }*/
-
-        // wait for next duration anyway
-        self.last_update_time + next_duration
+        }
     }
 }
 
@@ -154,6 +159,18 @@ impl DirtyTimeWindows {
             let entry = self.windows.entry(lower_bound);
             entry.or_insert(None);
         }
+    }
+
+    pub fn window_size(&self) -> Duration {
+        let mut ret = Duration::from_secs(0);
+        for (start, end) in &self.windows {
+            if let Some(end) = end {
+                if let Some(duration) = end.sub(start) {
+                    ret += duration.to_std().unwrap_or_default();
+                }
+            }
+        }
+        ret
     }
 
     pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {

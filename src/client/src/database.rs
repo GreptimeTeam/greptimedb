@@ -196,12 +196,22 @@ impl Database {
 
     /// Retry if connection fails, max_retries is the max number of retries, so the total wait time
     /// is `max_retries * GRPC_CONN_TIMEOUT`
-    pub async fn handle_with_retry(&self, request: Request, max_retries: u32) -> Result<u32> {
+    pub async fn handle_with_retry(
+        &self,
+        request: Request,
+        max_retries: u32,
+        hints: &[(&str, &str)],
+    ) -> Result<u32> {
         let mut client = make_database_client(&self.client)?.inner;
         let mut retries = 0;
+
         let request = self.to_rpc_request(request);
+
         loop {
-            let raw_response = client.handle(request.clone()).await;
+            let mut tonic_request = tonic::Request::new(request.clone());
+            let metadata = tonic_request.metadata_mut();
+            Self::put_hints(metadata, hints)?;
+            let raw_response = client.handle(tonic_request).await;
             match (raw_response, retries < max_retries) {
                 (Ok(resp), _) => return from_grpc_response(resp.into_inner()),
                 (Err(err), true) => {
