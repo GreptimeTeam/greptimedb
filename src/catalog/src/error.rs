@@ -278,9 +278,16 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to list frontend nodes"))]
-    ListProcess {
+    #[snafu(display("Failed to invoke frontend services"))]
+    InvokeFrontend {
         source: common_frontend::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to find frontend node: {}", addr))]
+    FrontendNotFound {
+        addr: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -352,7 +359,8 @@ impl ErrorExt for Error {
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
             }
-            Error::ListProcess { source, .. } => source.status_code(),
+            Error::InvokeFrontend { source, .. } => source.status_code(),
+            Error::FrontendNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -18,13 +18,13 @@ use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use api::v1::frontend::{ListProcessRequest, ProcessInfo};
+use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation_handle::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_telemetry::debug;
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::error;
 
@@ -134,14 +134,14 @@ impl ProcessManager {
             let frontends = remote_frontend_selector
                 .select(|node| node.peer.addr != self.server_addr)
                 .await
-                .context(error::ListProcessSnafu)?;
+                .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
                 processes.extend(
                     f.list_process(ListProcessRequest {
                         catalog: catalog.unwrap_or_default().to_string(),
                     })
                     .await
-                    .context(error::ListProcessSnafu)?
+                    .context(error::InvokeFrontendSnafu)?
                     .processes,
                 );
             }
@@ -151,14 +151,46 @@ impl ProcessManager {
     }
 
     /// Kills query with provided catalog and id.
-    pub fn kill_process(&self, catalog: String, id: u64) {
-        if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
-            if let Some(process) = catalogs.remove(&id) {
-                debug!(
-                    "Stopped process, catalog: {}, id: {:?}",
-                    process.process.catalog, process.process.id
-                );
+    pub async fn kill_process(
+        &self,
+        server_addr: String,
+        catalog: String,
+        id: u64,
+    ) -> error::Result<bool> {
+        if server_addr == self.server_addr {
+            if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
+                if let Some(process) = catalogs.remove(&id) {
+                    debug!(
+                        "Stopped process, catalog: {}, id: {:?}",
+                        process.process.catalog, process.process.id
+                    );
+                    return Ok(true);
+                }
             }
+            Ok(false)
+        } else {
+            let mut nodes = self
+                .frontend_selector
+                .as_ref()
+                .unwrap()
+                .select(|node| node.peer.addr == server_addr)
+                .await
+                .context(error::InvokeFrontendSnafu)?;
+            ensure!(
+                nodes.is_empty(),
+                error::FrontendNotFoundSnafu { addr: server_addr }
+            );
+
+            let request = KillProcessRequest {
+                server_addr,
+                catalog,
+                process_id: id,
+            };
+            nodes[0]
+                .kill_process(request)
+                .await
+                .context(error::InvokeFrontendSnafu)?;
+            Ok(true)
         }
     }
 }

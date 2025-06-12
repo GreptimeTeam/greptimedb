@@ -16,9 +16,13 @@ use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cluster::{ClusterInfo, NodeInfo, Role};
-use greptime_proto::v1::frontend::{frontend_client, ListProcessRequest, ListProcessResponse};
+use greptime_proto::v1::frontend::{
+    frontend_client, KillProcessRequest, KillProcessResponse, ListProcessRequest,
+    ListProcessResponse,
+};
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
+use tonic::Response;
 
 use crate::error;
 use crate::error::{MetaSnafu, Result};
@@ -28,18 +32,28 @@ pub type FrontendClientPtr = Box<dyn FrontendClient>;
 #[async_trait::async_trait]
 pub trait FrontendClient: Send {
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse>;
+
+    async fn kill_process(&mut self, req: KillProcessRequest) -> Result<KillProcessResponse>;
 }
 
 #[async_trait::async_trait]
 impl FrontendClient for frontend_client::FrontendClient<tonic::transport::channel::Channel> {
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse> {
-        let response: ListProcessResponse = frontend_client::FrontendClient::<
-            tonic::transport::channel::Channel,
-        >::list_process(self, req)
+        frontend_client::FrontendClient::<tonic::transport::channel::Channel>::list_process(
+            self, req,
+        )
         .await
-        .context(error::ListProcessSnafu)?
-        .into_inner();
-        Ok(response)
+        .context(error::InvokeFrontendSnafu)
+        .map(Response::into_inner)
+    }
+
+    async fn kill_process(&mut self, req: KillProcessRequest) -> Result<KillProcessResponse> {
+        frontend_client::FrontendClient::<tonic::transport::channel::Channel>::kill_process(
+            self, req,
+        )
+        .await
+        .context(error::InvokeFrontendSnafu)
+        .map(Response::into_inner)
     }
 }
 

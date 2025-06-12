@@ -43,13 +43,11 @@ impl Frontend for FrontendGrpcHandler {
         } else {
             Some(list_process_request.catalog.as_str())
         };
-        match self.process_manager.local_processes(catalog) {
-            Ok(processes) => Ok(Response::new(ListProcessResponse { processes })),
-            Err(e) => {
-                error!(e; "Failed to handle list process request");
-                Err(Status::new(Code::Internal, e.to_string()))
-            }
-        }
+        let processes = self.process_manager.local_processes(catalog).map_err(|e| {
+            error!(e; "Failed to handle list process request");
+            Status::new(Code::Internal, e.to_string())
+        })?;
+        Ok(Response::new(ListProcessResponse { processes }))
     }
 
     async fn kill_process(
@@ -57,8 +55,15 @@ impl Frontend for FrontendGrpcHandler {
         request: Request<KillProcessRequest>,
     ) -> Result<Response<KillProcessResponse>, Status> {
         let req = request.into_inner();
-        self.process_manager
-            .kill_process(req.catalog, req.process_id);
-        Ok(Response::new(KillProcessResponse {}))
+        let found = self
+            .process_manager
+            .kill_process(req.server_addr, req.catalog, req.process_id)
+            .await
+            .map_err(|e| {
+                error!(e; "Failed to handle kill process request");
+                Status::new(Code::Internal, e.to_string())
+            })?;
+
+        Ok(Response::new(KillProcessResponse { found }))
     }
 }
