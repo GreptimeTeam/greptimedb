@@ -27,6 +27,35 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to list nodes from metasrv"))]
+    Meta {
+        source: Box<meta_client::error::Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse process id: {}", s))]
+    ParseProcessId {
+        s: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to invoke list process service"))]
+    ListProcess {
+        #[snafu(source)]
+        error: tonic::Status,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to invoke list process service"))]
+    CreateChannel {
+        source: common_grpc::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -36,6 +65,10 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             External { source, .. } => source.status_code(),
+            Meta { source, .. } => source.status_code(),
+            ParseProcessId { .. } => StatusCode::InvalidArguments,
+            ListProcess { .. } => StatusCode::External,
+            CreateChannel { source, .. } => source.status_code(),
         }
     }
 

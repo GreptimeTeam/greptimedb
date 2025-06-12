@@ -277,6 +277,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to list frontend nodes"))]
+    ListProcess {
+        source: common_frontend::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -345,6 +352,7 @@ impl ErrorExt for Error {
             Error::GetViewCache { source, .. } | Error::GetTableCache { source, .. } => {
                 source.status_code()
             }
+            Error::ListProcess { source, .. } => source.status_code(),
         }
     }
 

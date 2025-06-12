@@ -20,6 +20,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer, GrpcServerConfig};
 use servers::http::event::LogValidatorRef;
@@ -157,11 +158,14 @@ where
             opts.grpc.flight_compression,
         );
 
+        let frontend_grpc_handler =
+            FrontendGrpcHandler::new(self.instance.process_manager().clone());
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
             .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler))
+            .frontend_grpc_handler(frontend_grpc_handler)
             .build();
         Ok(grpc_server)
     }

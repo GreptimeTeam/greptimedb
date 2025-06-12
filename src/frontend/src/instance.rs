@@ -30,6 +30,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::Plugins;
@@ -80,6 +81,7 @@ use crate::error::{
 };
 use crate::limiter::LimiterRef;
 use crate::slow_query_recorder::SlowQueryRecorder;
+use crate::stream_wrapper::StreamWrapper;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -96,6 +98,7 @@ pub struct Instance {
     table_metadata_manager: TableMetadataManagerRef,
     slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
+    process_manager: ProcessManagerRef,
 }
 
 impl Instance {
@@ -153,6 +156,10 @@ impl Instance {
     pub fn inserter(&self) -> &InserterRef {
         &self.inserter
     }
+
+    pub fn process_manager(&self) -> &ProcessManagerRef {
+        &self.process_manager
+    }
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
@@ -171,6 +178,14 @@ impl Instance {
         } else {
             None
         };
+
+        let ticket = self.process_manager.register_query(
+            query_ctx.current_catalog().to_string(),
+            vec![query_ctx.current_schema()],
+            stmt.to_string(),
+            "unknown".to_string(),
+            None,
+        );
 
         let output = match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
@@ -215,7 +230,20 @@ impl Instance {
             }
         };
 
-        output.context(TableOperationSnafu)
+        match output {
+            Ok(output) => {
+                let Output { meta, data } = output;
+
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(StreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Ok(Output { data, meta })
+            }
+            Err(e) => Err(e).context(TableOperationSnafu),
+        }
     }
 }
 

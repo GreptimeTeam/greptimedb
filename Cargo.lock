@@ -1623,6 +1623,7 @@ dependencies = [
  "chrono",
  "common-catalog",
  "common-error",
+ "common-frontend",
  "common-macro",
  "common-meta",
  "common-procedure",
@@ -2293,8 +2294,14 @@ version = "0.15.0"
 dependencies = [
  "async-trait",
  "common-error",
+ "common-grpc",
  "common-macro",
+ "common-meta",
+ "greptime-proto",
+ "meta-client",
  "snafu 0.8.5",
+ "tokio",
+ "tonic 0.12.3",
 ]
 
 [[package]]
@@ -4701,6 +4708,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-function",
  "common-grpc",
  "common-macro",
@@ -5133,7 +5141,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=454c52634c3bac27de10bf0d85d5533eed1cf03f#454c52634c3bac27de10bf0d85d5533eed1cf03f"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5f6119ac7952878d39dcde0343c4bf828d18ffc8#5f6119ac7952878d39dcde0343c4bf828d18ffc8"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -8885,9 +8893,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.30.1"
+version = "0.30.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec79ee18e6cafde8698885646780b967ecc905120798b8359dd0da64f9688e89"
+checksum = "4ca6c26b25be998208a13ff2f0c55b567363f34675410e6d6f1c513a150583fd"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11135,6 +11143,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-frontend",
  "common-grpc",
  "common-macro",
  "common-mem-prof",
