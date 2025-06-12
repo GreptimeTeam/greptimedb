@@ -44,16 +44,9 @@ use crate::range_array::RangeArray;
 /// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
 /// There's the [discussion](https://github.com/prometheus/prometheus/issues/2458) in the Prometheus Github that dates back
 /// to 2017 highlighting the naming/implementation mismatch.
-pub struct HoltWinters {
-    sf: f64,
-    tf: f64,
-}
+pub struct HoltWinters;
 
 impl HoltWinters {
-    fn new(sf: f64, tf: f64) -> Self {
-        Self { sf, tf }
-    }
-
     pub const fn name() -> &'static str {
         "prom_holt_winters"
     }
@@ -80,36 +73,20 @@ impl HoltWinters {
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
+            Arc::new(Self::holt_winters) as _,
         )
     }
 
-    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
-        if inputs.len() != 4 {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function should have 4 inputs".to_string(),
-            ));
-        }
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(sf))) = inputs[2] else {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function's third input should be a scalar float64".to_string(),
-            ));
-        };
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(tf))) = inputs[3] else {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function's fourth input should be a scalar float64".to_string(),
-            ));
-        };
-        Ok(Self::new(sf, tf))
-    }
-
-    fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
-        // construct matrix from input.
-        // The third one is level param, the fourth - trend param which are included in fields.
-        assert_eq!(input.len(), 4);
+    fn holt_winters(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        error::ensure(
+            input.len() == 4,
+            DataFusionError::Plan("prom_holt_winters function should have 4 inputs".to_string()),
+        )?;
 
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
+        let sf_col = &input[2];
+        let tf_col = &input[3];
 
         let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
         let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
@@ -142,6 +119,44 @@ impl HoltWinters {
 
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
+
+        let get_sf = |i| {
+            if let ColumnarValue::Array(array) = sf_col {
+                let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                if array.is_null(i) {
+                    f64::NAN
+                } else {
+                    array.value(i)
+                }
+            } else if let ColumnarValue::Scalar(scalar) = sf_col {
+                if let ScalarValue::Float64(Some(val)) = scalar {
+                    *val
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            }
+        };
+        let get_tf = |i| {
+            if let ColumnarValue::Array(array) = tf_col {
+                let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                if array.is_null(i) {
+                    f64::NAN
+                } else {
+                    array.value(i)
+                }
+            } else if let ColumnarValue::Scalar(scalar) = tf_col {
+                if let ScalarValue::Float64(Some(val)) = scalar {
+                    *val
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            }
+        };
+
         for index in 0..ts_range.len() {
             let timestamps = ts_range.get(index).unwrap();
             let values = value_range.get(index).unwrap();
@@ -159,7 +174,9 @@ impl HoltWinters {
                     values.len()
                 )),
             )?;
-            result_array.push(holt_winter_impl(values, self.sf, self.tf));
+            let sf = get_sf(index);
+            let tf = get_tf(index);
+            result_array.push(holt_winter_impl(values, sf, tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
