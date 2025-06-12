@@ -34,6 +34,9 @@ use crate::dist_plan::MergeScanLogicalPlan;
 ///     Aggregate:
 ///
 /// from Aggregate
+///
+/// The upper Projection exists sole to make sure parent plan can recognize the output
+/// of the upper aggregation plan.
 pub fn step_aggr_to_upper_aggr(
     aggr_plan: &LogicalPlan,
 ) -> datafusion_common::Result<Vec<LogicalPlan>> {
@@ -131,13 +134,12 @@ pub fn step_aggr_to_upper_aggr(
         let aggr_out_column = Column::new(table, col_name);
         let aliased_output_aggr_expr =
             Expr::Column(aggr_out_column).alias_qualified(lower_col_name.0, lower_col_name.1);
-        debug!("lower_aggr_expr: {lower_aggr_expr:?}, upper_aggr_expr: {upper_aggr_expr:?}, aliased_output_aggr_expr: {aliased_output_aggr_expr:?}");
         new_projection_exprs.push(aliased_output_aggr_expr);
     }
     let upper_aggr_plan = LogicalPlan::Aggregate(new_aggr);
-    debug!("Before recompute schema: {upper_aggr_plan:#?}");
+    debug!("Before recompute schema: {upper_aggr_plan:?}");
     let upper_aggr_plan = upper_aggr_plan.recompute_schema()?;
-    debug!("After recompute schema: {upper_aggr_plan:#?}");
+    debug!("After recompute schema: {upper_aggr_plan:?}");
     // create a projection on top of the new aggregate plan
     let new_projection =
         Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
@@ -237,20 +239,20 @@ impl Categorizer {
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
                 let is_all_steppable = is_all_aggr_exprs_steppable(&aggr.aggr_expr);
-                let is_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
-                if !is_partition && is_all_steppable {
+                let matches_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
+                if !matches_partition && is_all_steppable {
                     debug!("Plan is steppable: {plan}");
                     return Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
-                            debug!("After Step Optimize: {ret:#?}");
+                            debug!("After Step Optimize: {ret:?}");
                             ret.ok()
                         })),
                         expand_on_parent: true,
                     };
                 }
-                if !is_partition {
+                if !matches_partition {
                     return Commutativity::NonCommutative;
                 }
                 for expr in &aggr.aggr_expr {
