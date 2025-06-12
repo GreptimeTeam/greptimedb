@@ -962,19 +962,22 @@ impl StreamContext {
                 }
             }
         }
+        if verbose {
+            write!(f, "{{")?;
+        }
         write!(
             f,
-            "partition_count={} ({} memtable ranges, {} file {} ranges)",
+            "\"partition_count\":{{\"count\":{}, \"mem_ranges\":{}, \"files\":{}, \"file_ranges\":{}}}",
             self.ranges.len(),
             num_mem_ranges,
             self.input.num_files(),
             num_file_ranges,
         )?;
         if let Some(selector) = &self.input.series_row_selector {
-            write!(f, ", selector={}", selector)?;
+            write!(f, ", \"selector\":\"{}\"", selector)?;
         }
         if let Some(distribution) = &self.input.distribution {
-            write!(f, ", distribution={}", distribution)?;
+            write!(f, ", \"distribution\":\"{}\"", distribution)?;
         }
 
         if verbose {
@@ -991,14 +994,15 @@ impl StreamContext {
 
         impl fmt::Debug for FileWrapper<'_> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                let (start, end) = self.file.time_range();
                 write!(
                     f,
-                    "[file={}, time_range=({}::{}, {}::{}), rows={}, size={}, index_size={}]",
+                    r#"{{"file_id":"{}","time_range_start":"{}::{}","time_range_end":"{}::{}","rows":{},"size":{},"index_size":{}}}"#,
                     self.file.file_id(),
-                    self.file.time_range().0.value(),
-                    self.file.time_range().0.unit(),
-                    self.file.time_range().1.value(),
-                    self.file.time_range().1.unit(),
+                    start.value(),
+                    start.unit(),
+                    end.value(),
+                    end.unit(),
                     self.file.num_rows(),
                     self.file.size(),
                     self.file.index_size()
@@ -1014,25 +1018,22 @@ impl StreamContext {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 let output_schema = self.input.mapper.output_schema();
                 if !output_schema.is_empty() {
-                    write!(f, ", projection=")?;
-                    f.debug_list()
-                        .entries(output_schema.column_schemas().iter().map(|col| &col.name))
-                        .finish()?;
+                    let names: Vec<_> = output_schema
+                        .column_schemas()
+                        .iter()
+                        .map(|col| &col.name)
+                        .collect();
+                    write!(f, ", \"projection\": {:?}", names)?;
                 }
                 if let Some(predicate) = &self.input.predicate.predicate() {
                     if !predicate.exprs().is_empty() {
-                        write!(f, ", filters=[")?;
-                        for (i, expr) in predicate.exprs().iter().enumerate() {
-                            if i == predicate.exprs().len() - 1 {
-                                write!(f, "{}]", expr)?;
-                            } else {
-                                write!(f, "{}, ", expr)?;
-                            }
-                        }
+                        let exprs: Vec<_> =
+                            predicate.exprs().iter().map(|e| e.to_string()).collect();
+                        write!(f, ", \"filters\": {:?}", exprs)?;
                     }
                 }
                 if !self.input.files.is_empty() {
-                    write!(f, ", files=")?;
+                    write!(f, ", \"files\": ")?;
                     f.debug_list()
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
