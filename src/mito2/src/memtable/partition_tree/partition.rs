@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use mito_codec::key_values::KeyValue;
+use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
@@ -307,11 +308,6 @@ impl Partition {
             .map(|meta| meta.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
             .unwrap_or(false)
     }
-
-    /// Returns true if this is a partition column.
-    pub(crate) fn is_partition_column(name: &str) -> bool {
-        name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
-    }
 }
 
 pub(crate) struct PartitionStats {
@@ -449,7 +445,7 @@ impl ReadPartitionContext {
     fn need_prune_key(metadata: &RegionMetadataRef, filters: &[SimpleFilterEvaluator]) -> bool {
         for filter in filters {
             // We already pruned partitions before so we skip the partition column.
-            if Partition::is_partition_column(filter.column_name()) {
+            if is_partition_column(filter.column_name()) {
                 continue;
             }
             let Some(column) = metadata.column_by_name(filter.column_name()) else {

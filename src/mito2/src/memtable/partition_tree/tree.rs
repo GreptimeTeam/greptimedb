@@ -24,6 +24,7 @@ use common_time::Timestamp;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ValueRef;
 use mito_codec::key_values::KeyValue;
+use mito_codec::primary_key_filter::is_partition_column;
 use mito_codec::row_converter::sparse::{FieldWithId, SparseEncoder};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField};
 use snafu::{ensure, ResultExt};
@@ -419,7 +420,7 @@ impl PartitionTree {
         for (key, partition) in partitions.iter() {
             let mut is_needed = true;
             for filter in filters {
-                if !Partition::is_partition_column(filter.column_name()) {
+                if is_partition_column(filter.column_name()) {
                     continue;
                 }
 

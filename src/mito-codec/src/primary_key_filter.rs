@@ -25,7 +25,7 @@ use store_api::storage::ColumnId;
 use crate::error::Result;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, SparsePrimaryKeyCodec};
 
-/// Returns true if this is a partition column.
+/// Returns true if this is a partition column for metrics in the memtable.
 pub fn is_partition_column(name: &str) -> bool {
     name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
 }
