@@ -19,6 +19,7 @@ pub const HINTS_KEY_PREFIX: &str = "x-greptime-hint-";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 
+/// Deprecated, use `HINTS_KEY` instead.
 pub const HINT_KEYS: [&str; 7] = [
     "x-greptime-hint-auto_create_table",
     "x-greptime-hint-ttl",
