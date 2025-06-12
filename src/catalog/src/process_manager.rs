@@ -255,4 +255,212 @@ mod tests {
         drop(ticket);
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
     }
+
+    #[tokio::test]
+    async fn test_register_query_with_custom_id() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+        let custom_id = 12345;
+
+        let ticket = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["test".to_string()],
+            "SELECT * FROM table".to_string(),
+            "client1".to_string(),
+            Some(custom_id),
+        );
+
+        assert_eq!(ticket.id, custom_id);
+
+        let running_processes = process_manager.local_processes(None).unwrap();
+        assert_eq!(running_processes.len(), 1);
+        assert_eq!(running_processes[0].id, custom_id);
+        assert_eq!(&running_processes[0].client, "client1");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_queries_same_catalog() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let ticket1 = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["schema1".to_string()],
+            "SELECT * FROM table1".to_string(),
+            "client1".to_string(),
+            None,
+        );
+
+        let ticket2 = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["schema2".to_string()],
+            "SELECT * FROM table2".to_string(),
+            "client2".to_string(),
+            None,
+        );
+
+        let running_processes = process_manager.local_processes(Some("public")).unwrap();
+        assert_eq!(running_processes.len(), 2);
+
+        // Verify both processes are present
+        let ids: Vec<u64> = running_processes.iter().map(|p| p.id).collect();
+        assert!(ids.contains(&ticket1.id));
+        assert!(ids.contains(&ticket2.id));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_catalogs() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let _ticket1 = process_manager.clone().register_query(
+            "catalog1".to_string(),
+            vec!["schema1".to_string()],
+            "SELECT * FROM table1".to_string(),
+            "client1".to_string(),
+            None,
+        );
+
+        let _ticket2 = process_manager.clone().register_query(
+            "catalog2".to_string(),
+            vec!["schema2".to_string()],
+            "SELECT * FROM table2".to_string(),
+            "client2".to_string(),
+            None,
+        );
+
+        // Test listing processes for specific catalog
+        let catalog1_processes = process_manager.local_processes(Some("catalog1")).unwrap();
+        assert_eq!(catalog1_processes.len(), 1);
+        assert_eq!(&catalog1_processes[0].catalog, "catalog1");
+
+        let catalog2_processes = process_manager.local_processes(Some("catalog2")).unwrap();
+        assert_eq!(catalog2_processes.len(), 1);
+        assert_eq!(&catalog2_processes[0].catalog, "catalog2");
+
+        // Test listing all processes
+        let all_processes = process_manager.local_processes(None).unwrap();
+        assert_eq!(all_processes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_deregister_query() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let ticket = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["test".to_string()],
+            "SELECT * FROM table".to_string(),
+            "client1".to_string(),
+            None,
+        );
+        assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
+        process_manager.deregister_query("public".to_string(), ticket.id);
+        assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_handle() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let ticket = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["test".to_string()],
+            "SELECT * FROM table".to_string(),
+            "client1".to_string(),
+            None,
+        );
+
+        assert!(!ticket.cancellation_handler.is_cancelled());
+        ticket.cancellation_handler.cancel();
+        assert!(ticket.cancellation_handler.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_kill_local_process() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let ticket = process_manager.clone().register_query(
+            "public".to_string(),
+            vec!["test".to_string()],
+            "SELECT * FROM table".to_string(),
+            "client1".to_string(),
+            None,
+        );
+        assert!(!ticket.cancellation_handler.is_cancelled());
+        let killed = process_manager
+            .kill_process(
+                "127.0.0.1:8000".to_string(),
+                "public".to_string(),
+                ticket.id,
+            )
+            .await
+            .unwrap();
+
+        assert!(killed);
+        assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_kill_nonexistent_process() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+        let killed = process_manager
+            .kill_process("127.0.0.1:8000".to_string(), "public".to_string(), 999)
+            .await
+            .unwrap();
+        assert!(!killed);
+    }
+
+    #[tokio::test]
+    async fn test_kill_process_nonexistent_catalog() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+        let killed = process_manager
+            .kill_process("127.0.0.1:8000".to_string(), "nonexistent".to_string(), 1)
+            .await
+            .unwrap();
+        assert!(!killed);
+    }
+
+    #[tokio::test]
+    async fn test_process_info_fields() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        let _ticket = process_manager.clone().register_query(
+            "test_catalog".to_string(),
+            vec!["schema1".to_string(), "schema2".to_string()],
+            "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
+            "test_client".to_string(),
+            Some(42),
+        );
+
+        let processes = process_manager.local_processes(None).unwrap();
+        assert_eq!(processes.len(), 1);
+
+        let process = &processes[0];
+        assert_eq!(process.id, 42);
+        assert_eq!(&process.catalog, "test_catalog");
+        assert_eq!(process.schemas, vec!["schema1", "schema2"]);
+        assert_eq!(&process.query, "SELECT COUNT(*) FROM users WHERE age > 18");
+        assert_eq!(&process.client, "test_client");
+        assert_eq!(&process.frontend, "127.0.0.1:8000");
+        assert!(process.start_timestamp > 0);
+    }
+
+    #[tokio::test]
+    async fn test_ticket_drop_deregisters_process() {
+        let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+
+        {
+            let _ticket = process_manager.clone().register_query(
+                "public".to_string(),
+                vec!["test".to_string()],
+                "SELECT * FROM table".to_string(),
+                "client1".to_string(),
+                None,
+            );
+
+            // Process should be registered
+            assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
+        } // ticket goes out of scope here
+
+        // Process should be automatically deregistered
+        assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
+    }
 }

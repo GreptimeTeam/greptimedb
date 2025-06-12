@@ -193,7 +193,7 @@ impl ParserContext<'_> {
                     let process_id_ident =
                         self.parser.parse_literal_string().with_context(|_| {
                             error::UnexpectedSnafu {
-                                expected: "process id",
+                                expected: "process id string literal",
                                 actual: self.peek_token_as_string(),
                             }
                         })?;
