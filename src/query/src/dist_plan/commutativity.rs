@@ -366,7 +366,8 @@ impl Categorizer {
             | Expr::Negative(_)
             | Expr::Between(_)
             | Expr::Exists(_)
-            | Expr::InList(_) => Commutativity::Commutative,
+            | Expr::InList(_)
+            | Expr::Case(_) => Commutativity::Commutative,
             Expr::ScalarFunction(_udf) => Commutativity::Commutative,
             Expr::AggregateFunction(_udaf) => Commutativity::Commutative,
 
@@ -374,7 +375,6 @@ impl Categorizer {
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
-            | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)
             | Expr::WindowFunction(_)
