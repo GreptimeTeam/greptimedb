@@ -14,6 +14,7 @@
 
 // For the given format: `x-greptime-hints: auto_create_table=true, ttl=7d`
 pub const HINTS_KEY: &str = "x-greptime-hints";
+/// Deprecated, use `HINTS_KEY` instead. Notes if "x-greptime-hints" is set, keys with this prefix will be ignored.
 pub const HINTS_KEY_PREFIX: &str = "x-greptime-hint-";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
