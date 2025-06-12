@@ -19,7 +19,6 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
-// mod primary_key_filter;
 mod shard;
 mod shard_builder;
 mod tree;
