@@ -92,7 +92,14 @@ pub enum AlterTableOperation {
     UnsetIndex {
         options: UnsetIndexOperation,
     },
+    DropDefaults {
+        columns: Vec<DropDefaultsOperation>,
+    },
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+/// `ALTER <column_name> DROP DEFAULT`
+pub struct DropDefaultsOperation(pub Ident);
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum SetIndexOperation {
@@ -204,6 +211,13 @@ impl Display for AlterTableOperation {
                     write!(f, "MODIFY COLUMN {column_name} UNSET SKIPPING INDEX")
                 }
             },
+            AlterTableOperation::DropDefaults { columns } => {
+                let columns = columns
+                    .iter()
+                    .map(|column| format!("ALTER {} DROP DEFAULT", column.0))
+                    .join(", ");
+                write!(f, "{columns}")
+            }
         }
     }
 }
@@ -480,6 +494,27 @@ ALTER TABLE monitor MODIFY COLUMN a UNSET FULLTEXT INDEX"#,
                 assert_eq!(
                     r#"
 ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor ALTER a DROP DEFAULT";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor ALTER a DROP DEFAULT"#,
                     &new_sql
                 );
             }

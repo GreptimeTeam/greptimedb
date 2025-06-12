@@ -61,7 +61,8 @@ impl AlterTableProcedure {
             | AlterKind::SetTableOptions { .. }
             | AlterKind::UnsetTableOptions { .. }
             | AlterKind::SetIndex { .. }
-            | AlterKind::UnsetIndex { .. } => {}
+            | AlterKind::UnsetIndex { .. }
+            | AlterKind::DropDefaults { .. } => {}
         }
 
         Ok(new_info)
