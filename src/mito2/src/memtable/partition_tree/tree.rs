@@ -420,7 +420,7 @@ impl PartitionTree {
         for (key, partition) in partitions.iter() {
             let mut is_needed = true;
             for filter in filters {
-                if is_partition_column(filter.column_name()) {
+                if !is_partition_column(filter.column_name()) {
                     continue;
                 }
 
