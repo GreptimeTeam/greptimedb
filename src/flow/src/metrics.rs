@@ -96,6 +96,12 @@ lazy_static! {
             &["flow_id"]
         )
         .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_CUR_WND_CNT: IntGaugeVec = register_int_gauge_vec!(
+        "greptime_flow_batching_current_window_count",
+        "flow batching engine current query window count per flow id",
+        &["flow_id"]
+    )
+    .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_GUESS_FE_LOAD: HistogramVec =
         register_histogram_vec!(
             "greptime_flow_batching_engine_guess_fe_load",

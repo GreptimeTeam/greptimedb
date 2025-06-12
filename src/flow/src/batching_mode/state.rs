@@ -59,6 +59,11 @@ pub struct TaskState {
     pub(crate) min_run_interval: Option<u64>,
     /// max filter number per query
     pub(crate) max_filter_num: Option<usize>,
+    /// Current filter count, will grow when query succeeds(capped by `max_filter_num`),
+    /// and reset to 1 when query fails.
+    ///
+    /// This is useful for controlling resource usage
+    pub(crate) cur_filter_cnt: usize,
 }
 impl TaskState {
     pub fn new(query_ctx: QueryContextRef, shutdown_rx: oneshot::Receiver<()>) -> Self {
@@ -72,6 +77,7 @@ impl TaskState {
             task_handle: None,
             min_run_interval: None,
             max_filter_num: None,
+            cur_filter_cnt: 1,
         }
     }
 
@@ -140,6 +146,17 @@ pub struct DirtyTimeWindows {
     windows: BTreeMap<Timestamp, Option<Timestamp>>,
 }
 
+/// Time windows that are being worked on, which are not dirty but are currently being processed
+#[derive(Debug, Clone, Default)]
+pub struct WorkingTimeWindows {
+    /// windows's `start -> end` and non-overlapping
+    /// `end` is exclusive(and optional)
+    pub windows: BTreeMap<Timestamp, Option<Timestamp>>,
+    /// Filter expression for the time windows
+    /// This is used to filter the data in the time windows.
+    pub filter: Option<datafusion_expr::Expr>,
+}
+
 impl DirtyTimeWindows {
     /// Time window merge distance
     ///
@@ -177,6 +194,12 @@ impl DirtyTimeWindows {
         self.windows.insert(start, end);
     }
 
+    pub fn add_windows(&mut self, windows: BTreeMap<Timestamp, Option<Timestamp>>) {
+        for (start, end) in windows {
+            self.windows.insert(start, end);
+        }
+    }
+
     /// Clean all dirty time windows, useful when can't found time window expr
     pub fn clean(&mut self) {
         self.windows.clear();
@@ -195,7 +218,7 @@ impl DirtyTimeWindows {
         window_cnt: usize,
         flow_id: FlowId,
         task_ctx: Option<&BatchingTask>,
-    ) -> Result<Option<datafusion_expr::Expr>, Error> {
+    ) -> Result<WorkingTimeWindows, Error> {
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
             expire_lower_bound.map(|t| t.to_iso8601_string()),
@@ -318,7 +341,7 @@ impl DirtyTimeWindows {
             .observe(stalled_time_range.num_seconds() as f64);
 
         let mut expr_lst = vec![];
-        for (start, end) in to_be_query.into_iter() {
+        for (start, end) in to_be_query.clone().into_iter() {
             // align using time window exprs
             let (start, end) = if let Some(ctx) = task_ctx {
                 let Some(time_window_expr) = &ctx.config.time_window_expr else {
@@ -350,7 +373,12 @@ impl DirtyTimeWindows {
             expr_lst.push(expr);
         }
         let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
-        Ok(expr)
+
+        let working = WorkingTimeWindows {
+            windows: to_be_query,
+            filter: expr,
+        };
+        Ok(working)
     }
 
     fn align_time_window(
@@ -646,7 +674,8 @@ mod test {
                     0,
                     None,
                 )
-                .unwrap();
+                .unwrap()
+                .filter;
 
             let unparser = datafusion::sql::unparser::Unparser::default();
             let to_sql = filter_expr
