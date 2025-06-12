@@ -14,6 +14,7 @@
 
 pub mod bit_vec;
 pub mod bytes;
+pub mod cancellation_handle;
 pub mod plugins;
 pub mod range_read;
 #[allow(clippy::all)]

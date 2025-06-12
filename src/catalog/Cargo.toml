@@ -17,6 +17,7 @@ arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-frontend.workspace = true

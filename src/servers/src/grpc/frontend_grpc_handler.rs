@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use api::v1::frontend::frontend_server::Frontend;
-use api::v1::frontend::{ListProcessRequest, ListProcessResponse};
+use api::v1::frontend::{
+    KillProcessRequest, KillProcessResponse, ListProcessRequest, ListProcessResponse,
+};
 use catalog::process_manager::ProcessManagerRef;
 use common_telemetry::error;
 use tonic::{Code, Request, Response, Status};
@@ -48,5 +50,15 @@ impl Frontend for FrontendGrpcHandler {
                 Err(Status::new(Code::Internal, e.to_string()))
             }
         }
+    }
+
+    async fn kill_process(
+        &self,
+        request: Request<KillProcessRequest>,
+    ) -> Result<Response<KillProcessResponse>, Status> {
+        let req = request.into_inner();
+        self.process_manager
+            .kill_process(req.catalog, req.process_id);
+        Ok(Response::new(KillProcessResponse {}))
     }
 }

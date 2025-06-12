@@ -15,37 +15,52 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use catalog::process_manager::Ticket;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 
-pub struct StreamWrapper<T> {
+pub struct CancellableStreamWrapper {
     inner: SendableRecordBatchStream,
-    _attachment: T,
+    ticket: Ticket,
 }
 
-impl<T> Unpin for StreamWrapper<T> {}
+impl Unpin for CancellableStreamWrapper {}
 
-impl<T> StreamWrapper<T> {
-    pub fn new(stream: SendableRecordBatchStream, attachment: T) -> Self {
+impl CancellableStreamWrapper {
+    pub fn new(stream: SendableRecordBatchStream, ticket: Ticket) -> Self {
         Self {
             inner: stream,
-            _attachment: attachment,
+            ticket,
         }
     }
 }
 
-impl<T> Stream for StreamWrapper<T> {
+impl Stream for CancellableStreamWrapper {
     type Item = common_recordbatch::error::Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        Pin::new(&mut this.inner).poll_next(cx)
+        if this.ticket.cancellation_handler.is_cancelled() {
+            return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
+        }
+
+        if let Poll::Ready(res) = Pin::new(&mut this.inner).poll_next(cx) {
+            return Poll::Ready(res);
+        }
+
+        // on pending, register cancellation waker.
+        this.ticket.cancellation_handler.waker.register(cx.waker());
+        // check if canceled again.
+        if this.ticket.cancellation_handler.is_cancelled() {
+            return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
+        }
+        Poll::Pending
     }
 }
 
-impl<T> RecordBatchStream for StreamWrapper<T> {
+impl RecordBatchStream for CancellableStreamWrapper {
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

@@ -81,7 +81,7 @@ use crate::error::{
 };
 use crate::limiter::LimiterRef;
 use crate::slow_query_recorder::SlowQueryRecorder;
-use crate::stream_wrapper::StreamWrapper;
+use crate::stream_wrapper::CancellableStreamWrapper;
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -236,7 +236,7 @@ impl Instance {
 
                 let data = match data {
                     OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(StreamWrapper::new(stream, ticket)))
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
                     }
                     other => other,
                 };

@@ -14,12 +14,14 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::frontend::{ListProcessRequest, ProcessInfo};
+use common_base::cancellation_handle::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::{debug, info};
+use common_telemetry::debug;
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
@@ -31,7 +33,7 @@ pub type ProcessManagerRef = Arc<ProcessManager>;
 pub struct ProcessManager {
     server_addr: String,
     next_id: AtomicU64,
-    catalogs: RwLock<HashMap<String, HashMap<u64, ProcessInfo>>>,
+    catalogs: RwLock<HashMap<String, HashMap<u64, CancellableProcess>>>,
     frontend_selector: Option<MetaClientSelector>,
 }
 
@@ -68,16 +70,24 @@ impl ProcessManager {
             client,
             frontend: self.server_addr.clone(),
         };
+        let cancellation_handler = Arc::new(CancellationHandle::new());
+
+        let cancellable_process = CancellableProcess {
+            handle: cancellation_handler.clone(),
+            process,
+        };
         self.catalogs
             .write()
             .unwrap()
             .entry(catalog.clone())
             .or_default()
-            .insert(id, process);
+            .insert(id, cancellable_process);
+
         Ticket {
             catalog,
             manager: self.clone(),
             id,
+            cancellation_handler,
         }
     }
 
@@ -97,24 +107,19 @@ impl ProcessManager {
         }
     }
 
-    pub fn deregister_all_queries(&self) {
-        self.catalogs.write().unwrap().clear();
-        info!("All queries on {} has been deregistered", self.server_addr);
-    }
-
     /// List local running processes in given catalog.
     pub fn local_processes(&self, catalog: Option<&str>) -> error::Result<Vec<ProcessInfo>> {
         let catalogs = self.catalogs.read().unwrap();
         let result = if let Some(catalog) = catalog {
             if let Some(catalogs) = catalogs.get(catalog) {
-                catalogs.values().cloned().collect()
+                catalogs.values().map(|p| p.process.clone()).collect()
             } else {
                 vec![]
             }
         } else {
             catalogs
                 .values()
-                .flat_map(|v| v.values().cloned())
+                .flat_map(|v| v.values().map(|p| p.process.clone()))
                 .collect()
         };
         Ok(result)
@@ -144,18 +149,46 @@ impl ProcessManager {
         processes.extend(self.local_processes(catalog)?);
         Ok(processes)
     }
+
+    /// Kills query with provided catalog and id.
+    pub fn kill_process(&self, catalog: String, id: u64) {
+        if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
+            if let Some(process) = catalogs.remove(&id) {
+                debug!(
+                    "Stopped process, catalog: {}, id: {:?}",
+                    process.process.catalog, process.process.id
+                );
+            }
+        }
+    }
 }
 
 pub struct Ticket {
     pub(crate) catalog: String,
     pub(crate) manager: ProcessManagerRef,
     pub(crate) id: u64,
+    pub cancellation_handler: Arc<CancellationHandle>,
 }
 
 impl Drop for Ticket {
     fn drop(&mut self) {
         self.manager
             .deregister_query(std::mem::take(&mut self.catalog), self.id);
+        self.cancellation_handler.cancel();
+    }
+}
+
+struct CancellableProcess {
+    handle: Arc<CancellationHandle>,
+    process: ProcessInfo,
+}
+
+impl Debug for CancellableProcess {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableProcess")
+            .field("cancelled", &self.handle.is_cancelled())
+            .field("process", &self.process)
+            .finish()
     }
 }
 
