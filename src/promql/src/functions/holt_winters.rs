@@ -128,12 +128,8 @@ impl HoltWinters {
                 } else {
                     array.value(i)
                 }
-            } else if let ColumnarValue::Scalar(scalar) = sf_col {
-                if let ScalarValue::Float64(Some(val)) = scalar {
-                    *val
-                } else {
-                    f64::NAN
-                }
+            } else if let ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) = sf_col {
+                *val
             } else {
                 f64::NAN
             }
@@ -146,12 +142,8 @@ impl HoltWinters {
                 } else {
                     array.value(i)
                 }
-            } else if let ColumnarValue::Scalar(scalar) = tf_col {
-                if let ScalarValue::Float64(Some(val)) = scalar {
-                    *val
-                } else {
-                    f64::NAN
-                }
+            } else if let ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) = tf_col {
+                *val
             } else {
                 f64::NAN
             }
