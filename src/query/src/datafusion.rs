@@ -478,6 +478,8 @@ impl QueryEngine for DatafusionQueryEngine {
     fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
         let mut state = self.state.session_state();
         state.config_mut().set_extension(query_ctx.clone());
+        // note that hints in "x-greptime-hints" is automatically parsed
+        // and set to query context's extension, so we can get it from query context.
         if let Some(parallelism) = query_ctx.extension("query_parallelism") {
             if let Ok(n) = parallelism.parse::<u64>() {
                 let new_cfg = state.config().clone().with_target_partitions(n as usize);
