@@ -481,7 +481,7 @@ impl BatchingEngine {
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
 
-        task.mark_all_windows_as_dirty()?;
+        // task.mark_all_windows_as_dirty()?;
 
         let res = task
             .gen_exec_once(&self.query_engine, &self.frontend_client)
