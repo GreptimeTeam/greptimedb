@@ -42,8 +42,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to invoke list process service"))]
-    ListProcess {
+    #[snafu(display("Failed to invoke frontend service"))]
+    InvokeFrontend {
         #[snafu(source)]
         error: tonic::Status,
         #[snafu(implicit)]
@@ -67,7 +67,7 @@ impl ErrorExt for Error {
             External { source, .. } => source.status_code(),
             Meta { source, .. } => source.status_code(),
             ParseProcessId { .. } => StatusCode::InvalidArguments,
-            ListProcess { .. } => StatusCode::External,
+            InvokeFrontend { .. } => StatusCode::Unexpected,
             CreateChannel { source, .. } => source.status_code(),
         }
     }

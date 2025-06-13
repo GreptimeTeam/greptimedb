@@ -138,6 +138,8 @@ pub enum Statement {
     FetchCursor(FetchCursor),
     // CLOSE
     CloseCursor(CloseCursor),
+    // KILL <process>
+    Kill(String),
 }
 
 impl Display for Statement {
@@ -194,6 +196,7 @@ impl Display for Statement {
             Statement::DeclareCursor(s) => s.fmt(f),
             Statement::FetchCursor(s) => s.fmt(f),
             Statement::CloseCursor(s) => s.fmt(f),
+            Statement::Kill(k) => k.fmt(f),
         }
     }
 }

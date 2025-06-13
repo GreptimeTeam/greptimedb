@@ -26,6 +26,7 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
+common-frontend.workspace = true
 common-function.workspace = true
 common-grpc.workspace = true
 common-grpc-expr.workspace = true

@@ -173,6 +173,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Stream timeout"))]
     StreamTimeout {
         #[snafu(implicit)]
@@ -180,12 +181,19 @@ pub enum Error {
         #[snafu(source)]
         error: tokio::time::error::Elapsed,
     },
+
     #[snafu(display("RecordBatch slice index overflow: {visit_index} > {size}"))]
     RecordBatchSliceIndexOverflow {
         #[snafu(implicit)]
         location: Location,
         size: usize,
         visit_index: usize,
+    },
+
+    #[snafu(display("Stream has been cancelled"))]
+    StreamCancelled {
+        #[snafu(implicit)]
+        location: Location,
     },
 }
 
@@ -221,6 +229,8 @@ impl ErrorExt for Error {
             }
 
             Error::StreamTimeout { .. } => StatusCode::Cancelled,
+
+            Error::StreamCancelled { .. } => StatusCode::Cancelled,
         }
     }
 

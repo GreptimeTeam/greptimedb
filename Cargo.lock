@@ -1621,6 +1621,7 @@ dependencies = [
  "cache",
  "catalog",
  "chrono",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-frontend",
@@ -4755,6 +4756,7 @@ dependencies = [
  "substrait 0.15.0",
  "table",
  "tokio",
+ "tokio-util",
  "toml 0.8.19",
  "tonic 0.12.3",
  "tower 0.5.2",
@@ -5141,7 +5143,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=5f6119ac7952878d39dcde0343c4bf828d18ffc8#5f6119ac7952878d39dcde0343c4bf828d18ffc8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f0913f179ee1d2ce428f8b85a9ea12b5f69ad636#f0913f179ee1d2ce428f8b85a9ea12b5f69ad636"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -8419,6 +8421,7 @@ dependencies = [
  "common-catalog",
  "common-datasource",
  "common-error",
+ "common-frontend",
  "common-function",
  "common-grpc",
  "common-grpc-expr",

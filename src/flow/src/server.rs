@@ -578,6 +578,7 @@ impl FrontendInvoker {
             layered_cache_registry.clone(),
             inserter.clone(),
             table_route_cache,
+            None,
         ));
 
         let invoker = FrontendInvoker::new(inserter, deleter, statement_executor);
