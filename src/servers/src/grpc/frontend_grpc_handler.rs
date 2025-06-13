@@ -64,6 +64,6 @@ impl Frontend for FrontendGrpcHandler {
                 Status::new(Code::Internal, e.to_string())
             })?;
 
-        Ok(Response::new(KillProcessResponse { found: success }))
+        Ok(Response::new(KillProcessResponse { success }))
     }
 }
