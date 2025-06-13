@@ -434,8 +434,8 @@ impl RegionOpener {
             .await?;
         } else {
             info!(
-                "Skip the WAL replay for region: {}, manifest version: {}",
-                region_id, manifest.manifest_version
+                "Skip the WAL replay for region: {}, manifest version: {}, flushed_entry_id: {}",
+                region_id, manifest.manifest_version, flushed_entry_id
             );
         }
         let now = self.time_provider.current_time_millis();

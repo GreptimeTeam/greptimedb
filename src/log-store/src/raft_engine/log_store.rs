@@ -158,7 +158,7 @@ impl RaftEngineLogStore {
             .context(StartWalTaskSnafu { name: "sync_task" })
     }
 
-    fn span(&self, provider: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
+    pub fn span(&self, provider: &RaftEngineProvider) -> (Option<u64>, Option<u64>) {
         (
             self.engine.first_index(provider.id),
             self.engine.last_index(provider.id),

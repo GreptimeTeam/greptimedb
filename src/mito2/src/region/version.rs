@@ -78,6 +78,12 @@ impl VersionControl {
         data.last_entry_id = entry_id;
     }
 
+    /// Updates last entry id.
+    pub(crate) fn set_entry_id(&self, entry_id: EntryId) {
+        let mut data = self.data.write().unwrap();
+        data.last_entry_id = entry_id;
+    }
+
     /// Sequence number of last committed data.
     pub(crate) fn committed_sequence(&self) -> SequenceNumber {
         self.data.read().unwrap().committed_sequence

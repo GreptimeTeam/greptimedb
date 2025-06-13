@@ -98,8 +98,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 )
             }
         } else {
-            warn!("Skips to replay memtable for region: {}", region.region_id);
-            let flushed_entry_id = region.version_control.current().last_entry_id;
+            let version = region.version_control.current();
+            let mut flushed_entry_id = version.last_entry_id;
+
+            warn!(
+                "Skips to replay memtable for region: {}, flushed entry id: {}",
+                region.region_id, flushed_entry_id
+            );
+
+            let high_watermark = self
+                .wal
+                .store()
+                .high_watermark(&region.provider)
+                .unwrap_or_default();
+            if high_watermark > flushed_entry_id {
+                warn!(
+                    "Found high watermark is greater than flushed entry id, using high watermark as flushed entry id, region: {}, high watermark: {}, flushed entry id: {}",
+                    region_id, high_watermark, flushed_entry_id
+                );
+                flushed_entry_id = high_watermark;
+                region.version_control.set_entry_id(flushed_entry_id);
+            }
             let on_region_opened = self.wal.on_region_opened();
             on_region_opened(region_id, flushed_entry_id, &region.provider).await?;
         }
