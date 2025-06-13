@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 
 use client::{Output, OutputData, OutputMeta};
@@ -46,12 +47,12 @@ use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use table::requests::{CopyTableRequest, InsertRequest};
 use table::table_reference::TableReference;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
-use crate::error::{self, IntoVectorsSnafu, Result};
+use crate::error::{self, IntoVectorsSnafu, PathNotFoundSnafu, Result};
 use crate::statement::StatementExecutor;
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
@@ -97,6 +98,8 @@ impl StatementExecutor {
         req: &CopyTableRequest,
     ) -> Result<(ObjectStore, Vec<Entry>)> {
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+
+        ensure!(Path::new(&path).exists(), PathNotFoundSnafu { path },);
 
         let object_store =
             build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;

@@ -831,6 +831,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Path not found: {path}"))]
+    PathNotFound {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Trigger related operations are not currently supported"))]
     UnsupportedTrigger {
@@ -975,6 +982,7 @@ impl ErrorExt for Error {
             Error::ComputeArrow { .. } => StatusCode::Internal,
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
+            Error::PathNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
 
