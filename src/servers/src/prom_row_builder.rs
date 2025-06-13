@@ -27,6 +27,7 @@ use crate::http::PromValidationMode;
 use crate::proto::{decode_string, PromLabel};
 use crate::repeated_field::Clear;
 
+// Prometheus remote write context
 #[derive(Debug, Default, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PromCtx {
     pub schema: Option<String>,

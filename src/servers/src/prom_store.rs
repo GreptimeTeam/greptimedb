@@ -41,8 +41,8 @@ use crate::row_writer::{self, MultiTableData};
 pub const METRIC_NAME_LABEL: &str = "__name__";
 pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
-pub const SCHEMA_LABEL: &str = "__schema__";
-pub const SCHEMA_LABEL_BYTES: &[u8] = b"__schema__";
+pub const DATABASE_LABEL: &str = "__database__";
+pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
 
 pub const PHYSICAL_TABLE_LABEL: &str = "__physical_table__";
 pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"__physical_table__";
