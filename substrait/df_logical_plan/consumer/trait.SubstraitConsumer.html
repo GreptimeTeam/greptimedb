@@ -1,0 +1,538 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="This trait is used to consume Substrait plans, converting them into DataFusion Logical Plans. It can be implemented by users to allow for custom handling of relations, expressions, etc."><title>SubstraitConsumer in substrait::df_logical_plan::consumer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0ce1a80b.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="substrait" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (4d051fb30 2025-05-18)" data-channel="nightly" data-search-js="search-f7877310.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-7ef8a74a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc trait"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="mobile-topbar"><button class="sidebar-menu-toggle" title="show sidebar"></button></nav><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../substrait/index.html">substrait</a><span class="version">0.15.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Substrait<wbr>Consumer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#example-usage" title="Example Usage">Example Usage</a></li></ul><h3><a href="#required-methods">Required Methods</a></h3><ul class="block"><li><a href="#tymethod.get_extensions" title="get_extensions">get_extensions</a></li><li><a href="#tymethod.get_function_registry" title="get_function_registry">get_function_registry</a></li><li><a href="#tymethod.resolve_table_ref" title="resolve_table_ref">resolve_table_ref</a></li></ul><h3><a href="#provided-methods">Provided Methods</a></h3><ul class="block"><li><a href="#method.consume_aggregate" title="consume_aggregate">consume_aggregate</a></li><li><a href="#method.consume_cast" title="consume_cast">consume_cast</a></li><li><a href="#method.consume_consistent_partition_window" title="consume_consistent_partition_window">consume_consistent_partition_window</a></li><li><a href="#method.consume_cross" title="consume_cross">consume_cross</a></li><li><a href="#method.consume_enum" title="consume_enum">consume_enum</a></li><li><a href="#method.consume_exchange" title="consume_exchange">consume_exchange</a></li><li><a href="#method.consume_expression" title="consume_expression">consume_expression</a></li><li><a href="#method.consume_extension_leaf" title="consume_extension_leaf">consume_extension_leaf</a></li><li><a href="#method.consume_extension_multi" title="consume_extension_multi">consume_extension_multi</a></li><li><a href="#method.consume_extension_single" title="consume_extension_single">consume_extension_single</a></li><li><a href="#method.consume_fetch" title="consume_fetch">consume_fetch</a></li><li><a href="#method.consume_field_reference" title="consume_field_reference">consume_field_reference</a></li><li><a href="#method.consume_filter" title="consume_filter">consume_filter</a></li><li><a href="#method.consume_if_then" title="consume_if_then">consume_if_then</a></li><li><a href="#method.consume_join" title="consume_join">consume_join</a></li><li><a href="#method.consume_literal" title="consume_literal">consume_literal</a></li><li><a href="#method.consume_multi_or_list" title="consume_multi_or_list">consume_multi_or_list</a></li><li><a href="#method.consume_nested" title="consume_nested">consume_nested</a></li><li><a href="#method.consume_project" title="consume_project">consume_project</a></li><li><a href="#method.consume_read" title="consume_read">consume_read</a></li><li><a href="#method.consume_rel" title="consume_rel">consume_rel</a></li><li><a href="#method.consume_scalar_function" title="consume_scalar_function">consume_scalar_function</a></li><li><a href="#method.consume_set" title="consume_set">consume_set</a></li><li><a href="#method.consume_singular_or_list" title="consume_singular_or_list">consume_singular_or_list</a></li><li><a href="#method.consume_sort" title="consume_sort">consume_sort</a></li><li><a href="#method.consume_subquery" title="consume_subquery">consume_subquery</a></li><li><a href="#method.consume_switch" title="consume_switch">consume_switch</a></li><li><a href="#method.consume_user_defined_literal" title="consume_user_defined_literal">consume_user_defined_literal</a></li><li><a href="#method.consume_user_defined_type" title="consume_user_defined_type">consume_user_defined_type</a></li><li><a href="#method.consume_window_function" title="consume_window_function">consume_window_function</a></li></ul><h3><a href="#dyn-compatibility">Dyn Compatibility</a></h3><h3><a href="#implementors">Implementors</a></h3></section><div id="rustdoc-modnav"><h2><a href="index.html">In substrait::<wbr>df_<wbr>logical_<wbr>plan::<wbr>consumer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">substrait</a>::<wbr><a href="../index.html">df_logical_plan</a>::<wbr><a href="index.html">consumer</a></div><h1>Trait <span class="trait">SubstraitConsumer</span><button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"></span></div><pre class="rust item-decl"><code>pub trait SubstraitConsumer:
+    <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a>
+    + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> {
+<details class="toggle type-contents-toggle"><summary class="hideme"><span>Show 33 methods</span></summary>    // Required methods
+    fn <a href="#tymethod.resolve_table_ref" class="fn">resolve_table_ref</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        table_ref: &amp;'life1 TableReference,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="enum" href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;dyn TableProvider&gt;&gt;, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span>;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_extensions" class="fn">get_extensions</a>(&amp;self) -&gt; &amp;Extensions;
+<span class="item-spacer"></span>    fn <a href="#tymethod.get_function_registry" class="fn">get_function_registry</a>(&amp;self) -&gt; &amp;impl FunctionRegistry;
+
+    // Provided methods
+    fn <a href="#method.consume_rel" class="fn">consume_rel</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 Rel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_read" class="fn">consume_read</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ReadRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_filter" class="fn">consume_filter</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 FilterRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_fetch" class="fn">consume_fetch</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 FetchRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_aggregate" class="fn">consume_aggregate</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 AggregateRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_sort" class="fn">consume_sort</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 SortRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_join" class="fn">consume_join</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 JoinRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_project" class="fn">consume_project</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ProjectRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_set" class="fn">consume_set</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 SetRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_cross" class="fn">consume_cross</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 CrossRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_consistent_partition_window" class="fn">consume_consistent_partition_window</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        _rel: &amp;'life1 ConsistentPartitionWindowRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_exchange" class="fn">consume_exchange</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ExchangeRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_expression" class="fn">consume_expression</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 Expression,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_literal" class="fn">consume_literal</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 Literal,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_field_reference" class="fn">consume_field_reference</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 FieldReference,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_scalar_function" class="fn">consume_scalar_function</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 ScalarFunction,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_window_function" class="fn">consume_window_function</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 WindowFunction,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_if_then" class="fn">consume_if_then</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 IfThen,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_switch" class="fn">consume_switch</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        _expr: &amp;'life1 SwitchExpression,
+        _input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_singular_or_list" class="fn">consume_singular_or_list</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 SingularOrList,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_multi_or_list" class="fn">consume_multi_or_list</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        _expr: &amp;'life1 MultiOrList,
+        _input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_cast" class="fn">consume_cast</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 Cast,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_subquery" class="fn">consume_subquery</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        expr: &amp;'life1 Subquery,
+        input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_nested" class="fn">consume_nested</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        _expr: &amp;'life1 Nested,
+        _input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_enum" class="fn">consume_enum</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+        &amp;'life0 self,
+        _expr: &amp;'life1 Enum,
+        _input_schema: &amp;'life2 DFSchema,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             'life2: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_extension_leaf" class="fn">consume_extension_leaf</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ExtensionLeafRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_extension_single" class="fn">consume_extension_single</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ExtensionSingleRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_extension_multi" class="fn">consume_extension_multi</a>&lt;'life0, 'life1, 'async_trait&gt;(
+        &amp;'life0 self,
+        rel: &amp;'life1 ExtensionMultiRel,
+    ) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;
+       <span class="where">where 'life0: 'async_trait,
+             'life1: 'async_trait,
+             Self: 'async_trait</span> { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_user_defined_type" class="fn">consume_user_defined_type</a>(
+        &amp;self,
+        user_defined_type: &amp;UserDefined,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;DataType, DataFusionError&gt; { ... }
+<span class="item-spacer"></span>    fn <a href="#method.consume_user_defined_literal" class="fn">consume_user_defined_literal</a>(
+        &amp;self,
+        user_defined_literal: &amp;UserDefined,
+    ) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;ScalarValue, DataFusionError&gt; { ... }
+</details>}</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>This trait is used to consume Substrait plans, converting them into DataFusion Logical Plans.
+It can be implemented by users to allow for custom handling of relations, expressions, etc.</p>
+<p>Combined with the <a href="../producer/trait.SubstraitProducer.html" title="trait substrait::df_logical_plan::producer::SubstraitProducer">crate::logical_plan::producer::SubstraitProducer</a> this allows for fully
+customizable Substrait serde.</p>
+<h2 id="example-usage"><a class="doc-anchor" href="#example-usage">§</a>Example Usage</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>
+<span class="kw">struct </span>CustomSubstraitConsumer {
+    extensions: Arc&lt;Extensions&gt;,
+    state: Arc&lt;SessionState&gt;,
+}
+
+<span class="attr">#[async_trait]
+</span><span class="kw">impl </span>SubstraitConsumer <span class="kw">for </span>CustomSubstraitConsumer {
+    <span class="kw">async fn </span>resolve_table_ref(
+        <span class="kw-2">&amp;</span><span class="self">self</span>,
+        table_ref: <span class="kw-2">&amp;</span>TableReference,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>TableProvider&gt;&gt;&gt; {
+        <span class="kw">let </span>table = table_ref.table().to_string();
+        <span class="kw">let </span>schema = <span class="self">self</span>.state.schema_for_ref(table_ref.clone())<span class="question-mark">?</span>;
+        <span class="kw">let </span>table_provider = schema.table(<span class="kw-2">&amp;</span>table).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="prelude-val">Ok</span>(table_provider)
+    }
+
+    <span class="kw">fn </span>get_extensions(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Extensions {
+        <span class="self">self</span>.extensions.as_ref()
+    }
+
+    <span class="kw">fn </span>get_function_registry(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="kw">impl </span>FunctionRegistry {
+        <span class="self">self</span>.state.as_ref()
+    }
+
+    <span class="comment">// You can reuse existing consumer code to assist in handling advanced extensions
+    </span><span class="kw">async fn </span>consume_project(<span class="kw-2">&amp;</span><span class="self">self</span>, rel: <span class="kw-2">&amp;</span>ProjectRel) -&gt; <span class="prelude-ty">Result</span>&lt;LogicalPlan&gt; {
+        <span class="kw">let </span>df_plan = from_project_rel(<span class="self">self</span>, rel).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(advanced_extension) = rel.advanced_extension.as_ref() {
+            <span class="macro">not_impl_err!</span>(
+                <span class="string">"decode and handle an advanced extension: {:?}"</span>,
+                advanced_extension
+            )
+        } <span class="kw">else </span>{
+            <span class="prelude-val">Ok</span>(df_plan)
+        }
+    }
+
+    <span class="comment">// You can implement a fully custom consumer method if you need special handling
+    </span><span class="kw">async fn </span>consume_filter(<span class="kw-2">&amp;</span><span class="self">self</span>, rel: <span class="kw-2">&amp;</span>FilterRel) -&gt; <span class="prelude-ty">Result</span>&lt;LogicalPlan&gt; {
+        <span class="kw">let </span>input = <span class="self">self</span>.consume_rel(rel.input.as_ref().unwrap()).<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="kw">let </span>expression =
+            <span class="self">self</span>.consume_expression(rel.condition.as_ref().unwrap(), input.schema())
+                .<span class="kw">await</span><span class="question-mark">?</span>;
+        <span class="comment">// though this one is quite boring
+        </span>LogicalPlanBuilder::from(input).filter(expression)<span class="question-mark">?</span>.build()
+    }
+
+    <span class="comment">// You can add handlers for extension relations
+    </span><span class="kw">async fn </span>consume_extension_leaf(
+        <span class="kw-2">&amp;</span><span class="self">self</span>,
+        rel: <span class="kw-2">&amp;</span>ExtensionLeafRel,
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;LogicalPlan&gt; {
+        <span class="macro">not_impl_err!</span>(
+            <span class="string">"handle protobuf Any {} as you need"</span>,
+            rel.detail.as_ref().unwrap().type_url
+        )
+    }
+
+    <span class="comment">// and handlers for user-define types
+    </span><span class="kw">fn </span>consume_user_defined_type(<span class="kw-2">&amp;</span><span class="self">self</span>, typ: <span class="kw-2">&amp;</span>proto::r#type::UserDefined) -&gt; <span class="prelude-ty">Result</span>&lt;DataType&gt; {
+        <span class="kw">let </span>type_string = <span class="self">self</span>.extensions.types.get(<span class="kw-2">&amp;</span>typ.type_reference).unwrap();
+        <span class="kw">match </span>type_string.as_str() {
+            <span class="string">"u!foo" </span>=&gt; <span class="macro">not_impl_err!</span>(<span class="string">"handle foo conversion"</span>),
+            <span class="string">"u!bar" </span>=&gt; <span class="macro">not_impl_err!</span>(<span class="string">"handle bar conversion"</span>),
+            <span class="kw">_ </span>=&gt; <span class="macro">substrait_err!</span>(<span class="string">"unexpected type"</span>)
+        }
+    }
+
+    <span class="comment">// and user-defined literals
+    </span><span class="kw">fn </span>consume_user_defined_literal(<span class="kw-2">&amp;</span><span class="self">self</span>, literal: <span class="kw-2">&amp;</span>proto::expression::literal::UserDefined) -&gt; <span class="prelude-ty">Result</span>&lt;ScalarValue&gt; {
+        <span class="kw">let </span>type_string = <span class="self">self</span>.extensions.types.get(<span class="kw-2">&amp;</span>literal.type_reference).unwrap();
+        <span class="kw">match </span>type_string.as_str() {
+            <span class="string">"u!foo" </span>=&gt; <span class="macro">not_impl_err!</span>(<span class="string">"handle foo conversion"</span>),
+            <span class="string">"u!bar" </span>=&gt; <span class="macro">not_impl_err!</span>(<span class="string">"handle bar conversion"</span>),
+            <span class="kw">_ </span>=&gt; <span class="macro">substrait_err!</span>(<span class="string">"unexpected type"</span>)
+        }
+    }
+}</code></pre></div>
+</div></details><h2 id="required-methods" class="section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><section id="tymethod.resolve_table_ref" class="method"><h4 class="code-header">fn <a href="#tymethod.resolve_table_ref" class="fn">resolve_table_ref</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    table_ref: &amp;'life1 TableReference,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;<a class="enum" href="https://doc.rust-lang.org/nightly/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/sync/struct.Arc.html" title="struct alloc::sync::Arc">Arc</a>&lt;dyn TableProvider&gt;&gt;, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="tymethod.get_extensions" class="method"><h4 class="code-header">fn <a href="#tymethod.get_extensions" class="fn">get_extensions</a>(&amp;self) -&gt; &amp;Extensions</h4></section><section id="tymethod.get_function_registry" class="method"><h4 class="code-header">fn <a href="#tymethod.get_function_registry" class="fn">get_function_registry</a>(&amp;self) -&gt; &amp;impl FunctionRegistry</h4></section></div><h2 id="provided-methods" class="section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.consume_rel" class="method"><h4 class="code-header">fn <a href="#method.consume_rel" class="fn">consume_rel</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 Rel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section></summary><div class="docblock"><p>All [Rel]s to be converted pass through this method.
+You can provide your own implementation if you wish to customize the conversion behaviour.</p>
+</div></details><section id="method.consume_read" class="method"><h4 class="code-header">fn <a href="#method.consume_read" class="fn">consume_read</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ReadRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_filter" class="method"><h4 class="code-header">fn <a href="#method.consume_filter" class="fn">consume_filter</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 FilterRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_fetch" class="method"><h4 class="code-header">fn <a href="#method.consume_fetch" class="fn">consume_fetch</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 FetchRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_aggregate" class="method"><h4 class="code-header">fn <a href="#method.consume_aggregate" class="fn">consume_aggregate</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 AggregateRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_sort" class="method"><h4 class="code-header">fn <a href="#method.consume_sort" class="fn">consume_sort</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 SortRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_join" class="method"><h4 class="code-header">fn <a href="#method.consume_join" class="fn">consume_join</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 JoinRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_project" class="method"><h4 class="code-header">fn <a href="#method.consume_project" class="fn">consume_project</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ProjectRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_set" class="method"><h4 class="code-header">fn <a href="#method.consume_set" class="fn">consume_set</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 SetRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_cross" class="method"><h4 class="code-header">fn <a href="#method.consume_cross" class="fn">consume_cross</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 CrossRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_consistent_partition_window" class="method"><h4 class="code-header">fn <a href="#method.consume_consistent_partition_window" class="fn">consume_consistent_partition_window</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    _rel: &amp;'life1 ConsistentPartitionWindowRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_exchange" class="method"><h4 class="code-header">fn <a href="#method.consume_exchange" class="fn">consume_exchange</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ExchangeRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><details class="toggle method-toggle" open><summary><section id="method.consume_expression" class="method"><h4 class="code-header">fn <a href="#method.consume_expression" class="fn">consume_expression</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 Expression,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section></summary><div class="docblock"><p>All [Expression]s to be converted pass through this method.
+You can provide your own implementation if you wish to customize the conversion behaviour.</p>
+</div></details><section id="method.consume_literal" class="method"><h4 class="code-header">fn <a href="#method.consume_literal" class="fn">consume_literal</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 Literal,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_field_reference" class="method"><h4 class="code-header">fn <a href="#method.consume_field_reference" class="fn">consume_field_reference</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 FieldReference,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_scalar_function" class="method"><h4 class="code-header">fn <a href="#method.consume_scalar_function" class="fn">consume_scalar_function</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 ScalarFunction,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_window_function" class="method"><h4 class="code-header">fn <a href="#method.consume_window_function" class="fn">consume_window_function</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 WindowFunction,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_if_then" class="method"><h4 class="code-header">fn <a href="#method.consume_if_then" class="fn">consume_if_then</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 IfThen,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_switch" class="method"><h4 class="code-header">fn <a href="#method.consume_switch" class="fn">consume_switch</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    _expr: &amp;'life1 SwitchExpression,
+    _input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_singular_or_list" class="method"><h4 class="code-header">fn <a href="#method.consume_singular_or_list" class="fn">consume_singular_or_list</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 SingularOrList,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_multi_or_list" class="method"><h4 class="code-header">fn <a href="#method.consume_multi_or_list" class="fn">consume_multi_or_list</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    _expr: &amp;'life1 MultiOrList,
+    _input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_cast" class="method"><h4 class="code-header">fn <a href="#method.consume_cast" class="fn">consume_cast</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 Cast,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_subquery" class="method"><h4 class="code-header">fn <a href="#method.consume_subquery" class="fn">consume_subquery</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    expr: &amp;'life1 Subquery,
+    input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_nested" class="method"><h4 class="code-header">fn <a href="#method.consume_nested" class="fn">consume_nested</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    _expr: &amp;'life1 Nested,
+    _input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_enum" class="method"><h4 class="code-header">fn <a href="#method.consume_enum" class="fn">consume_enum</a>&lt;'life0, 'life1, 'life2, 'async_trait&gt;(
+    &amp;'life0 self,
+    _expr: &amp;'life1 Enum,
+    _input_schema: &amp;'life2 DFSchema,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;Expr, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    'life2: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_extension_leaf" class="method"><h4 class="code-header">fn <a href="#method.consume_extension_leaf" class="fn">consume_extension_leaf</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ExtensionLeafRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_extension_single" class="method"><h4 class="code-header">fn <a href="#method.consume_extension_single" class="fn">consume_extension_single</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ExtensionSingleRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_extension_multi" class="method"><h4 class="code-header">fn <a href="#method.consume_extension_multi" class="fn">consume_extension_multi</a>&lt;'life0, 'life1, 'async_trait&gt;(
+    &amp;'life0 self,
+    rel: &amp;'life1 ExtensionMultiRel,
+) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/pin/struct.Pin.html" title="struct core::pin::Pin">Pin</a>&lt;<a class="struct" href="https://doc.rust-lang.org/nightly/alloc/boxed/struct.Box.html" title="struct alloc::boxed::Box">Box</a>&lt;dyn <a class="trait" href="https://doc.rust-lang.org/nightly/core/future/future/trait.Future.html" title="trait core::future::future::Future">Future</a>&lt;Output = <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;LogicalPlan, DataFusionError&gt;&gt; + <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> + 'async_trait&gt;&gt;<div class="where">where
+    'life0: 'async_trait,
+    'life1: 'async_trait,
+    Self: 'async_trait,</div></h4></section><section id="method.consume_user_defined_type" class="method"><h4 class="code-header">fn <a href="#method.consume_user_defined_type" class="fn">consume_user_defined_type</a>(
+    &amp;self,
+    user_defined_type: &amp;UserDefined,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;DataType, DataFusionError&gt;</h4></section><section id="method.consume_user_defined_literal" class="method"><h4 class="code-header">fn <a href="#method.consume_user_defined_literal" class="fn">consume_user_defined_literal</a>(
+    &amp;self,
+    user_defined_literal: &amp;UserDefined,
+) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;ScalarValue, DataFusionError&gt;</h4></section></div><h2 id="dyn-compatibility" class="section-header">Dyn Compatibility<a href="#dyn-compatibility" class="anchor">§</a></h2><div class="dyn-compatibility-info"><p>This trait is <b>not</b> <a href="https://doc.rust-lang.org/nightly/reference/items/traits.html#dyn-compatibility">dyn compatible</a>.</p><p><i>In older versions of Rust, dyn compatibility was called "object safety", so this trait is not object safe.</i></p></div><h2 id="implementors" class="section-header">Implementors<a href="#implementors" class="anchor">§</a></h2><div id="implementors-list"><section id="impl-SubstraitConsumer-for-DefaultSubstraitConsumer%3C'_%3E" class="impl"><a href="#impl-SubstraitConsumer-for-DefaultSubstraitConsumer%3C'_%3E" class="anchor">§</a><h3 class="code-header">impl <a class="trait" href="trait.SubstraitConsumer.html" title="trait substrait::df_logical_plan::consumer::SubstraitConsumer">SubstraitConsumer</a> for <a class="struct" href="struct.DefaultSubstraitConsumer.html" title="struct substrait::df_logical_plan::consumer::DefaultSubstraitConsumer">DefaultSubstraitConsumer</a>&lt;'_&gt;</h3></section></div><script src="../../../trait.impl/datafusion_substrait/logical_plan/consumer/trait.SubstraitConsumer.js" data-ignore-extern-crates="datafusion_substrait" async></script></section></div></main></body></html>

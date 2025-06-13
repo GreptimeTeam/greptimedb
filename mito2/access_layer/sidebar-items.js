@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ATOMIC_WRITE_DIR","OLD_ATOMIC_WRITE_DIR"],"enum":["OperationType"],"fn":["clean_dir","new_fs_cache_store"],"struct":["AccessLayer","RegionFilePathFactory","SstWriteRequest","TempFileCleaner","WriteCachePathProvider"],"trait":["FilePathProvider"],"type":["AccessLayerRef","SstInfoArray"]};

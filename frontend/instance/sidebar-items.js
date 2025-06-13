@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["attach_timer","check_permission","parse_stmt","validate_database","validate_param"],"macro":["validate_db_permission"],"mod":["builder","grpc","influxdb","jaeger","log_handler","logs","opentsdb","otlp","prom_store","promql","region_query","standalone"],"struct":["Instance"]};

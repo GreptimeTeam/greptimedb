@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fill_column_delete_default","fill_column_put_default"],"struct":["ColumnFiller","PlainBatch"]};

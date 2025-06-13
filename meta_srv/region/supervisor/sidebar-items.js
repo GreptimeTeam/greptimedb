@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TICK_INTERVAL"],"enum":["Event","RegionSupervisorSelector"],"struct":["DatanodeHeartbeat","HeartbeatAcceptor","RegionFailureDetectorControl","RegionSupervisor","RegionSupervisorTicker"],"type":["RegionSupervisorRef","RegionSupervisorTickerRef"]};
