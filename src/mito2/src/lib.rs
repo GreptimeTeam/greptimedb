@@ -41,7 +41,6 @@ pub mod read;
 pub mod region;
 mod region_write_ctx;
 pub mod request;
-pub mod row_converter;
 pub mod schedule;
 pub mod sst;
 mod time_provider;

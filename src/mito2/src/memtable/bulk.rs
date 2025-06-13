@@ -16,13 +16,13 @@
 
 use std::sync::{Arc, RwLock};
 
+use mito_codec::key_values::KeyValue;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::{BulkPart, EncodedBulkPart};
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef,
     MemtableStats, PredicateGroup,

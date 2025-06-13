@@ -19,7 +19,6 @@ mod dedup;
 mod dict;
 mod merger;
 mod partition;
-mod primary_key_filter;
 mod shard;
 mod shard_builder;
 mod tree;
@@ -29,7 +28,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-pub(crate) use primary_key_filter::{DensePrimaryKeyFilter, SparsePrimaryKeyFilter};
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -38,7 +38,6 @@ use table::predicate::Predicate;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::tree::PartitionTree;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
@@ -47,7 +46,6 @@ use crate::memtable::{
     PredicateGroup,
 };
 use crate::region::options::MergeMode;
-use crate::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
 
 /// Use `1/DICTIONARY_SIZE_FACTOR` of OS memory as dictionary size.
 pub(crate) const DICTIONARY_SIZE_FACTOR: u64 = 8;
@@ -368,11 +366,11 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::value::Value;
     use datatypes::vectors::Int64Vector;
+    use mito_codec::row_converter::DensePrimaryKeyCodec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::row_converter::DensePrimaryKeyCodec;
     use crate::test_util::memtable_util::{
         self, collect_iter_timestamps, region_metadata_to_row_schema,
     };

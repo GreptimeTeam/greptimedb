@@ -27,8 +27,8 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::ColumnId;
 
 use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
-use crate::memtable::key_values::KeyValue;
-use crate::memtable::partition_tree::SparsePrimaryKeyFilter;
+use crate::key_values::KeyValue;
+use crate::primary_key_filter::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
@@ -205,7 +205,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Returns the offset of the given column id in the given primary key.
-    pub(crate) fn has_column(
+    pub fn has_column(
         &self,
         pk: &[u8],
         offsets_map: &mut HashMap<u32, usize>,
@@ -233,12 +233,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Decode value at `offset` in `pk`.
-    pub(crate) fn decode_value_at(
-        &self,
-        pk: &[u8],
-        offset: usize,
-        column_id: ColumnId,
-    ) -> Result<Value> {
+    pub fn decode_value_at(&self, pk: &[u8], offset: usize, column_id: ColumnId) -> Result<Value> {
         let mut deserializer = Deserializer::new(pk);
         deserializer.advance(offset);
         // Safety: checked by `has_column`
@@ -297,6 +292,40 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
 
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         self.decode_leftmost(bytes)
+    }
+}
+
+/// Field with column id.
+pub struct FieldWithId {
+    pub field: SortField,
+    pub column_id: ColumnId,
+}
+
+/// A special encoder for memtable.
+pub struct SparseEncoder {
+    fields: Vec<FieldWithId>,
+}
+
+impl SparseEncoder {
+    pub fn new(fields: Vec<FieldWithId>) -> Self {
+        Self { fields }
+    }
+
+    pub fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
+    where
+        I: Iterator<Item = ValueRef<'a>>,
+    {
+        let mut serializer = Serializer::new(buffer);
+        for (value, field) in row.zip(self.fields.iter()) {
+            if !value.is_null() {
+                field
+                    .column_id
+                    .serialize(&mut serializer)
+                    .context(SerializeFieldSnafu)?;
+                field.field.serialize(&mut serializer, &value)?;
+            }
+        }
+        Ok(())
     }
 }
 

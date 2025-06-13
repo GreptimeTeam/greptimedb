@@ -27,6 +27,7 @@ futures-util.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
+mito-codec.workspace = true
 mito2.workspace = true
 mur3 = "0.1"
 object-store.workspace = true

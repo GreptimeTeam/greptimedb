@@ -35,20 +35,26 @@ use store_api::storage::ColumnId;
 use crate::error::{
     self, FieldTypeMismatchSnafu, NotSupportedFieldSnafu, Result, SerializeFieldSnafu,
 };
-use crate::memtable::key_values::KeyValue;
-use crate::memtable::partition_tree::DensePrimaryKeyFilter;
+use crate::key_values::KeyValue;
+use crate::primary_key_filter::DensePrimaryKeyFilter;
 use crate::row_converter::{
     CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter,
 };
 
+/// Field to serialize and deserialize value in memcomparable format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortField {
-    pub(crate) data_type: ConcreteDataType,
+    data_type: ConcreteDataType,
 }
 
 impl SortField {
     pub fn new(data_type: ConcreteDataType) -> Self {
         Self { data_type }
+    }
+
+    /// Returns the data type of the field.
+    pub fn data_type(&self) -> &ConcreteDataType {
+        &self.data_type
     }
 
     pub fn estimated_size(&self) -> usize {
@@ -75,10 +81,9 @@ impl SortField {
             | ConcreteDataType::Dictionary(_) => 0,
         }
     }
-}
 
-impl SortField {
-    pub(crate) fn serialize(
+    /// Serialize a value to the serializer.
+    pub fn serialize(
         &self,
         serializer: &mut Serializer<&mut Vec<u8>>,
         value: &ValueRef,
@@ -163,7 +168,8 @@ impl SortField {
         Ok(())
     }
 
-    pub(crate) fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
+    /// Deserialize a value from the deserializer.
+    pub fn deserialize<B: Buf>(&self, deserializer: &mut Deserializer<B>) -> Result<Value> {
         macro_rules! deserialize_and_build_value {
             (
                 $self: ident;
@@ -525,7 +531,7 @@ mod tests {
                 let value = encoder.decode_value_at(&result, i, &mut offsets).unwrap();
                 decoded.push(value);
             }
-            assert_eq!(data_types.len(), offsets.len(), "offsets: {:?}", offsets);
+            assert_eq!(data_types.len(), offsets.len(), "offsets: {offsets:?}");
             assert_eq!(decoded, row);
         }
     }

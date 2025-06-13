@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
+use mito_codec::key_values::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -26,7 +27,6 @@ use table::predicate::Predicate;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::{Series, Values};
 use crate::memtable::{

@@ -16,7 +16,6 @@
 
 pub mod batch_util;
 pub mod memtable_util;
-pub mod meta_util;
 pub mod scheduler_util;
 pub mod sst_util;
 pub mod version_util;
@@ -838,13 +837,6 @@ impl CreateRequestBuilder {
             options,
             region_dir: self.region_dir.clone(),
         }
-    }
-}
-
-/// Creates value for i64.
-pub(crate) fn i64_value(data: i64) -> v1::Value {
-    v1::Value {
-        value_data: Some(ValueData::I64Value(data)),
     }
 }
 

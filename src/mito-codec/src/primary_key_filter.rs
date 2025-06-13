@@ -19,11 +19,16 @@ use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::Value;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
-use crate::memtable::partition_tree::partition::Partition;
 use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyFilter, SparsePrimaryKeyCodec};
+
+/// Returns true if this is a partition column for metrics in the memtable.
+pub fn is_partition_column(name: &str) -> bool {
+    name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+}
 
 #[derive(Clone)]
 struct PrimaryKeyFilterInner {
@@ -42,7 +47,7 @@ impl PrimaryKeyFilterInner {
 
         let mut result = true;
         for filter in self.filters.iter() {
-            if Partition::is_partition_column(filter.column_name()) {
+            if is_partition_column(filter.column_name()) {
                 continue;
             }
             let Some(column) = self.metadata.column_by_name(filter.column_name()) else {
@@ -149,9 +154,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
-    use datafusion::logical_expr::BinaryExpr;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{Expr, Operator};
+    use datafusion_expr::{BinaryExpr, Expr, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;

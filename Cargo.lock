@@ -7248,6 +7248,7 @@ dependencies = [
  "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
+ "mito-codec",
  "mito2",
  "mur3",
  "object-store",
@@ -7314,6 +7315,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mito-codec"
+version = "0.15.0"
+dependencies = [
+ "api",
+ "bytes",
+ "common-base",
+ "common-decimal",
+ "common-error",
+ "common-macro",
+ "common-recordbatch",
+ "common-telemetry",
+ "common-time",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "memcomparable",
+ "paste",
+ "serde",
+ "snafu 0.8.5",
+ "store-api",
+]
+
+[[package]]
 name = "mito2"
 version = "0.15.0"
 dependencies = [
@@ -7355,6 +7379,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "memcomparable",
+ "mito-codec",
  "moka",
  "object-store",
  "parquet",

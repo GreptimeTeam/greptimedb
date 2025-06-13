@@ -27,6 +27,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
+use mito_codec::index::IndexValueCodec;
+use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
@@ -35,9 +37,9 @@ use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::inverted_index::InvertedIndexCacheRef;
-use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
-use crate::row_converter::SortField;
-use crate::sst::index::codec::IndexValueCodec;
+use crate::error::{
+    BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, EncodeSnafu, Result,
+};
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -230,7 +232,8 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
         let mut bytes = vec![];
         let field = SortField::new(data_type);
-        IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)?;
+        IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut bytes)
+            .context(EncodeSnafu)?;
         Ok(bytes)
     }
 }

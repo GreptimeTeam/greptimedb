@@ -115,7 +115,7 @@ pub enum Error {
 
     #[snafu(display("Failed to encode primary key"))]
     EncodePrimaryKey {
-        source: mito2::error::Error,
+        source: mito_codec::error::Error,
         #[snafu(implicit)]
         location: Location,
     },

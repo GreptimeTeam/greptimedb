@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Index codec utilities.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -47,7 +49,7 @@ impl IndexValueCodec {
     ) -> Result<()> {
         ensure!(!value.is_null(), IndexEncodeNullSnafu);
 
-        if matches!(field.data_type, ConcreteDataType::String(_)) {
+        if matches!(field.data_type(), ConcreteDataType::String(_)) {
             let value = value
                 .as_string()
                 .context(FieldTypeMismatchSnafu)?

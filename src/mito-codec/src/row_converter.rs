@@ -12,21 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod dense;
-mod sparse;
+pub mod dense;
+pub mod sparse;
+
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datatypes::value::{Value, ValueRef};
 pub use dense::{DensePrimaryKeyCodec, SortField};
-use mito_codec::key_values::KeyValue;
 pub use sparse::{SparsePrimaryKeyCodec, SparseValues, COLUMN_ID_ENCODE_SIZE};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::Result;
+use crate::key_values::KeyValue;
 
 /// Row value encoder/decoder.
 pub trait PrimaryKeyCodecExt {
@@ -80,7 +81,7 @@ impl CompositeValues {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl CompositeValues {
     pub fn into_sparse(self) -> SparseValues {
         match self {

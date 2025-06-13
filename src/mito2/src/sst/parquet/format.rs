@@ -38,6 +38,7 @@ use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
+use mito_codec::row_converter::{build_primary_key_codec_with_fields, SortField};
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -48,7 +49,6 @@ use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
-use crate::row_converter::{build_primary_key_codec_with_fields, SortField};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::to_sst_arrow_schema;
 

@@ -22,6 +22,8 @@ use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
+use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
+use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -30,13 +32,11 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
+    BiErrorsSnafu, EncodeSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
     PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::row_converter::SortField;
 use crate::sst::file::FileId;
-use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -205,7 +205,8 @@ impl InvertedIndexer {
                                 v.as_value_ref(),
                                 field,
                                 &mut self.value_buf,
-                            )?;
+                            )
+                            .context(EncodeSnafu)?;
                             Ok(self.value_buf.as_slice())
                         })
                         .transpose()?;
@@ -238,7 +239,8 @@ impl InvertedIndexer {
                                 value,
                                 &sort_field,
                                 &mut self.value_buf,
-                            )?;
+                            )
+                            .context(EncodeSnafu)?;
                             self.index_creator
                                 .push_with_name(col_id_str, Some(&self.value_buf))
                                 .await
@@ -334,6 +336,7 @@ mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt64Vector, UInt8Vector};
     use futures::future::BoxFuture;
+    use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use puffin::puffin_manager::cache::PuffinMetadataCache;
@@ -346,7 +349,6 @@ mod tests {
     use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
-    use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 

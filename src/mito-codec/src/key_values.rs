@@ -31,7 +31,7 @@ pub struct KeyValues {
     ///
     /// This mutation must be a valid mutation and rows in the mutation
     /// must not be `None`.
-    pub(crate) mutation: Mutation,
+    pub mutation: Mutation,
     /// Key value read helper.
     helper: SparseReadRowHelper,
     /// Primary key encoding hint.
@@ -333,8 +333,7 @@ mod tests {
     use api::v1::{self, ColumnDataType, SemanticType};
 
     use super::*;
-    use crate::test_util::i64_value;
-    use crate::test_util::meta_util::TestRegionMetadataBuilder;
+    use crate::test_util::{i64_value, TestRegionMetadataBuilder};
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;

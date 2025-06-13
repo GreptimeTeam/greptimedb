@@ -25,20 +25,20 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::schema::ColumnSchema;
 use datatypes::vectors::TimestampMillisecondVector;
+use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::key_values::KeyValue;
 use crate::memtable::partition_tree::data::{timestamp_array_to_i64_slice, DataBatch, DataBuffer};
 use crate::memtable::{
     BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId, MemtableRanges,
     MemtableRef, MemtableStats,
 };
 use crate::read::scan_region::PredicateGroup;
-use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 
 /// Empty memtable for test.
 #[derive(Debug, Default)]

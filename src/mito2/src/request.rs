@@ -922,11 +922,12 @@ mod tests {
     use api::v1::{Row, SemanticType};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnDefaultConstraint;
+    use mito_codec::test_util::i64_value;
     use store_api::metadata::RegionMetadataBuilder;
 
     use super::*;
     use crate::error::Error;
-    use crate::test_util::{i64_value, ts_ms_value};
+    use crate::test_util::ts_ms_value;
 
     fn new_column_schema(
         name: &str,

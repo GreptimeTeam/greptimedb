@@ -26,6 +26,7 @@ use datafusion_expr::Expr;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
+use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection};
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
@@ -48,7 +49,6 @@ use crate::metrics::{
 };
 use crate::read::prune::{PruneReader, Source};
 use crate::read::{Batch, BatchReader};
-use crate::row_converter::build_primary_key_codec;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;

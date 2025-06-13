@@ -264,7 +264,7 @@ mod tests {
         );
 
         let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
-        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(matches!(res, Err(Error::Encode { .. })));
         assert!(builder.output.is_empty());
     }
 

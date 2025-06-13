@@ -29,7 +29,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::error::{
-    CastVectorSnafu, CreateFulltextCreatorSnafu, FieldTypeMismatchSnafu, FulltextFinishSnafu,
+    CastVectorSnafu, CreateFulltextCreatorSnafu, DataTypeMismatchSnafu, FulltextFinishSnafu,
     FulltextPushTextSnafu, IndexOptionsSnafu, OperateAbortedIndexSnafu, Result,
 };
 use crate::read::Batch;
@@ -259,7 +259,7 @@ impl SingleCreator {
                     let data = data.get_ref(i);
                     let text = data
                         .as_string()
-                        .context(FieldTypeMismatchSnafu)?
+                        .context(DataTypeMismatchSnafu)?
                         .unwrap_or_default();
                     self.inner.push_text(text).await?;
                 }

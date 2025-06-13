@@ -226,7 +226,7 @@ mod tests {
         );
 
         let res = builder.collect_eq(&tag_column(), &int64_lit(1));
-        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(matches!(res, Err(Error::Encode { .. })));
         assert!(builder.output.is_empty());
     }
 

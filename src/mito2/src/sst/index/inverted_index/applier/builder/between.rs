@@ -194,7 +194,7 @@ mod tests {
         };
 
         let res = builder.collect_between(&between);
-        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(matches!(res, Err(Error::Encode { .. })));
         assert!(builder.output.is_empty());
     }
 

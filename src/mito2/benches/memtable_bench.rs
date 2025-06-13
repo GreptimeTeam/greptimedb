@@ -25,8 +25,8 @@ use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::region::options::MergeMode;
-use mito2::row_converter::DensePrimaryKeyCodec;
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
+use mito_codec::row_converter::DensePrimaryKeyCodec;
 use rand::rngs::ThreadRng;
 use rand::seq::IndexedRandom;
 use rand::Rng;

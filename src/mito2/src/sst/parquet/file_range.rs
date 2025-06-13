@@ -22,18 +22,19 @@ use api::v1::{OpType, SemanticType};
 use common_telemetry::error;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::arrow::buffer::BooleanBuffer;
+use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
 use parquet::arrow::arrow_reader::RowSelection;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TimeSeriesRowSelector;
 
 use crate::error::{
-    DecodeStatsSnafu, FieldTypeMismatchSnafu, RecordBatchSnafu, Result, StatsNotPresentSnafu,
+    DataTypeMismatchSnafu, DecodeSnafu, DecodeStatsSnafu, RecordBatchSnafu, Result,
+    StatsNotPresentSnafu,
 };
 use crate::read::compat::CompatBatch;
 use crate::read::last_row::RowGroupLastRowCachedReader;
 use crate::read::prune::PruneReader;
 use crate::read::Batch;
-use crate::row_converter::{CompositeValues, PrimaryKeyCodec};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::{
@@ -270,7 +271,11 @@ impl RangeBase {
                     let pk_values = if let Some(pk_values) = input.pk_values() {
                         pk_values
                     } else {
-                        input.set_pk_values(self.codec.decode(input.primary_key())?);
+                        input.set_pk_values(
+                            self.codec
+                                .decode(input.primary_key())
+                                .context(DecodeSnafu)?,
+                        );
                         input.pk_values().unwrap()
                     };
                     let pk_value = match pk_values {
@@ -284,12 +289,12 @@ impl RangeBase {
                             v[pk_index]
                                 .1
                                 .try_to_scalar_value(filter_ctx.data_type())
-                                .context(FieldTypeMismatchSnafu)?
+                                .context(DataTypeMismatchSnafu)?
                         }
                         CompositeValues::Sparse(v) => {
                             let v = v.get_or_null(filter_ctx.column_id());
                             v.try_to_scalar_value(filter_ctx.data_type())
-                                .context(FieldTypeMismatchSnafu)?
+                                .context(DataTypeMismatchSnafu)?
                         }
                     };
                     if filter

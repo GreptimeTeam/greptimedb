@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Utilities to create a [RegionMetadata](store_api::metadata::RegionMetadata).
+//! Test utilities for mito codec.
 
+use api::greptime_proto::v1;
+use api::v1::value::ValueData;
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -103,5 +105,12 @@ impl TestRegionMetadataBuilder {
         }
         builder.primary_key(primary_key);
         builder.build().unwrap()
+    }
+}
+
+/// Creates value for i64.
+pub fn i64_value(data: i64) -> v1::Value {
+    v1::Value {
+        value_data: Some(ValueData::I64Value(data)),
     }
 }
