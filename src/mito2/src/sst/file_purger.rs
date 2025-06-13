@@ -38,6 +38,15 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
+#[derive(Debug)]
+pub struct NoopFilePurger;
+
+impl FilePurger for NoopFilePurger {
+    fn send_request(&self, _: PurgeRequest) {
+        // noop
+    }
+}
+
 /// Purger that purges file for current region.
 pub struct LocalFilePurger {
     scheduler: SchedulerRef,

@@ -144,7 +144,11 @@ impl UnorderedScan {
                 } else {
                     let range = stream_ctx.input.extension_range(index.index);
                     let reader = range.reader();
-                    let stream = reader.read();
+                    let stream = reader.read(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                    );
                     for await batch in stream {
                         yield batch;
                     }

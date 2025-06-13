@@ -212,9 +212,9 @@ mod tests {
     use crate::compaction::window::{file_time_bucket_span, WindowedCompactionPicker};
     use crate::region::options::RegionOptions;
     use crate::sst::file::{FileId, FileMeta, Level};
+    use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
-    use crate::test_util::NoopFilePurger;
 
     fn build_version(
         files: &[(FileId, i64, i64, Level)],

@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::error::Result;
+use crate::read::range::RowGroupIndex;
+use crate::read::scan_region::StreamContext;
+use crate::read::scan_util::PartitionMetrics;
 use crate::read::BoxedBatchStream;
 
 pub type InclusiveTimeRange = (Timestamp, Timestamp);
@@ -35,7 +40,12 @@ pub trait ExtensionRange: Send + Sync {
 pub(crate) type BoxedExtensionRange = Box<dyn ExtensionRange>;
 
 pub trait ExtensionRangeReader: Send {
-    fn read(self: Box<Self>) -> BoxedBatchStream;
+    fn read(
+        self: Box<Self>,
+        stream_ctx: Arc<StreamContext>,
+        part_metrics: PartitionMetrics,
+        index: RowGroupIndex,
+    ) -> BoxedBatchStream;
 }
 
 pub type BoxedExtensionRangeReader = Box<dyn ExtensionRangeReader>;

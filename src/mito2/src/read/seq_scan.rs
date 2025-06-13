@@ -476,7 +476,7 @@ pub(crate) fn build_sources(
         } else {
             let range = stream_ctx.input.extension_range(index.index);
             let reader = range.reader();
-            reader.read()
+            reader.read(stream_ctx.clone(), part_metrics.clone(), *index)
         };
         sources.push(Source::Stream(stream));
     }

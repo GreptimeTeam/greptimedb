@@ -607,7 +607,7 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
 }
 
 /// Common input for different scanners.
-pub(crate) struct ScanInput {
+pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -843,12 +843,11 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
-    pub(crate) async fn prune_file(
+    pub async fn prune_file(
         &self,
-        file_index: usize,
+        file: &FileHandle,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
-        let file = &self.files[file_index];
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -966,7 +965,7 @@ impl ScanInput {
 /// It contains the input and ranges to scan.
 pub struct StreamContext {
     /// Input memtables and files.
-    pub(crate) input: ScanInput,
+    pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
 

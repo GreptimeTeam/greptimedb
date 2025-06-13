@@ -72,21 +72,14 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
-use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
+use crate::sst::file_purger::{FilePurger, FilePurgerRef, NoopFilePurger, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
-#[derive(Debug)]
-pub(crate) struct NoopFilePurger;
-
-impl FilePurger for NoopFilePurger {
-    fn send_request(&self, _request: PurgeRequest) {}
-}
-
 pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
-    Arc::new(NoopFilePurger {})
+    Arc::new(NoopFilePurger)
 }
 
 pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {

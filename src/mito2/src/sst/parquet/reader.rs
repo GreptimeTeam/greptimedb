@@ -823,7 +823,7 @@ impl ReaderFilterMetrics {
 
 /// Parquet reader metrics.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ReaderMetrics {
+pub struct ReaderMetrics {
     /// Filtered row groups and rows metrics.
     pub(crate) filter_metrics: ReaderFilterMetrics,
     /// Duration to build the parquet reader.
