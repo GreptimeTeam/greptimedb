@@ -215,7 +215,7 @@ pub struct JaegerQueryParams {
     pub operation_name: Option<String>,
 
     /// Limit the return data.
-    pub limit: Option<usize>,
+    pub limit: Option<String>,
 
     /// Start time of the trace in microseconds since unix epoch.
     pub start: Option<i64>,
@@ -259,7 +259,7 @@ impl QueryTraceParams {
             ..Default::default()
         };
 
-        if let Some(max_duration) = query_params.max_duration {
+        if let Some(max_duration) = query_params.max_duration.filter(|d| !d.is_empty()) {
             let duration = humantime::parse_duration(&max_duration).map_err(|e| {
                 InvalidJaegerQuerySnafu {
                     reason: format!("parse maxDuration '{}' failed: {}", max_duration, e),
@@ -269,7 +269,7 @@ impl QueryTraceParams {
             internal_query_params.max_duration = Some(duration.as_nanos() as u64);
         }
 
-        if let Some(min_duration) = query_params.min_duration {
+        if let Some(min_duration) = query_params.min_duration.filter(|d| !d.is_empty()) {
             let duration = humantime::parse_duration(&min_duration).map_err(|e| {
                 InvalidJaegerQuerySnafu {
                     reason: format!("parse minDuration '{}' failed: {}", min_duration, e),
@@ -299,7 +299,14 @@ impl QueryTraceParams {
             internal_query_params.tags = Some(tags_map);
         }
 
-        internal_query_params.limit = query_params.limit;
+        if let Some(limit) = query_params.limit.filter(|d| !d.is_empty()) {
+            internal_query_params.limit = Some(limit.parse::<usize>().map_err(|e| {
+                InvalidJaegerQuerySnafu {
+                    reason: format!("parse limit '{}' failed: {}", limit, e),
+                }
+                .build()
+            })?);
+        }
 
         Ok(internal_query_params)
     }
@@ -403,8 +410,12 @@ pub async fn handle_get_trace(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
+    // Convert start time and end time from microseconds to nanoseconds.
+    let start_time = query_params.start.map(|start| start * 1000);
+    let end_time = query_params.end.map(|end| end * 1000);
+
     let output = match handler
-        .get_trace(query_ctx, &trace_id, query_params.start, query_params.end)
+        .get_trace(query_ctx, &trace_id, start_time, end_time)
         .await
     {
         Ok(output) => output,
@@ -1543,7 +1554,7 @@ mod tests {
                     end: Some(1738726754642422),
                     max_duration: Some("100ms".to_string()),
                     min_duration: Some("50ms".to_string()),
-                    limit: Some(10),
+                    limit: Some("10".to_string()),
                     tags: Some("{\"http.status_code\":\"200\",\"latency\":\"11.234\",\"error\":\"false\",\"http.method\":\"GET\",\"http.path\":\"/api/v1/users\"}".to_string()),
                     ..Default::default()
                 },
