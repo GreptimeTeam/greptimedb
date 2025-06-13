@@ -517,7 +517,7 @@ pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
     let idc3_schema = TimeSeries {
         labels: vec![
             new_label(METRIC_NAME_LABEL.to_string(), "idc3_lo_table".to_string()),
-            new_label("__schema__".to_string(), "idc3".to_string()),
+            new_label("__database__".to_string(), "idc3".to_string()),
             new_label("__physical_table__".to_string(), "f1".to_string()),
         ],
         samples: vec![Sample {
@@ -532,7 +532,7 @@ pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
                 METRIC_NAME_LABEL.to_string(),
                 "idc4_local_table".to_string(),
             ),
-            new_label("__schema__".to_string(), "idc4".to_string()),
+            new_label("__database__".to_string(), "idc4".to_string()),
             new_label("__physical_table__".to_string(), "f2".to_string()),
         ],
         samples: vec![Sample {
