@@ -366,8 +366,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::InvokeFrontend { source, .. } => source.status_code(),
-            Error::FrontendNotFound { .. } => StatusCode::InvalidArguments,
-            Error::MetaClientMissing { .. } => StatusCode::Internal,
+            Error::FrontendNotFound { .. } | Error::MetaClientMissing { .. } => {
+                StatusCode::Unexpected
+            }
         }
     }
 

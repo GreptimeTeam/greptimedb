@@ -55,7 +55,7 @@ impl Frontend for FrontendGrpcHandler {
         request: Request<KillProcessRequest>,
     ) -> Result<Response<KillProcessResponse>, Status> {
         let req = request.into_inner();
-        let found = self
+        let success = self
             .process_manager
             .kill_process(req.server_addr, req.catalog, req.process_id)
             .await
@@ -64,6 +64,6 @@ impl Frontend for FrontendGrpcHandler {
                 Status::new(Code::Internal, e.to_string())
             })?;
 
-        Ok(Response::new(KillProcessResponse { found }))
+        Ok(Response::new(KillProcessResponse { found: success }))
     }
 }

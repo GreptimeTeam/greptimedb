@@ -840,6 +840,12 @@ pub enum Error {
 
     #[snafu(display("Invalid process id: {}", id))]
     InvalidProcessId { id: String },
+
+    #[snafu(display("ProcessManager is not present, this can be caused by misconfiguration."))]
+    ProcessManagerMissing {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -968,6 +974,7 @@ impl ErrorExt for Error {
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
+            Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
         }
     }
 

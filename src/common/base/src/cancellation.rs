@@ -47,8 +47,13 @@ impl CancellationHandle {
 
     /// Cancels a future or stream.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        self.waker.wake();
+        if self
+            .cancelled
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.waker.wake();
+        }
     }
 
     /// Is this handle cancelled.

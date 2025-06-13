@@ -31,6 +31,7 @@ use crate::metrics::PROCESS_LIST_COUNT;
 
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
+/// Query process manager.
 pub struct ProcessManager {
     server_addr: String,
     next_id: AtomicU64,
@@ -53,6 +54,7 @@ impl ProcessManager {
 
 impl ProcessManager {
     /// Registers a submitted query. Use the provided id if present.
+    #[must_use]
     pub fn register_query(
         self: &Arc<Self>,
         catalog: String,

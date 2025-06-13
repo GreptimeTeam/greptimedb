@@ -29,7 +29,7 @@ impl StatementExecutor {
     ) -> crate::error::Result<Output> {
         let Some(process_manager) = self.process_manager.as_ref() else {
             error!("Process manager is not initialized");
-            return Ok(Output::new_with_affected_rows(0));
+            return error::ProcessManagerMissingSnafu.fail();
         };
 
         let display_id = DisplayProcessId::try_from(process_id.as_str())
