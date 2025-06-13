@@ -232,8 +232,7 @@ async fn decode_remote_write_request(
     if processor.use_pipeline {
         processor.exec_pipeline().await
     } else {
-        let reqs = request.as_row_insert_requests();
-        Ok(ContextReq::default_opt_with_reqs(reqs))
+        Ok(request.as_row_insert_requests())
     }
 }
 

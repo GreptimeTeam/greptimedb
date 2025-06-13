@@ -39,8 +39,13 @@ use crate::error::{self, Result};
 use crate::row_writer::{self, MultiTableData};
 
 pub const METRIC_NAME_LABEL: &str = "__name__";
-
 pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
+
+pub const DATABASE_LABEL: &str = "__database__";
+pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
+
+pub const PHYSICAL_TABLE_LABEL: &str = "__physical_table__";
+pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"__physical_table__";
 
 /// The same as `FIELD_COLUMN_MATCHER` in `promql` crate
 pub const FIELD_NAME_LABEL: &str = "__field__";
@@ -505,6 +510,39 @@ pub fn mock_timeseries_new_label() -> Vec<TimeSeries> {
     };
 
     vec![ts_demo_metrics, ts_multi_labels]
+}
+
+/// Add new labels to the mock timeseries.
+pub fn mock_timeseries_special_labels() -> Vec<TimeSeries> {
+    let idc3_schema = TimeSeries {
+        labels: vec![
+            new_label(METRIC_NAME_LABEL.to_string(), "idc3_lo_table".to_string()),
+            new_label("__database__".to_string(), "idc3".to_string()),
+            new_label("__physical_table__".to_string(), "f1".to_string()),
+        ],
+        samples: vec![Sample {
+            value: 42.0,
+            timestamp: 3000,
+        }],
+        ..Default::default()
+    };
+    let idc4_schema = TimeSeries {
+        labels: vec![
+            new_label(
+                METRIC_NAME_LABEL.to_string(),
+                "idc4_local_table".to_string(),
+            ),
+            new_label("__database__".to_string(), "idc4".to_string()),
+            new_label("__physical_table__".to_string(), "f2".to_string()),
+        ],
+        samples: vec![Sample {
+            value: 99.0,
+            timestamp: 4000,
+        }],
+        ..Default::default()
+    };
+
+    vec![idc3_schema, idc4_schema]
 }
 
 #[cfg(test)]

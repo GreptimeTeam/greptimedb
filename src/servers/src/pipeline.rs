@@ -167,7 +167,7 @@ async fn run_custom_pipeline(
         // `RowInsertRequest` and append to results. If the pipeline doesn't
         // have dispatch, this will be only output of the pipeline.
         for ((opt, table_name), rows) in transformed_map {
-            results.add_rows(
+            results.add_row(
                 opt,
                 RowInsertRequest {
                     rows: Some(Rows {
