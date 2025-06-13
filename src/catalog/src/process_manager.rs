@@ -27,6 +27,7 @@ use meta_client::MetaClientRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
+use crate::metrics::PROCESS_LIST_COUNT;
 
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
@@ -71,11 +72,8 @@ impl ProcessManager {
             frontend: self.server_addr.clone(),
         };
         let cancellation_handler = Arc::new(CancellationHandle::default());
+        let cancellable_process = CancellableProcess::new(cancellation_handler.clone(), process);
 
-        let cancellable_process = CancellableProcess {
-            handle: cancellation_handler.clone(),
-            process,
-        };
         self.catalogs
             .write()
             .unwrap()
@@ -218,6 +216,23 @@ impl Drop for Ticket {
 struct CancellableProcess {
     handle: Arc<CancellationHandle>,
     process: ProcessInfo,
+}
+
+impl Drop for CancellableProcess {
+    fn drop(&mut self) {
+        PROCESS_LIST_COUNT
+            .with_label_values(&[&self.process.catalog])
+            .dec();
+    }
+}
+
+impl CancellableProcess {
+    fn new(handle: Arc<CancellationHandle>, process: ProcessInfo) -> Self {
+        PROCESS_LIST_COUNT
+            .with_label_values(&[&process.catalog])
+            .inc();
+        Self { handle, process }
+    }
 }
 
 impl Debug for CancellableProcess {
