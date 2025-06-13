@@ -60,12 +60,14 @@ Affected Rows: 0
 
 tql eval (0,10,'5s') sum(MemAvailable / 4) + sum(MemTotal / 4);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.MemTotal
+++
+++
 
 -- Cross schema is not supported
 tql eval (0,10,'5s') sum(MemAvailable / 4) + sum({__name__="AnotherSchema.MemTotal"} / 4);
 
-Error: 4001(TableNotFound), Table not found: greptime.public.AnotherSchema.MemTotal
+++
+++
 
 drop table "MemAvailable";
 

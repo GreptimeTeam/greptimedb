@@ -478,6 +478,30 @@ impl<'de> Deserialize<'de> for Matches {
     }
 }
 
+/// Handles schema errors, transforming a Result into an Option.
+/// - If the input is `Ok(v)`, returns `Some(v)`
+/// - If the input is `Err(err)` and the error status code is `TableNotFound` or
+///   `TableColumnNotFound`, returns `None` (ignoring these specific errors)
+/// - If the input is `Err(err)` with any other error code, directly returns a
+///   `PrometheusJsonResponse::error`.
+macro_rules! handle_schema_err {
+    ($result:expr) => {
+        match $result {
+            Ok(v) => Some(v),
+            Err(err) => {
+                if err.status_code() == StatusCode::TableNotFound
+                    || err.status_code() == StatusCode::TableColumnNotFound
+                {
+                    // Prometheus won't report error if querying nonexist label and metric
+                    None
+                } else {
+                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+                }
+            }
+        }
+    };
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
@@ -546,17 +570,10 @@ pub async fn labels_query(
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
-        if let Err(err) =
+        handle_schema_err!(
             retrieve_labels_name_from_query_result(result, &mut fetched_labels, &mut merge_map)
                 .await
-        {
-            // Prometheus won't report error if querying nonexist label and metric
-            if err.status_code() != StatusCode::TableNotFound
-                && err.status_code() != StatusCode::TableColumnNotFound
-            {
-                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
-            }
-        }
+        );
     }
 
     // intersect `fetched_labels` with `labels` to filter out non-tag columns
@@ -971,15 +988,10 @@ pub async fn label_values_query(
         table_names.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(table_names));
     } else if label_name == FIELD_NAME_LABEL {
-        let field_columns =
-            match retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0)
-                .await
-            {
-                Ok(table_names) => table_names,
-                Err(e) => {
-                    return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
-                }
-            };
+        let field_columns = handle_schema_err!(
+            retrieve_field_names(&query_ctx, handler.catalog_manager(), params.matches.0).await
+        )
+        .unwrap_or_default();
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
         field_columns.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
@@ -1029,19 +1041,8 @@ pub async fn label_values_query(
                 &query_ctx,
             )
             .await;
-
-        match result {
-            Ok(result) => {
-                label_values.extend(result.into_iter());
-            }
-            Err(err) => {
-                // Prometheus won't report error if querying nonexist label and metric
-                if err.status_code() != StatusCode::TableNotFound
-                    && err.status_code() != StatusCode::TableColumnNotFound
-                {
-                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
-                }
-            }
+        if let Some(result) = handle_schema_err!(result) {
+            label_values.extend(result.into_iter());
         }
     }
 
@@ -1229,18 +1230,17 @@ pub async fn series_query(
         };
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
-        if let Err(err) = retrieve_series_from_query_result(
-            result,
-            &mut series,
-            &query_ctx,
-            &table_name,
-            &handler.catalog_manager(),
-            &mut merge_map,
-        )
-        .await
-        {
-            return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
-        }
+        handle_schema_err!(
+            retrieve_series_from_query_result(
+                result,
+                &mut series,
+                &query_ctx,
+                &table_name,
+                &handler.catalog_manager(),
+                &mut merge_map,
+            )
+            .await
+        );
     }
     let merge_map = merge_map
         .into_iter()

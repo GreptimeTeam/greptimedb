@@ -11,7 +11,7 @@ create table http_requests (
     primary key (job, instance, g)
 );
 
-insert into http_requests values 
+insert into http_requests values
     (3000000, "api", "0", "production", 100),
     (3000000, "api", "1", "production", 200),
     (3000000, "api", "0", "canary", 300),
@@ -336,3 +336,63 @@ tql eval (3, 4, '1s') cache_hit_with_null_label / on(job) (cache_miss_with_null_
 drop table cache_hit_with_null_label;
 
 drop table cache_miss_with_null_label;
+
+-- Physical table for test
+CREATE TABLE test_physical (greptime_timestamp timestamp time index, greptime_value double) engine=metric with ("physical_metric_table" = "");
+
+CREATE TABLE IF NOT EXISTS node_network_transmit_bytes_total (
+  cloud STRING NULL,
+  dest_port STRING NULL,
+  dest STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  host STRING NULL,
+  job STRING NULL,
+  node STRING NULL,
+  region STRING NULL,
+  src_port STRING NULL,
+  src STRING NULL,
+  src_namespace STRING NULL,
+  src_node STRING NULL,
+  src_pod STRING NULL,
+  az STRING NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (cloud, dest_port, dest, host, job, node, region, src_port, src, src_namespace, src_node, src_pod, az)
+)
+ENGINE=metric
+WITH(
+  on_physical_table = 'test_physical'
+);
+
+INSERT INTO node_network_transmit_bytes_total (
+    cloud, dest_port, dest, greptime_timestamp, greptime_value, host, job, node, region, src_port, src, src_namespace, src_node, src_pod, az
+) VALUES
+    ('cloud-1', '443', '10.0.0.2', 1000000, 1000, 'host-1', 'greptimedb', 'node-a', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-1', 'pod-1', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.2', 1200000, 2000, 'host-1', 'greptimedb', 'node-a', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-1', 'pod-1', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.3', 1000000, 1500, 'host-2', 'greptimedb', 'node-b', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-2', 'pod-2', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.3', 1200000, 2500, 'host-2', 'greptimedb', 'node-b', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-2', 'pod-2', 'us-west-6'),
+    ('cloud-2', '80', '10.0.0.5', 1000000, 800, 'host-3', 'greptimedb', 'node-c', 'us-west', '9000', '10.0.0.4', 'namespace-2', 'node-3', 'pod-3', 'us-west-6'),
+    ('cloud-2', '80', '10.0.0.5', 1200000, 1800, 'host-3', 'greptimedb', 'node-c', 'us-west', '9000', '10.0.0.4', 'namespace-2', 'node-3', 'pod-3', 'us-west-6');
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') unknown_metric or node_network_transmit_bytes_total;
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total) or unknown_metric;
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') unknown_metric or unknown_metric1 or sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total) or sum by (cloud, tag0, tag1) (unknown_metric);
+
+-- Or with unknown label dst_namespace.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{src_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0) or sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{dst_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0);
+
+DROP TABLE node_network_transmit_bytes_total;
+
+DROP TABLE test_physical;

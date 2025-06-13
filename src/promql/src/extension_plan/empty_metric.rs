@@ -259,7 +259,11 @@ impl ExecutionPlan for EmptyMetricExec {
     }
 
     fn statistics(&self) -> DataFusionResult<Statistics> {
-        let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
+        let estimated_row_num = if self.end > self.start {
+            (self.end - self.start) as f64 / self.interval as f64
+        } else {
+            0.0
+        };
         let total_byte_size = estimated_row_num * std::mem::size_of::<Millisecond>() as f64;
 
         Ok(Statistics {

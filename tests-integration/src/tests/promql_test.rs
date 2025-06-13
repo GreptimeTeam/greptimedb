@@ -638,8 +638,13 @@ async fn cross_schema_query(instance: Arc<dyn MockInstance>) {
         interval,
         lookback_delta,
     )
-    .await;
-    assert!(query_output.is_err());
+    .await
+    .unwrap();
+    let empty_result = r#"+------+-------+
+| time | value |
++------+-------+
++------+-------+"#;
+    check_unordered_output_stream(query_output, empty_result).await;
 
     let query_output = promql_query(
         ins.clone(),

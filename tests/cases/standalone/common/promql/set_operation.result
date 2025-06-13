@@ -12,7 +12,7 @@ create table http_requests (
 
 Affected Rows: 0
 
-insert into http_requests values 
+insert into http_requests values
     (3000000, "api", "0", "production", 100),
     (3000000, "api", "1", "production", 200),
     (3000000, "api", "0", "canary", 300),
@@ -715,6 +715,128 @@ drop table cache_hit_with_null_label;
 Affected Rows: 0
 
 drop table cache_miss_with_null_label;
+
+Affected Rows: 0
+
+-- Physical table for test
+CREATE TABLE test_physical (greptime_timestamp timestamp time index, greptime_value double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS node_network_transmit_bytes_total (
+  cloud STRING NULL,
+  dest_port STRING NULL,
+  dest STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  host STRING NULL,
+  job STRING NULL,
+  node STRING NULL,
+  region STRING NULL,
+  src_port STRING NULL,
+  src STRING NULL,
+  src_namespace STRING NULL,
+  src_node STRING NULL,
+  src_pod STRING NULL,
+  az STRING NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (cloud, dest_port, dest, host, job, node, region, src_port, src, src_namespace, src_node, src_pod, az)
+)
+ENGINE=metric
+WITH(
+  on_physical_table = 'test_physical'
+);
+
+Affected Rows: 0
+
+INSERT INTO node_network_transmit_bytes_total (
+    cloud, dest_port, dest, greptime_timestamp, greptime_value, host, job, node, region, src_port, src, src_namespace, src_node, src_pod, az
+) VALUES
+    ('cloud-1', '443', '10.0.0.2', 1000000, 1000, 'host-1', 'greptimedb', 'node-a', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-1', 'pod-1', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.2', 1200000, 2000, 'host-1', 'greptimedb', 'node-a', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-1', 'pod-1', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.3', 1000000, 1500, 'host-2', 'greptimedb', 'node-b', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-2', 'pod-2', 'us-west-6'),
+    ('cloud-1', '443', '10.0.0.3', 1200000, 2500, 'host-2', 'greptimedb', 'node-b', 'us-west', '8080', '10.0.0.1', 'namespace-1', 'node-2', 'pod-2', 'us-west-6'),
+    ('cloud-2', '80', '10.0.0.5', 1000000, 800, 'host-3', 'greptimedb', 'node-c', 'us-west', '9000', '10.0.0.4', 'namespace-2', 'node-3', 'pod-3', 'us-west-6'),
+    ('cloud-2', '80', '10.0.0.5', 1200000, 1800, 'host-3', 'greptimedb', 'node-c', 'us-west', '9000', '10.0.0.4', 'namespace-2', 'node-3', 'pod-3', 'us-west-6');
+
+Affected Rows: 6
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') unknown_metric or node_network_transmit_bytes_total;
+
++---------------------+-----------+---------+----------+-----------+--------+------------+--------+---------+----------+---------------+----------+---------+----------+--------+
+| time                | az        | cloud   | dest     | dest_port | host   | job        | node   | region  | src      | src_namespace | src_node | src_pod | src_port | value  |
++---------------------+-----------+---------+----------+-----------+--------+------------+--------+---------+----------+---------------+----------+---------+----------+--------+
+| 1970-01-01T00:16:40 | us-west-6 | cloud-1 | 10.0.0.2 | 443       | host-1 | greptimedb | node-a | us-west | 10.0.0.1 | namespace-1   | node-1   | pod-1   | 8080     | 1000.0 |
+| 1970-01-01T00:16:40 | us-west-6 | cloud-1 | 10.0.0.3 | 443       | host-2 | greptimedb | node-b | us-west | 10.0.0.1 | namespace-1   | node-2   | pod-2   | 8080     | 1500.0 |
+| 1970-01-01T00:16:40 | us-west-6 | cloud-2 | 10.0.0.5 | 80        | host-3 | greptimedb | node-c | us-west | 10.0.0.4 | namespace-2   | node-3   | pod-3   | 9000     | 800.0  |
+| 1970-01-01T00:21:40 | us-west-6 | cloud-1 | 10.0.0.2 | 443       | host-1 | greptimedb | node-a | us-west | 10.0.0.1 | namespace-1   | node-1   | pod-1   | 8080     | 2000.0 |
+| 1970-01-01T00:21:40 | us-west-6 | cloud-1 | 10.0.0.3 | 443       | host-2 | greptimedb | node-b | us-west | 10.0.0.1 | namespace-1   | node-2   | pod-2   | 8080     | 2500.0 |
+| 1970-01-01T00:21:40 | us-west-6 | cloud-2 | 10.0.0.5 | 80        | host-3 | greptimedb | node-c | us-west | 10.0.0.4 | namespace-2   | node-3   | pod-3   | 9000     | 1800.0 |
++---------------------+-----------+---------+----------+-----------+--------+------------+--------+---------+----------+---------------+----------+---------+----------+--------+
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total) or unknown_metric;
+
++---------------------+---------+-------------------------------------------------------+
+| greptime_timestamp  | cloud   | sum(node_network_transmit_bytes_total.greptime_value) |
++---------------------+---------+-------------------------------------------------------+
+| 1970-01-01T00:16:40 | cloud-1 | 2500.0                                                |
+| 1970-01-01T00:16:40 | cloud-2 | 800.0                                                 |
+| 1970-01-01T00:21:40 | cloud-1 | 4500.0                                                |
+| 1970-01-01T00:21:40 | cloud-2 | 1800.0                                                |
++---------------------+---------+-------------------------------------------------------+
+
+-- Or with unknown label and metric.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') unknown_metric or unknown_metric1 or sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total);
+
++---------------------+---------+--------+
+| time                | cloud   | value  |
++---------------------+---------+--------+
+| 1970-01-01T00:16:40 | cloud-1 | 2500.0 |
+| 1970-01-01T00:16:40 | cloud-2 | 800.0  |
+| 1970-01-01T00:21:40 | cloud-1 | 4500.0 |
+| 1970-01-01T00:21:40 | cloud-2 | 1800.0 |
++---------------------+---------+--------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (cloud, tag0, tag1) (node_network_transmit_bytes_total) or sum by (cloud, tag0, tag1) (unknown_metric);
+
++---------------------+---------+-------------------------------------------------------+
+| greptime_timestamp  | cloud   | sum(node_network_transmit_bytes_total.greptime_value) |
++---------------------+---------+-------------------------------------------------------+
+| 1970-01-01T00:16:40 | cloud-1 | 2500.0                                                |
+| 1970-01-01T00:16:40 | cloud-2 | 800.0                                                 |
+| 1970-01-01T00:21:40 | cloud-1 | 4500.0                                                |
+| 1970-01-01T00:21:40 | cloud-2 | 1800.0                                                |
++---------------------+---------+-------------------------------------------------------+
+
+-- Or with unknown label dst_namespace.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(1000, 2000, '300s') sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{src_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0) or sum by (src, src_pod, src_namespace, src_node, dest, dst_pod, dst_namespace, dst_node, cloud, region, az) (increase(node_network_transmit_bytes_total{dst_node!="", job=~"greptimedb", region=~"us-west", az=~"us-west-6"}[900s])>0);
+
++---------------------+-----------+---------+----------+---------+----------+---------------+----------+---------+----------------------------------------------------------------------------------------------+
+| greptime_timestamp  | az        | cloud   | dest     | region  | src      | src_namespace | src_node | src_pod | sum(prom_increase(greptime_timestamp_range,greptime_value,greptime_timestamp,Int64(900000))) |
++---------------------+-----------+---------+----------+---------+----------+---------------+----------+---------+----------------------------------------------------------------------------------------------+
+| 1970-01-01T00:21:40 | us-west-6 | cloud-1 | 10.0.0.2 | us-west | 10.0.0.1 | namespace-1   | node-1   | pod-1   | 2500.0                                                                                       |
+| 1970-01-01T00:21:40 | us-west-6 | cloud-1 | 10.0.0.3 | us-west | 10.0.0.1 | namespace-1   | node-2   | pod-2   | 2000.0                                                                                       |
+| 1970-01-01T00:21:40 | us-west-6 | cloud-2 | 10.0.0.5 | us-west | 10.0.0.4 | namespace-2   | node-3   | pod-3   | 2300.0                                                                                       |
+| 1970-01-01T00:26:40 | us-west-6 | cloud-1 | 10.0.0.2 | us-west | 10.0.0.1 | namespace-1   | node-1   | pod-1   | 2500.0                                                                                       |
+| 1970-01-01T00:26:40 | us-west-6 | cloud-1 | 10.0.0.3 | us-west | 10.0.0.1 | namespace-1   | node-2   | pod-2   | 2000.0                                                                                       |
+| 1970-01-01T00:26:40 | us-west-6 | cloud-2 | 10.0.0.5 | us-west | 10.0.0.4 | namespace-2   | node-3   | pod-3   | 2300.0                                                                                       |
+| 1970-01-01T00:31:40 | us-west-6 | cloud-1 | 10.0.0.2 | us-west | 10.0.0.1 | namespace-1   | node-1   | pod-1   | 1500.0                                                                                       |
+| 1970-01-01T00:31:40 | us-west-6 | cloud-1 | 10.0.0.3 | us-west | 10.0.0.1 | namespace-1   | node-2   | pod-2   | 1500.0                                                                                       |
+| 1970-01-01T00:31:40 | us-west-6 | cloud-2 | 10.0.0.5 | us-west | 10.0.0.4 | namespace-2   | node-3   | pod-3   | 1500.0                                                                                       |
++---------------------+-----------+---------+----------+---------+----------+---------------+----------+---------+----------------------------------------------------------------------------------------------+
+
+DROP TABLE node_network_transmit_bytes_total;
+
+Affected Rows: 0
+
+DROP TABLE test_physical;
 
 Affected Rows: 0
 
