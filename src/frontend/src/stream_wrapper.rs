@@ -42,7 +42,7 @@ impl Stream for CancellableStreamWrapper {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        if this.ticket.cancellation_handler.is_cancelled() {
+        if this.ticket.cancellation_handle.is_cancelled() {
             return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
         }
 
@@ -51,12 +51,9 @@ impl Stream for CancellableStreamWrapper {
         }
 
         // on pending, register cancellation waker.
-        this.ticket
-            .cancellation_handler
-            .waker()
-            .register(cx.waker());
+        this.ticket.cancellation_handle.waker().register(cx.waker());
         // check if canceled again.
-        if this.ticket.cancellation_handler.is_cancelled() {
+        if this.ticket.cancellation_handle.is_cancelled() {
             return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
         }
         Poll::Pending
@@ -216,7 +213,7 @@ mod tests {
         );
 
         // Cancel before creating the wrapper
-        ticket.cancellation_handler.cancel();
+        ticket.cancellation_handle.cancel();
 
         let mut cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
 
@@ -238,7 +235,7 @@ mod tests {
             "client".to_string(),
             None,
         );
-        let cancellation_handle = ticket.cancellation_handler.clone();
+        let cancellation_handle = ticket.cancellation_handle.clone();
 
         let mut cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
 
@@ -265,7 +262,7 @@ mod tests {
             "client".to_string(),
             None,
         );
-        let cancellation_handle = ticket.cancellation_handler.clone();
+        let cancellation_handle = ticket.cancellation_handle.clone();
 
         let mut cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
 
@@ -351,7 +348,7 @@ mod tests {
             "client".to_string(),
             None,
         );
-        let cancellation_handle = ticket.cancellation_handler.clone();
+        let cancellation_handle = ticket.cancellation_handle.clone();
 
         let mut cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
 

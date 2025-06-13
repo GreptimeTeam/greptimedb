@@ -239,7 +239,7 @@ impl Instance {
             }
         };
 
-        CancellableFuture::new(query_fut, ticket.cancellation_handler.clone())
+        CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| error::CancelledSnafu.build())?
             .map(|output| {

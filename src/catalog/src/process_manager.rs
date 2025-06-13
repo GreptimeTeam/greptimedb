@@ -27,15 +27,19 @@ use meta_client::MetaClientRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
-use crate::metrics::PROCESS_LIST_COUNT;
+use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
 
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
 /// Query process manager.
 pub struct ProcessManager {
+    /// Local frontend server address,
     server_addr: String,
+    /// Next process id for local queries.
     next_id: AtomicU64,
+    /// Running process per catalog.
     catalogs: RwLock<HashMap<String, HashMap<u64, CancellableProcess>>>,
+    /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
 }
 
@@ -73,8 +77,8 @@ impl ProcessManager {
             client,
             frontend: self.server_addr.clone(),
         };
-        let cancellation_handler = Arc::new(CancellationHandle::default());
-        let cancellable_process = CancellableProcess::new(cancellation_handler.clone(), process);
+        let cancellation_handle = Arc::new(CancellationHandle::default());
+        let cancellable_process = CancellableProcess::new(cancellation_handle.clone(), process);
 
         self.catalogs
             .write()
@@ -87,7 +91,7 @@ impl ProcessManager {
             catalog,
             manager: self.clone(),
             id,
-            cancellation_handler,
+            cancellation_handle,
         }
     }
 
@@ -165,6 +169,7 @@ impl ProcessManager {
                         "Killed process, catalog: {}, id: {:?}",
                         process.process.catalog, process.process.id
                     );
+                    PROCESS_KILL_COUNT.with_label_values(&[&catalog]).inc();
                     Ok(true)
                 } else {
                     debug!("Failed to kill process, id not found: {}", id);
@@ -205,7 +210,7 @@ pub struct Ticket {
     pub(crate) catalog: String,
     pub(crate) manager: ProcessManagerRef,
     pub(crate) id: u64,
-    pub cancellation_handler: Arc<CancellationHandle>,
+    pub cancellation_handle: Arc<CancellationHandle>,
 }
 
 impl Drop for Ticket {
@@ -385,9 +390,9 @@ mod tests {
             None,
         );
 
-        assert!(!ticket.cancellation_handler.is_cancelled());
-        ticket.cancellation_handler.cancel();
-        assert!(ticket.cancellation_handler.is_cancelled());
+        assert!(!ticket.cancellation_handle.is_cancelled());
+        ticket.cancellation_handle.cancel();
+        assert!(ticket.cancellation_handle.is_cancelled());
     }
 
     #[tokio::test]
@@ -401,7 +406,7 @@ mod tests {
             "client1".to_string(),
             None,
         );
-        assert!(!ticket.cancellation_handler.is_cancelled());
+        assert!(!ticket.cancellation_handle.is_cancelled());
         let killed = process_manager
             .kill_process(
                 "127.0.0.1:8000".to_string(),
