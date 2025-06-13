@@ -581,6 +581,7 @@ pub fn identity_pipeline(
     array: Vec<Value>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
+    skip_error: bool,
 ) -> Result<HashMap<ContextOpt, Rows>> {
     let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
         array

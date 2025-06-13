@@ -66,6 +66,7 @@ pub(crate) async fn run_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
+    skip_error: bool,
     is_top_level: bool,
 ) -> Result<ContextReq> {
     if pipeline_ctx.pipeline_definition.is_identity() {
@@ -103,6 +104,7 @@ async fn run_custom_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
+    skip_error: bool,
     is_top_level: bool,
 ) -> Result<ContextReq> {
     let db = query_ctx.get_db_string();
@@ -121,15 +123,21 @@ async fn run_custom_pipeline(
     let mut auto_map_ts_keys = HashMap::new();
 
     for pipeline_map in pipeline_maps {
-        let r = pipeline
+        let result = pipeline
             .exec_mut(pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
             })
-            .context(PipelineSnafu)?;
+            .context(PipelineSnafu);
 
+        let r = match result {
+            Ok(output) => output,
+            Err(e) => {
+                continue; // skip this map if error occurs
+            }
+        };
         match r {
             PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
