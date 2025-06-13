@@ -36,8 +36,6 @@ use crate::error::{
     ValueYamlKeyMustBeStringSnafu,
 };
 
-pub type PipelineMap = Value;
-
 /// Value can be used as type
 /// acts as value: the enclosed value is the actual value
 /// acts as type: the enclosed value is the default value
