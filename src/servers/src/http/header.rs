@@ -87,6 +87,7 @@ pub static CONTENT_TYPE_PROTOBUF: HeaderValue = HeaderValue::from_static(CONTENT
 pub static CONTENT_ENCODING_SNAPPY: HeaderValue = HeaderValue::from_static("snappy");
 
 pub static CONTENT_TYPE_NDJSON_STR: &str = "application/x-ndjson";
+pub static CONTENT_TYPE_NDJSON_SUBTYPE_STR: &str = "x-ndjson";
 
 pub struct GreptimeDbName(Option<String>);
 

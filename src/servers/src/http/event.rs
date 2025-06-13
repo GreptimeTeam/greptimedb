@@ -33,6 +33,7 @@ use common_telemetry::{error, warn};
 use datatypes::value::column_data_to_json;
 use headers::ContentType;
 use lazy_static::lazy_static;
+use mime_guess::mime;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
     ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value as PipelineValue,
@@ -47,7 +48,9 @@ use crate::error::{
     status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
 };
 use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
-use crate::http::header::{CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_PROTOBUF_STR};
+use crate::http::header::{
+    CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
+};
 use crate::http::result::greptime_manage_resp::GreptimedbManageResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
@@ -665,12 +668,13 @@ impl TryFrom<&ContentType> for EventPayloadResolverInner {
     type Error = Error;
 
     fn try_from(content_type: &ContentType) -> Result<Self> {
-        match content_type {
-            x if *x == *JSON_CONTENT_TYPE => Ok(EventPayloadResolverInner::Json),
-            x if *x == *NDJSON_CONTENT_TYPE => Ok(EventPayloadResolverInner::Ndjson),
-            x if *x == *TEXT_CONTENT_TYPE || *x == *TEXT_UTF8_CONTENT_TYPE => {
-                Ok(EventPayloadResolverInner::Text)
+        let mime: mime_guess::Mime = content_type.clone().into();
+        match (mime.type_(), mime.subtype()) {
+            (mime::APPLICATION, mime::JSON) => return Ok(EventPayloadResolverInner::Json),
+            (mime::APPLICATION, subtype) if subtype == CONTENT_TYPE_NDJSON_SUBTYPE_STR => {
+                return Ok(EventPayloadResolverInner::Ndjson)
             }
+            (mime::TEXT, mime::PLAIN) => return Ok(EventPayloadResolverInner::Text),
             _ => InvalidParameterSnafu {
                 reason: format!(
                     "invalid content type: {}, expected: one of {}",
