@@ -67,6 +67,9 @@ pub struct QueryContext {
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u64,
+    /// Connection information
+    #[builder(default)]
+    conn_info: ConnInfo,
 }
 
 /// This fields hold data that is only valid to current query context
@@ -439,6 +442,11 @@ impl QueryContext {
     pub fn process_id(&self) -> u64 {
         self.process_id
     }
+
+    /// Get client information
+    pub fn conn_info(&self) -> &ConnInfo {
+        &self.conn_info
+    }
 }
 
 impl QueryContextBuilder {
@@ -461,6 +469,7 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
             process_id: self.process_id.unwrap_or_default(),
+            conn_info: self.conn_info.unwrap_or_default(),
         }
     }
 
@@ -472,7 +481,7 @@ impl QueryContextBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct ConnInfo {
     pub client_addr: Option<SocketAddr>,
     pub channel: Channel,

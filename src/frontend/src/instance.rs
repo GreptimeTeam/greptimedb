@@ -183,7 +183,7 @@ impl Instance {
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
             stmt.to_string(),
-            "unknown".to_string(),
+            query_ctx.conn_info().to_string(),
             None,
         );
 

@@ -98,6 +98,7 @@ impl Session {
             .configuration_parameter(self.configuration_variables.clone())
             .channel(self.conn_info.channel)
             .process_id(self.process_id)
+            .conn_info(self.conn_info.clone())
             .build()
             .into()
     }
