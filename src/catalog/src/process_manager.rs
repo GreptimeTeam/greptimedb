@@ -99,7 +99,7 @@ impl ProcessManager {
         if let Entry::Occupied(mut o) = self.catalogs.write().unwrap().entry(catalog) {
             let process = o.get_mut().remove(&id);
             debug!("Deregister process: {:?}", process);
-            if o.get_mut().is_empty() {
+            if o.get().is_empty() {
                 o.remove();
             }
         }
