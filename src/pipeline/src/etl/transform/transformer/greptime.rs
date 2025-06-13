@@ -41,7 +41,7 @@ use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
-use crate::{Map, PipelineContext};
+use crate::{unwrap_or_continue_if_err, Map, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -55,7 +55,7 @@ pub struct GreptimeTransformer {
 }
 
 /// Parameters that can be used to configure the greptime pipelines.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct GreptimePipelineParams {
     /// The original options for configuring the greptime pipelines.
     /// This should not be used directly, instead, use the parsed shortcut option values.
@@ -63,6 +63,7 @@ pub struct GreptimePipelineParams {
 
     /// Parsed shortcut option values
     pub flatten_json_object: OnceCell<bool>,
+    pub skip_error: OnceCell<bool>,
 }
 
 impl GreptimePipelineParams {
@@ -79,8 +80,26 @@ impl GreptimePipelineParams {
 
         Self {
             options,
+            skip_error: OnceCell::new(),
             flatten_json_object: OnceCell::new(),
         }
+    }
+
+    pub fn from_map(options: HashMap<String, String>) -> Self {
+        Self {
+            options,
+            skip_error: OnceCell::new(),
+            flatten_json_object: OnceCell::new(),
+        }
+    }
+
+    pub fn parse_header_str_to_map(params: Option<&str>) -> HashMap<String, String> {
+        params
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|s| s.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<HashMap<String, String>>()
     }
 
     /// Whether to flatten the JSON object.
@@ -89,6 +108,15 @@ impl GreptimePipelineParams {
             self.options
                 .get("flatten_json_object")
                 .map(|v| v == "true")
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn skip_error(&self) -> bool {
+        *self.skip_error.get_or_init(|| {
+            self.options
+                .get("skip_error")
+                .map(|v| v == "true" || v == "1" || v == "yes" || v == "on" || v == "t")
                 .unwrap_or(false)
         })
     }
@@ -523,6 +551,7 @@ fn identity_pipeline_inner(
     pipeline_maps: Vec<Value>,
     pipeline_ctx: &PipelineContext<'_>,
 ) -> Result<(SchemaInfo, HashMap<ContextOpt, Vec<Row>>)> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let mut schema_info = SchemaInfo::default();
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
@@ -547,8 +576,14 @@ fn identity_pipeline_inner(
     let len = pipeline_maps.len();
 
     for mut pipeline_map in pipeline_maps {
-        let opt = ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map)?;
-        let row = values_to_row(&mut schema_info, pipeline_map, pipeline_ctx)?;
+        let opt = unwrap_or_continue_if_err!(
+            ContextOpt::from_pipeline_map_to_opt(&mut pipeline_map),
+            skip_error
+        );
+        let row = unwrap_or_continue_if_err!(
+            values_to_row(&mut schema_info, pipeline_map, pipeline_ctx),
+            skip_error
+        );
 
         opt_map
             .entry(opt)
@@ -581,13 +616,18 @@ pub fn identity_pipeline(
     array: Vec<Value>,
     table: Option<Arc<table::Table>>,
     pipeline_ctx: &PipelineContext<'_>,
-    skip_error: bool,
 ) -> Result<HashMap<ContextOpt, Rows>> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let input = if pipeline_ctx.pipeline_param.flatten_json_object() {
-        array
-            .into_iter()
-            .map(|item| flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING))
-            .collect::<Result<Vec<Value>>>()?
+        let mut results = Vec::with_capacity(array.len());
+        for item in array.into_iter() {
+            let result = unwrap_or_continue_if_err!(
+                flatten_object(item, DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING),
+                skip_error
+            );
+            results.push(result);
+        }
+        results
     } else {
         array
     };

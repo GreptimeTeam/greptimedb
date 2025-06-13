@@ -20,8 +20,8 @@ use api::v1::{RowInsertRequest, Rows};
 use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
+    unwrap_or_continue_if_err, AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex,
+    Pipeline, PipelineContext, PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
@@ -66,7 +66,6 @@ pub(crate) async fn run_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
-    skip_error: bool,
     is_top_level: bool,
 ) -> Result<ContextReq> {
     if pipeline_ctx.pipeline_definition.is_identity() {
@@ -104,9 +103,9 @@ async fn run_custom_pipeline(
     pipeline_ctx: &PipelineContext<'_>,
     pipeline_req: PipelineIngestRequest,
     query_ctx: &QueryContextRef,
-    skip_error: bool,
     is_top_level: bool,
 ) -> Result<ContextReq> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let db = query_ctx.get_db_string();
     let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
@@ -132,12 +131,7 @@ async fn run_custom_pipeline(
             })
             .context(PipelineSnafu);
 
-        let r = match result {
-            Ok(output) => output,
-            Err(e) => {
-                continue; // skip this map if error occurs
-            }
-        };
+        let r = unwrap_or_continue_if_err!(result, skip_error);
         match r {
             PipelineExecOutput::Transformed(TransformedOutput {
                 opt,

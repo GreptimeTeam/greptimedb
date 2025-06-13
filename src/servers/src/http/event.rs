@@ -60,6 +60,7 @@ use crate::pipeline::run_pipeline;
 use crate::query_handler::PipelineHandlerRef;
 
 const GREPTIME_INTERNAL_PIPELINE_NAME_PREFIX: &str = "greptime_";
+const GREPTIME_PIPELINE_SKIP_ERROR_KEY: &str = "skip_error";
 
 lazy_static! {
     pub static ref JSON_CONTENT_TYPE: ContentType = ContentType::json();
@@ -98,6 +99,20 @@ pub struct LogIngesterQueryParams {
     /// If an error occurs while ingesting the data, the `ignore_errors` will be used to determine if the error should be ignored.
     /// If so, use the current server's timestamp as the event time.
     pub custom_time_index: Option<String>,
+    pub skip_error: Option<bool>,
+}
+
+pub struct PipelineQueryParams {
+    skip_error: bool,
+}
+
+impl PipelineQueryParams {
+    pub fn skip_error(&self) -> bool {
+        self.skip_error
+    }
+    pub fn new(skip_error: bool) -> Self {
+        Self { skip_error }
+    }
 }
 
 /// LogIngestRequest is the internal request for log ingestion. The raw log input can be transformed into multiple LogIngestRequests.
@@ -613,6 +628,7 @@ pub async fn log_ingester(
     let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
         reason: "pipeline_name is required",
     })?;
+    let skip_error = query_params.skip_error.unwrap_or(false);
     let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
     let pipeline = PipelineDefinition::from_name(
         &pipeline_name,
@@ -640,6 +656,7 @@ pub async fn log_ingester(
         }],
         query_ctx,
         headers,
+        Some(PipelineQueryParams::new(skip_error)),
     )
     .await
 }
@@ -799,17 +816,23 @@ pub(crate) async fn ingest_logs_inner(
     log_ingest_requests: Vec<PipelineIngestRequest>,
     query_ctx: QueryContextRef,
     headers: HeaderMap,
+    ingester_query_params: Option<PipelineQueryParams>,
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
     let exec_timer = std::time::Instant::now();
 
     let mut req = ContextReq::default();
-
-    let pipeline_params = GreptimePipelineParams::from_params(
+    let mut pipeline_parmas_map = GreptimePipelineParams::parse_header_str_to_map(
         headers
             .get(GREPTIME_PIPELINE_PARAMS_HEADER)
             .and_then(|v| v.to_str().ok()),
     );
+    if ingester_query_params.is_some_and(|x| x.skip_error())
+        && !pipeline_parmas_map.contains_key(GREPTIME_PIPELINE_SKIP_ERROR_KEY)
+    {
+        pipeline_parmas_map.insert(GREPTIME_PIPELINE_SKIP_ERROR_KEY.to_string(), "true".into());
+    }
+    let pipeline_params = GreptimePipelineParams::from_map(pipeline_parmas_map);
 
     let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params, query_ctx.channel());
     for pipeline_req in log_ingest_requests {
