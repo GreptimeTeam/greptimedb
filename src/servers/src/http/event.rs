@@ -670,11 +670,11 @@ impl TryFrom<&ContentType> for EventPayloadResolverInner {
     fn try_from(content_type: &ContentType) -> Result<Self> {
         let mime: mime_guess::Mime = content_type.clone().into();
         match (mime.type_(), mime.subtype()) {
-            (mime::APPLICATION, mime::JSON) => return Ok(EventPayloadResolverInner::Json),
+            (mime::APPLICATION, mime::JSON) => Ok(EventPayloadResolverInner::Json),
             (mime::APPLICATION, subtype) if subtype == CONTENT_TYPE_NDJSON_SUBTYPE_STR => {
-                return Ok(EventPayloadResolverInner::Ndjson)
+                Ok(EventPayloadResolverInner::Ndjson)
             }
-            (mime::TEXT, mime::PLAIN) => return Ok(EventPayloadResolverInner::Text),
+            (mime::TEXT, mime::PLAIN) => Ok(EventPayloadResolverInner::Text),
             _ => InvalidParameterSnafu {
                 reason: format!(
                     "invalid content type: {}, expected: one of {}",
