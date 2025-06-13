@@ -184,6 +184,7 @@ async fn do_handle_bulk_api(
         requests,
         Arc::new(query_ctx),
         headers,
+        None,
     )
     .await
     {
