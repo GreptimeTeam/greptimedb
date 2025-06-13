@@ -33,8 +33,9 @@ use snafu::OptionExt;
 
 use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    TransformColumnNameMustBeUniqueSnafu, TransformMultipleTimestampIndexSnafu,
-    TransformTimestampIndexCountSnafu, UnsupportedNumberTypeSnafu, ValueMustBeMapSnafu,
+    TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
+    TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu,
+    UnsupportedNumberTypeSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::ctx_req::ContextOpt;
 use crate::etl::field::{Field, Fields};
@@ -242,6 +243,9 @@ impl GreptimeTransformer {
                             Some(crate::etl::transform::OnFailure::Ignore) => None,
                             None => None,
                         };
+                        if !transform.can_none() && value_data.is_none() {
+                            return TimeIndexMustBeNonNullSnafu.fail();
+                        }
                         values[output_index] = GreptimeValue { value_data };
                     }
                 }
