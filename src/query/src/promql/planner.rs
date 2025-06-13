@@ -1460,7 +1460,13 @@ impl PromPlanner {
             "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
             "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
             "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
-            "predict_linear" => ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf())),
+            "predict_linear" => {
+                other_input_exprs[0] = DfExpr::Cast(Cast {
+                    expr: Box::new(other_input_exprs[0].clone()),
+                    data_type: ArrowDataType::Int64,
+                });
+                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
+            }
             "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
                 exprs.push(build_special_time_expr(

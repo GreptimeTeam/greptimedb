@@ -28,11 +28,11 @@ tql eval (3, 3, '1s') predict_linear(prom_series[3s], 0);
 tql eval (3, 3, '1s') predict_linear(prom_series[3s], 3);
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval (3, 3, '1s') predict_linear(prom_series[3s], 4.2);
+tql eval (3, 3, '1s') predict_linear(prom_series[3s], 40 + 2);
 
 -- holt_winters
 -- SQLNESS SORT_RESULT 3 1
-tql eval (10, 10, '1s') holt_winters(prom_series[10s], 0.5, 0.1);
+tql eval (10, 10, '1s') holt_winters(prom_series[10s], 0.4 + 0.1, 0.1);
 
 DROP TABLE prom_series;
 
@@ -73,5 +73,8 @@ tql eval (1, 4, '1s') round(prom_series_q, 10.0);
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval (1, 4, '1s') round(prom_series_q, 100.0 + 3.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (1, 4, '1s') round(prom_series_q, - 3.0 + 13.0);
 
 DROP TABLE prom_series_q;
