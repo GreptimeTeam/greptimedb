@@ -43,7 +43,7 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Count of running process in each catalog.
+    /// Count of killed process in each catalog.
     pub static ref PROCESS_KILL_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_process_kill_count",
         "Completed kill process requests count",
