@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
@@ -58,12 +57,7 @@ fn test_load_datanode_example_config() {
                 metadata_cache_tti: Duration::from_secs(300),
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some(
-                    Path::new(DEFAULT_DATA_HOME)
-                        .join(WAL_DIR)
-                        .to_string_lossy()
-                        .to_string(),
-                ),
+                dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
@@ -86,10 +80,7 @@ fn test_load_datanode_example_config() {
             ],
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                dir: Path::new(DEFAULT_DATA_HOME)
-                    .join(DEFAULT_LOGGING_DIR)
-                    .to_string_lossy()
-                    .to_string(),
+                dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
@@ -132,10 +123,7 @@ fn test_load_frontend_example_config() {
             }),
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                dir: Path::new(DEFAULT_DATA_HOME)
-                    .join(DEFAULT_LOGGING_DIR)
-                    .to_string_lossy()
-                    .to_string(),
+                dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
@@ -182,10 +170,7 @@ fn test_load_metasrv_example_config() {
                 ..Default::default()
             },
             logging: LoggingOptions {
-                dir: Path::new(DEFAULT_DATA_HOME)
-                    .join(DEFAULT_LOGGING_DIR)
-                    .to_string_lossy()
-                    .to_string(),
+                dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
@@ -220,12 +205,7 @@ fn test_load_standalone_example_config() {
         component: StandaloneOptions {
             default_timezone: Some("UTC".to_string()),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
-                dir: Some(
-                    Path::new(DEFAULT_DATA_HOME)
-                        .join(WAL_DIR)
-                        .to_string_lossy()
-                        .to_string(),
-                ),
+                dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
                 sync_period: Some(Duration::from_secs(10)),
                 recovery_parallelism: 2,
                 ..Default::default()
@@ -248,10 +228,7 @@ fn test_load_standalone_example_config() {
             },
             logging: LoggingOptions {
                 level: Some("info".to_string()),
-                dir: Path::new(DEFAULT_DATA_HOME)
-                    .join(DEFAULT_LOGGING_DIR)
-                    .to_string_lossy()
-                    .to_string(),
+                dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
