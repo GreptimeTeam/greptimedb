@@ -28,15 +28,9 @@ use crate::error;
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
-pub struct QuantileOverTime {
-    quantile: f64,
-}
+pub struct QuantileOverTime;
 
 impl QuantileOverTime {
-    fn new(quantile: f64) -> Self {
-        Self { quantile }
-    }
-
     pub const fn name() -> &'static str {
         "prom_quantile_over_time"
     }
@@ -55,32 +49,21 @@ impl QuantileOverTime {
             input_types,
             DataType::Float64,
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::create_function(input)?.quantile_over_time(input)) as _,
+            Arc::new(Self::quantile_over_time) as _,
         )
     }
 
-    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
-        if inputs.len() != 3 {
-            return Err(DataFusionError::Plan(
-                "QuantileOverTime function should have 3 inputs".to_string(),
-            ));
-        }
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(quantile))) = inputs[2] else {
-            return Err(DataFusionError::Plan(
-                "QuantileOverTime function's third input should be a scalar float64".to_string(),
-            ));
-        };
-        Ok(Self::new(quantile))
-    }
+    fn quantile_over_time(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        error::ensure(
+            input.len() == 3,
+            DataFusionError::Plan(
+                "prom_quantile_over_time function should have 3 inputs".to_string(),
+            ),
+        )?;
 
-    fn quantile_over_time(
-        &self,
-        input: &[ColumnarValue],
-    ) -> Result<ColumnarValue, DataFusionError> {
-        // construct matrix from input.
-        assert_eq!(input.len(), 2);
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
+        let quantile_col = &input[2];
 
         let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
         let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
@@ -113,27 +96,85 @@ impl QuantileOverTime {
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
 
-        for index in 0..ts_range.len() {
-            let timestamps = ts_range.get(index).unwrap();
-            let values = value_range.get(index).unwrap();
-            let values = values
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values();
-            error::ensure(
-                timestamps.len() == values.len(),
-                DataFusionError::Execution(format!(
-                    "{}: input arrays should have the same length, found {} and {}",
-                    Self::name(),
-                    timestamps.len(),
-                    values.len()
-                )),
-            )?;
+        match quantile_col {
+            ColumnarValue::Scalar(quantile_scalar) => {
+                let quantile = if let ScalarValue::Float64(Some(q)) = quantile_scalar {
+                    *q
+                } else {
+                    // For `ScalarValue::Float64(None)` or other scalar types, use NAN,
+                    // which conforms to PromQL's behavior.
+                    f64::NAN
+                };
 
-            let retule = quantile_impl(values, self.quantile);
+                for index in 0..ts_range.len() {
+                    let timestamps = ts_range.get(index).unwrap();
+                    let values = value_range.get(index).unwrap();
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .values();
+                    error::ensure(
+                        timestamps.len() == values.len(),
+                        DataFusionError::Execution(format!(
+                            "{}: time and value arrays in a group should have the same length, found {} and {}",
+                            Self::name(),
+                            timestamps.len(),
+                            values.len()
+                        )),
+                    )?;
 
-            result_array.push(retule);
+                    let result = quantile_impl(values, quantile);
+                    result_array.push(result);
+                }
+            }
+            ColumnarValue::Array(quantile_array) => {
+                let quantile_array = quantile_array
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "{}: expect Float64 as quantile array's type, found {}",
+                            Self::name(),
+                            quantile_array.data_type()
+                        ))
+                    })?;
+
+                error::ensure(
+                    quantile_array.len() == ts_range.len(),
+                    DataFusionError::Execution(format!(
+                        "{}: quantile array should have the same length as other columns, found {} and {}",
+                        Self::name(),
+                        quantile_array.len(),
+                        ts_range.len()
+                    )),
+                )?;
+                for index in 0..ts_range.len() {
+                    let timestamps = ts_range.get(index).unwrap();
+                    let values = value_range.get(index).unwrap();
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .values();
+                    error::ensure(
+                        timestamps.len() == values.len(),
+                        DataFusionError::Execution(format!(
+                            "{}: time and value arrays in a group should have the same length, found {} and {}",
+                            Self::name(),
+                            timestamps.len(),
+                            values.len()
+                        )),
+                    )?;
+                    let quantile = if quantile_array.is_null(index) {
+                        f64::NAN
+                    } else {
+                        quantile_array.value(index)
+                    };
+                    let result = quantile_impl(values, quantile);
+                    result_array.push(result);
+                }
+            }
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));

@@ -29,9 +29,9 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
-    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta,
-    Increase, LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, Round,
-    StddevOverTime, StdvarOverTime, SumOverTime,
+    quantile_udaf, AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
+    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -161,7 +161,9 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-        // TODO(ruihang): add quantile_over_time, predict_linear, holt_winters, round
+        let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
+        let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
+        let _ = session_state.register_udf(Arc::new(HoltWinters::scalar_udf()));
 
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)
