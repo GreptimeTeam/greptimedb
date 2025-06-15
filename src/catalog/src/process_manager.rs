@@ -65,9 +65,10 @@ impl ProcessManager {
         schemas: Vec<String>,
         query: String,
         client: String,
-        id: Option<u64>,
+        query_id: Option<u64>,
+        connection_id: Option<u32>,
     ) -> Ticket {
-        let id = id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = query_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
             id,
             catalog: catalog.clone(),
@@ -76,6 +77,7 @@ impl ProcessManager {
             start_timestamp: current_time_millis(),
             client,
             frontend: self.server_addr.clone(),
+            connection_id: connection_id.unwrap_or(0),
         };
         let cancellation_handle = Arc::new(CancellationHandle::default());
         let cancellable_process = CancellableProcess::new(cancellation_handle.clone(), process);
@@ -162,23 +164,7 @@ impl ProcessManager {
         id: u64,
     ) -> error::Result<bool> {
         if server_addr == self.server_addr {
-            if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
-                if let Some(process) = catalogs.remove(&id) {
-                    process.handle.cancel();
-                    info!(
-                        "Killed process, catalog: {}, id: {:?}",
-                        process.process.catalog, process.process.id
-                    );
-                    PROCESS_KILL_COUNT.with_label_values(&[&catalog]).inc();
-                    Ok(true)
-                } else {
-                    debug!("Failed to kill process, id not found: {}", id);
-                    Ok(false)
-                }
-            } else {
-                debug!("Failed to kill process, catalog not found: {}", catalog);
-                Ok(false)
-            }
+            self.kill_local_process(catalog, id).await
         } else {
             let mut nodes = self
                 .frontend_selector
@@ -202,6 +188,41 @@ impl ProcessManager {
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             Ok(true)
+        }
+    }
+
+    /// Finds [ProcessInfo]s that matches provided connection id.
+    pub async fn find_processes_by_connection_id(
+        &self,
+        catalog: &str,
+        connection_id: u32,
+    ) -> error::Result<Vec<ProcessInfo>> {
+        let processes = self.list_all_processes(Some(catalog)).await?;
+        let matches = processes
+            .into_iter()
+            .filter(|p| p.connection_id == connection_id)
+            .collect();
+        Ok(matches)
+    }
+
+    /// Kills local query with provided catalog and id.
+    pub async fn kill_local_process(&self, catalog: String, id: u64) -> error::Result<bool> {
+        if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
+            if let Some(process) = catalogs.remove(&id) {
+                process.handle.cancel();
+                info!(
+                    "Killed process, catalog: {}, id: {:?}",
+                    process.process.catalog, process.process.id
+                );
+                PROCESS_KILL_COUNT.with_label_values(&[&catalog]).inc();
+                Ok(true)
+            } else {
+                debug!("Failed to kill process, id not found: {}", id);
+                Ok(false)
+            }
+        } else {
+            debug!("Failed to kill process, catalog not found: {}", catalog);
+            Ok(false)
         }
     }
 }
@@ -266,6 +287,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "".to_string(),
             None,
+            None,
         );
 
         let running_processes = process_manager.local_processes(None).unwrap();
@@ -289,6 +311,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             Some(custom_id),
+            None,
         );
 
         assert_eq!(ticket.id, custom_id);
@@ -309,6 +332,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let ticket2 = process_manager.clone().register_query(
@@ -316,6 +340,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -338,6 +363,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let _ticket2 = process_manager.clone().register_query(
@@ -345,6 +371,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -372,6 +399,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
         process_manager.deregister_query("public".to_string(), ticket.id);
@@ -387,6 +415,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
 
@@ -404,6 +433,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
         assert!(!ticket.cancellation_handle.is_cancelled());
@@ -450,6 +480,7 @@ mod tests {
             "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
             "test_client".to_string(),
             Some(42),
+            None,
         );
 
         let processes = process_manager.local_processes(None).unwrap();
@@ -475,6 +506,7 @@ mod tests {
                 vec!["test".to_string()],
                 "SELECT * FROM table".to_string(),
                 "client1".to_string(),
+                None,
                 None,
             );
 

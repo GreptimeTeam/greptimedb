@@ -187,6 +187,7 @@ mod tests {
             "query".to_string(),
             "client".to_string(),
             None,
+            None,
         );
 
         let mut cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
@@ -209,6 +210,7 @@ mod tests {
             vec![],
             "query".to_string(),
             "client".to_string(),
+            None,
             None,
         );
 
@@ -233,6 +235,7 @@ mod tests {
             vec![],
             "query".to_string(),
             "client".to_string(),
+            None,
             None,
         );
         let cancellation_handle = ticket.cancellation_handle.clone();
@@ -261,6 +264,7 @@ mod tests {
             "query".to_string(),
             "client".to_string(),
             None,
+            None,
         );
         let cancellation_handle = ticket.cancellation_handle.clone();
 
@@ -288,6 +292,7 @@ mod tests {
             vec![],
             "query".to_string(),
             "client".to_string(),
+            None,
             None,
         );
 
@@ -319,6 +324,7 @@ mod tests {
             "query".to_string(),
             "client".to_string(),
             None,
+            None,
         );
 
         let cancellable_stream = CancellableStreamWrapper::new(Box::pin(mock_stream), ticket);
@@ -346,6 +352,7 @@ mod tests {
             vec![],
             "query".to_string(),
             "client".to_string(),
+            None,
             None,
         );
         let cancellation_handle = ticket.cancellation_handle.clone();
