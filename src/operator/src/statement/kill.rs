@@ -74,21 +74,19 @@ impl StatementExecutor {
         connection_id: u32,
     ) -> error::Result<usize> {
         let current_user_catalog = query_ctx.current_catalog().to_string();
-        let catalog_processes = pm
-            .list_all_processes(Some(current_user_catalog.as_ref()))
+        let matches = pm
+            .find_processes_by_connection_id(current_user_catalog.as_ref(), connection_id)
             .await
             .context(error::CatalogSnafu)?;
         let mut killed = 0;
-        for process in catalog_processes {
-            if process.connection_id == connection_id {
-                let succ = pm
-                    .kill_local_process(current_user_catalog.clone(), process.id)
-                    .await
-                    .context(error::CatalogSnafu)?;
-                if succ {
-                    killed += 1;
-                }
-            };
+        for process in matches {
+            let succ = pm
+                .kill_local_process(current_user_catalog.clone(), process.id)
+                .await
+                .context(error::CatalogSnafu)?;
+            if succ {
+                killed += 1;
+            }
         }
         Ok(killed)
     }

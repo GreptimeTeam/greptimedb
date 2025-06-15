@@ -191,6 +191,20 @@ impl ProcessManager {
         }
     }
 
+    /// Finds [ProcessInfo]s that matches provided connection id.
+    pub async fn find_processes_by_connection_id(
+        &self,
+        catalog: &str,
+        connection_id: u32,
+    ) -> error::Result<Vec<ProcessInfo>> {
+        let processes = self.list_all_processes(Some(catalog)).await?;
+        let matches = processes
+            .into_iter()
+            .filter(|p| p.connection_id == connection_id)
+            .collect();
+        Ok(matches)
+    }
+
     /// Kills local query with provided catalog and id.
     pub async fn kill_local_process(&self, catalog: String, id: u64) -> error::Result<bool> {
         if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
