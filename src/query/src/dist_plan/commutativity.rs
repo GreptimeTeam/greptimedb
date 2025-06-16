@@ -62,8 +62,7 @@ pub fn step_aggr_to_upper_aggr(
         let col_name = aggr_expr.qualified_name();
         let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
         let upper_func = match aggr_func.func.name() {
-            "sum" | "min" | "max" | "last_value" | "first_value" | UDDSKETCH_MERGE_NAME
-            | HLL_MERGE_NAME => {
+            "sum" | "min" | "max" | "last_value" | "first_value" => {
                 // aggr_calc(aggr_merge(input_column))) as col_name
                 let mut new_aggr_func = aggr_func.clone();
                 new_aggr_func.args = vec![input_column.clone()];
@@ -76,14 +75,14 @@ pub fn step_aggr_to_upper_aggr(
                 new_aggr_func.args = vec![input_column.clone()];
                 new_aggr_func
             }
-            UDDSKETCH_STATE_NAME => {
+            UDDSKETCH_STATE_NAME | UDDSKETCH_MERGE_NAME => {
                 // udd_merge(bucket_size, error_rate input_column) as col_name
                 let mut new_aggr_func = aggr_func.clone();
                 new_aggr_func.func = Arc::new(UddSketchState::merge_udf_impl());
                 new_aggr_func.args[2] = input_column.clone();
                 new_aggr_func
             }
-            HLL_NAME => {
+            HLL_NAME | HLL_MERGE_NAME => {
                 // hll_merge(input_column) as col_name
                 let mut new_aggr_func = aggr_func.clone();
                 new_aggr_func.func = Arc::new(HllState::merge_udf_impl());
