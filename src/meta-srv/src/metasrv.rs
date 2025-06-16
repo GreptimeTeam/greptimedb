@@ -417,6 +417,7 @@ pub struct Metasrv {
     meta_peer_client: MetaPeerClientRef,
     // The selector is used to select a target datanode.
     selector: SelectorRef,
+    selector_ctx: SelectorContext,
     // The flow selector is used to select a target flownode.
     flow_selector: SelectorRef,
     handler_group: RwLock<Option<HeartbeatHandlerGroupRef>>,
@@ -652,6 +653,10 @@ impl Metasrv {
 
     pub fn selector(&self) -> &SelectorRef {
         &self.selector
+    }
+
+    pub fn selector_ctx(&self) -> &SelectorContext {
+        &self.selector_ctx
     }
 
     pub fn flow_selector(&self) -> &SelectorRef {
