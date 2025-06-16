@@ -246,6 +246,9 @@ GROUP BY
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
   env,
@@ -448,6 +451,9 @@ where
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
   count(*)

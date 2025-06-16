@@ -48,6 +48,7 @@ FROM
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
     count(i),
@@ -97,6 +98,7 @@ ORDER BY
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
     ts,

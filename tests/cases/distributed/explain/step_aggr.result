@@ -72,6 +72,7 @@ FROM
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
     count(i),
@@ -175,6 +176,7 @@ ORDER BY
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
 EXPLAIN ANALYZE
 SELECT
     ts,
@@ -197,25 +199,25 @@ ORDER BY
 |_|_|_ProjectionExec: expr=[ts@0 as ts, sum(count(integers.i))@1 as count(integers.i), sum(sum(integers.i))@2 as sum(integers.i), uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i))@3) as uddsketch_calc(Float64(0.5),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll_merge(hll(integers.i))@4) as hll_count(hll(integers.i))] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[sum(count(integers.i)), sum(sum(integers.i)), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_merge(hll(integers.i))] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=REDACTED REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@0 as ts], aggr=[sum(count(integers.i)), sum(sum(integers.i)), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_merge(hll(integers.i))] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=REDACTED REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=REDACTED REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
 | 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[ts@0 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
-|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=20 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([ts@0], 20), input_partitions=REDACTED REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[ts@1 as ts], aggr=[count(integers.i), sum(integers.i), uddsketch_state(Int64(128),Float64(0.01),integers.i), hll(integers.i)] REDACTED
 |_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
 |_|_|_|
