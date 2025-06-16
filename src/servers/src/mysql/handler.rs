@@ -82,7 +82,7 @@ pub struct MysqlInstanceShim {
     user_provider: Option<UserProviderRef>,
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
-    connection_id: u32,
+    process_id: u32,
 }
 
 impl MysqlInstanceShim {
@@ -90,7 +90,7 @@ impl MysqlInstanceShim {
         query_handler: ServerSqlQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
-        connection_id: u32,
+        process_id: u32,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -112,14 +112,12 @@ impl MysqlInstanceShim {
                 Some(client_addr),
                 Channel::Mysql,
                 Default::default(),
-                // TODO(sunng87): generate process id properly
-                0,
-                Some(connection_id),
+                process_id,
             )),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
-            connection_id,
+            process_id,
         }
     }
 
@@ -346,7 +344,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     fn connect_id(&self) -> u32 {
-        self.connection_id
+        self.process_id
     }
 
     fn default_auth_plugin(&self) -> &str {

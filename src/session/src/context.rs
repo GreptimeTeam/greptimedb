@@ -66,13 +66,10 @@ pub struct QueryContext {
     channel: Channel,
     /// Process id for managing on-going queries
     #[builder(default)]
-    process_id: u64,
+    process_id: u32,
     /// Connection information
     #[builder(default)]
     conn_info: ConnInfo,
-    // Current connection id used to identify client connections.
-    #[builder(default)]
-    connection_id: Option<u32>,
 }
 
 /// This fields hold data that is only valid to current query context
@@ -442,11 +439,7 @@ impl QueryContext {
             .copied()
     }
 
-    pub fn connection_id(&self) -> Option<u32> {
-        self.connection_id
-    }
-
-    pub fn process_id(&self) -> u64 {
+    pub fn process_id(&self) -> u32 {
         self.process_id
     }
 
@@ -475,7 +468,6 @@ impl QueryContextBuilder {
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
-            connection_id: self.connection_id.flatten(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
         }
@@ -637,7 +629,6 @@ mod test {
             Channel::Mysql,
             Default::default(),
             100,
-            Some(123),
         );
         // test user_info
         assert_eq!(session.user_info().username(), "greptime");
@@ -650,7 +641,6 @@ mod test {
 
         assert_eq!("mysql[127.0.0.1:9000]", session.conn_info().to_string());
         assert_eq!(100, session.process_id());
-        assert_eq!(session.connection_id, Some(123));
     }
 
     #[test]

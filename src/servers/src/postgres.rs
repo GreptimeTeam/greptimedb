@@ -120,14 +120,7 @@ impl PgWireServerHandlers for PostgresServerHandler {
 
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
-        // TODO(sunng87): generate pid from process manager
-        let session = Arc::new(Session::new(
-            addr,
-            Channel::Postgres,
-            Default::default(),
-            0,
-            None,
-        ));
+        let session = Arc::new(Session::new(addr, Channel::Postgres, Default::default(), 0));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),

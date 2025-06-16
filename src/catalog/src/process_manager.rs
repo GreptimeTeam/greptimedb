@@ -15,7 +15,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
@@ -29,6 +29,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
 
+pub type ProcessId = u32;
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
 /// Query process manager.
@@ -36,9 +37,9 @@ pub struct ProcessManager {
     /// Local frontend server address,
     server_addr: String,
     /// Next process id for local queries.
-    next_id: AtomicU64,
+    next_id: AtomicU32,
     /// Running process per catalog.
-    catalogs: RwLock<HashMap<String, HashMap<u64, CancellableProcess>>>,
+    catalogs: RwLock<HashMap<String, HashMap<ProcessId, CancellableProcess>>>,
     /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
 }
@@ -65,8 +66,7 @@ impl ProcessManager {
         schemas: Vec<String>,
         query: String,
         client: String,
-        query_id: Option<u64>,
-        connection_id: Option<u32>,
+        query_id: Option<ProcessId>,
     ) -> Ticket {
         let id = query_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
@@ -77,7 +77,6 @@ impl ProcessManager {
             start_timestamp: current_time_millis(),
             client,
             frontend: self.server_addr.clone(),
-            connection_id: connection_id.unwrap_or(0),
         };
         let cancellation_handle = Arc::new(CancellationHandle::default());
         let cancellable_process = CancellableProcess::new(cancellation_handle.clone(), process);
@@ -98,12 +97,12 @@ impl ProcessManager {
     }
 
     /// Generates the next process id.
-    pub fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// De-register a query from process list.
-    pub fn deregister_query(&self, catalog: String, id: u64) {
+    pub fn deregister_query(&self, catalog: String, id: ProcessId) {
         if let Entry::Occupied(mut o) = self.catalogs.write().unwrap().entry(catalog) {
             let process = o.get_mut().remove(&id);
             debug!("Deregister process: {:?}", process);
@@ -161,7 +160,7 @@ impl ProcessManager {
         &self,
         server_addr: String,
         catalog: String,
-        id: u64,
+        id: ProcessId,
     ) -> error::Result<bool> {
         if server_addr == self.server_addr {
             self.kill_local_process(catalog, id).await
@@ -191,22 +190,8 @@ impl ProcessManager {
         }
     }
 
-    /// Finds [ProcessInfo]s that matches provided connection id.
-    pub async fn find_processes_by_connection_id(
-        &self,
-        catalog: &str,
-        connection_id: u32,
-    ) -> error::Result<Vec<ProcessInfo>> {
-        let processes = self.list_all_processes(Some(catalog)).await?;
-        let matches = processes
-            .into_iter()
-            .filter(|p| p.connection_id == connection_id)
-            .collect();
-        Ok(matches)
-    }
-
     /// Kills local query with provided catalog and id.
-    pub async fn kill_local_process(&self, catalog: String, id: u64) -> error::Result<bool> {
+    pub async fn kill_local_process(&self, catalog: String, id: ProcessId) -> error::Result<bool> {
         if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
             if let Some(process) = catalogs.remove(&id) {
                 process.handle.cancel();
@@ -230,7 +215,7 @@ impl ProcessManager {
 pub struct Ticket {
     pub(crate) catalog: String,
     pub(crate) manager: ProcessManagerRef,
-    pub(crate) id: u64,
+    pub(crate) id: ProcessId,
     pub cancellation_handle: Arc<CancellationHandle>,
 }
 
@@ -287,7 +272,6 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "".to_string(),
             None,
-            None,
         );
 
         let running_processes = process_manager.local_processes(None).unwrap();
@@ -311,7 +295,6 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             Some(custom_id),
-            None,
         );
 
         assert_eq!(ticket.id, custom_id);
@@ -332,7 +315,6 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
-            None,
         );
 
         let ticket2 = process_manager.clone().register_query(
@@ -341,14 +323,13 @@ mod tests {
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
             None,
-            None,
         );
 
         let running_processes = process_manager.local_processes(Some("public")).unwrap();
         assert_eq!(running_processes.len(), 2);
 
         // Verify both processes are present
-        let ids: Vec<u64> = running_processes.iter().map(|p| p.id).collect();
+        let ids: Vec<u32> = running_processes.iter().map(|p| p.id).collect();
         assert!(ids.contains(&ticket1.id));
         assert!(ids.contains(&ticket2.id));
     }
@@ -363,7 +344,6 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
-            None,
         );
 
         let _ticket2 = process_manager.clone().register_query(
@@ -371,7 +351,6 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
-            None,
             None,
         );
 
@@ -399,7 +378,6 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             None,
-            None,
         );
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
         process_manager.deregister_query("public".to_string(), ticket.id);
@@ -415,7 +393,6 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
-            None,
             None,
         );
 
@@ -433,7 +410,6 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
-            None,
             None,
         );
         assert!(!ticket.cancellation_handle.is_cancelled());
@@ -480,7 +456,6 @@ mod tests {
             "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
             "test_client".to_string(),
             Some(42),
-            None,
         );
 
         let processes = process_manager.local_processes(None).unwrap();
@@ -506,7 +481,6 @@ mod tests {
                 vec!["test".to_string()],
                 "SELECT * FROM table".to_string(),
                 "client1".to_string(),
-                None,
                 None,
             );
 

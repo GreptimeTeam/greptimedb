@@ -34,7 +34,7 @@ impl StatementExecutor {
             return error::ProcessManagerMissingSnafu.fail();
         };
 
-        let count = match kill {
+        let succ = match kill {
             Kill::ProcessId(process_id) => {
                 self.kill_process_id(process_manager, query_ctx, process_id)
                     .await?
@@ -44,7 +44,7 @@ impl StatementExecutor {
                     .await?
             }
         };
-        Ok(Output::new_with_affected_rows(count))
+        Ok(Output::new_with_affected_rows(if succ { 1 } else { 0 }))
     }
 
     /// Handles `KILL <PROCESS_ID>` statements.
@@ -53,17 +53,14 @@ impl StatementExecutor {
         pm: &ProcessManagerRef,
         query_ctx: QueryContextRef,
         process_id: String,
-    ) -> error::Result<usize> {
+    ) -> error::Result<bool> {
         let display_id = DisplayProcessId::try_from(process_id.as_str())
             .map_err(|_| error::InvalidProcessIdSnafu { id: process_id }.build())?;
 
         let current_user_catalog = query_ctx.current_catalog().to_string();
-        let succ = pm
-            .kill_process(display_id.server_addr, current_user_catalog, display_id.id)
+        pm.kill_process(display_id.server_addr, current_user_catalog, display_id.id)
             .await
-            .context(error::CatalogSnafu)?;
-
-        Ok(if succ { 1 } else { 0 })
+            .context(error::CatalogSnafu)
     }
 
     /// Handles MySQL `KILL QUERY <CONNECTION_ID>` statements.
@@ -72,22 +69,9 @@ impl StatementExecutor {
         pm: &ProcessManagerRef,
         query_ctx: QueryContextRef,
         connection_id: u32,
-    ) -> error::Result<usize> {
-        let current_user_catalog = query_ctx.current_catalog().to_string();
-        let matches = pm
-            .find_processes_by_connection_id(current_user_catalog.as_ref(), connection_id)
+    ) -> error::Result<bool> {
+        pm.kill_local_process(query_ctx.current_catalog().to_string(), connection_id)
             .await
-            .context(error::CatalogSnafu)?;
-        let mut killed = 0;
-        for process in matches {
-            let succ = pm
-                .kill_local_process(current_user_catalog.clone(), process.id)
-                .await
-                .context(error::CatalogSnafu)?;
-            if succ {
-                killed += 1;
-            }
-        }
-        Ok(killed)
+            .context(error::CatalogSnafu)
     }
 }

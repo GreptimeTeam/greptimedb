@@ -235,6 +235,7 @@ where
                     opts.keep_alive.as_secs(),
                     opts.reject_no_database.unwrap_or(false),
                 )),
+                Some(instance.process_manager().clone()),
             );
             handlers.insert((mysql_server, mysql_addr));
         }

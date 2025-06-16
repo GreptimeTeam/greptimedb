@@ -23,7 +23,7 @@ pub mod selector;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct DisplayProcessId {
     pub server_addr: String,
-    pub id: u64,
+    pub id: u32,
 }
 
 impl Display for DisplayProcessId {
@@ -44,7 +44,7 @@ impl TryFrom<&str> for DisplayProcessId {
         let id = split
             .next()
             .context(error::ParseProcessIdSnafu { s: value })?;
-        let id = u64::from_str(id)
+        let id = u32::from_str(id)
             .ok()
             .context(error::ParseProcessIdSnafu { s: value })?;
         Ok(DisplayProcessId { server_addr, id })

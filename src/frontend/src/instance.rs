@@ -186,7 +186,6 @@ impl Instance {
             stmt.to_string(),
             query_ctx.conn_info().to_string(),
             None,
-            query_ctx.connection_id(),
         );
 
         let query_fut = async {

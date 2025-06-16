@@ -14,11 +14,11 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use auth::UserProviderRef;
+use catalog::process_manager::ProcessManagerRef;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::{debug, warn};
@@ -113,6 +113,7 @@ pub struct MysqlServer {
     spawn_ref: Arc<MysqlSpawnRef>,
     spawn_config: Arc<MysqlSpawnConfig>,
     bind_addr: Option<SocketAddr>,
+    process_manager: Option<ProcessManagerRef>,
 }
 
 impl MysqlServer {
@@ -120,26 +121,31 @@ impl MysqlServer {
         io_runtime: Runtime,
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> Box<dyn Server> {
         Box::new(MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),
             spawn_ref,
             spawn_config,
             bind_addr: None,
+            process_manager,
         })
     }
 
-    fn accept(&self, io_runtime: Runtime, stream: AbortableStream) -> impl Future<Output = ()> {
+    fn accept(
+        &self,
+        io_runtime: Runtime,
+        stream: AbortableStream,
+        process_manager: Option<ProcessManagerRef>,
+    ) -> impl Future<Output = ()> {
         let spawn_ref = self.spawn_ref.clone();
         let spawn_config = self.spawn_config.clone();
 
-        let connection_counter = Arc::new(AtomicU32::new(8));
         stream.for_each(move |tcp_stream| {
             let spawn_ref = spawn_ref.clone();
             let spawn_config = spawn_config.clone();
             let io_runtime = io_runtime.clone();
-            let connection_counter = connection_counter.clone();
-
+            let process_id = process_manager.as_ref().map(|p| p.next_id()).unwrap_or(8);
             async move {
                 match tcp_stream {
                     Err(e) => warn!(e; "Broken pipe"), // IoError doesn't impl ErrorExt.
@@ -147,11 +153,9 @@ impl MysqlServer {
                         if let Err(e) = io_stream.set_nodelay(true) {
                             warn!(e; "Failed to set TCP nodelay");
                         }
-                        let connection_id = connection_counter.fetch_add(1, Ordering::Relaxed);
                         io_runtime.spawn(async move {
                             if let Err(error) =
-                                Self::handle(io_stream, spawn_ref, spawn_config, connection_id)
-                                    .await
+                                Self::handle(io_stream, spawn_ref, spawn_config, process_id).await
                             {
                                 warn!(error; "Unexpected error when handling TcpStream");
                             };
@@ -166,11 +170,11 @@ impl MysqlServer {
         stream: TcpStream,
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
-        connection_id: u32,
+        process_id: u32,
     ) -> Result<()> {
         debug!("MySQL connection coming from: {}", stream.peer_addr()?);
         crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
-        if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config, connection_id).await {
+        if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config, process_id).await {
             if let Error::InternalIo { error } = &e
                 && error.kind() == std::io::ErrorKind::ConnectionAborted
             {
@@ -190,13 +194,13 @@ impl MysqlServer {
         stream: TcpStream,
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
-        connection_id: u32,
+        process_id: u32,
     ) -> Result<()> {
         let mut shim = MysqlInstanceShim::create(
             spawn_ref.query_handler(),
             spawn_ref.user_provider(),
             stream.peer_addr()?,
-            connection_id,
+            process_id,
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
@@ -238,7 +242,11 @@ impl Server for MysqlServer {
             .await?;
         let io_runtime = self.base_server.io_runtime();
 
-        let join_handle = common_runtime::spawn_global(self.accept(io_runtime, stream));
+        let join_handle = common_runtime::spawn_global(self.accept(
+            io_runtime,
+            stream,
+            self.process_manager.clone(),
+        ));
         self.base_server.start_with(join_handle).await?;
 
         self.bind_addr = Some(addr);

@@ -73,6 +73,7 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
             0,
             opts.reject_no_database,
         )),
+        None,
     ))
 }
 
