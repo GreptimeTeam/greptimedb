@@ -38,6 +38,8 @@ with (
 
 show create table logical_table_2;
 
+select count(*) from logical_table_2;
+
 drop table logical_table_2;
 
 drop table metric_engine_partition;

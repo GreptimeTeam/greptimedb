@@ -71,6 +71,14 @@ show create table logical_table_2;
 |                 | )                                               |
 +-----------------+-------------------------------------------------+
 
+select count(*) from logical_table_2;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
 drop table logical_table_2;
 
 Affected Rows: 0

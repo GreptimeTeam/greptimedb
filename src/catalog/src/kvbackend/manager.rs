@@ -22,7 +22,9 @@ use common_catalog::consts::{
     PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
-use common_meta::cache::{LayeredCacheRegistryRef, ViewInfoCacheRef};
+use common_meta::cache::{
+    LayeredCacheRegistryRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
+};
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -266,16 +268,43 @@ impl CatalogManager for KvBackendCatalogManager {
         let table_cache: TableCacheRef = self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "table_cache",
         })?;
-        if let Some(table) = table_cache
+        let table_route_cache: TableRouteCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_route_cache",
+            })?;
+        let table = table_cache
             .get_by_ref(&TableName {
                 catalog_name: catalog_name.to_string(),
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
             })
             .await
-            .context(GetTableCacheSnafu)?
+            .context(GetTableCacheSnafu)?;
+
+        // Override logical table's partition key indices with physical table's.
+        if let Some(table) = &table
+            && let Some(table_route_value) = table_route_cache
+                .get(table.table_info().table_id())
+                .await
+                .context(TableMetadataManagerSnafu)?
+            && let TableRoute::Logical(logical_route) = &*table_route_value
+            && let Some(physical_table_info_value) = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(logical_route.physical_table_id())
+                .await
+                .context(TableMetadataManagerSnafu)?
         {
-            return Ok(Some(table));
+            let mut new_table_info = (*table.table_info()).clone();
+            new_table_info.meta.partition_key_indices = physical_table_info_value
+                .table_info
+                .meta
+                .partition_key_indices
+                .clone();
+
+            let new_table = DistTable::table(Arc::new(new_table_info));
+
+            return Ok(Some(new_table));
         }
 
         if channel == Channel::Postgres {
@@ -288,7 +317,7 @@ impl CatalogManager for KvBackendCatalogManager {
             }
         }
 
-        return Ok(None);
+        Ok(table)
     }
 
     async fn tables_by_ids(
