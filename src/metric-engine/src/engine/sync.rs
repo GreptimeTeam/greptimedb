@@ -87,17 +87,8 @@ impl MetricEngineInner {
                 region_id: data_region_id,
             })?
             .options();
-        let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(
-            PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            },
-        )?;
         let new_opened_logical_region_ids = self
-            .recover_states(
-                data_region_id,
-                primary_key_encoding,
-                physical_region_options,
-            )
+            .recover_states(data_region_id, physical_region_options)
             .await?;
         info!(
                 "Sync metadata region for physical region {}, cost: {:?}, new opened logical region ids: {:?}",
