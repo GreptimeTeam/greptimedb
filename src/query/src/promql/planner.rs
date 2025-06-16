@@ -1435,27 +1435,22 @@ impl PromPlanner {
 
         for arg in args {
             match *arg.clone() {
-                PromExpr::Aggregate(_)
-                | PromExpr::Unary(_)
-                | PromExpr::Binary(_)
-                | PromExpr::Paren(_)
-                | PromExpr::Subquery(_)
+                PromExpr::Subquery(_)
                 | PromExpr::VectorSelector(_)
                 | PromExpr::MatrixSelector(_)
                 | PromExpr::Extension(_)
+                | PromExpr::Aggregate(_)
+                | PromExpr::Paren(_)
                 | PromExpr::Call(_) => {
                     if result.input.replace(*arg.clone()).is_some() {
                         MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
                     }
                 }
 
-                PromExpr::NumberLiteral(NumberLiteral { val, .. }) => {
-                    let scalar_value = ScalarValue::Float64(Some(val));
-                    result.literals.push(DfExpr::Literal(scalar_value));
-                }
-                PromExpr::StringLiteral(StringLiteral { val, .. }) => {
-                    let scalar_value = ScalarValue::Utf8(Some(val));
-                    result.literals.push(DfExpr::Literal(scalar_value));
+                _ => {
+                    let expr =
+                        Self::get_param_as_literal_expr(&Some(Box::new(*arg.clone())), None, None)?;
+                    result.literals.push(expr);
                 }
             }
         }
@@ -1507,7 +1502,13 @@ impl PromPlanner {
             "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
             "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
             "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
-            "predict_linear" => ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf())),
+            "predict_linear" => {
+                other_input_exprs[0] = DfExpr::Cast(Cast {
+                    expr: Box::new(other_input_exprs[0].clone()),
+                    data_type: ArrowDataType::Int64,
+                });
+                ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
+            }
             "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
                 exprs.push(build_special_time_expr(

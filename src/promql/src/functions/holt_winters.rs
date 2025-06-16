@@ -31,6 +31,60 @@ use crate::error;
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
+/// `FactorIterator` iterates over a `ColumnarValue` that can be a scalar or an array.
+struct FactorIterator<'a> {
+    is_scalar: bool,
+    array: Option<&'a Float64Array>,
+    scalar_val: f64,
+    index: usize,
+    len: usize,
+}
+
+impl<'a> FactorIterator<'a> {
+    fn new(value: &'a ColumnarValue, len: usize) -> Self {
+        let (is_scalar, array, scalar_val) = match value {
+            ColumnarValue::Array(arr) => {
+                (false, arr.as_any().downcast_ref::<Float64Array>(), f64::NAN)
+            }
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) => (true, None, *val),
+            _ => (true, None, f64::NAN),
+        };
+
+        Self {
+            is_scalar,
+            array,
+            scalar_val,
+            index: 0,
+            len,
+        }
+    }
+}
+
+impl<'a> Iterator for FactorIterator<'a> {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.len {
+            return None;
+        }
+        self.index += 1;
+
+        if self.is_scalar {
+            return Some(self.scalar_val);
+        }
+
+        if let Some(array) = self.array {
+            if array.is_null(self.index - 1) {
+                Some(f64::NAN)
+            } else {
+                Some(array.value(self.index - 1))
+            }
+        } else {
+            Some(f64::NAN)
+        }
+    }
+}
+
 /// There are 3 variants of smoothing functions:
 /// 1) "Simple exponential smoothing": only the `level` component (the weighted average of the observations) is used to make forecasts.
 ///    This method is applied for time-series data that does not exhibit trend or seasonality.
@@ -44,16 +98,9 @@ use crate::range_array::RangeArray;
 /// the "Holt's linear"("double exponential smoothing") suits better and reflects implementation.
 /// There's the [discussion](https://github.com/prometheus/prometheus/issues/2458) in the Prometheus Github that dates back
 /// to 2017 highlighting the naming/implementation mismatch.
-pub struct HoltWinters {
-    sf: f64,
-    tf: f64,
-}
+pub struct HoltWinters;
 
 impl HoltWinters {
-    fn new(sf: f64, tf: f64) -> Self {
-        Self { sf, tf }
-    }
-
     pub const fn name() -> &'static str {
         "prom_holt_winters"
     }
@@ -80,46 +127,31 @@ impl HoltWinters {
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
+            Arc::new(Self::holt_winters) as _,
         )
     }
 
-    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
-        if inputs.len() != 4 {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function should have 4 inputs".to_string(),
-            ));
-        }
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(sf))) = inputs[2] else {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function's third input should be a scalar float64".to_string(),
-            ));
-        };
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(tf))) = inputs[3] else {
-            return Err(DataFusionError::Plan(
-                "HoltWinters function's fourth input should be a scalar float64".to_string(),
-            ));
-        };
-        Ok(Self::new(sf, tf))
-    }
-
-    fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
-        // construct matrix from input.
-        // The third one is level param, the fourth - trend param which are included in fields.
-        assert_eq!(input.len(), 4);
+    fn holt_winters(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        error::ensure(
+            input.len() == 4,
+            DataFusionError::Plan("prom_holt_winters function should have 4 inputs".to_string()),
+        )?;
 
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
+        let sf_col = &input[2];
+        let tf_col = &input[3];
 
         let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
         let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
+        let num_rows = ts_range.len();
 
         error::ensure(
-            ts_range.len() == value_range.len(),
+            num_rows == value_range.len(),
             DataFusionError::Execution(format!(
                 "{}: input arrays should have the same length, found {} and {}",
                 Self::name(),
-                ts_range.len(),
+                num_rows,
                 value_range.len()
             )),
         )?;
@@ -142,9 +174,17 @@ impl HoltWinters {
 
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
-        for index in 0..ts_range.len() {
-            let timestamps = ts_range.get(index).unwrap();
-            let values = value_range.get(index).unwrap();
+
+        let sf_iter = FactorIterator::new(sf_col, num_rows);
+        let tf_iter = FactorIterator::new(tf_col, num_rows);
+
+        let iter = (0..num_rows)
+            .map(|i| (ts_range.get(i), value_range.get(i)))
+            .zip(sf_iter.zip(tf_iter));
+
+        for ((timestamps, values), (sf, tf)) in iter {
+            let timestamps = timestamps.unwrap();
+            let values = values.unwrap();
             let values = values
                 .as_any()
                 .downcast_ref::<Float64Array>()
@@ -159,7 +199,8 @@ impl HoltWinters {
                     values.len()
                 )),
             )?;
-            result_array.push(holt_winter_impl(values, self.sf, self.tf));
+
+            result_array.push(holt_winter_impl(values, sf, tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
