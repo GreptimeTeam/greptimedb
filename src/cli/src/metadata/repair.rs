@@ -31,7 +31,7 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::RegionRoute;
+use common_meta::rpc::router::{find_leaders, RegionRoute};
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
 use snafu::ResultExt;
@@ -231,8 +231,8 @@ impl RepairTool {
             full_table_metadata.full_table_name(),
             physical_region_routes.len()
         );
-        for region_rotue in physical_region_routes {
-            let peer = region_rotue.leader_peer.as_ref().unwrap();
+        let leaders = find_leaders(physical_region_routes);
+        for peer in &leaders {
             let alter_table_request = alter_table::make_alter_region_request_for_peer(
                 logical_table_id,
                 &alter_table_expr,
