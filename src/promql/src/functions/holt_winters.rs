@@ -31,6 +31,60 @@ use crate::error;
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
+/// `FactorIterator` iterates over a `ColumnarValue` that can be a scalar or an array.
+struct FactorIterator<'a> {
+    is_scalar: bool,
+    array: Option<&'a Float64Array>,
+    scalar_val: f64,
+    index: usize,
+    len: usize,
+}
+
+impl<'a> FactorIterator<'a> {
+    fn new(value: &'a ColumnarValue, len: usize) -> Self {
+        let (is_scalar, array, scalar_val) = match value {
+            ColumnarValue::Array(arr) => {
+                (false, arr.as_any().downcast_ref::<Float64Array>(), f64::NAN)
+            }
+            ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) => (true, None, *val),
+            _ => (true, None, f64::NAN),
+        };
+
+        Self {
+            is_scalar,
+            array,
+            scalar_val,
+            index: 0,
+            len,
+        }
+    }
+}
+
+impl<'a> Iterator for FactorIterator<'a> {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.len {
+            return None;
+        }
+        self.index += 1;
+
+        if self.is_scalar {
+            return Some(self.scalar_val);
+        }
+
+        if let Some(array) = self.array {
+            if array.is_null(self.index - 1) {
+                Some(f64::NAN)
+            } else {
+                Some(array.value(self.index - 1))
+            }
+        } else {
+            Some(f64::NAN)
+        }
+    }
+}
+
 /// There are 3 variants of smoothing functions:
 /// 1) "Simple exponential smoothing": only the `level` component (the weighted average of the observations) is used to make forecasts.
 ///    This method is applied for time-series data that does not exhibit trend or seasonality.
@@ -90,13 +144,14 @@ impl HoltWinters {
 
         let ts_range: RangeArray = RangeArray::try_new(ts_array.to_data().into())?;
         let value_range: RangeArray = RangeArray::try_new(value_array.to_data().into())?;
+        let num_rows = ts_range.len();
 
         error::ensure(
-            ts_range.len() == value_range.len(),
+            num_rows == value_range.len(),
             DataFusionError::Execution(format!(
                 "{}: input arrays should have the same length, found {} and {}",
                 Self::name(),
-                ts_range.len(),
+                num_rows,
                 value_range.len()
             )),
         )?;
@@ -117,14 +172,19 @@ impl HoltWinters {
             )),
         )?;
 
-        let sf_iter = get_factor(sf_col, ts_range.len());
-        let tf_iter = get_factor(tf_col, ts_range.len());
-
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
-        for (index, (sf, tf)) in sf_iter.zip(tf_iter).enumerate() {
-            let timestamps = ts_range.get(index).unwrap();
-            let values = value_range.get(index).unwrap();
+
+        let sf_iter = FactorIterator::new(sf_col, num_rows);
+        let tf_iter = FactorIterator::new(tf_col, num_rows);
+
+        let iter = (0..num_rows)
+            .map(|i| (ts_range.get(i), value_range.get(i)))
+            .zip(sf_iter.zip(tf_iter));
+
+        for ((timestamps, values), (sf, tf)) in iter {
+            let timestamps = timestamps.unwrap();
+            let values = values.unwrap();
             let values = values
                 .as_any()
                 .downcast_ref::<Float64Array>()
@@ -139,30 +199,12 @@ impl HoltWinters {
                     values.len()
                 )),
             )?;
+
             result_array.push(holt_winter_impl(values, sf, tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
         Ok(result)
-    }
-}
-
-fn get_factor<'a>(
-    factor_col: &'a ColumnarValue,
-    num_rows: usize,
-) -> Box<dyn Iterator<Item = f64> + 'a> {
-    match factor_col {
-        ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) => {
-            Box::new((0..num_rows).map(|_| *val))
-        }
-        ColumnarValue::Array(array) => {
-            let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-            let iter = array
-                .iter()
-                .map(|x| if let Some(x) = x { x } else { f64::NAN });
-            Box::new(iter)
-        }
-        _ => Box::new((0..num_rows).map(|_| f64::NAN)),
     }
 }
 
