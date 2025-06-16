@@ -130,8 +130,8 @@ pub struct GetTableCommand {
     table_name: Option<String>,
 
     /// The schema name of the table.
-    #[clap(long)]
-    schema_name: Option<String>,
+    #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
+    schema_name: String,
 
     /// Pretty print the output.
     #[clap(long, default_value = "false")]
@@ -159,7 +159,7 @@ struct GetTableTool {
     kvbackend: KvBackendRef,
     table_id: Option<u32>,
     table_name: Option<String>,
-    schema_name: Option<String>,
+    schema_name: String,
     pretty: bool,
 }
 
@@ -173,17 +173,14 @@ impl Tool for GetTableTool {
 
         let table_id = if let Some(table_name) = &self.table_name {
             let catalog = DEFAULT_CATALOG_NAME.to_string();
-            let schema_name = self
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-            let key = TableNameKey::new(&catalog, &schema_name, table_name);
+            let schema_name = &self.schema_name;
+            let key = TableNameKey::new(&catalog, schema_name, table_name);
 
             let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
             else {
                 println!(
                     "Table({}) not found",
-                    format_full_table_name(&catalog, &schema_name, table_name)
+                    format_full_table_name(&catalog, schema_name, table_name)
                 );
                 return Ok(());
             };
