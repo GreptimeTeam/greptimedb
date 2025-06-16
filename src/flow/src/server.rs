@@ -17,6 +17,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::flow::DirtyWindowRequests;
 use api::v1::{RowDeleteRequests, RowInsertRequests};
 use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
@@ -132,6 +133,18 @@ impl flow_server::Flow for FlowService {
 
         self.dual_engine
             .handle_inserts(request)
+            .await
+            .map(Response::new)
+            .map_err(to_status_with_last_err)
+    }
+
+    async fn handle_mark_dirty_time_window(
+        &self,
+        reqs: Request<DirtyWindowRequests>,
+    ) -> Result<Response<FlowResponse>, Status> {
+        self.dual_engine
+            .batching_engine()
+            .handle_mark_dirty_time_window(reqs.into_inner())
             .await
             .map(Response::new)
             .map_err(to_status_with_last_err)

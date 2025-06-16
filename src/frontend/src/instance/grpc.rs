@@ -35,8 +35,8 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::TableId;
 use table::table_name::TableName;
+use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, DataFusionSnafu, Error, InFlightWriteBytesExceededSnafu,
@@ -235,34 +235,33 @@ impl GrpcQueryHandler for Instance {
 
     async fn put_record_batch(
         &self,
-        table: &TableName,
-        table_id: &mut Option<TableId>,
+        table_name: &TableName,
+        table_ref: &mut Option<TableRef>,
         decoder: &mut FlightDecoder,
         data: FlightData,
     ) -> Result<AffectedRows> {
-        let table_id = if let Some(table_id) = table_id {
-            *table_id
+        let table = if let Some(table) = table_ref {
+            table.clone()
         } else {
             let table = self
                 .catalog_manager()
                 .table(
-                    &table.catalog_name,
-                    &table.schema_name,
-                    &table.table_name,
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
                     None,
                 )
                 .await
                 .context(CatalogSnafu)?
                 .with_context(|| TableNotFoundSnafu {
-                    table_name: table.to_string(),
+                    table_name: table_name.to_string(),
                 })?;
-            let id = table.table_info().table_id();
-            *table_id = Some(id);
-            id
+            *table_ref = Some(table.clone());
+            table
         };
 
         self.inserter
-            .handle_bulk_insert(table_id, decoder, data)
+            .handle_bulk_insert(table, decoder, data)
             .await
             .context(TableOperationSnafu)
     }
