@@ -117,39 +117,12 @@ impl HoltWinters {
             )),
         )?;
 
+        let sf_iter = get_factor(sf_col, ts_range.len());
+        let tf_iter = get_factor(tf_col, ts_range.len());
+
         // calculation
         let mut result_array = Vec::with_capacity(ts_range.len());
-
-        let get_sf = |i| {
-            if let ColumnarValue::Array(array) = sf_col {
-                let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                if array.is_null(i) {
-                    f64::NAN
-                } else {
-                    array.value(i)
-                }
-            } else if let ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) = sf_col {
-                *val
-            } else {
-                f64::NAN
-            }
-        };
-        let get_tf = |i| {
-            if let ColumnarValue::Array(array) = tf_col {
-                let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                if array.is_null(i) {
-                    f64::NAN
-                } else {
-                    array.value(i)
-                }
-            } else if let ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) = tf_col {
-                *val
-            } else {
-                f64::NAN
-            }
-        };
-
-        for index in 0..ts_range.len() {
+        for (index, (sf, tf)) in sf_iter.zip(tf_iter).enumerate() {
             let timestamps = ts_range.get(index).unwrap();
             let values = value_range.get(index).unwrap();
             let values = values
@@ -166,13 +139,30 @@ impl HoltWinters {
                     values.len()
                 )),
             )?;
-            let sf = get_sf(index);
-            let tf = get_tf(index);
             result_array.push(holt_winter_impl(values, sf, tf));
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
         Ok(result)
+    }
+}
+
+fn get_factor<'a>(
+    factor_col: &'a ColumnarValue,
+    num_rows: usize,
+) -> Box<dyn Iterator<Item = f64> + 'a> {
+    match factor_col {
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(val))) => {
+            Box::new((0..num_rows).map(|_| *val))
+        }
+        ColumnarValue::Array(array) => {
+            let array = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            let iter = array
+                .iter()
+                .map(|x| if let Some(x) = x { x } else { f64::NAN });
+            Box::new(iter)
+        }
+        _ => Box::new((0..num_rows).map(|_| f64::NAN)),
     }
 }
 

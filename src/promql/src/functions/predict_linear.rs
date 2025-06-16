@@ -94,10 +94,7 @@ impl PredictLinear {
             )),
         )?;
 
-        // calculation
-        let mut result_array = Vec::with_capacity(ts_range.len());
-
-        match t_col {
+        let t_iter: Box<dyn Iterator<Item = Option<i64>>> = match t_col {
             ColumnarValue::Scalar(t_scalar) => {
                 let t = if let ScalarValue::Int64(Some(t_val)) = t_scalar {
                     *t_val
@@ -107,35 +104,7 @@ impl PredictLinear {
                     let null_array = Float64Array::new_null(ts_range.len());
                     return Ok(ColumnarValue::Array(Arc::new(null_array)));
                 };
-
-                for index in 0..ts_range.len() {
-                    let timestamps = ts_range
-                        .get(index)
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .unwrap()
-                        .clone();
-                    let values = value_range
-                        .get(index)
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .unwrap()
-                        .clone();
-                    error::ensure(
-                        timestamps.len() == values.len(),
-                        DataFusionError::Execution(format!(
-                            "{}: time and value arrays in a group should have the same length, found {} and {}",
-                            Self::name(),
-                            timestamps.len(),
-                            values.len()
-                        )),
-                    )?;
-
-                    let ret = predict_linear_impl(&timestamps, &values, t);
-                    result_array.push(ret);
-                }
+                Box::new((0..ts_range.len()).map(move |_| Some(t)))
             }
             ColumnarValue::Array(t_array) => {
                 let t_array = t_array
@@ -148,7 +117,6 @@ impl PredictLinear {
                             t_array.data_type()
                         ))
                     })?;
-
                 error::ensure(
                     t_array.len() == ts_range.len(),
                     DataFusionError::Execution(format!(
@@ -159,45 +127,51 @@ impl PredictLinear {
                     )),
                 )?;
 
-                for index in 0..ts_range.len() {
-                    let timestamps = ts_range
-                        .get(index)
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .unwrap()
-                        .clone();
-                    let values = value_range
-                        .get(index)
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .unwrap()
-                        .clone();
-                    error::ensure(
-                        timestamps.len() == values.len(),
-                        DataFusionError::Execution(format!(
-                            "{}: time and value arrays in a group should have the same length, found {} and {}",
-                            Self::name(),
-                            timestamps.len(),
-                            values.len()
-                        )),
-                    )?;
-
-                    if t_array.is_null(index) {
-                        result_array.push(None);
-                        continue;
-                    }
-                    let t = t_array.value(index);
-                    let ret = predict_linear_impl(&timestamps, &values, t);
-                    result_array.push(ret);
-                }
+                Box::new(t_array.iter())
             }
+        };
+        let mut result_array = Vec::with_capacity(ts_range.len());
+        for (index, t) in t_iter.enumerate() {
+            let (timestamps, values) = get_ts_values(&ts_range, &value_range, index, Self::name())?;
+            let ret = predict_linear_impl(&timestamps, &values, t.unwrap());
+            result_array.push(ret);
         }
 
         let result = ColumnarValue::Array(Arc::new(Float64Array::from_iter(result_array)));
         Ok(result)
     }
+}
+
+fn get_ts_values(
+    ts_range: &RangeArray,
+    value_range: &RangeArray,
+    index: usize,
+    func_name: &str,
+) -> Result<(TimestampMillisecondArray, Float64Array), DataFusionError> {
+    let timestamps = ts_range
+        .get(index)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap()
+        .clone();
+    let values = value_range
+        .get(index)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .clone();
+    error::ensure(
+        timestamps.len() == values.len(),
+        DataFusionError::Execution(format!(
+            "{}: time and value arrays in a group should have the same length, found {} and {}",
+            func_name,
+            timestamps.len(),
+            values.len()
+        )),
+    )?;
+    Ok((timestamps, values))
 }
 
 fn predict_linear_impl(
