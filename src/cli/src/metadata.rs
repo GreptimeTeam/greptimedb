@@ -14,14 +14,15 @@
 
 mod common;
 mod control;
-mod doctor;
+mod repair;
 mod snapshot;
+mod utils;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;
 
 use crate::metadata::control::ControlCommand;
-use crate::metadata::doctor::DoctorCommand;
+use crate::metadata::repair::RepairLogicalTablesCommand;
 use crate::metadata::snapshot::SnapshotCommand;
 use crate::Tool;
 
@@ -34,8 +35,7 @@ pub enum MetadataCommand {
     Snapshot(SnapshotCommand),
     #[clap(subcommand)]
     Control(ControlCommand),
-    #[clap(subcommand)]
-    Doctor(DoctorCommand),
+    RepairLogicalTables(RepairLogicalTablesCommand),
 }
 
 impl MetadataCommand {
@@ -43,7 +43,7 @@ impl MetadataCommand {
         match self {
             MetadataCommand::Snapshot(cmd) => cmd.build().await,
             MetadataCommand::Control(cmd) => cmd.build().await,
-            MetadataCommand::Doctor(cmd) => cmd.build().await,
+            MetadataCommand::RepairLogicalTables(cmd) => cmd.build().await,
         }
     }
 }

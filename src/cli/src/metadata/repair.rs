@@ -41,7 +41,7 @@ use crate::error::{
     InvalidArgumentsSnafu, Result, SendRequestToDatanodeSnafu, TableMetadataSnafu, UnexpectedSnafu,
 };
 use crate::metadata::common::StoreConfig;
-use crate::metadata::doctor::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
+use crate::metadata::utils::{FullTableMetadata, IteratorInput, TableMetadataIterator};
 use crate::Tool;
 
 /// Repair metadata of logical tables.
