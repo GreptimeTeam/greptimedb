@@ -15,6 +15,7 @@
 use std::fmt::Display;
 
 use serde::Serialize;
+use sqlparser::ast::AnalyzeFormat;
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -73,7 +74,7 @@ impl Display for TqlEval {
     }
 }
 
-/// TQL EXPLAIN [VERBOSE] [<start>, <end>, <step>, [lookback]] <promql>
+/// TQL EXPLAIN [VERBOSE] [FORMAT format] [<start>, <end>, <step>, [lookback]] <promql>
 /// doesn't execute the query but tells how the query would be executed (similar to SQL EXPLAIN).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlExplain {
@@ -83,6 +84,7 @@ pub struct TqlExplain {
     pub lookback: Option<String>,
     pub query: String,
     pub is_verbose: bool,
+    pub format: Option<AnalyzeFormat>,
 }
 
 impl Display for TqlExplain {
@@ -90,6 +92,9 @@ impl Display for TqlExplain {
         write!(f, "TQL EXPLAIN ")?;
         if self.is_verbose {
             write!(f, "VERBOSE ")?;
+        }
+        if let Some(format) = &self.format {
+            write!(f, "FORMAT {} ", format)?;
         }
         format_tql(
             f,
@@ -102,7 +107,7 @@ impl Display for TqlExplain {
     }
 }
 
-/// TQL ANALYZE [VERBOSE] (<start>, <end>, <step>, [lookback]) <promql>
+/// TQL ANALYZE [VERBOSE] [FORMAT format] (<start>, <end>, <step>, [lookback]) <promql>
 /// executes the plan and tells the detailed per-step execution time (similar to SQL ANALYZE).
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct TqlAnalyze {
@@ -112,6 +117,7 @@ pub struct TqlAnalyze {
     pub lookback: Option<String>,
     pub query: String,
     pub is_verbose: bool,
+    pub format: Option<AnalyzeFormat>,
 }
 
 impl Display for TqlAnalyze {
@@ -119,6 +125,9 @@ impl Display for TqlAnalyze {
         write!(f, "TQL ANALYZE ")?;
         if self.is_verbose {
             write!(f, "VERBOSE ")?;
+        }
+        if let Some(format) = &self.format {
+            write!(f, "FORMAT {} ", format)?;
         }
         format_tql(
             f,
@@ -143,6 +152,7 @@ pub struct TqlParameters {
     lookback: Option<String>,
     query: String,
     pub is_verbose: bool,
+    pub format: Option<AnalyzeFormat>,
 }
 
 impl TqlParameters {
@@ -160,6 +170,7 @@ impl TqlParameters {
             lookback,
             query,
             is_verbose: false,
+            format: None,
         }
     }
 }
@@ -185,6 +196,7 @@ impl From<TqlParameters> for TqlExplain {
             query: params.query,
             lookback: params.lookback,
             is_verbose: params.is_verbose,
+            format: params.format,
         }
     }
 }
@@ -198,6 +210,7 @@ impl From<TqlParameters> for TqlAnalyze {
             query: params.query,
             lookback: params.lookback,
             is_verbose: params.is_verbose,
+            format: params.format,
         }
     }
 }

@@ -163,6 +163,72 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 |_|_| Total rows: 0_|
 +-+-+-+
 
+-- Test new FORMAT functionality for ANALYZE
+-- analyze with JSON format
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE FORMAT JSON (0, 10, '5s') test;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"elapsed_compute":1002,"REDACTED
+| 1_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"elapsed_compute":32,"REDACTED
+| 1_| 1_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"elapsed_compute":32,"REDACTED
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- analyze verbose with JSON format
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (Duration.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
+| 1_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
+| 1_| 1_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
+|_|_| Total rows: 0_|
++-+-+-+
+
+-- analyze with TEXT format (should be same as default)
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE FORMAT TEXT (0, 10, '5s') test;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+|_|_|_SortExec: expr=[k@2 ASC, l@3 ASC, j@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
 drop table test;
 
 Affected Rows: 0

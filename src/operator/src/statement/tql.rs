@@ -46,6 +46,10 @@ impl StatementExecutor {
                 QueryLanguageParser::parse_promql(&promql, query_ctx).context(ParseQuerySnafu)?
             }
             Tql::Explain(explain) => {
+                if let Some(format) = &explain.format {
+                    query_ctx.set_explain_format(format.to_string());
+                }
+
                 let promql = PromQuery {
                     query: explain.query,
                     lookback: explain
@@ -66,6 +70,10 @@ impl StatementExecutor {
                     .unwrap()
             }
             Tql::Analyze(analyze) => {
+                if let Some(format) = &analyze.format {
+                    query_ctx.set_explain_format(format.to_string());
+                }
+
                 let promql = PromQuery {
                     start: analyze.start,
                     end: analyze.end,
