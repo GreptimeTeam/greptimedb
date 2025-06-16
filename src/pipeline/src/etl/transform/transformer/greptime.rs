@@ -55,6 +55,11 @@ pub struct GreptimeTransformer {
     schema: Vec<ColumnSchema>,
 }
 
+fn truthy<V: AsRef<str>>(v: V) -> bool {
+    let v = v.as_ref().to_lowercase();
+    v == "true" || v == "1" || v == "yes" || v == "on" || v == "t"
+}
+
 /// Parameters that can be used to configure the greptime pipelines.
 #[derive(Debug, Default)]
 pub struct GreptimePipelineParams {
@@ -64,6 +69,7 @@ pub struct GreptimePipelineParams {
 
     /// Parsed shortcut option values
     pub flatten_json_object: OnceCell<bool>,
+    /// Whether to skip error when processing the pipeline.
     pub skip_error: OnceCell<bool>,
 }
 
@@ -114,12 +120,9 @@ impl GreptimePipelineParams {
     }
 
     pub fn skip_error(&self) -> bool {
-        *self.skip_error.get_or_init(|| {
-            self.options
-                .get("skip_error")
-                .map(|v| v == "true" || v == "1" || v == "yes" || v == "on" || v == "t")
-                .unwrap_or(false)
-        })
+        *self
+            .skip_error
+            .get_or_init(|| self.options.get("skip_error").map(truthy).unwrap_or(false))
     }
 }
 
@@ -243,7 +246,7 @@ impl GreptimeTransformer {
                             Some(crate::etl::transform::OnFailure::Ignore) => None,
                             None => None,
                         };
-                        if !transform.can_none() && value_data.is_none() {
+                        if !transform.nullable() && value_data.is_none() {
                             return TimeIndexMustBeNonNullSnafu.fail();
                         }
                         values[output_index] = GreptimeValue { value_data };

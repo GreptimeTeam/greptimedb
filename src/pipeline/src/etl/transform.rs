@@ -161,7 +161,7 @@ impl Transform {
         None
     }
 
-    pub(crate) fn can_none(&self) -> bool {
+    pub(crate) fn nullable(&self) -> bool {
         !self.index.is_some_and(|i| i == Index::Time)
     }
 }
