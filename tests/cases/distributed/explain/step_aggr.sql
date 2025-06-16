@@ -1,5 +1,5 @@
 CREATE TABLE integers(
-    host STRING,
+    host STRING PRIMARY KEY,
     i BIGINT,
     ts TIMESTAMP TIME INDEX
 ) PARTITION ON COLUMNS (host) (
@@ -9,136 +9,106 @@ CREATE TABLE integers(
     host >= '550-W'
 );
 
-INSERT INTO integers (host, i, ts) VALUES
+INSERT INTO
+    integers (host, i, ts)
+VALUES
     ('550-A', 1, '2023-01-01 00:00:00'),
+    ('550-B', 5, '2023-01-01 00:00:00'),
     ('550-A', 2, '2023-01-01 01:00:00'),
     ('550-W', 3, '2023-01-01 02:00:00'),
     ('550-W', 4, '2023-01-01 03:00:00');
 
--- count
-EXPLAIN SELECT
-    count(i)
+SELECT
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers;
 
-EXPLAIN SELECT
-    ts,
-    count(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
-EXPLAIN SELECT
-    count(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
--- sum
-EXPLAIN SELECT
-    sum(i)
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers;
 
-EXPLAIN SELECT
-    ts,
-    sum(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
-EXPLAIN SELECT
-    sum(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
--- min
-EXPLAIN SELECT
-    min(i)
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE
+SELECT
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers;
 
-EXPLAIN SELECT
+SELECT
     ts,
-    min(i)
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers
 GROUP BY
+    ts
+ORDER BY
     ts;
 
-EXPLAIN SELECT
-    min(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
--- max
-EXPLAIN SELECT
-    max(i)
-FROM
-    integers;
-
-EXPLAIN SELECT
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
     ts,
-    max(i)
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers
 GROUP BY
+    ts
+ORDER BY
     ts;
 
-EXPLAIN SELECT
-    max(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
--- uddsketch_state
-EXPLAIN SELECT
-    uddsketch_state(128, 0.01, i)
-FROM
-    integers;
-
-EXPLAIN SELECT
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+EXPLAIN ANALYZE
+SELECT
     ts,
-    uddsketch_state(128, 0.01, i)
+    count(i),
+    sum(i),
+    uddsketch_calc(0.5, uddsketch_state(128, 0.01, i)),
+    hll_count(hll(i))
 FROM
     integers
 GROUP BY
-    ts;
-
-EXPLAIN SELECT
-    uddsketch_state(128, 0.01, i)
-FROM
-    integers
-GROUP BY
-    ts;
-
--- hll
-EXPLAIN SELECT
-    hll(i)
-FROM
-    integers;
-
-EXPLAIN SELECT
-    ts,
-    hll(i)
-FROM
-    integers
-GROUP BY
-    ts;
-
-EXPLAIN SELECT
-    hll(i)
-FROM
-    integers
-GROUP BY
+    ts
+ORDER BY
     ts;
 
 DROP TABLE integers;
