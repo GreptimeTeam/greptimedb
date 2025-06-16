@@ -260,6 +260,10 @@ impl DirtyTimeWindows {
                 // too large a window, split it
                 // split at window_size * times
                 let surplus = max_time_range - cur_time_range;
+                if surplus.num_seconds() < window_size.num_seconds() {
+                    // Skip splitting if surplus is smaller than window_size
+                    break;
+                }
                 let times = surplus.num_seconds() / window_size.num_seconds();
 
                 let split_offset = window_size * times as i32;
