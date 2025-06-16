@@ -148,4 +148,66 @@ ORDER BY
     time_window,
     count(i);
 
+-- test udd/hll_merege pushdown
+CREATE TABLE sink_table (
+    time_window TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    udd_state BINARY,
+    hll_state BINARY,
+) PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A'
+    AND host < '550-W',
+    host >= '550-W'
+);
+
+INSERT INTO
+    sink_table
+SELECT
+    date_bin('1 hour' :: INTERVAL, ts) as time_window,
+    host,
+    uddsketch_state(128, 0.01, i) as udd_state,
+    hll(i) as hll_state
+FROM
+    integers
+GROUP BY
+    time_window,
+    host;
+
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
+EXPLAIN ANALYZE
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
 DROP TABLE integers;
+
+DROP TABLE sink_table;

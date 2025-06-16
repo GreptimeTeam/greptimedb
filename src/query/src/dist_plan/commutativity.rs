@@ -164,7 +164,9 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
         "first_value",
         "last_value",
         UDDSKETCH_STATE_NAME,
+        UDDSKETCH_MERGE_NAME,
         HLL_NAME,
+        HLL_MERGE_NAME,
     ]);
     aggr_exprs.iter().all(|expr| {
         if let Some(aggr_func) = get_aggr_func(expr) {

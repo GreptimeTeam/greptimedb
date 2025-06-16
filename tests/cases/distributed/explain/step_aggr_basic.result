@@ -319,7 +319,122 @@ ORDER BY
 |_|_| Total rows: 4_|
 +-+-+-+
 
+-- test udd/hll_merege pushdown
+CREATE TABLE sink_table (
+    time_window TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    udd_state BINARY,
+    hll_state BINARY,
+) PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A'
+    AND host < '550-W',
+    host >= '550-W'
+);
+
+Affected Rows: 0
+
+INSERT INTO
+    sink_table
+SELECT
+    date_bin('1 hour' :: INTERVAL, ts) as time_window,
+    host,
+    uddsketch_state(128, 0.01, i) as udd_state,
+    hll(i) as hll_state
+FROM
+    integers
+GROUP BY
+    time_window,
+    host;
+
+Affected Rows: 5
+
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
++--------------------+------------+
+| udd_result         | hll_result |
++--------------------+------------+
+| 2.9742334234767016 | 5          |
++--------------------+------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: uddsketch_calc(Float64(0.5), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state))) AS udd_result, hll_count(hll_merge(hll_merge(sink_table.hll_state))) AS hll_result_|
+|_|_Aggregate: groupBy=[[]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))]]_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | ProjectionExec: expr=[uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state))@0) as udd_result, hll_count(hll_merge(hll_merge(sink_table.hll_state))@1) as hll_result] |
+|_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE input_partitions=(\d+) input_partitions=REDACTED
+EXPLAIN ANALYZE
+SELECT
+    uddsketch_calc(0.5, uddsketch_merge(128, 0.01, udd_state)) as udd_result,
+    hll_count(hll_merge(hll_state)) as hll_result
+FROM
+    sink_table;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state))@0) as udd_result, hll_count(hll_merge(hll_merge(sink_table.hll_state))@1) as hll_result] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+| 1_| 2_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state), hll_merge(sink_table.hll_state)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
 DROP TABLE integers;
+
+Affected Rows: 0
+
+DROP TABLE sink_table;
 
 Affected Rows: 0
 
