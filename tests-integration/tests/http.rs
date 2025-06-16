@@ -666,15 +666,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let prom_resp = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("TableNotFound")));
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
+    assert_eq!(res.status(), StatusCode::OK);
+    // An empty array will be deserialized into PrometheusResponse::Labels.
+    // So here we compare the text directly.
+    assert_eq!(res.text().await, r#"{"status":"success","data":[]}"#);
 
     // label values
     // should return error if there is no match[]
