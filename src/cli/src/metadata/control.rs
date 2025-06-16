@@ -16,28 +16,5 @@ mod del;
 mod get;
 mod utils;
 
-use clap::Subcommand;
-use common_error::ext::BoxedError;
-use del::DelCommand;
-use get::GetCommand;
-
-use crate::Tool;
-
-/// Subcommand for metadata control, including getting metadata from metadata store
-#[derive(Subcommand)]
-pub enum ControlCommand {
-    #[clap(subcommand)]
-    Get(GetCommand),
-    /// Delete the metadata from the metasrv.
-    #[clap(subcommand)]
-    Del(DelCommand),
-}
-
-impl ControlCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        match self {
-            ControlCommand::Get(cmd) => cmd.build().await,
-            ControlCommand::Del(cmd) => cmd.build().await,
-        }
-    }
-}
+pub(crate) use del::DelCommand;
+pub(crate) use get::GetCommand;

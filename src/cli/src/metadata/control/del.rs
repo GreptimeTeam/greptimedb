@@ -27,7 +27,7 @@ use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
 use crate::Tool;
 
-/// Subcommand for delete command.
+/// Subcommand for deleting metadata from the metadata store.
 #[derive(Subcommand)]
 pub enum DelCommand {
     Key(DelKeyCommand),
@@ -110,6 +110,10 @@ pub struct DelTableCommand {
     #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
     schema_name: String,
 
+    /// The catalog name of the table.
+    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
+    catalog_name: String,
+
     #[clap(flatten)]
     store: StoreConfig,
 }
@@ -136,6 +140,7 @@ impl DelTableCommand {
             table_id: self.table_id,
             table_name: self.table_name.clone(),
             schema_name: self.schema_name.clone(),
+            catalog_name: self.catalog_name.clone(),
             kv_backend,
         }))
     }
@@ -145,6 +150,7 @@ struct DelTableTool {
     table_id: Option<u32>,
     table_name: Option<String>,
     schema_name: String,
+    catalog_name: String,
     kv_backend: KvBackendRef,
 }
 
@@ -154,15 +160,15 @@ impl Tool for DelTableTool {
         let table_metadata_manager = TableMetadataManager::new(self.kv_backend.clone());
         let table_name_manager = table_metadata_manager.table_name_manager();
         let table_id = if let Some(table_name) = &self.table_name {
-            let catalog = DEFAULT_CATALOG_NAME.to_string();
+            let catalog_name = &self.catalog_name;
             let schema_name = &self.schema_name;
-            let key = TableNameKey::new(&catalog, schema_name, table_name);
+            let key = TableNameKey::new(catalog_name, schema_name, table_name);
 
             let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
             else {
                 println!(
                     "Table({}) not found",
-                    format_full_table_name(&catalog, schema_name, table_name)
+                    format_full_table_name(catalog_name, schema_name, table_name)
                 );
                 return Ok(());
             };

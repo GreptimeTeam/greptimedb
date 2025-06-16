@@ -133,6 +133,10 @@ pub struct GetTableCommand {
     #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
     schema_name: String,
 
+    /// The catalog name of the table.
+    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
+    catalog_name: String,
+
     /// Pretty print the output.
     #[clap(long, default_value = "false")]
     pretty: bool,
@@ -160,6 +164,7 @@ struct GetTableTool {
     table_id: Option<u32>,
     table_name: Option<String>,
     schema_name: String,
+    catalog_name: String,
     pretty: bool,
 }
 
@@ -172,15 +177,15 @@ impl Tool for GetTableTool {
         let table_route_manager = table_metadata_manager.table_route_manager();
 
         let table_id = if let Some(table_name) = &self.table_name {
-            let catalog = DEFAULT_CATALOG_NAME.to_string();
+            let catalog_name = &self.catalog_name;
             let schema_name = &self.schema_name;
-            let key = TableNameKey::new(&catalog, schema_name, table_name);
+            let key = TableNameKey::new(catalog_name, schema_name, table_name);
 
             let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
             else {
                 println!(
                     "Table({}) not found",
-                    format_full_table_name(&catalog, schema_name, table_name)
+                    format_full_table_name(catalog_name, schema_name, table_name)
                 );
                 return Ok(());
             };
@@ -233,6 +238,7 @@ impl GetTableCommand {
             table_id: self.table_id,
             table_name: self.table_name.clone(),
             schema_name: self.schema_name.clone(),
+            catalog_name: self.catalog_name.clone(),
             pretty: self.pretty,
         }))
     }
