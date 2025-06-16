@@ -22,6 +22,7 @@ pub mod describe;
 pub mod drop;
 pub mod explain;
 pub mod insert;
+pub mod kill;
 mod option_map;
 pub mod query;
 pub mod set_variables;

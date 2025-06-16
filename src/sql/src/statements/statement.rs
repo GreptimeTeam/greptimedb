@@ -32,6 +32,7 @@ use crate::statements::describe::DescribeTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
+use crate::statements::kill::Kill;
 use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
@@ -139,7 +140,7 @@ pub enum Statement {
     // CLOSE
     CloseCursor(CloseCursor),
     // KILL <process>
-    Kill(String),
+    Kill(Kill),
 }
 
 impl Display for Statement {

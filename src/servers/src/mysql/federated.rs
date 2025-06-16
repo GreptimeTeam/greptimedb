@@ -299,7 +299,13 @@ mod test {
 
     #[test]
     fn test_check_abnormal() {
-        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let session = Arc::new(Session::new(
+            None,
+            Channel::Mysql,
+            Default::default(),
+            0,
+            None,
+        ));
         let query = "🫣一点不正常的东西🫣";
         let output = check(query, QueryContext::arc(), session.clone());
 
@@ -308,7 +314,13 @@ mod test {
 
     #[test]
     fn test_check() {
-        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let session = Arc::new(Session::new(
+            None,
+            Channel::Mysql,
+            Default::default(),
+            0,
+            None,
+        ));
         let query = "select 1";
         let result = check(query, QueryContext::arc(), session.clone());
         assert!(result.is_none());
@@ -318,7 +330,13 @@ mod test {
         assert!(output.is_none());
 
         fn test(query: &str, expected: &str) {
-            let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+            let session = Arc::new(Session::new(
+                None,
+                Channel::Mysql,
+                Default::default(),
+                0,
+                None,
+            ));
             let output = check(query, QueryContext::arc(), session.clone());
             match output.unwrap().data {
                 OutputData::RecordBatches(r) => {

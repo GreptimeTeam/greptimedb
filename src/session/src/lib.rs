@@ -41,6 +41,7 @@ pub struct Session {
     mutable_inner: Arc<RwLock<MutableInner>>,
     conn_info: ConnInfo,
     configuration_variables: Arc<ConfigurationVariables>,
+    connection_id: Option<u32>,
     // the connection id to use when killing the query
     process_id: u64,
 }
@@ -78,6 +79,7 @@ impl Session {
         channel: Channel,
         configuration_variables: ConfigurationVariables,
         process_id: u64,
+        connection_id: Option<u32>,
     ) -> Self {
         Session {
             catalog: RwLock::new(DEFAULT_CATALOG_NAME.into()),
@@ -85,6 +87,7 @@ impl Session {
             configuration_variables: Arc::new(configuration_variables),
             mutable_inner: Arc::new(RwLock::new(MutableInner::default())),
             process_id,
+            connection_id,
         }
     }
 
@@ -99,6 +102,7 @@ impl Session {
             .channel(self.conn_info.channel)
             .process_id(self.process_id)
             .conn_info(self.conn_info.clone())
+            .connection_id(self.connection_id)
             .build()
             .into()
     }

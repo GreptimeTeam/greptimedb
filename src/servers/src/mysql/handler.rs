@@ -82,6 +82,7 @@ pub struct MysqlInstanceShim {
     user_provider: Option<UserProviderRef>,
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
+    connection_id: u32,
 }
 
 impl MysqlInstanceShim {
@@ -89,6 +90,7 @@ impl MysqlInstanceShim {
         query_handler: ServerSqlQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
+        connection_id: u32,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -112,10 +114,12 @@ impl MysqlInstanceShim {
                 Default::default(),
                 // TODO(sunng87): generate process id properly
                 0,
+                Some(connection_id),
             )),
             user_provider,
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
+            connection_id,
         }
     }
 
@@ -339,6 +343,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     fn version(&self) -> String {
         std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION").unwrap_or_else(|_| "8.4.2".to_string())
+    }
+
+    fn connect_id(&self) -> u32 {
+        self.connection_id
     }
 
     fn default_auth_plugin(&self) -> &str {
