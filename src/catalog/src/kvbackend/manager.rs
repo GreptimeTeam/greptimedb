@@ -296,11 +296,36 @@ impl CatalogManager for KvBackendCatalogManager {
                 .context(TableMetadataManagerSnafu)?
         {
             let mut new_table_info = (*table.table_info()).clone();
+            // Gather all column ids from the logical table
+            let logical_column_ids: std::collections::HashSet<_> = new_table_info
+                .meta
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| &col.name)
+                .collect();
+
+            // Only preserve partition key indices where the corresponding columns exist in logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
                 .meta
                 .partition_key_indices
-                .clone();
+                .iter()
+                .filter(|&&index| {
+                    if let Some(physical_column) = physical_table_info_value
+                        .table_info
+                        .meta
+                        .schema
+                        .column_schemas
+                        .get(index)
+                    {
+                        logical_column_ids.contains(&physical_column.name)
+                    } else {
+                        false
+                    }
+                })
+                .cloned()
+                .collect();
 
             let new_table = DistTable::table(Arc::new(new_table_info));
 
