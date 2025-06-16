@@ -15,8 +15,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use common_function::aggrs::approximate::hll::{HllState, HLL_NAME};
-use common_function::aggrs::approximate::uddsketch::{UddSketchState, UDDSKETCH_STATE_NAME};
+use common_function::aggrs::approximate::hll::{HllState, HLL_MERGE_NAME, HLL_NAME};
+use common_function::aggrs::approximate::uddsketch::{
+    UddSketchState, UDDSKETCH_MERGE_NAME, UDDSKETCH_STATE_NAME,
+};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion_common::Column;
@@ -60,7 +62,8 @@ pub fn step_aggr_to_upper_aggr(
         let col_name = aggr_expr.qualified_name();
         let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
         let upper_func = match aggr_func.func.name() {
-            "sum" | "min" | "max" | "last_value" | "first_value" => {
+            "sum" | "min" | "max" | "last_value" | "first_value" | UDDSKETCH_MERGE_NAME
+            | HLL_MERGE_NAME => {
                 // aggr_calc(aggr_merge(input_column))) as col_name
                 let mut new_aggr_func = aggr_func.clone();
                 new_aggr_func.args = vec![input_column.clone()];
