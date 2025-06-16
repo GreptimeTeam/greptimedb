@@ -101,16 +101,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let version = region.version_control.current();
             let mut flushed_entry_id = version.last_entry_id;
 
-            warn!(
-                "Skips to replay memtable for region: {}, flushed entry id: {}",
-                region.region_id, flushed_entry_id
-            );
-
             let high_watermark = self
                 .wal
                 .store()
                 .high_watermark(&region.provider)
                 .unwrap_or_default();
+            warn!(
+                "Skips to replay memtable for region: {}, flushed entry id: {}, high watermark: {}",
+                region.region_id, flushed_entry_id, high_watermark
+            );
+
             if high_watermark > flushed_entry_id {
                 warn!(
                     "Found high watermark is greater than flushed entry id, using high watermark as flushed entry id, region: {}, high watermark: {}, flushed entry id: {}",
