@@ -122,6 +122,12 @@ pub(crate) fn multiple_log_store_factories(#[case] factory: Option<LogStoreFacto
 #[tokio::test]
 pub(crate) fn single_kafka_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
 
+#[template]
+#[rstest]
+#[case::with_raft_engine(raft_engine_log_store_factory())]
+#[tokio::test]
+pub(crate) fn single_raft_engine_log_store_factory(#[case] factory: Option<LogStoreFactory>) {}
+
 #[derive(Clone)]
 pub(crate) struct RaftEngineLogStoreFactory;
 
@@ -691,6 +697,10 @@ impl TestEnv {
 
     pub fn get_kv_backend(&self) -> KvBackendRef {
         self.kv_backend.clone()
+    }
+
+    pub(crate) fn get_log_store(&self) -> Option<LogStoreImpl> {
+        self.log_store.as_ref().cloned()
     }
 }
 
