@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use ::auth::UserProviderRef;
 use async_trait::async_trait;
+use catalog::process_manager::ProcessManagerRef;
 use common_runtime::runtime::RuntimeTrait;
 use common_runtime::Runtime;
 use common_telemetry::{debug, warn};
@@ -37,6 +38,7 @@ pub struct PostgresServer {
     tls_server_config: Arc<ReloadableTlsServerConfig>,
     keep_alive_secs: u64,
     bind_addr: Option<SocketAddr>,
+    process_manager: Option<ProcessManagerRef>,
 }
 
 impl PostgresServer {
@@ -48,6 +50,7 @@ impl PostgresServer {
         keep_alive_secs: u64,
         io_runtime: Runtime,
         user_provider: Option<UserProviderRef>,
+        process_manager: Option<ProcessManagerRef>,
     ) -> PostgresServer {
         let make_handler = Arc::new(
             MakePostgresServerHandlerBuilder::default()
@@ -63,6 +66,7 @@ impl PostgresServer {
             tls_server_config,
             keep_alive_secs,
             bind_addr: None,
+            process_manager,
         }
     }
 
@@ -73,12 +77,12 @@ impl PostgresServer {
     ) -> impl Future<Output = ()> {
         let handler_maker = self.make_handler.clone();
         let tls_server_config = self.tls_server_config.clone();
+        let process_manager = self.process_manager.clone();
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
-
             let tls_acceptor = tls_server_config.get_server_config().map(TlsAcceptor::from);
-
             let handler_maker = handler_maker.clone();
+            let process_id = process_manager.as_ref().map(|p| p.next_id()).unwrap_or(0);
 
             async move {
                 match tcp_stream {
@@ -97,7 +101,7 @@ impl PostgresServer {
 
                         let _handle = io_runtime.spawn(async move {
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.inc();
-                            let pg_handler = Arc::new(handler_maker.make(addr));
+                            let pg_handler = Arc::new(handler_maker.make(addr, process_id));
                             let r =
                                 process_socket(io_stream, tls_acceptor.clone(), pg_handler).await;
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.dec();
