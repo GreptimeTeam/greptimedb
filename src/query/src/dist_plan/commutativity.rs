@@ -154,7 +154,6 @@ pub fn step_aggr_to_upper_aggr(
 /// As in if it can be split into multiple steps:
 /// i.e. on datanode first call `state(input)` then
 /// on frontend call `calc(merge(state))` to get the final result.
-///
 pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
     let step_action = HashSet::from([
         "sum",
