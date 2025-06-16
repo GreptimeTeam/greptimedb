@@ -16,6 +16,7 @@ mysql_kvbackend = ["common-meta/mysql_kvbackend", "meta-srv/mysql_kvbackend"]
 workspace = true
 
 [dependencies]
+async-stream = "0.3"
 async-trait.workspace = true
 auth.workspace = true
 base64.workspace = true
@@ -50,6 +51,7 @@ meta-client.workspace = true
 meta-srv.workspace = true
 nu-ansi-term = "0.46"
 object-store.workspace = true
+operator.workspace = true
 query.workspace = true
 rand.workspace = true
 reqwest.workspace = true

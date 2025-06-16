@@ -33,7 +33,7 @@ use crate::metadata::common::StoreConfig;
 use crate::metadata::control::utils::{decode_key_value, json_fromatter};
 use crate::Tool;
 
-/// Subcommand for get command.
+/// Getting metadata from metadata store.
 #[derive(Subcommand)]
 pub enum GetCommand {
     Key(GetKeyCommand),

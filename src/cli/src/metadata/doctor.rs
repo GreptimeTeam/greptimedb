@@ -12,26 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod get;
+mod repair;
 mod utils;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;
-use get::GetCommand;
 
+use crate::metadata::doctor::repair::RepairLogicalTablesCommand;
 use crate::Tool;
 
-/// Subcommand for metadata control, including getting metadata from metadata store
+/// Subcommand for metadata diagnosis and repair operations.
 #[derive(Subcommand)]
-pub enum ControlCommand {
-    #[clap(subcommand)]
-    Get(GetCommand),
+pub enum DoctorCommand {
+    /// Repair metadata of logical tables.
+    RepairLogicalTables(RepairLogicalTablesCommand),
 }
 
-impl ControlCommand {
+impl DoctorCommand {
     pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
         match self {
-            ControlCommand::Get(cmd) => cmd.build().await,
+            DoctorCommand::RepairLogicalTables(cmd) => cmd.build().await,
         }
     }
 }
