@@ -801,7 +801,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Time index mush be non null."))]
+    #[snafu(display("Time index must be non null."))]
     TimeIndexMustBeNonNull {
         #[snafu(implicit)]
         location: Location,
