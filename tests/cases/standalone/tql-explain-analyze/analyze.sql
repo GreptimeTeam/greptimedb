@@ -66,6 +66,7 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 -- Test new FORMAT functionality for ANALYZE
 -- analyze with JSON format
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
