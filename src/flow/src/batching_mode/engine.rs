@@ -476,15 +476,33 @@ impl BatchingEngine {
         Ok(())
     }
 
+    /// Only flush the dirty windows of the flow task with given flow id, by running the query on it.
+    /// As flush the whole time range is usually prohibitively expensive.
     pub async fn flush_flow_inner(&self, flow_id: FlowId) -> Result<usize, Error> {
         debug!("Try flush flow {flow_id}");
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
 
-        // task.mark_all_windows_as_dirty()?;
+        let time_window_size = task
+            .config
+            .time_window_expr
+            .as_ref()
+            .and_then(|expr| *expr.time_window_size());
+
+        let cur_dirty_window_cnt = time_window_size.map(|time_window_size| {
+            task.state
+                .read()
+                .unwrap()
+                .dirty_time_windows
+                .effective_count(&time_window_size)
+        });
 
         let res = task
-            .gen_exec_once(&self.query_engine, &self.frontend_client)
+            .gen_exec_once(
+                &self.query_engine,
+                &self.frontend_client,
+                cur_dirty_window_cnt,
+            )
             .await?;
 
         let affected_rows = res.map(|(r, _)| r).unwrap_or_default() as usize;

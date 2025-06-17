@@ -179,6 +179,33 @@ impl DirtyTimeWindows {
         self.windows.len()
     }
 
+    /// Get the effective count of time windows, which is the number of time windows that can be
+    /// used for query, compute from total time window range divided by `window_size`.
+    pub fn effective_count(&self, window_size: &Duration) -> usize {
+        if self.windows.is_empty() {
+            return 0;
+        }
+        let window_size =
+            chrono::Duration::from_std(*window_size).unwrap_or(chrono::Duration::zero());
+        let total_window_time_range =
+            self.windows
+                .iter()
+                .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                    if let Some(end) = end {
+                        acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+                    } else {
+                        acc + window_size
+                    }
+                });
+
+        // not sure window_size is zero have any meaning, but just in case
+        if window_size.num_seconds() == 0 {
+            0
+        } else {
+            (total_window_time_range.num_seconds() / window_size.num_seconds()) as usize
+        }
+    }
+
     /// Generate all filter expressions consuming all time windows
     ///
     /// there is two limits:
@@ -292,7 +319,7 @@ impl DirtyTimeWindows {
                 if let Some(end) = end {
                     acc + end.sub(start).unwrap_or(chrono::Duration::zero())
                 } else {
-                    acc
+                    acc + window_size
                 }
             })
             .num_seconds() as f64;
@@ -307,7 +334,7 @@ impl DirtyTimeWindows {
                     if let Some(end) = end {
                         acc + end.sub(start).unwrap_or(chrono::Duration::zero())
                     } else {
-                        acc
+                        acc + window_size
                     }
                 });
 
