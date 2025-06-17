@@ -18,7 +18,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use api::v1::flow::{
-    flow_request, CreateRequest, DropRequest, FlowRequest, FlowResponse, FlushFlow,
+    flow_request, CreateRequest, DirtyWindowRequests, DropRequest, FlowRequest, FlowResponse,
+    FlushFlow,
 };
 use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
@@ -834,8 +835,13 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .map_err(to_meta_err(snafu::location!()))
     }
 
-    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
-        unreachable!()
+    async fn handle_mark_window_dirty(&self, req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
+        self.batching_engine()
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![req],
+            })
+            .await
+            .map_err(to_meta_err(snafu::location!()))
     }
 }
 
@@ -856,97 +862,6 @@ fn to_meta_err(
                 source: BoxedError::new(err),
             },
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl common_meta::node_manager::Flownode for StreamingEngine {
-    async fn handle(&self, request: FlowRequest) -> MetaResult<FlowResponse> {
-        let query_ctx = request
-            .header
-            .and_then(|h| h.query_context)
-            .map(|ctx| ctx.into());
-        match request.body {
-            Some(flow_request::Body::Create(CreateRequest {
-                flow_id: Some(task_id),
-                source_table_ids,
-                sink_table_name: Some(sink_table_name),
-                create_if_not_exists,
-                expire_after,
-                comment,
-                sql,
-                flow_options,
-                or_replace,
-            })) => {
-                let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
-                let sink_table_name = [
-                    sink_table_name.catalog_name,
-                    sink_table_name.schema_name,
-                    sink_table_name.table_name,
-                ];
-                let expire_after = expire_after.map(|e| e.value);
-                let args = CreateFlowArgs {
-                    flow_id: task_id.id as u64,
-                    sink_table_name,
-                    source_table_ids,
-                    create_if_not_exists,
-                    or_replace,
-                    expire_after,
-                    comment: Some(comment),
-                    sql: sql.clone(),
-                    flow_options,
-                    query_ctx,
-                };
-                let ret = self
-                    .create_flow(args)
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| CreateFlowSnafu { sql: sql.clone() })
-                    .map_err(to_meta_err(snafu::location!()))?;
-                METRIC_FLOW_TASK_COUNT.inc();
-                Ok(FlowResponse {
-                    affected_flows: ret
-                        .map(|id| greptime_proto::v1::FlowId { id: id as u32 })
-                        .into_iter()
-                        .collect_vec(),
-                    ..Default::default()
-                })
-            }
-            Some(flow_request::Body::Drop(DropRequest {
-                flow_id: Some(flow_id),
-            })) => {
-                self.remove_flow(flow_id.id as u64)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                METRIC_FLOW_TASK_COUNT.dec();
-                Ok(Default::default())
-            }
-            Some(flow_request::Body::Flush(FlushFlow {
-                flow_id: Some(flow_id),
-            })) => {
-                let row = self
-                    .flush_flow_inner(flow_id.id as u64)
-                    .await
-                    .map_err(to_meta_err(snafu::location!()))?;
-                Ok(FlowResponse {
-                    affected_flows: vec![flow_id],
-                    affected_rows: row as u64,
-                    ..Default::default()
-                })
-            }
-            other => common_meta::error::InvalidFlowRequestBodySnafu { body: other }.fail(),
-        }
-    }
-
-    async fn handle_inserts(&self, request: InsertRequests) -> MetaResult<FlowResponse> {
-        self.handle_inserts_inner(request)
-            .await
-            .map(|_| Default::default())
-            .map_err(to_meta_err(snafu::location!()))
-    }
-
-    async fn handle_mark_window_dirty(&self, _req: DirtyWindowRequest) -> MetaResult<FlowResponse> {
-        unreachable!()
     }
 }
 
