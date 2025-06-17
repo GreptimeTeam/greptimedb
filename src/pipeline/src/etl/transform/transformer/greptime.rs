@@ -78,12 +78,7 @@ impl GreptimePipelineParams {
     /// The params is in the format of `key1=value1&key2=value2`,for example:
     /// x-greptime-pipeline-params: flatten_json_object=true
     pub fn from_params(params: Option<&str>) -> Self {
-        let options = params
-            .unwrap_or_default()
-            .split('&')
-            .filter_map(|s| s.split_once('='))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect::<HashMap<String, String>>();
+        let options = Self::parse_header_str_to_map(params);
 
         Self {
             options,
@@ -101,12 +96,19 @@ impl GreptimePipelineParams {
     }
 
     pub fn parse_header_str_to_map(params: Option<&str>) -> HashMap<String, String> {
-        params
-            .unwrap_or_default()
-            .split('&')
-            .filter_map(|s| s.split_once('='))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect::<HashMap<String, String>>()
+        if let Some(params) = params {
+            if params.is_empty() {
+                HashMap::new()
+            } else {
+                params
+                    .split('&')
+                    .filter_map(|s| s.split_once('='))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<String, String>>()
+            }
+        } else {
+            HashMap::new()
+        }
     }
 
     /// Whether to flatten the JSON object.
@@ -119,6 +121,7 @@ impl GreptimePipelineParams {
         })
     }
 
+    /// Whether to skip error when processing the pipeline.
     pub fn skip_error(&self) -> bool {
         *self
             .skip_error
@@ -246,7 +249,7 @@ impl GreptimeTransformer {
                             Some(crate::etl::transform::OnFailure::Ignore) => None,
                             None => None,
                         };
-                        if !transform.nullable() && value_data.is_none() {
+                        if transform.is_timeindex() && value_data.is_none() {
                             return TimeIndexMustBeNonNullSnafu.fail();
                         }
                         values[output_index] = GreptimeValue { value_data };
