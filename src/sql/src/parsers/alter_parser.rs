@@ -173,21 +173,22 @@ impl ParserContext<'_> {
     fn parse_alter_columns(&mut self) -> Result<AlterTableOperation> {
         let _ = self.parser.next_token();
         let _ = self.parser.next_token();
-        match self.parser.peek_token().token {
-            // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER COLUMN `a` DROP DEFAULT, ALTER `b` DROP DEFAULT, ...
+        let ts = self.parser.next_token();
+        match ts.token {
+            // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER `a` DROP DEFAULT, ALTER `b` DROP DEFAULT, ...
             Token::Word(w) if w.keyword == Keyword::DROP => {
-                let _ = self.parser.next_token();
-                match self.parser.peek_token().token {
+                let ts = self.parser.peek_token();
+                match ts.token {
                     Token::Word(w) if w.keyword == Keyword::DEFAULT => {
                         self.parser.prev_token();
                         self.parser.prev_token();
                         self.parser.prev_token();
                         self.parse_alter_table_drop_default()
                     }
-                    _ => self.expected("DEFAULT is expecting after DROP", self.parser.peek_token()),
+                    _ => self.expected("DEFAULT is expecting after DROP", ts),
                 }
             }
-            _ => self.expected("DROP after ALTER COLUMN", self.parser.peek_token()),
+            _ => self.expected("DROP after ALTER COLUMN", ts),
         }
     }
 
