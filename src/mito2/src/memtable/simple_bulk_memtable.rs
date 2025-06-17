@@ -33,6 +33,7 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
     MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
+use crate::metrics::{MEMTABLE_ACTIVE_SERIES_COUNT, MEMTABLE_ACTIVE_VALUES_COUNT};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::scan_region::PredicateGroup;
 use crate::read::Batch;
@@ -50,6 +51,13 @@ pub struct SimpleBulkMemtable {
     merge_mode: MergeMode,
     num_rows: AtomicUsize,
     series: RwLock<Series>,
+}
+
+impl Drop for SimpleBulkMemtable {
+    fn drop(&mut self) {
+        MEMTABLE_ACTIVE_SERIES_COUNT.dec();
+        MEMTABLE_ACTIVE_VALUES_COUNT.sub(self.series.read().unwrap().num_values() as i64);
+    }
 }
 
 impl SimpleBulkMemtable {
