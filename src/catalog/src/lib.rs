@@ -14,6 +14,7 @@
 
 #![feature(assert_matches)]
 #![feature(try_blocks)]
+#![feature(let_chains)]
 
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
