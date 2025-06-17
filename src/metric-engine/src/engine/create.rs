@@ -34,7 +34,8 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, SKIP_WAL_KEY, TTL_KEY,
+    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, MEMTABLE_TYPE, SKIP_WAL_KEY,
+    TTL_KEY,
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
@@ -605,6 +606,8 @@ pub(crate) fn region_options_for_metadata_region(
     original.remove(APPEND_MODE_KEY);
     // Don't allow to set primary key encoding for metadata region.
     original.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
+    // Don't allow to set memtable type for metadata region.
+    original.remove(MEMTABLE_TYPE);
     original.insert(TTL_KEY.to_string(), FOREVER.to_string());
     original.remove(SKIP_WAL_KEY);
     original
