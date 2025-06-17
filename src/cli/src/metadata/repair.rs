@@ -34,7 +34,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{find_leaders, RegionRoute};
 use common_telemetry::{error, info, warn};
 use futures::TryStreamExt;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::storage::TableId;
 
 use crate::error::{
@@ -48,42 +48,45 @@ use crate::Tool;
 #[derive(Debug, Default, Parser)]
 pub struct RepairLogicalTablesCommand {
     /// The names of the tables to repair.
-    #[clap(long, value_delimiter = ',', num_args = 1..)]
+    #[clap(long, value_delimiter = ',')]
     table_names: Vec<String>,
 
     /// The id of the table to repair.
-    #[clap(long)]
-    table_id: Option<TableId>,
+    #[clap(long, value_delimiter = ',')]
+    table_ids: Vec<TableId>,
 
     /// The schema of the tables to repair.
     #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
     schema_name: String,
 
+    /// The catalog of the tables to repair.
+    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
+    catalog_name: String,
+
     /// Whether to fail fast if any repair operation fails.
     #[clap(long)]
-    no_fail_fast: bool,
+    fail_fast: bool,
 
     #[clap(flatten)]
     store: StoreConfig,
 
     /// The timeout for the client to operate the datanode.
-    #[clap(long, default_value_t = 10)]
+    #[clap(long, default_value_t = 30)]
     client_timeout_secs: u64,
 
     /// The timeout for the client to connect to the datanode.
-    #[clap(long, default_value_t = 1)]
+    #[clap(long, default_value_t = 3)]
     client_connect_timeout_secs: u64,
 }
 
 impl RepairLogicalTablesCommand {
     fn validate(&self) -> Result<()> {
-        if self.table_names.is_empty() && self.table_id.is_none() {
-            return InvalidArgumentsSnafu {
-                msg: "You must specify --table-names or --table-id.",
+        ensure!(
+            !self.table_names.is_empty() || !self.table_ids.is_empty(),
+            InvalidArgumentsSnafu {
+                msg: "You must specify --table-names or --table-ids.",
             }
-            .fail();
-        }
-
+        );
         Ok(())
     }
 }
@@ -99,9 +102,10 @@ impl RepairLogicalTablesCommand {
 
         Ok(Box::new(RepairTool {
             table_names: self.table_names.clone(),
-            table_id: self.table_id,
+            table_ids: self.table_ids.clone(),
             schema_name: self.schema_name.clone(),
-            no_fail_fast: self.no_fail_fast,
+            catalog_name: self.catalog_name.clone(),
+            fail_fast: self.fail_fast,
             kv_backend,
             node_manager,
         }))
@@ -110,9 +114,10 @@ impl RepairLogicalTablesCommand {
 
 struct RepairTool {
     table_names: Vec<String>,
-    table_id: Option<TableId>,
+    table_ids: Vec<TableId>,
     schema_name: String,
-    no_fail_fast: bool,
+    catalog_name: String,
+    fail_fast: bool,
     kv_backend: KvBackendRef,
     node_manager: NodeManagerRef,
 }
@@ -128,7 +133,7 @@ impl RepairTool {
     fn generate_iterator_input(&self) -> Result<IteratorInput> {
         if !self.table_names.is_empty() {
             let table_names = &self.table_names;
-            let catalog = DEFAULT_CATALOG_NAME;
+            let catalog = &self.catalog_name;
             let schema_name = &self.schema_name;
 
             let table_names = table_names
@@ -142,8 +147,8 @@ impl RepairTool {
                 })
                 .collect::<Vec<_>>();
             return Ok(IteratorInput::new_table_names(table_names));
-        } else if let Some(table_id) = self.table_id {
-            return Ok(IteratorInput::new_table_ids(vec![table_id]));
+        } else if !self.table_ids.is_empty() {
+            return Ok(IteratorInput::new_table_ids(self.table_ids.clone()));
         };
 
         InvalidArgumentsSnafu {
@@ -198,7 +203,7 @@ impl RepairTool {
                     skipped_table,
                 );
 
-                if !self.no_fail_fast {
+                if self.fail_fast {
                     return Err(err);
                 }
             } else {
@@ -333,6 +338,9 @@ impl RepairTool {
                 .await
             {
                 errors.push(err);
+                if self.fail_fast {
+                    break;
+                }
             } else {
                 info!(
                     "Created table on datanode: {} for table: {}",

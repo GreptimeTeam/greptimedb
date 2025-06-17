@@ -158,13 +158,13 @@ impl TableMetadataIterator {
             .context(TableMetadataSnafu)?;
 
         let table_info = table_info
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 msg: format!("Table info not found for table id: {table_id}"),
             })?
             .into_inner()
             .table_info;
         let table_route = table_route
-            .context(UnexpectedSnafu {
+            .with_context(|| UnexpectedSnafu {
                 msg: format!("Table route not found for table id: {table_id}"),
             })?
             .into_inner();
