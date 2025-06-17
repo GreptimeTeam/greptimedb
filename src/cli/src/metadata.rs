@@ -14,22 +14,28 @@
 
 mod common;
 mod control;
+mod repair;
 mod snapshot;
+mod utils;
 
 use clap::Subcommand;
 use common_error::ext::BoxedError;
 
 use crate::metadata::control::ControlCommand;
+use crate::metadata::repair::RepairLogicalTablesCommand;
 use crate::metadata::snapshot::SnapshotCommand;
 use crate::Tool;
 
-/// Command for managing metadata operations, including saving metadata snapshots and restoring metadata from snapshots.
+/// Command for managing metadata operations,
+/// including saving and restoring metadata snapshots,
+/// controlling metadata operations, and diagnosing and repairing metadata.
 #[derive(Subcommand)]
 pub enum MetadataCommand {
     #[clap(subcommand)]
     Snapshot(SnapshotCommand),
     #[clap(subcommand)]
     Control(ControlCommand),
+    RepairLogicalTables(RepairLogicalTablesCommand),
 }
 
 impl MetadataCommand {
@@ -37,6 +43,7 @@ impl MetadataCommand {
         match self {
             MetadataCommand::Snapshot(cmd) => cmd.build().await,
             MetadataCommand::Control(cmd) => cmd.build().await,
+            MetadataCommand::RepairLogicalTables(cmd) => cmd.build().await,
         }
     }
 }

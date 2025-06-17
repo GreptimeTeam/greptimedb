@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_meta::peer::Peer;
 use object_store::Error as ObjectStoreError;
 use snafu::{Location, Snafu};
 
@@ -71,6 +72,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to get table metadata"))]
+    TableMetadata {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Unexpected error: {}", msg))]
+    Unexpected {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Missing config, msg: {}", msg))]
@@ -267,6 +282,29 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to init backend"))]
+    InitBackend {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: ObjectStoreError,
+    },
+
+    #[snafu(display("Covert column schemas to defs failed"))]
+    CovertColumnSchemasToDefs {
+        #[snafu(implicit)]
+        location: Location,
+        source: operator::error::Error,
+    },
+
+    #[snafu(display("Failed to send request to datanode: {}", peer))]
+    SendRequestToDatanode {
+        peer: Peer,
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -274,9 +312,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
-                source.status_code()
-            }
+            Error::InitMetadata { source, .. }
+            | Error::InitDdlManager { source, .. }
+            | Error::TableMetadata { source, .. } => source.status_code(),
 
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
@@ -290,6 +328,9 @@ impl ErrorExt for Error {
             | Error::InvalidArguments { .. }
             | Error::ParseProxyOpts { .. } => StatusCode::InvalidArguments,
 
+            Error::CovertColumnSchemasToDefs { source, .. } => source.status_code(),
+            Error::SendRequestToDatanode { source, .. } => source.status_code(),
+
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
@@ -297,6 +338,7 @@ impl ErrorExt for Error {
             Error::ParseSql { source, .. } | Error::PlanStatement { source, .. } => {
                 source.status_code()
             }
+            Error::Unexpected { .. } => StatusCode::Unexpected,
 
             Error::SerdeJson { .. }
             | Error::FileIo { .. }
@@ -305,7 +347,7 @@ impl ErrorExt for Error {
             | Error::BuildClient { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
-            Error::OpenDal { .. } => StatusCode::Internal,
+            Error::OpenDal { .. } | Error::InitBackend { .. } => StatusCode::Internal,
             Error::S3ConfigNotSet { .. }
             | Error::OutputDirNotSet { .. }
             | Error::EmptyStoreAddrs { .. } => StatusCode::InvalidArguments,

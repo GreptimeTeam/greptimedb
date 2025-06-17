@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 
 use api::v1::region::{region_request, CreateRequests, RegionRequest, RegionRequestHeader};
+use api::v1::CreateTableExpr;
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
 use crate::ddl::utils::region_storage_path;
 use crate::error::Result;
 use crate::peer::Peer;
-use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, RegionRoute};
 
 impl CreateLogicalTablesProcedure {
@@ -45,13 +45,15 @@ impl CreateLogicalTablesProcedure {
             let catalog = &create_table_expr.catalog_name;
             let schema = &create_table_expr.schema_name;
             let logical_table_id = task.table_info.ident.table_id;
+            let physical_table_id = self.data.physical_table_id;
             let storage_path = region_storage_path(catalog, schema);
-            let request_builder = self.create_region_request_builder(task)?;
+            let request_builder =
+                create_region_request_builder(&task.create_table, physical_table_id)?;
 
             for region_number in &regions_on_this_peer {
                 let region_id = RegionId::new(logical_table_id, *region_number);
                 let one_region_request =
-                    request_builder.build_one(region_id, storage_path.clone(), &HashMap::new())?;
+                    request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
                 requests.push(one_region_request);
             }
         }
@@ -69,16 +71,13 @@ impl CreateLogicalTablesProcedure {
             body: Some(region_request::Body::Creates(CreateRequests { requests })),
         }))
     }
+}
 
-    fn create_region_request_builder(
-        &self,
-        task: &CreateTableTask,
-    ) -> Result<CreateRequestBuilder> {
-        let create_expr = &task.create_table;
-        let template = build_template(create_expr)?;
-        Ok(CreateRequestBuilder::new(
-            template,
-            Some(self.data.physical_table_id),
-        ))
-    }
+/// Creates a region request builder.
+pub fn create_region_request_builder(
+    create_table_expr: &CreateTableExpr,
+    physical_table_id: TableId,
+) -> Result<CreateRequestBuilder> {
+    let template = build_template(create_table_expr)?;
+    Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }

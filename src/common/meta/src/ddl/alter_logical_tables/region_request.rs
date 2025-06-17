@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1;
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::{
     alter_request, region_request, AddColumn, AddColumns, AlterRequest, AlterRequests,
     RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
+use api::v1::{self, AlterTableExpr};
 use common_telemetry::tracing_context::TracingContext;
 use store_api::storage::RegionId;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::error::Result;
-use crate::key::table_info::TableInfoValue;
 use crate::peer::Peer;
-use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, RegionRoute};
 
 impl AlterLogicalTablesProcedure {
@@ -62,34 +60,37 @@ impl AlterLogicalTablesProcedure {
         {
             for region_number in &regions_on_this_peer {
                 let region_id = RegionId::new(table.table_info.ident.table_id, *region_number);
-                let request = self.make_alter_region_request(region_id, task, table)?;
+                let request = make_alter_region_request(
+                    region_id,
+                    &task.alter_table,
+                    table.table_info.ident.version,
+                );
                 requests.push(request);
             }
         }
 
         Ok(AlterRequests { requests })
     }
+}
 
-    fn make_alter_region_request(
-        &self,
-        region_id: RegionId,
-        task: &AlterTableTask,
-        table: &TableInfoValue,
-    ) -> Result<AlterRequest> {
-        let region_id = region_id.as_u64();
-        let schema_version = table.table_info.ident.version;
-        let kind = match &task.alter_table.kind {
-            Some(Kind::AddColumns(add_columns)) => Some(alter_request::Kind::AddColumns(
-                to_region_add_columns(add_columns),
-            )),
-            _ => unreachable!(), // Safety: we have checked the kind in check_input_tasks
-        };
+/// Makes an alter region request.
+pub fn make_alter_region_request(
+    region_id: RegionId,
+    alter_table_expr: &AlterTableExpr,
+    schema_version: u64,
+) -> AlterRequest {
+    let region_id = region_id.as_u64();
+    let kind = match &alter_table_expr.kind {
+        Some(Kind::AddColumns(add_columns)) => Some(alter_request::Kind::AddColumns(
+            to_region_add_columns(add_columns),
+        )),
+        _ => unreachable!(), // Safety: we have checked the kind in check_input_tasks
+    };
 
-        Ok(AlterRequest {
-            region_id,
-            schema_version,
-            kind,
-        })
+    AlterRequest {
+        region_id,
+        schema_version,
+        kind,
     }
 }
 

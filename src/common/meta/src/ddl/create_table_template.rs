@@ -105,12 +105,12 @@ impl CreateRequestBuilder {
         &self.template
     }
 
-    pub(crate) fn build_one(
+    pub fn build_one(
         &self,
         region_id: RegionId,
         storage_path: String,
         region_wal_options: &HashMap<RegionNumber, String>,
-    ) -> Result<CreateRequest> {
+    ) -> CreateRequest {
         let mut request = self.template.clone();
 
         request.region_id = region_id.as_u64();
@@ -130,6 +130,6 @@ impl CreateRequestBuilder {
             );
         }
 
-        Ok(request)
+        request
     }
 }

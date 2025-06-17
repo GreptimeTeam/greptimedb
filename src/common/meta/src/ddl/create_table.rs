@@ -218,11 +218,8 @@ impl CreateTableProcedure {
             let mut requests = Vec::with_capacity(regions.len());
             for region_number in regions {
                 let region_id = RegionId::new(self.table_id(), region_number);
-                let create_region_request = request_builder.build_one(
-                    region_id,
-                    storage_path.clone(),
-                    region_wal_options,
-                )?;
+                let create_region_request =
+                    request_builder.build_one(region_id, storage_path.clone(), region_wal_options);
                 requests.push(PbRegionRequest::Create(create_region_request));
             }
 

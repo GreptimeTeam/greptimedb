@@ -25,6 +25,7 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{Context, LockKey, Procedure, Status};
 use common_telemetry::{error, info, warn};
 use futures_util::future;
+pub use region_request::make_alter_region_request;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;

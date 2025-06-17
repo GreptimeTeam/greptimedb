@@ -21,10 +21,9 @@ use get::GetCommand;
 
 use crate::Tool;
 
-/// Subcommand for metadata control.
+/// Subcommand for metadata control, including getting metadata from metadata store
 #[derive(Subcommand)]
 pub enum ControlCommand {
-    /// Get the metadata from the metasrv.
     #[clap(subcommand)]
     Get(GetCommand),
 }
