@@ -34,3 +34,40 @@ pub use manager::{
     PipelineInfo, PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
 };
+
+#[macro_export]
+macro_rules! unwrap_or_continue_if_err {
+    ($result:expr, $condition:expr) => {{
+        match $result {
+            Ok(value) => value,
+            Err(e) => {
+                if $condition {
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! unwrap_or_warn_continue {
+    ($expr:expr, $msg:expr) => {
+        if let Some(value) = $expr {
+            value
+        } else {
+            warn!($msg);
+            continue;
+        }
+    };
+
+    ($expr:expr, $fmt:expr, $($arg:tt)*) => {
+        if let Some(value) = $expr {
+            value
+        } else {
+            warn!($fmt, $($arg)*);
+            continue;
+        }
+    };
+}

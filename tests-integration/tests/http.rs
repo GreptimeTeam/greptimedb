@@ -108,6 +108,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_with_hint_vrl,
+                test_pipeline_skip_error,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -1781,6 +1782,138 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","Json","","YES","","FIELD"],["json_object","Json","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_skip_error(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_skip_error").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+      "message": "good message"
+  },
+  {
+    "time": "2024-05-25",
+    "message": "bad message"
+  },
+  {
+    "message": "another bad message"
+  }
+]
+"#;
+
+    // write data without skip error
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. check data
+    // without skip error, all data should be dropped
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "show tables",
+        "[[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    // write data with skip error
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. check data
+    // with skip error, only the first row should be written
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "select message, time from logs1",
+        "[[\"good message\",1716668197217000000]]",
+    )
+    .await;
+
+    // write data with skip error on header
+    // header has a higher priority than params
+    // write one row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=false")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-params", "skip_error=true")
+        .body(data_body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write one row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write zero row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-params", "skip_error=false")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 5. check data
+    // it will be three rows with the same ts
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "select message, time from logs1",
+        "[[\"good message\",1716668197217000000],[\"good message\",1716668197217000000],[\"good message\",1716668197217000000]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }
