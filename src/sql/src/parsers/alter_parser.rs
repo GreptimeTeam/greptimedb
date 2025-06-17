@@ -30,7 +30,7 @@ use crate::parsers::utils::{
 };
 use crate::statements::alter::{
     AddColumn, AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
-    KeyValueOption, SetIndexOperation, UnsetIndexOperation,
+    DropDefaultsOperation, KeyValueOption, SetIndexOperation, UnsetIndexOperation,
 };
 use crate::statements::statement::Statement;
 use crate::util::parse_option_string;
@@ -156,6 +156,7 @@ impl ParserContext<'_> {
                                 .collect();
                             AlterTableOperation::SetTableOptions { options }
                         }
+                        Keyword::ALTER => self.parse_alter_columns()?,
                         _ => self.expected(
                             "ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE",
                             self.parser.peek_token(),
@@ -166,6 +167,29 @@ impl ParserContext<'_> {
             unexpected => self.unsupported(unexpected.to_string())?,
         };
         Ok(AlterTable::new(table_name, alter_operation))
+    }
+
+    // Parse the following: ALTER TABLE table_name ALTER ...
+    fn parse_alter_columns(&mut self) -> Result<AlterTableOperation> {
+        let _ = self.parser.next_token();
+        let _ = self.parser.next_token();
+        let ts = self.parser.next_token();
+        match ts.token {
+            // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER `a` DROP DEFAULT, ALTER `b` DROP DEFAULT, ...
+            Token::Word(w) if w.keyword == Keyword::DROP => {
+                let ts = self.parser.peek_token();
+                match ts.token {
+                    Token::Word(w) if w.keyword == Keyword::DEFAULT => {
+                        self.parser.prev_token();
+                        self.parser.prev_token();
+                        self.parser.prev_token();
+                        self.parse_alter_table_drop_default()
+                    }
+                    _ => self.expected("DEFAULT is expecting after DROP", ts),
+                }
+            }
+            _ => self.expected("DROP after ALTER COLUMN", ts),
+        }
     }
 
     fn parse_alter_table_unset(&mut self) -> Result<AlterTableOperation> {
@@ -196,6 +220,14 @@ impl ParserContext<'_> {
                 .context(error::SyntaxSnafu)?;
             Ok(AlterTableOperation::AddColumns { add_columns })
         }
+    }
+
+    fn parse_alter_table_drop_default(&mut self) -> Result<AlterTableOperation> {
+        let columns = self
+            .parser
+            .parse_comma_separated(parse_alter_column_drop_default)
+            .context(error::SyntaxSnafu)?;
+        Ok(AlterTableOperation::DropDefaults { columns })
     }
 
     fn parse_alter_table_modify(&mut self) -> Result<AlterTableOperation> {
@@ -382,6 +414,23 @@ impl ParserContext<'_> {
                     .context(error::SetSkippingIndexOptionSnafu)?,
             },
         })
+    }
+}
+
+fn parse_alter_column_drop_default(
+    parser: &mut Parser,
+) -> std::result::Result<DropDefaultsOperation, ParserError> {
+    parser.next_token();
+    let column_name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
+    if parser.parse_keywords(&[Keyword::DROP, Keyword::DEFAULT]) {
+        Ok(DropDefaultsOperation(column_name))
+    } else {
+        let not_drop = parser.peek_token();
+        parser.next_token();
+        let not_default = parser.peek_token();
+        Err(ParserError::ParserError(format!(
+            "Unexpected keyword, expect DROP DEFAULT, got: `{not_drop} {not_default}`"
+        )))
     }
 }
 
@@ -1117,6 +1166,44 @@ mod tests {
                             assert_eq!(options.len(), 1);
                             assert_eq!(options[0].key, "compaction.twcs.trigger_file_num");
                             assert_eq!(options[0].value, "8");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_drop_default() {
+        let columns = vec![vec!["a"], vec!["a", "b", "c"]];
+        for col in columns {
+            let sql = col
+                .iter()
+                .map(|x| format!("ALTER {x} DROP DEFAULT"))
+                .collect::<Vec<String>>()
+                .join(",");
+            let sql = format!("ALTER TABLE test_table {sql}");
+            let mut result = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(1, result.len());
+            let statement = result.remove(0);
+            assert_matches!(statement, Statement::AlterTable { .. });
+            match statement {
+                Statement::AlterTable(alter_table) => {
+                    assert_eq!("test_table", alter_table.table_name().0[0].value);
+                    let alter_operation = alter_table.alter_operation();
+                    match alter_operation {
+                        AlterTableOperation::DropDefaults { columns } => {
+                            assert_eq!(col.len(), columns.len());
+                            for i in 0..columns.len() {
+                                assert_eq!(col[i], columns[i].0.value);
+                            }
                         }
                         _ => unreachable!(),
                     }
