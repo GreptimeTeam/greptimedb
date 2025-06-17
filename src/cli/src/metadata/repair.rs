@@ -337,6 +337,11 @@ impl RepairTool {
                 )
                 .await
             {
+                error!(
+                    err;
+                    "Failed to create table on datanode: {} for table: {}",
+                    peer.id, full_table_name
+                );
                 errors.push(err);
                 if self.fail_fast {
                     break;
@@ -352,13 +357,8 @@ impl RepairTool {
         if !errors.is_empty() {
             return UnexpectedSnafu {
                 msg: format!(
-                    "Failed to create table on datanodes for table: {}, errors: \n{}",
+                    "Failed to create table on datanodes for table: {}",
                     full_table_name,
-                    errors
-                        .iter()
-                        .map(|e| format!("{:?}", e))
-                        .collect::<Vec<_>>()
-                        .join("\n")
                 ),
             }
             .fail();
