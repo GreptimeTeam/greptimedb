@@ -296,8 +296,8 @@ impl CatalogManager for KvBackendCatalogManager {
                 .context(TableMetadataManagerSnafu)?
         {
             let mut new_table_info = (*table.table_info()).clone();
-            // Gather all column ids from the logical table
-            let logical_column_ids: std::collections::HashSet<_> = new_table_info
+            // Gather all column names from the logical table
+            let logical_column_names: std::collections::HashSet<_> = new_table_info
                 .meta
                 .schema
                 .column_schemas()
@@ -319,7 +319,7 @@ impl CatalogManager for KvBackendCatalogManager {
                         .column_schemas
                         .get(index)
                     {
-                        logical_column_ids.contains(&physical_column.name)
+                        logical_column_names.contains(&physical_column.name)
                     } else {
                         false
                     }
