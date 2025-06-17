@@ -15,7 +15,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
@@ -29,6 +29,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
 
+pub type ProcessId = u32;
 pub type ProcessManagerRef = Arc<ProcessManager>;
 
 /// Query process manager.
@@ -36,9 +37,9 @@ pub struct ProcessManager {
     /// Local frontend server address,
     server_addr: String,
     /// Next process id for local queries.
-    next_id: AtomicU64,
+    next_id: AtomicU32,
     /// Running process per catalog.
-    catalogs: RwLock<HashMap<String, HashMap<u64, CancellableProcess>>>,
+    catalogs: RwLock<HashMap<String, HashMap<ProcessId, CancellableProcess>>>,
     /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
 }
@@ -65,9 +66,9 @@ impl ProcessManager {
         schemas: Vec<String>,
         query: String,
         client: String,
-        id: Option<u64>,
+        query_id: Option<ProcessId>,
     ) -> Ticket {
-        let id = id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
+        let id = query_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
             id,
             catalog: catalog.clone(),
@@ -96,12 +97,12 @@ impl ProcessManager {
     }
 
     /// Generates the next process id.
-    pub fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// De-register a query from process list.
-    pub fn deregister_query(&self, catalog: String, id: u64) {
+    pub fn deregister_query(&self, catalog: String, id: ProcessId) {
         if let Entry::Occupied(mut o) = self.catalogs.write().unwrap().entry(catalog) {
             let process = o.get_mut().remove(&id);
             debug!("Deregister process: {:?}", process);
@@ -159,26 +160,10 @@ impl ProcessManager {
         &self,
         server_addr: String,
         catalog: String,
-        id: u64,
+        id: ProcessId,
     ) -> error::Result<bool> {
         if server_addr == self.server_addr {
-            if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
-                if let Some(process) = catalogs.remove(&id) {
-                    process.handle.cancel();
-                    info!(
-                        "Killed process, catalog: {}, id: {:?}",
-                        process.process.catalog, process.process.id
-                    );
-                    PROCESS_KILL_COUNT.with_label_values(&[&catalog]).inc();
-                    Ok(true)
-                } else {
-                    debug!("Failed to kill process, id not found: {}", id);
-                    Ok(false)
-                }
-            } else {
-                debug!("Failed to kill process, catalog not found: {}", catalog);
-                Ok(false)
-            }
+            self.kill_local_process(catalog, id).await
         } else {
             let mut nodes = self
                 .frontend_selector
@@ -204,12 +189,33 @@ impl ProcessManager {
             Ok(true)
         }
     }
+
+    /// Kills local query with provided catalog and id.
+    pub async fn kill_local_process(&self, catalog: String, id: ProcessId) -> error::Result<bool> {
+        if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
+            if let Some(process) = catalogs.remove(&id) {
+                process.handle.cancel();
+                info!(
+                    "Killed process, catalog: {}, id: {:?}",
+                    process.process.catalog, process.process.id
+                );
+                PROCESS_KILL_COUNT.with_label_values(&[&catalog]).inc();
+                Ok(true)
+            } else {
+                debug!("Failed to kill process, id not found: {}", id);
+                Ok(false)
+            }
+        } else {
+            debug!("Failed to kill process, catalog not found: {}", catalog);
+            Ok(false)
+        }
+    }
 }
 
 pub struct Ticket {
     pub(crate) catalog: String,
     pub(crate) manager: ProcessManagerRef,
-    pub(crate) id: u64,
+    pub(crate) id: ProcessId,
     pub cancellation_handle: Arc<CancellationHandle>,
 }
 
@@ -323,7 +329,7 @@ mod tests {
         assert_eq!(running_processes.len(), 2);
 
         // Verify both processes are present
-        let ids: Vec<u64> = running_processes.iter().map(|p| p.id).collect();
+        let ids: Vec<u32> = running_processes.iter().map(|p| p.id).collect();
         assert!(ids.contains(&ticket1.id));
         assert!(ids.contains(&ticket2.id));
     }
