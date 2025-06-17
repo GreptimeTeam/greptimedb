@@ -37,7 +37,6 @@ pub struct PromCtx {
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
 pub(crate) struct TablesBuilder {
-    // tables: HashMap<String, TableBuilder>,
     // schema -> table -> table_builder
     tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
 }
