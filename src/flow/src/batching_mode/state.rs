@@ -22,7 +22,7 @@ use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -220,6 +220,13 @@ impl DirtyTimeWindows {
         flow_id: FlowId,
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
+        ensure!(
+            window_size.num_seconds() > 0,
+            UnexpectedSnafu {
+                reason: "window_size is zero, can't generate filter exprs",
+            }
+        );
+
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
             expire_lower_bound.map(|t| t.to_iso8601_string()),
@@ -287,7 +294,7 @@ impl DirtyTimeWindows {
                 // too large a window, split it
                 // split at window_size * times
                 let surplus = max_time_range - cur_time_range;
-                if surplus.num_seconds() < window_size.num_seconds() {
+                if surplus.num_seconds() <= window_size.num_seconds() {
                     // Skip splitting if surplus is smaller than window_size
                     break;
                 }
