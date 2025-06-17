@@ -308,6 +308,10 @@ impl Partition {
             .map(|meta| meta.column_schema.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
             .unwrap_or(false)
     }
+
+    pub(crate) fn series_count(&self) -> usize {
+        self.inner.read().unwrap().series_count()
+    }
 }
 
 pub(crate) struct PartitionStats {
@@ -576,5 +580,10 @@ impl Inner {
             self.shards.push(shard);
         }
         Ok(())
+    }
+
+    /// Returns count of timeseries.
+    fn series_count(&self) -> usize {
+        self.pk_to_pk_id.len()
     }
 }

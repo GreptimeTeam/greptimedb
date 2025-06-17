@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
@@ -56,8 +56,8 @@ use crate::memtable::{
     PredicateGroup,
 };
 use crate::metrics::{
-    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT,
-     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
+    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
+    READ_STAGE_ELAPSED,
 };
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -339,6 +339,7 @@ impl Memtable for TimeSeriesMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                series_count: 0,
             };
         }
         let ts_type = self
@@ -351,12 +352,14 @@ impl Memtable for TimeSeriesMemtable {
             .expect("Timestamp column must have timestamp type");
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
+        let series_count = self.series_set.series.read().unwrap().0.len();
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            series_count,
         }
     }
 
@@ -700,11 +703,6 @@ impl Series {
 
     pub fn is_empty(&self) -> bool {
         self.active.len() == 0 && self.frozen.is_empty()
-    }
-
-    /// Number of values and value builders
-    pub fn num_values(&self) -> usize {
-        self.frozen.len() + 1
     }
 
     /// Pushes a row of values into Series. Return the size of values.
