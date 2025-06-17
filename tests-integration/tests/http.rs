@@ -91,6 +91,7 @@ macro_rules! http_tests {
                 test_config_api,
                 test_dashboard_path,
                 test_prometheus_remote_write,
+                test_prometheus_remote_special_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
@@ -107,6 +108,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_with_hint_vrl,
+                test_pipeline_skip_error,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -666,15 +668,10 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let prom_resp = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(prom_resp.status, "error");
-    assert!(prom_resp
-        .error_type
-        .is_some_and(|err| err.eq_ignore_ascii_case("TableNotFound")));
-    assert!(prom_resp
-        .error
-        .is_some_and(|err| err.eq_ignore_ascii_case("Table not found: greptime.public.up")));
+    assert_eq!(res.status(), StatusCode::OK);
+    // An empty array will be deserialized into PrometheusResponse::Labels.
+    // So here we compare the text directly.
+    assert_eq!(res.text().await, r#"{"status":"success","data":[]}"#);
 
     // label values
     // should return error if there is no match[]
@@ -1300,6 +1297,100 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_special_labels")
+            .await;
+    let client = TestClient::new(app).await;
+
+    // write snappy encoded data
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries_special_labels(),
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    // create databases
+    let res = client
+        .post("/v1/sql?sql=create database idc3")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/sql?sql=create database idc4")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write data
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // test idc3
+    let expected = "[[\"f1\"],[\"idc3_lo_table\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3",
+        &client,
+        "show tables from idc3;",
+        expected,
+    )
+    .await;
+    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'f1'\\n)\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3_show_create_table",
+        &client,
+        "show create table idc3.idc3_lo_table",
+        expected,
+    )
+    .await;
+    let expected = "[[3000,42.0]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc3_select",
+        &client,
+        "select * from idc3.idc3_lo_table",
+        expected,
+    )
+    .await;
+
+    // test idc4
+    let expected = "[[\"f2\"],[\"idc4_local_table\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4",
+        &client,
+        "show tables from idc4;",
+        expected,
+    )
+    .await;
+    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'f2'\\n)\"]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4_show_create_table",
+        &client,
+        "show create table idc4.idc4_local_table",
+        expected,
+    )
+    .await;
+    let expected = "[[4000,99.0]]";
+    validate_data(
+        "test_prometheus_remote_special_labels_idc4_select",
+        &client,
+        "select * from idc4.idc4_local_table",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -1691,6 +1782,138 @@ pub async fn test_identity_pipeline(store_type: StorageType) {
 
     let expected = r#"[["greptime_timestamp","TimestampNanosecond","PRI","NO","","TIMESTAMP"],["__source__","String","","YES","","FIELD"],["__time__","Int64","","YES","","FIELD"],["__topic__","String","","YES","","FIELD"],["ip","String","","YES","","FIELD"],["json_array","Json","","YES","","FIELD"],["json_object","Json","","YES","","FIELD"],["status","String","","YES","","FIELD"],["time","String","","YES","","FIELD"],["url","String","","YES","","FIELD"],["user-agent","String","","YES","","FIELD"],["dongdongdong","String","","YES","","FIELD"],["hasagei","String","","YES","","FIELD"]]"#;
     validate_data("identity_schema", &client, "desc logs", expected).await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_skip_error(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_skip_error").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+      "message": "good message"
+  },
+  {
+    "time": "2024-05-25",
+    "message": "bad message"
+  },
+  {
+    "message": "another bad message"
+  }
+]
+"#;
+
+    // write data without skip error
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 3. check data
+    // without skip error, all data should be dropped
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "show tables",
+        "[[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    // write data with skip error
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 4. check data
+    // with skip error, only the first row should be written
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "select message, time from logs1",
+        "[[\"good message\",1716668197217000000]]",
+    )
+    .await;
+
+    // write data with skip error on header
+    // header has a higher priority than params
+    // write one row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=false")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-params", "skip_error=true")
+        .body(data_body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write one row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write zero row
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test&skip_error=true")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-params", "skip_error=false")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 5. check data
+    // it will be three rows with the same ts
+    validate_data(
+        "pipeline_skip_error",
+        &client,
+        "select message, time from logs1",
+        "[[\"good message\",1716668197217000000],[\"good message\",1716668197217000000],[\"good message\",1716668197217000000]]",
+    )
+    .await;
 
     guard.remove_all().await;
 }

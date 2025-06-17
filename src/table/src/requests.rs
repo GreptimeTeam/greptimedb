@@ -257,6 +257,9 @@ pub enum AlterKind {
     UnsetIndex {
         options: UnsetIndexOptions,
     },
+    DropDefaults {
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

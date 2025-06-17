@@ -452,6 +452,7 @@ impl MetasrvBuilder {
             leader_cached_kv_backend,
             meta_peer_client: meta_peer_client.clone(),
             selector,
+            selector_ctx,
             // TODO(jeremy): We do not allow configuring the flow selector.
             flow_selector,
             handler_group: RwLock::new(None),

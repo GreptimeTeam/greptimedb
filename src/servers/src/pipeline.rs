@@ -20,8 +20,8 @@ use api::v1::{RowInsertRequest, Rows};
 use itertools::Itertools;
 use pipeline::error::AutoTransformOneTimestampSnafu;
 use pipeline::{
-    AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
+    unwrap_or_continue_if_err, AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex,
+    Pipeline, PipelineContext, PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
@@ -105,6 +105,7 @@ async fn run_custom_pipeline(
     query_ctx: &QueryContextRef,
     is_top_level: bool,
 ) -> Result<ContextReq> {
+    let skip_error = pipeline_ctx.pipeline_param.skip_error();
     let db = query_ctx.get_db_string();
     let pipeline = get_pipeline(pipeline_ctx.pipeline_definition, handler, query_ctx).await?;
 
@@ -121,15 +122,16 @@ async fn run_custom_pipeline(
     let mut auto_map_ts_keys = HashMap::new();
 
     for pipeline_map in pipeline_maps {
-        let r = pipeline
+        let result = pipeline
             .exec_mut(pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
                     .observe(transform_timer.elapsed().as_secs_f64());
             })
-            .context(PipelineSnafu)?;
+            .context(PipelineSnafu);
 
+        let r = unwrap_or_continue_if_err!(result, skip_error);
         match r {
             PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
@@ -167,7 +169,7 @@ async fn run_custom_pipeline(
         // `RowInsertRequest` and append to results. If the pipeline doesn't
         // have dispatch, this will be only output of the pipeline.
         for ((opt, table_name), rows) in transformed_map {
-            results.add_rows(
+            results.add_row(
                 opt,
                 RowInsertRequest {
                     rows: Some(Rows {

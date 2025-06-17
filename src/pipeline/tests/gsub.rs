@@ -81,16 +81,26 @@ processors:
 transform:
   - field: reqTimeSec
     type: epoch, millisecond
+  - field: ts
+    type: epoch, millisecond
     index: timestamp
+    on_failure: default
 "#;
 
     let output = common::parse_and_exec(empty_string, pipeline_yaml);
 
-    let expected_schema = vec![common::make_column_schema(
-        "reqTimeSec".to_string(),
-        ColumnDataType::TimestampMillisecond,
-        SemanticType::Timestamp,
-    )];
+    let expected_schema = vec![
+        common::make_column_schema(
+            "reqTimeSec".to_string(),
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Field,
+        ),
+        common::make_column_schema(
+            "ts".to_string(),
+            ColumnDataType::TimestampMillisecond,
+            SemanticType::Timestamp,
+        ),
+    ];
 
     assert_eq!(output.schema, expected_schema);
     assert_eq!(output.rows[0].values[0].value_data, None);

@@ -36,8 +36,24 @@ with (
     on_physical_table = "metric_engine_partition",
 );
 
+create table logical_table_3 (
+    ts timestamp time index,
+    a string,
+    z string,
+    cpu double,
+    primary key(a, z) -- trigger a physical table change with smaller and bigger column ids
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
 show create table logical_table_2;
 
+select count(*) from logical_table_2;
+
 drop table logical_table_2;
+
+drop table logical_table_3;
 
 drop table metric_engine_partition;

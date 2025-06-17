@@ -33,6 +33,7 @@ use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::prost_types::Timestamp;
+use pipeline::unwrap_or_warn_continue;
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -50,7 +51,7 @@ use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_LOKI_LOGS_INGESTION_COUNTER, METRIC_LOKI_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,
 };
-use crate::{prom_store, unwrap_or_warn_continue};
+use crate::prom_store;
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
@@ -453,27 +454,6 @@ fn process_labels(
             });
         }
     }
-}
-
-#[macro_export]
-macro_rules! unwrap_or_warn_continue {
-    ($expr:expr, $msg:expr) => {
-        if let Some(value) = $expr {
-            value
-        } else {
-            warn!($msg);
-            continue;
-        }
-    };
-
-    ($expr:expr, $fmt:expr, $($arg:tt)*) => {
-        if let Some(value) = $expr {
-            value
-        } else {
-            warn!($fmt, $($arg)*);
-            continue;
-        }
-    };
 }
 
 #[cfg(test)]

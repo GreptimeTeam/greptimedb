@@ -71,6 +71,7 @@ fn create_postgres_server(
         0,
         io_runtime,
         user_provider,
+        None,
     )))
 }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::vectors::{StringVector, UInt64Vector, VectorRef};
+use datatypes::vectors::{StringVector, UInt32Vector, VectorRef};
 use derive_more::Display;
 
 use crate::function::{Function, FunctionContext};
@@ -144,7 +144,7 @@ impl Function for PgBackendPidFunction {
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let pid = func_ctx.query_ctx.process_id();
 
-        Ok(Arc::new(UInt64Vector::from_slice([pid])) as _)
+        Ok(Arc::new(UInt32Vector::from_slice([pid])) as _)
     }
 }
 
@@ -164,7 +164,7 @@ impl Function for ConnectionIdFunction {
     fn eval(&self, func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let pid = func_ctx.query_ctx.process_id();
 
-        Ok(Arc::new(UInt64Vector::from_slice([pid])) as _)
+        Ok(Arc::new(UInt32Vector::from_slice([pid])) as _)
     }
 }
 

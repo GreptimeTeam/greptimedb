@@ -1,0 +1,113 @@
+--- alter table to add new column with default timestamp values aware of session timezone test ---
+CREATE TABLE test1 (i INTEGER, j TIMESTAMP time index, PRIMARY KEY(i));
+
+Affected Rows: 0
+
+ALTER TABLE test1 ADD COLUMN k INTEGER DEFAULT 100;
+
+Affected Rows: 0
+
+ALTER TABLE test1 ADD COLUMN l INTEGER DEFAULT 200;
+
+Affected Rows: 0
+
+ALTER TABLE test1 ADD COLUMN m TIMESTAMP DEFAULT '2024-01-30 00:00:00';
+
+Affected Rows: 0
+
+ALTER TABLE test1 ADD COLUMN n INTEGER DEFAULT 300;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test1;
+
++-------+-------------------------------------------------------------+
+| Table | Create Table                                                |
++-------+-------------------------------------------------------------+
+| test1 | CREATE TABLE IF NOT EXISTS "test1" (                        |
+|       |   "i" INT NULL,                                             |
+|       |   "j" TIMESTAMP(3) NOT NULL,                                |
+|       |   "k" INT NULL DEFAULT 100,                                 |
+|       |   "l" INT NULL DEFAULT 200,                                 |
+|       |   "m" TIMESTAMP(3) NULL DEFAULT '2024-01-30 00:00:00+0000', |
+|       |   "n" INT NULL DEFAULT 300,                                 |
+|       |   TIME INDEX ("j"),                                         |
+|       |   PRIMARY KEY ("i")                                         |
+|       | )                                                           |
+|       |                                                             |
+|       | ENGINE=mito                                                 |
+|       |                                                             |
++-------+-------------------------------------------------------------+
+
+INSERT INTO test1 VALUES (1, '2024-01-30 12:00:00', DEFAULT, DEFAULT, DEFAULT, DEFAULT);
+
+Affected Rows: 1
+
+SELECT * FROM test1;
+
++---+---------------------+-----+-----+---------------------+-----+
+| i | j                   | k   | l   | m                   | n   |
++---+---------------------+-----+-----+---------------------+-----+
+| 1 | 2024-01-30T12:00:00 | 100 | 200 | 2024-01-30T00:00:00 | 300 |
++---+---------------------+-----+-----+---------------------+-----+
+
+ALTER TABLE test1 ALTER k DROP DEFAULT;
+
+Affected Rows: 0
+
+ALTER TABLE test1 ALTER l DROP DEFAULT, ALTER m DROP DEFAULT, ALTER n DROP DEFAULT;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test1;
+
++-------+--------------------------------------+
+| Table | Create Table                         |
++-------+--------------------------------------+
+| test1 | CREATE TABLE IF NOT EXISTS "test1" ( |
+|       |   "i" INT NULL,                      |
+|       |   "j" TIMESTAMP(3) NOT NULL,         |
+|       |   "k" INT NULL,                      |
+|       |   "l" INT NULL,                      |
+|       |   "m" TIMESTAMP(3) NULL,             |
+|       |   "n" INT NULL,                      |
+|       |   TIME INDEX ("j"),                  |
+|       |   PRIMARY KEY ("i")                  |
+|       | )                                    |
+|       |                                      |
+|       | ENGINE=mito                          |
+|       |                                      |
++-------+--------------------------------------+
+
+INSERT INTO test1 VALUES (1, '2024-01-30 12:00:00', DEFAULT, DEFAULT, DEFAULT, DEFAULT);
+
+Affected Rows: 1
+
+SELECT * FROM test1;
+
++---+---------------------+---+---+---+---+
+| i | j                   | k | l | m | n |
++---+---------------------+---+---+---+---+
+| 1 | 2024-01-30T12:00:00 |   |   |   |   |
++---+---------------------+---+---+---+---+
+
+ALTER TABLE test1 ADD COLUMN o INTEGER NOT NULL DEFAULT 400;
+
+Affected Rows: 0
+
+SELECT * FROM test1;
+
++---+---------------------+---+---+---+---+-----+
+| i | j                   | k | l | m | n | o   |
++---+---------------------+---+---+---+---+-----+
+| 1 | 2024-01-30T12:00:00 |   |   |   |   | 400 |
++---+---------------------+---+---+---+---+-----+
+
+ALTER TABLE test1 ALTER o DROP DEFAULT;
+
+Error: 1004(InvalidArguments), Invalid alter table(test1) request: column o is not nullable and `default` cannot be dropped
+
+DROP TABLE test1;
+
+Affected Rows: 0
+

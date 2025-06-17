@@ -66,7 +66,7 @@ pub struct QueryContext {
     channel: Channel,
     /// Process id for managing on-going queries
     #[builder(default)]
-    process_id: u64,
+    process_id: u32,
     /// Connection information
     #[builder(default)]
     conn_info: ConnInfo,
@@ -439,7 +439,7 @@ impl QueryContext {
             .copied()
     }
 
-    pub fn process_id(&self) -> u64 {
+    pub fn process_id(&self) -> u32 {
         self.process_id
     }
 

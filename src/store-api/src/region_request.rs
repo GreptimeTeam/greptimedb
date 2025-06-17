@@ -530,6 +530,11 @@ pub enum AlterKind {
     SetIndex { options: ApiSetIndexOptions },
     /// Unset index options.
     UnsetIndex { options: ApiUnsetIndexOptions },
+    /// Drop column default value.
+    DropDefaults {
+        /// Name of columns to drop.
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -627,6 +632,11 @@ impl AlterKind {
                     options.is_fulltext(),
                 )?;
             }
+            AlterKind::DropDefaults { names } => {
+                names
+                    .iter()
+                    .try_for_each(|name| Self::validate_column_to_drop(name, metadata))?;
+            }
         }
         Ok(())
     }
@@ -656,6 +666,9 @@ impl AlterKind {
             AlterKind::UnsetIndex { options } => {
                 metadata.column_by_name(options.column_name()).is_some()
             }
+            AlterKind::DropDefaults { names } => names
+                .iter()
+                .any(|name| metadata.column_by_name(name).is_some()),
         }
     }
 
@@ -793,6 +806,9 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                         column_name: s.column_name,
                     },
                 },
+            },
+            alter_request::Kind::DropDefaults(x) => AlterKind::DropDefaults {
+                names: x.drop_defaults.into_iter().map(|x| x.column_name).collect(),
             },
         };
 

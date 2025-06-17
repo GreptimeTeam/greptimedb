@@ -160,6 +160,10 @@ impl Transform {
         }
         None
     }
+
+    pub(crate) fn is_timeindex(&self) -> bool {
+        self.index.is_some_and(|i| i == Index::Time)
+    }
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {

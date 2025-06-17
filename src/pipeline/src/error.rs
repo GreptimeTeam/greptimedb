@@ -800,6 +800,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Time index must be non null."))]
+    TimeIndexMustBeNonNull {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -814,7 +820,8 @@ impl ErrorExt for Error {
             CollectRecords { source, .. } => source.status_code(),
             PipelineNotFound { .. }
             | InvalidPipelineVersion { .. }
-            | InvalidCustomTimeIndex { .. } => StatusCode::InvalidArguments,
+            | InvalidCustomTimeIndex { .. }
+            | TimeIndexMustBeNonNull { .. } => StatusCode::InvalidArguments,
             MultiPipelineWithDiffSchema { .. } | ValueMustBeMap { .. } => StatusCode::IllegalState,
             BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
             ExecuteInternalStatement { source, .. } => source.status_code(),

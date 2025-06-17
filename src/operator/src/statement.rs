@@ -369,7 +369,7 @@ impl StatementExecutor {
             Statement::ShowSearchPath(_) => self.show_search_path(query_ctx).await,
             Statement::Use(db) => self.use_database(db, query_ctx).await,
             Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
-            Statement::Kill(id) => self.execute_kill(query_ctx, id).await,
+            Statement::Kill(kill) => self.execute_kill(query_ctx, kill).await,
         }
     }
 

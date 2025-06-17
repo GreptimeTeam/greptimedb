@@ -185,7 +185,7 @@ impl Instance {
             vec![query_ctx.current_schema()],
             stmt.to_string(),
             query_ctx.conn_info().to_string(),
-            None,
+            Some(query_ctx.process_id()),
         );
 
         let query_fut = async {

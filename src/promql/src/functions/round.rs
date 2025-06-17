@@ -17,21 +17,16 @@ use std::sync::Arc;
 use datafusion::error::DataFusionError;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{create_udf, ColumnarValue, ScalarUDF, Volatility};
-use datatypes::arrow::array::AsArray;
+use datatypes::arrow::array::{AsArray, Float64Array, PrimitiveArray};
 use datatypes::arrow::datatypes::{DataType, Float64Type};
-use datatypes::compute;
+use datatypes::arrow::error::ArrowError;
 
+use crate::error;
 use crate::functions::extract_array;
 
-pub struct Round {
-    nearest: f64,
-}
+pub struct Round;
 
 impl Round {
-    fn new(nearest: f64) -> Self {
-        Self { nearest }
-    }
-
     pub const fn name() -> &'static str {
         "prom_round"
     }
@@ -50,39 +45,62 @@ impl Round {
             Self::input_type(),
             Self::return_type(),
             Volatility::Volatile,
-            Arc::new(move |input: &_| Self::create_function(input)?.calc(input)) as _,
+            Arc::new(Self::round) as _,
         )
     }
 
-    fn create_function(inputs: &[ColumnarValue]) -> Result<Self, DataFusionError> {
-        if inputs.len() != 2 {
-            return Err(DataFusionError::Plan(
-                "Round function should have 2 inputs".to_string(),
-            ));
-        }
-        let ColumnarValue::Scalar(ScalarValue::Float64(Some(nearest))) = inputs[1] else {
-            return Err(DataFusionError::Plan(
-                "Round function's second input should be a scalar float64".to_string(),
-            ));
-        };
-        Ok(Self::new(nearest))
-    }
-
-    fn calc(&self, input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
-        assert_eq!(input.len(), 2);
+    fn round(input: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+        error::ensure(
+            input.len() == 2,
+            DataFusionError::Plan("prom_round function should have 2 inputs".to_string()),
+        )?;
 
         let value_array = extract_array(&input[0])?;
+        let nearest_col = &input[1];
 
-        if self.nearest == 0.0 {
-            let values = value_array.as_primitive::<Float64Type>();
-            let result = compute::unary::<_, _, Float64Type>(values, |a| a.round());
-            Ok(ColumnarValue::Array(Arc::new(result) as _))
-        } else {
-            let values = value_array.as_primitive::<Float64Type>();
-            let nearest = self.nearest;
-            let result =
-                compute::unary::<_, _, Float64Type>(values, |a| ((a / nearest).round() * nearest));
-            Ok(ColumnarValue::Array(Arc::new(result) as _))
+        match nearest_col {
+            ColumnarValue::Scalar(nearest_scalar) => {
+                let nearest = if let ScalarValue::Float64(Some(val)) = nearest_scalar {
+                    *val
+                } else {
+                    let null_array = Float64Array::new_null(value_array.len());
+                    return Ok(ColumnarValue::Array(Arc::new(null_array)));
+                };
+                let op = |a: f64| {
+                    if nearest == 0.0 {
+                        a.round()
+                    } else {
+                        (a / nearest).round() * nearest
+                    }
+                };
+                let result: PrimitiveArray<Float64Type> =
+                    value_array.as_primitive::<Float64Type>().unary(op);
+                Ok(ColumnarValue::Array(Arc::new(result) as _))
+            }
+            ColumnarValue::Array(nearest_array) => {
+                let value_array = value_array.as_primitive::<Float64Type>();
+                let nearest_array = nearest_array.as_primitive::<Float64Type>();
+                error::ensure(
+                    value_array.len() == nearest_array.len(),
+                    DataFusionError::Execution(format!(
+                        "input arrays should have the same length, found {} and {}",
+                        value_array.len(),
+                        nearest_array.len()
+                    )),
+                )?;
+
+                let result: PrimitiveArray<Float64Type> =
+                    datatypes::arrow::compute::binary(value_array, nearest_array, |a, nearest| {
+                        if nearest == 0.0 {
+                            a.round()
+                        } else {
+                            (a / nearest).round() * nearest
+                        }
+                    })
+                    .map_err(|err: ArrowError| DataFusionError::ArrowError(err, None))?;
+
+                Ok(ColumnarValue::Array(Arc::new(result) as _))
+            }
         }
     }
 }
