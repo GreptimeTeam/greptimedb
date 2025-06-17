@@ -32,7 +32,7 @@ use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::info;
-use futures::{FutureExt, TryStreamExt};
+use futures::TryStreamExt;
 use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertRequests};
 use itertools::Itertools;
 use operator::delete::Deleter;
@@ -40,16 +40,16 @@ use operator::insert::Inserter;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
-use servers::error::{StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu};
+use servers::add_service;
+use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{ServerHandler, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tonic::codec::CompressionEncoding;
-use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 
 use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
@@ -228,50 +228,6 @@ impl FlownodeServer {
             .send_compressed(CompressionEncoding::Gzip)
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd)
-    }
-}
-
-#[async_trait::async_trait]
-impl servers::server::Server for FlownodeServer {
-    async fn shutdown(&self) -> Result<(), servers::error::Error> {
-        let tx = self.inner.server_shutdown_tx.lock().await;
-        if tx.send(()).is_err() {
-            info!("Receiver dropped, the flow node server has already shutdown");
-        }
-        info!("Shutdown flow node server");
-
-        Ok(())
-    }
-
-    async fn start(&mut self, addr: SocketAddr) -> Result<(), servers::error::Error> {
-        let mut rx_server = self.inner.server_shutdown_tx.lock().await.subscribe();
-
-        let incoming = {
-            let listener = TcpListener::bind(addr)
-                .await
-                .context(TcpBindSnafu { addr })?;
-            let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
-            let incoming =
-                TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
-            info!("flow server is bound to {}", addr);
-
-            incoming
-        };
-
-        let builder = tonic::transport::Server::builder().add_service(self.create_flow_service());
-
-        let _handle = common_runtime::spawn_global(async move {
-            let _result = builder
-                .serve_with_incoming_shutdown(incoming, rx_server.recv().map(drop))
-                .await
-                .context(StartGrpcSnafu);
-        });
-
-        Ok(())
-    }
-
-    fn name(&self) -> &str {
-        FLOW_NODE_SERVER_NAME
     }
 }
 
@@ -470,7 +426,7 @@ impl FlownodeBuilder {
 /// Useful in distributed mode
 pub struct FlownodeServiceBuilder<'a> {
     opts: &'a FlownodeOptions,
-    grpc_server: Option<FlownodeServer>,
+    grpc_server: Option<GrpcServer>,
     enable_http_service: bool,
 }
 
@@ -490,11 +446,17 @@ impl<'a> FlownodeServiceBuilder<'a> {
         }
     }
 
-    pub fn with_grpc_server(self, grpc_server: FlownodeServer) -> Self {
+    pub fn with_grpc_server(self, grpc_server: GrpcServer) -> Self {
         Self {
             grpc_server: Some(grpc_server),
             ..self
         }
+    }
+
+    pub fn with_default_grpc_server(mut self, flownode_server: &FlownodeServer) -> Self {
+        let grpc_server = Self::grpc_server_builder(self.opts, flownode_server).build();
+        self.grpc_server = Some(grpc_server);
+        self
     }
 
     pub fn build(mut self) -> Result<ServerHandlers, Error> {
@@ -518,6 +480,22 @@ impl<'a> FlownodeServiceBuilder<'a> {
             handlers.insert(handler);
         }
         Ok(handlers)
+    }
+
+    pub fn grpc_server_builder(
+        opts: &FlownodeOptions,
+        flownode_server: &FlownodeServer,
+    ) -> GrpcServerBuilder {
+        let config = GrpcServerConfig {
+            max_recv_message_size: opts.grpc.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
+            tls: opts.grpc.tls.clone(),
+        };
+        let service = flownode_server.create_flow_service();
+        let runtime = common_runtime::global_runtime();
+        let mut builder = GrpcServerBuilder::new(config, runtime);
+        add_service!(builder, service);
+        builder
     }
 }
 
