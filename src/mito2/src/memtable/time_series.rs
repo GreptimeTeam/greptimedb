@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
@@ -56,7 +56,8 @@ use crate::memtable::{
     PredicateGroup,
 };
 use crate::metrics::{
-    MEMTABLE_ACTIVE_SERIES_COUNT, MEMTABLE_ACTIVE_VALUES_COUNT, READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
+    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT,
+     READ_ROWS_TOTAL, READ_STAGE_ELAPSED,
 };
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
@@ -376,13 +377,13 @@ struct SeriesMap(BTreeMap<Vec<u8>, Arc<RwLock<Series>>>);
 impl Drop for SeriesMap {
     fn drop(&mut self) {
         let num_series = self.0.len();
-        let num_values = self
+        let num_field_builders = self
             .0
             .values()
-            .map(|v| v.read().unwrap().num_values())
+            .map(|v| v.read().unwrap().active.num_field_builders())
             .sum::<usize>();
         MEMTABLE_ACTIVE_SERIES_COUNT.sub(num_series as i64);
-        MEMTABLE_ACTIVE_VALUES_COUNT.sub(num_values as i64);
+        MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.sub(num_field_builders as i64);
     }
 }
 
@@ -810,7 +811,6 @@ impl ValueBuilder {
             .map(|c| c.column_schema.data_type.clone())
             .collect::<Vec<_>>();
         let fields = (0..field_types.len()).map(|_| None).collect();
-        MEMTABLE_ACTIVE_VALUES_COUNT.inc();
         Self {
             timestamp: Vec::with_capacity(capacity),
             timestamp_type,
@@ -819,6 +819,11 @@ impl ValueBuilder {
             fields,
             field_types,
         }
+    }
+
+    /// Returns number of field builders.
+    pub fn num_field_builders(&self) -> usize {
+        self.fields.iter().flatten().count()
     }
 
     /// Pushes a new row to `ValueBuilder`.
@@ -864,6 +869,7 @@ impl ValueBuilder {
                     mutable_vector.push_nulls(num_rows - 1);
                     let _ = mutable_vector.push(field_value);
                     self.fields[idx] = Some(mutable_vector);
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
             }
         }
@@ -1050,6 +1056,7 @@ impl From<ValueBuilder> for Values {
             .enumerate()
             .map(|(i, v)| {
                 if let Some(v) = v {
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
                     v.finish()
                 } else {
                     let mut single_null = value.field_types[i].create_mutable_vector(num_rows);

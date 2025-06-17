@@ -421,10 +421,10 @@ lazy_static! {
         "active time series count in TimeSeriesMemtable",
         ).unwrap();
 
-    /// Active values(or value builder) count in TimeSeriesMemtable
-    pub static ref MEMTABLE_ACTIVE_VALUES_COUNT: IntGauge = register_int_gauge!(
-        "greptime_mito_memtable_active_values_count",
-        "active value(or value builder) count in TimeSeriesMemtable",
+    /// Active field builder count in TimeSeriesMemtable
+    pub static ref MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT: IntGauge = register_int_gauge!(
+        "greptime_mito_memtable_field_builder_count",
+        "active field builder count in TimeSeriesMemtable",
         ).unwrap();
 }
 

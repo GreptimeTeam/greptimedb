@@ -612,6 +612,21 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG'
+        - title: Active Series and Field Builders Count
+          type: timeseries
+          description: Compaction oinput output bytes
+          unit: none
+          queries:
+            - expr: sum by(instance, pod) (greptime_mito_memtable_active_series_count)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-series'
+            - expr: sum by(instance, pod) (greptime_mito_memtable_field_builder_count)
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-field_builders'
         - title: Region Worker Convert Requests
           type: timeseries
           description: Per-stage elapsed time for region worker to decode requests.
