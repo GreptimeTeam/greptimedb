@@ -21,6 +21,7 @@ use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
 use crate::aggrs::approximate::ApproximateFunction;
+use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{AsyncFunctionRef, Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
@@ -143,6 +144,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // Approximate functions
     ApproximateFunction::register(&function_registry);
+
+    // CountHash function
+    CountHash::register(&function_registry);
 
     Arc::new(function_registry)
 });
