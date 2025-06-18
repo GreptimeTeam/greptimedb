@@ -249,6 +249,13 @@ pub(crate) struct VersionControlData {
     pub(crate) is_dropped: bool,
 }
 
+impl VersionControlData {
+    /// Approximate timeseries count in current version.
+    pub(crate) fn series_count(&self) -> usize {
+        self.version.memtables.mutable.series_count()
+    }
+}
+
 /// Static metadata of a region.
 #[derive(Clone, Debug)]
 pub(crate) struct Version {

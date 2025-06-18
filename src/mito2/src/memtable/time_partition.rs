@@ -656,6 +656,11 @@ impl TimePartitions {
 
         Ok(())
     }
+
+    /// Timeseries count in all time partitions.
+    pub(crate) fn series_count(&self) -> usize {
+        self.inner.lock().unwrap().series_count()
+    }
 }
 
 /// Computes the start timestamp of the partition for `ts`.
@@ -696,6 +701,13 @@ impl PartitionsInner {
         let id = self.next_memtable_id;
         self.next_memtable_id += 1;
         id
+    }
+
+    pub(crate) fn series_count(&self) -> usize {
+        self.parts
+            .iter()
+            .map(|p| p.memtable.stats().series_count)
+            .sum()
     }
 }
 

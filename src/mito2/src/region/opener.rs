@@ -665,9 +665,10 @@ where
     // to avoid reading potentially incomplete entries in the future.
     (on_region_opened)(region_id, flushed_entry_id, provider).await?;
 
+    let series_count = version_control.current().series_count();
     info!(
-        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",
-        region_id, rows_replayed, last_entry_id
+        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}",
+        region_id, rows_replayed, last_entry_id, series_count
     );
     Ok(last_entry_id)
 }
