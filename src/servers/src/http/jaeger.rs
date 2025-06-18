@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -26,7 +28,7 @@ use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
 use common_telemetry::{debug, error, tracing, warn};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
 use session::context::{Channel, QueryContext};
 use snafu::{OptionExt, ResultExt};
@@ -215,6 +217,7 @@ pub struct JaegerQueryParams {
     pub operation_name: Option<String>,
 
     /// Limit the return data.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub limit: Option<usize>,
 
     /// Start time of the trace in microseconds since unix epoch.
@@ -224,9 +227,11 @@ pub struct JaegerQueryParams {
     pub end: Option<i64>,
 
     /// Max duration string value of the trace. Units can be `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub max_duration: Option<String>,
 
     /// Min duration string value of the trace. Units can be `ns`, `us` (or `µs`), `ms`, `s`, `m`, `h`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub min_duration: Option<String>,
 
     /// Tags of the trace in JSON format. It will be URL encoded in the raw query.
@@ -236,6 +241,20 @@ pub struct JaegerQueryParams {
 
     /// The span kind of the trace.
     pub span_kind: Option<String>,
+}
+
+/// Serde deserialization decorator to map empty Strings to None.
+fn empty_string_as_none<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let opt = Option::<String>::deserialize(de)?;
+    match opt.as_deref() {
+        None | Some("") => Ok(None),
+        Some(s) => FromStr::from_str(s).map_err(de::Error::custom).map(Some),
+    }
 }
 
 fn update_query_context(query_ctx: &mut QueryContext, table_name: Option<String>) {
@@ -403,8 +422,12 @@ pub async fn handle_get_trace(
         .with_label_values(&[&db, "/api/traces"])
         .start_timer();
 
+    // Convert start time and end time from microseconds to nanoseconds.
+    let start_time_ns = query_params.start.map(|start_us| start_us * 1000);
+    let end_time_ns = query_params.end.map(|end_us| end_us * 1000);
+
     let output = match handler
-        .get_trace(query_ctx, &trace_id, query_params.start, query_params.end)
+        .get_trace(query_ctx, &trace_id, start_time_ns, end_time_ns)
         .await
     {
         Ok(output) => output,
