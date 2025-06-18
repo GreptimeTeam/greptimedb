@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{region_request, RegionResponse as RegionResponseV1, SyncRequest};
+use api::v1::region::{
+    region_request, ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest,
+};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
@@ -47,6 +49,7 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::QueryEngineRef;
+use serde_json;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
@@ -71,10 +74,10 @@ use tonic::{Request, Response, Result as TonicResult};
 use crate::error::{
     self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
-    ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleBatchDdlRequestSnafu,
-    HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
-    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu, Result,
-    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
+    HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
+    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
+    Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -412,6 +415,7 @@ impl RegionServer {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 
@@ -441,6 +445,7 @@ impl RegionServer {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 
@@ -471,6 +476,39 @@ impl RegionServer {
             .trace(span)
             .await
             .map(|_| RegionResponse::new(AffectedRows::default()))
+    }
+
+    /// Handles the ListMetadata request and retrieves metadata for specified regions
+    #[tracing::instrument(skip_all)]
+    async fn handle_list_metadata_request(
+        &self,
+        request: &ListMetadataRequest,
+    ) -> Result<RegionResponse> {
+        let mut region_metadatas = Vec::new();
+        // Collect metadata for each region
+        for region_id in &request.region_ids {
+            let region_id = RegionId::from_u64(*region_id);
+            // Get the engine.
+            let engine = self
+                .find_engine(region_id)?
+                .context(RegionNotFoundSnafu { region_id })?;
+            let metadata =
+                engine
+                    .get_metadata(region_id)
+                    .await
+                    .with_context(|_| GetRegionMetadataSnafu {
+                        engine: engine.name(),
+                        region_id,
+                    })?;
+            region_metadatas.push(metadata);
+        }
+
+        // Serialize metadata to JSON
+        let json_result = serde_json::to_vec(&region_metadatas).context(SerializeJsonSnafu)?;
+
+        let response = RegionResponse::from_metadata(json_result);
+
+        Ok(response)
     }
 
     /// Sync region manifest and registers new opened logical regions.
@@ -504,6 +542,10 @@ impl RegionServerHandler for RegionServer {
             region_request::Body::Sync(sync_request) => {
                 self.handle_sync_region_request(sync_request).await
             }
+            region_request::Body::ListMetadata(list_metadata_request) => {
+                self.handle_list_metadata_request(list_metadata_request)
+                    .await
+            }
             _ => self.handle_requests_in_serial(request).await,
         }
         .map_err(BoxedError::new)
@@ -518,6 +560,7 @@ impl RegionServerHandler for RegionServer {
             }),
             affected_rows: response.affected_rows as _,
             extensions: response.extensions,
+            metadata: response.metadata,
         })
     }
 }
@@ -897,6 +940,7 @@ impl RegionServerInner {
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
+                    metadata: Vec::new(),
                 })
             }
             Err(err) => {
@@ -967,6 +1011,7 @@ impl RegionServerInner {
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
+                    metadata: Vec::new(),
                 })
             }
             Err(err) => {
