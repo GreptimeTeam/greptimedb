@@ -905,15 +905,22 @@ mod tests {
             .write(&key_values(&metadata, ('a'..'h').map(|c| c.to_string())))
             .unwrap();
         memtable.freeze().unwrap();
+        assert_eq!(
+            collect_kvs(memtable.iter(None, None, None).unwrap(), &metadata),
+            ('a'..'h').map(|c| (c.to_string(), c.to_string())).collect()
+        );
         let forked = memtable.fork(2, &metadata);
 
-        forked
-            .write(&key_values(
-                &metadata,
-                ["c", "f", "i", "h", "b", "e", "g"].iter(),
-            ))
-            .unwrap();
+        let keys = ["c", "f", "i", "h", "b", "e", "g"];
+        forked.write(&key_values(&metadata, keys.iter())).unwrap();
         forked.freeze().unwrap();
+        assert_eq!(
+            collect_kvs(forked.iter(None, None, None).unwrap(), &metadata),
+            keys.iter()
+                .map(|c| (c.to_string(), c.to_string()))
+                .collect()
+        );
+
         let forked2 = forked.fork(3, &metadata);
 
         let keys = ["g", "e", "a", "f", "b", "c", "h"];
