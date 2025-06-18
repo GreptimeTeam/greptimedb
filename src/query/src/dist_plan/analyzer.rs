@@ -196,20 +196,21 @@ impl PlanRewriter {
                     self.stage.push(plan)
                 }
             }
-            Commutativity::TransformedCommutative {
-                transformer,
-                expand_on_parent,
-            } => {
+            Commutativity::TransformedCommutative { transformer } => {
                 if let Some(transformer) = transformer
-                    && let Some(changed_plans) = transformer(plan)
+                    && let Some(transformer_actions) = transformer(plan)
                 {
-                    debug!("PlanRewriter: transformed plan: {changed_plans:#?} from {plan}");
-                    if let Some(last_stage) = changed_plans.last() {
+                    debug!(
+                        "PlanRewriter: transformed plan: {:#?}\n from {plan}",
+                        transformer_actions.extra_parent_plans
+                    );
+                    if let Some(last_stage) = transformer_actions.extra_parent_plans.last() {
                         // update the column requirements from the last stage
                         self.update_column_requirements(last_stage);
                     }
-                    self.stage.extend(changed_plans.into_iter().rev());
-                    self.expand_on_next_call = expand_on_parent;
+                    self.stage
+                        .extend(transformer_actions.extra_parent_plans.into_iter().rev());
+                    self.expand_on_next_call = true;
                 }
             }
             Commutativity::NonCommutative

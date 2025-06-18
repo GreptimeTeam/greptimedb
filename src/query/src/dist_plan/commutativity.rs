@@ -212,8 +212,6 @@ pub enum Commutativity {
     TransformedCommutative {
         /// Return plans from parent to child order
         transformer: Option<StageTransformer>,
-        /// whether the transformer changes the child to parent
-        expand_on_parent: bool,
     },
     NonCommutative,
     Unimplemented,
@@ -250,9 +248,10 @@ impl Categorizer {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
                             debug!("After Step Optimize: {ret:?}");
-                            ret.ok().map(|s| s.to_vec())
+                            ret.ok().map(|s| TransformerAction {
+                                extra_parent_plans: s.to_vec(),
+                            })
                         })),
-                        expand_on_parent: true,
                     };
                 }
                 if !matches_partition {
@@ -417,15 +416,21 @@ impl Categorizer {
 
 pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
 
-/// Returns a list of plans that need to be applied to parent plans, in the order of parent to child.
-/// i.e. if this returns `[Projection, Aggregate]`, then the parent plan should be transformed to
-/// ```
-/// Original Parent Plan:
-///     Projection:
-///         Aggregate:
-///             MergeScan: ...
-/// ```
-pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<Vec<LogicalPlan>>>;
+/// Returns transformer action that need to be applied
+pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<TransformerAction>>;
+
+/// The Action that a transformer should take on the plan.
+pub struct TransformerAction {
+    /// list of plans that need to be applied to parent plans, in the order of parent to child.
+    /// i.e. if this returns `[Projection, Aggregate]`, then the parent plan should be transformed to
+    /// ```
+    /// Original Parent Plan:
+    ///     Projection:
+    ///         Aggregate:
+    ///             MergeScan: ...
+    /// ```
+    pub extra_parent_plans: Vec<LogicalPlan>,
+}
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
     Some(plan.clone())
