@@ -439,6 +439,16 @@ impl PartitionTree {
         metrics.partitions_after_pruning = pruned.len();
         pruned
     }
+
+    /// Returns all series count in all partitions.
+    pub(crate) fn series_count(&self) -> usize {
+        self.partitions
+            .read()
+            .unwrap()
+            .values()
+            .map(|p| p.series_count())
+            .sum()
+    }
 }
 
 #[derive(Default)]

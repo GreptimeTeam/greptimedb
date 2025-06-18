@@ -227,6 +227,7 @@ impl Memtable for PartitionTreeMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                series_count: 0,
             };
         }
 
@@ -241,12 +242,14 @@ impl Memtable for PartitionTreeMemtable {
             .expect("Timestamp column must have timestamp type");
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
+        let series_count = self.tree.series_count();
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            series_count,
         }
     }
 

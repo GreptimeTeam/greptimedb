@@ -86,6 +86,8 @@ pub struct MemtableStats {
     num_ranges: usize,
     /// The maximum sequence number in the memtable.
     max_sequence: SequenceNumber,
+    /// Number of estimated timeseries in memtable.
+    series_count: usize,
 }
 
 impl MemtableStats {
@@ -119,6 +121,11 @@ impl MemtableStats {
     /// Returns the maximum sequence number in the memtable.
     pub fn max_sequence(&self) -> SequenceNumber {
         self.max_sequence
+    }
+
+    /// Series count in memtable.
+    pub fn series_count(&self) -> usize {
+        self.series_count
     }
 }
 

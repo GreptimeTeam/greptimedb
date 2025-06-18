@@ -340,13 +340,16 @@ impl RegionFlushTask {
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
+        let mut series_count = 0;
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
                 continue;
             }
 
-            let max_sequence = mem.stats().max_sequence();
+            let stats = mem.stats();
+            let max_sequence = stats.max_sequence();
+            series_count += stats.series_count();
             let iter = mem.iter(None, None, None)?;
             let source = Source::Iter(iter);
 
@@ -396,10 +399,11 @@ impl RegionFlushTask {
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}s",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}s",
             self.region_id,
             self.reason.as_str(),
             file_ids,
+            series_count,
             timer.stop_and_record(),
         );
 

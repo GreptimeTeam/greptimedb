@@ -414,6 +414,18 @@ lazy_static! {
         "greptime_mito_compaction_output_bytes",
         "mito compaction output file size",
         ).unwrap();
+
+    /// Active series count in TimeSeriesMemtable
+    pub static ref MEMTABLE_ACTIVE_SERIES_COUNT: IntGauge = register_int_gauge!(
+        "greptime_mito_memtable_active_series_count",
+        "active time series count in TimeSeriesMemtable",
+        ).unwrap();
+
+    /// Active field builder count in TimeSeriesMemtable
+    pub static ref MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT: IntGauge = register_int_gauge!(
+        "greptime_mito_memtable_field_builder_count",
+        "active field builder count in TimeSeriesMemtable",
+        ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

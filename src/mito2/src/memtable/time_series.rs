@@ -55,7 +55,10 @@ use crate::memtable::{
     MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
     PredicateGroup,
 };
-use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::metrics::{
+    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
+    READ_STAGE_ELAPSED,
+};
 use crate::read::dedup::LastNonNullIter;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::region::options::MergeMode;
@@ -316,7 +319,7 @@ impl Memtable for TimeSeriesMemtable {
     }
 
     fn is_empty(&self) -> bool {
-        self.series_set.series.read().unwrap().is_empty()
+        self.series_set.series.read().unwrap().0.is_empty()
     }
 
     fn freeze(&self) -> Result<()> {
@@ -336,6 +339,7 @@ impl Memtable for TimeSeriesMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                series_count: 0,
             };
         }
         let ts_type = self
@@ -348,12 +352,14 @@ impl Memtable for TimeSeriesMemtable {
             .expect("Timestamp column must have timestamp type");
         let max_timestamp = ts_type.create_timestamp(self.max_timestamp.load(Ordering::Relaxed));
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
+        let series_count = self.series_set.series.read().unwrap().0.len();
         MemtableStats {
             estimated_bytes,
             time_range: Some((min_timestamp, max_timestamp)),
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges: 1,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            series_count,
         }
     }
 
@@ -368,13 +374,27 @@ impl Memtable for TimeSeriesMemtable {
     }
 }
 
-type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
+#[derive(Default)]
+struct SeriesMap(BTreeMap<Vec<u8>, Arc<RwLock<Series>>>);
+
+impl Drop for SeriesMap {
+    fn drop(&mut self) {
+        let num_series = self.0.len();
+        let num_field_builders = self
+            .0
+            .values()
+            .map(|v| v.read().unwrap().active.num_field_builders())
+            .sum::<usize>();
+        MEMTABLE_ACTIVE_SERIES_COUNT.sub(num_series as i64);
+        MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.sub(num_field_builders as i64);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct SeriesSet {
-    pub(crate) region_metadata: RegionMetadataRef,
-    pub(crate) series: Arc<SeriesRwLockMap>,
-    pub(crate) codec: Arc<DensePrimaryKeyCodec>,
+    region_metadata: RegionMetadataRef,
+    series: Arc<RwLock<SeriesMap>>,
+    codec: Arc<DensePrimaryKeyCodec>,
 }
 
 impl SeriesSet {
@@ -390,7 +410,7 @@ impl SeriesSet {
 impl SeriesSet {
     /// Push [KeyValue] to SeriesSet with given primary key and return key/value allocated memory size.
     fn push_to_series(&self, primary_key: Vec<u8>, kv: &KeyValue) -> (usize, usize) {
-        if let Some(series) = self.series.read().unwrap().get(&primary_key) {
+        if let Some(series) = self.series.read().unwrap().0.get(&primary_key) {
             let value_allocated = series.write().unwrap().push(
                 kv.timestamp(),
                 kv.sequence(),
@@ -401,7 +421,7 @@ impl SeriesSet {
         };
 
         let mut indices = self.series.write().unwrap();
-        match indices.entry(primary_key) {
+        match indices.0.entry(primary_key) {
             Entry::Vacant(v) => {
                 let key_len = v.key().len();
                 let mut series = Series::new(&self.region_metadata);
@@ -425,7 +445,7 @@ impl SeriesSet {
 
     #[cfg(test)]
     fn get_series(&self, primary_key: &[u8]) -> Option<Arc<RwLock<Series>>> {
-        self.series.read().unwrap().get(primary_key).cloned()
+        self.series.read().unwrap().0.get(primary_key).cloned()
     }
 
     /// Iterates all series in [SeriesSet].
@@ -492,7 +512,7 @@ struct Metrics {
 
 struct Iter {
     metadata: RegionMetadataRef,
-    series: Arc<SeriesRwLockMap>,
+    series: Arc<RwLock<SeriesMap>>,
     projection: HashSet<ColumnId>,
     last_key: Option<Vec<u8>>,
     predicate: Vec<SimpleFilterEvaluator>,
@@ -508,7 +528,7 @@ impl Iter {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new(
         metadata: RegionMetadataRef,
-        series: Arc<SeriesRwLockMap>,
+        series: Arc<RwLock<SeriesMap>>,
         projection: HashSet<ColumnId>,
         predicate: Option<Predicate>,
         pk_schema: arrow::datatypes::SchemaRef,
@@ -565,10 +585,10 @@ impl Iterator for Iter {
         let start = Instant::now();
         let map = self.series.read().unwrap();
         let range = match &self.last_key {
-            None => map.range::<Vec<u8>, _>(..),
-            Some(last_key) => {
-                map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
-            }
+            None => map.0.range::<Vec<u8>, _>(..),
+            Some(last_key) => map
+                .0
+                .range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded)),
         };
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
@@ -668,6 +688,7 @@ pub(crate) struct Series {
 
 impl Series {
     pub(crate) fn with_capacity(region_metadata: &RegionMetadataRef, builder_cap: usize) -> Self {
+        MEMTABLE_ACTIVE_SERIES_COUNT.inc();
         Self {
             pk_cache: None,
             active: ValueBuilder::new(region_metadata, builder_cap),
@@ -788,7 +809,6 @@ impl ValueBuilder {
             .map(|c| c.column_schema.data_type.clone())
             .collect::<Vec<_>>();
         let fields = (0..field_types.len()).map(|_| None).collect();
-
         Self {
             timestamp: Vec::with_capacity(capacity),
             timestamp_type,
@@ -797,6 +817,11 @@ impl ValueBuilder {
             fields,
             field_types,
         }
+    }
+
+    /// Returns number of field builders.
+    pub fn num_field_builders(&self) -> usize {
+        self.fields.iter().flatten().count()
     }
 
     /// Pushes a new row to `ValueBuilder`.
@@ -842,6 +867,7 @@ impl ValueBuilder {
                     mutable_vector.push_nulls(num_rows - 1);
                     let _ = mutable_vector.push(field_value);
                     self.fields[idx] = Some(mutable_vector);
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();
                 }
             }
         }
@@ -1028,6 +1054,7 @@ impl From<ValueBuilder> for Values {
             .enumerate()
             .map(|(i, v)| {
                 if let Some(v) = v {
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
                     v.finish()
                 } else {
                     let mut single_null = value.field_types[i].create_mutable_vector(num_rows);
