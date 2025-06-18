@@ -27,7 +27,7 @@ use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::request::QueryRequest;
 use common_query::OutputData;
@@ -141,12 +141,12 @@ impl RegionServer {
 
     /// Finds the region's engine by its id. If the region is not ready, returns `None`.
     pub fn find_engine(&self, region_id: RegionId) -> Result<Option<RegionEngineRef>> {
-        self.inner
-            .get_engine(region_id, &RegionChange::None)
-            .map(|x| match x {
-                CurrentEngine::Engine(engine) => Some(engine),
-                CurrentEngine::EarlyReturn(_) => None,
-            })
+        match self.inner.get_engine(region_id, &RegionChange::None) {
+            Ok(CurrentEngine::Engine(engine)) => Ok(Some(engine)),
+            Ok(CurrentEngine::EarlyReturn(_)) => Ok(None),
+            Err(error::Error::RegionNotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -478,7 +478,10 @@ impl RegionServer {
             .map(|_| RegionResponse::new(AffectedRows::default()))
     }
 
-    /// Handles the ListMetadata request and retrieves metadata for specified regions
+    /// Handles the ListMetadata request and retrieves metadata for specified regions.
+    ///
+    /// Returns the results as a JSON-serialized list in the [RegionResponse]. It serializes
+    /// non-existing regions as `null`.
     #[tracing::instrument(skip_all)]
     async fn handle_list_metadata_request(
         &self,
@@ -489,18 +492,24 @@ impl RegionServer {
         for region_id in &request.region_ids {
             let region_id = RegionId::from_u64(*region_id);
             // Get the engine.
-            let engine = self
-                .find_engine(region_id)?
-                .context(RegionNotFoundSnafu { region_id })?;
-            let metadata =
-                engine
-                    .get_metadata(region_id)
-                    .await
-                    .with_context(|_| GetRegionMetadataSnafu {
-                        engine: engine.name(),
-                        region_id,
-                    })?;
-            region_metadatas.push(metadata);
+            let Some(engine) = self.find_engine(region_id)? else {
+                region_metadatas.push(None);
+                continue;
+            };
+
+            match engine.get_metadata(region_id).await {
+                Ok(metadata) => region_metadatas.push(Some(metadata)),
+                Err(err) => {
+                    if err.status_code() == StatusCode::RegionNotFound {
+                        region_metadatas.push(None);
+                    } else {
+                        Err(err).with_context(|_| GetRegionMetadataSnafu {
+                            engine: engine.name(),
+                            region_id,
+                        })?;
+                    }
+                }
+            }
         }
 
         // Serialize metadata to JSON
@@ -1291,9 +1300,7 @@ mod tests {
     use common_error::ext::ErrorExt;
     use datatypes::prelude::ConcreteDataType;
     use mito2::test_util::CreateRequestBuilder;
-    use store_api::metadata::{
-        ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
-    };
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionDropRequest, RegionOpenRequest, RegionTruncateRequest};
     use store_api::storage::RegionId;
@@ -1656,7 +1663,7 @@ mod tests {
         assert!(forth_query.is_ok());
     }
 
-    fn mock_region_metadata(region_id: RegionId) -> RegionMetadataRef {
+    fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
         let mut metadata_builder = RegionMetadataBuilder::new(region_id);
         metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: datatypes::schema::ColumnSchema::new(
@@ -1686,7 +1693,7 @@ mod tests {
             column_id: 2,
         });
         metadata_builder.primary_key(vec![1]);
-        Arc::new(metadata_builder.build().unwrap())
+        metadata_builder.build().unwrap()
     }
 
     #[tokio::test]
@@ -1699,8 +1706,10 @@ mod tests {
 
         let metadata_1 = mock_region_metadata(region_id_1);
         let metadata_2 = mock_region_metadata(region_id_2);
-        let metadatas = vec![metadata_1.clone(), metadata_2.clone()];
+        let metadatas = vec![Some(metadata_1.clone()), Some(metadata_2.clone())];
 
+        let metadata_1 = Arc::new(metadata_1);
+        let metadata_2 = Arc::new(metadata_2);
         let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
             MITO_ENGINE_NAME,
             Box::new(move |region_id| {
@@ -1709,10 +1718,7 @@ mod tests {
                 } else if region_id == region_id_2 {
                     Ok(metadata_2.clone())
                 } else {
-                    error::UnexpectedSnafu {
-                        violated: "Region not found".to_string(),
-                    }
-                    .fail()
+                    error::RegionNotFoundSnafu { region_id }.fail()
                 }
             }),
         );
@@ -1735,14 +1741,92 @@ mod tests {
             .handle_list_metadata_request(&list_metadata_request)
             .await
             .unwrap();
-        let decoded_metadata: Vec<RegionMetadata> =
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
             serde_json::from_slice(&response.metadata).unwrap();
-        let decoded_metadata: Vec<_> = decoded_metadata.into_iter().map(Arc::new).collect();
+        assert_eq!(metadatas, decoded_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_not_found() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+        let region_id_2 = RegionId::new(2, 0);
+
+        let metadata_1 = mock_region_metadata(region_id_1);
+        let metadatas = vec![Some(metadata_1.clone()), None];
+
+        let metadata_1 = Arc::new(metadata_1);
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                if region_id == region_id_1 {
+                    Ok(metadata_1.clone())
+                } else {
+                    error::RegionNotFoundSnafu { region_id }.fail()
+                }
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // Not in region map.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64(), region_id_2.as_u64()],
+        };
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
         assert_eq!(metadatas, decoded_metadata);
 
-        // List non existing regions.
+        // Not in region engine.
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_2, RegionEngineWithStatus::Ready(engine.clone()));
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        assert_eq!(metadatas, decoded_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_failed() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                error::UnexpectedSnafu {
+                    violated: format!("Failed to get region {region_id}"),
+                }
+                .fail()
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // Failed to get.
         let list_metadata_request = ListMetadataRequest {
-            region_ids: vec![region_id_1.as_u64(), RegionId::new(5, 0).as_u64()],
+            region_ids: vec![region_id_1.as_u64()],
         };
         mock_region_server
             .handle_list_metadata_request(&list_metadata_request)
