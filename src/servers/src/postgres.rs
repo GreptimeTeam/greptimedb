@@ -30,9 +30,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ::auth::UserProviderRef;
+use catalog::process_manager::ProcessManagerRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
 use pgwire::api::auth::StartupHandler;
+use pgwire::api::cancel::CancelHandler;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::ErrorHandler;
 use pgwire::api::{ClientInfo, PgWireServerHandlers};
@@ -73,6 +75,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
+    process_manager: ProcessManagerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -84,6 +87,7 @@ pub struct PostgresServerHandlerInner {
 #[derive(Builder)]
 pub(crate) struct MakePostgresServerHandler {
     query_handler: ServerSqlQueryHandlerRef,
+    process_manager: ProcessManagerRef,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -108,10 +112,15 @@ impl PgWireServerHandlers for PostgresServerHandler {
     fn error_handler(&self) -> Arc<impl ErrorHandler> {
         self.0.clone()
     }
+
+    fn cancel_handler(&self) -> Arc<impl CancelHandler> {
+        self.0.clone()
+    }
 }
 
 impl MakePostgresServerHandler {
-    fn make(&self, addr: Option<SocketAddr>, process_id: u32) -> PostgresServerHandler {
+    fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
+        let process_id = self.process_manager.next_id();
         let session = Arc::new(Session::new(
             addr,
             Channel::Postgres,
@@ -120,6 +129,7 @@ impl MakePostgresServerHandler {
         ));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
+            process_manager: self.process_manager.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),
