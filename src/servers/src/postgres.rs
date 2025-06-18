@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ::auth::UserProviderRef;
+use auth::UserProviderRef;
 use catalog::process_manager::ProcessManagerRef;
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
