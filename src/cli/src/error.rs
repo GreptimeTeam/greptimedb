@@ -20,6 +20,7 @@ use common_macro::stack_trace_debug;
 use common_meta::peer::Peer;
 use object_store::Error as ObjectStoreError;
 use snafu::{Location, Snafu};
+use store_api::storage::TableId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -237,6 +238,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table not found: {table_id}"))]
+    TableNotFound {
+        table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         #[snafu(implicit)]
@@ -356,6 +364,7 @@ impl ErrorExt for Error {
 
             Error::CacheRequired { .. } | Error::BuildCacheRegistry { .. } => StatusCode::Internal,
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SchemaNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }

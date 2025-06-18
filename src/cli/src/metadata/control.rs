@@ -14,6 +14,8 @@
 
 mod del;
 mod get;
+#[cfg(test)]
+mod test_utils;
 mod utils;
 
 pub(crate) use del::DelCommand;

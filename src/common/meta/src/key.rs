@@ -109,7 +109,7 @@ pub mod table_name;
 pub mod table_route;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
-mod tombstone;
+pub mod tombstone;
 pub mod topic_name;
 pub mod topic_region;
 pub mod txn_helper;
@@ -535,6 +535,29 @@ impl TableMetadataManager {
         }
     }
 
+    /// Creates a new `TableMetadataManager` with a custom tombstone prefix.
+    pub fn new_with_custom_tombstone_prefix(
+        kv_backend: KvBackendRef,
+        tombstone_prefix: &str,
+    ) -> Self {
+        Self {
+            table_name_manager: TableNameManager::new(kv_backend.clone()),
+            table_info_manager: TableInfoManager::new(kv_backend.clone()),
+            view_info_manager: ViewInfoManager::new(kv_backend.clone()),
+            datanode_table_manager: DatanodeTableManager::new(kv_backend.clone()),
+            catalog_manager: CatalogManager::new(kv_backend.clone()),
+            schema_manager: SchemaManager::new(kv_backend.clone()),
+            table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            tombstone_manager: TombstoneManager::new_with_prefix(
+                kv_backend.clone(),
+                tombstone_prefix,
+            ),
+            topic_name_manager: TopicNameManager::new(kv_backend.clone()),
+            topic_region_manager: TopicRegionManager::new(kv_backend.clone()),
+            kv_backend,
+        }
+    }
+
     pub async fn init(&self) -> Result<()> {
         let catalog_name = CatalogNameKey::new(DEFAULT_CATALOG_NAME);
 
@@ -925,7 +948,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.create(keys).await
+        self.tombstone_manager.create(keys).await.map(|_| ())
     }
 
     /// Deletes metadata tombstone for table **permanently**.
@@ -939,7 +962,10 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.delete(table_metadata_keys).await
+        self.tombstone_manager
+            .delete(table_metadata_keys)
+            .await
+            .map(|_| ())
     }
 
     /// Restores metadata for table.
@@ -953,7 +979,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.restore(keys).await
+        self.tombstone_manager.restore(keys).await.map(|_| ())
     }
 
     /// Deletes metadata for table **permanently**.
