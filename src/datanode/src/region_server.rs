@@ -1287,8 +1287,13 @@ mod tests {
 
     use std::assert_matches::assert_matches;
 
+    use api::v1::SemanticType;
     use common_error::ext::ErrorExt;
+    use datatypes::prelude::ConcreteDataType;
     use mito2::test_util::CreateRequestBuilder;
+    use store_api::metadata::{
+        ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
+    };
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionDropRequest, RegionOpenRequest, RegionTruncateRequest};
     use store_api::storage::RegionId;
@@ -1649,5 +1654,99 @@ mod tests {
         drop(first_query);
         let forth_query = p.acquire().await;
         assert!(forth_query.is_ok());
+    }
+
+    fn mock_region_metadata(region_id: RegionId) -> RegionMetadataRef {
+        let mut metadata_builder = RegionMetadataBuilder::new(region_id);
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        });
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "file",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        });
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "message",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Field,
+            column_id: 2,
+        });
+        metadata_builder.primary_key(vec![1]);
+        Arc::new(metadata_builder.build().unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_request() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+        let region_id_2 = RegionId::new(2, 0);
+
+        let metadata_1 = mock_region_metadata(region_id_1);
+        let metadata_2 = mock_region_metadata(region_id_2);
+        let metadatas = vec![metadata_1.clone(), metadata_2.clone()];
+
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                if region_id == region_id_1 {
+                    Ok(metadata_1.clone())
+                } else if region_id == region_id_2 {
+                    Ok(metadata_2.clone())
+                } else {
+                    error::UnexpectedSnafu {
+                        violated: "Region not found".to_string(),
+                    }
+                    .fail()
+                }
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_2, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // All regions exist.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64(), region_id_2.as_u64()],
+        };
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<RegionMetadata> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        let decoded_metadata: Vec<_> = decoded_metadata.into_iter().map(Arc::new).collect();
+        assert_eq!(metadatas, decoded_metadata);
+
+        // List non existing regions.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64(), RegionId::new(5, 0).as_u64()],
+        };
+        mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap_err();
     }
 }
