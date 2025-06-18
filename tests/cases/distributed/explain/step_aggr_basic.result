@@ -319,6 +319,125 @@ ORDER BY
 |_|_| Total rows: 4_|
 +-+-+-+
 
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
++------------------------+-----------------------+-------------------+
+| integers.ts + Int64(1) | integers.i / Int64(2) | count(integers.i) |
++------------------------+-----------------------+-------------------+
+| 1672531200001          | 0                     | 1                 |
+| 1672531200001          | 2                     | 1                 |
+| 1672534800001          | 1                     | 1                 |
+| 1672538400001          | 1                     | 1                 |
+| 1672542000001          | 2                     | 1                 |
++------------------------+-----------------------+-------------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: integers.ts + Int64(1) ASC NULLS LAST, integers.i / Int64(2) ASC NULLS LAST_|
+|_|_Projection: integers.ts + Int64(1), integers.i / Int64(2), sum(count(integers.i)) AS count(integers.i)_|
+|_|_Aggregate: groupBy=[[integers.ts + Int64(1), integers.i / Int64(2)]], aggr=[[sum(count(integers.i))]]_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | SortPreservingMergeExec: [integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST]_|
+|_|_SortExec: expr=[integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_ProjectionExec: expr=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2), sum(count(integers.i))@2 as count(integers.i)]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[sum(count(integers.i))] |
+|_|_CoalesceBatchesExec: target_batch_size=8192_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_AggregateExec: mode=Partial, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[sum(count(integers.i))]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN ANALYZE
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_ProjectionExec: expr=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2), sum(count(integers.i))@2 as count(integers.i)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[sum(count(integers.i))] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[sum(count(integers.i))] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+| 1_| 2_|_AggregateExec: mode=FinalPartitioned, gby=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[CAST(ts@1 AS Int64) + 1 as integers.ts + Int64(1), i@0 / 2 as integers.i / Int64(2)], aggr=[count(integers.i)] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
 -- test udd/hll_merege pushdown
 CREATE TABLE sink_table (
     time_window TIMESTAMP TIME INDEX,

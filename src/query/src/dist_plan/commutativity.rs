@@ -41,7 +41,7 @@ use crate::dist_plan::MergeScanLogicalPlan;
 /// of the upper aggregation plan.
 pub fn step_aggr_to_upper_aggr(
     aggr_plan: &LogicalPlan,
-) -> datafusion_common::Result<Vec<LogicalPlan>> {
+) -> datafusion_common::Result<[LogicalPlan; 2]> {
     let LogicalPlan::Aggregate(input_aggr) = aggr_plan else {
         return Err(datafusion_common::DataFusionError::Plan(
             "step_aggr_to_upper_aggr only accepts Aggregate plan".to_string(),
@@ -147,7 +147,7 @@ pub fn step_aggr_to_upper_aggr(
         Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
     let projection = LogicalPlan::Projection(new_projection);
     // return the new logical plan
-    Ok(vec![projection, upper_aggr_plan])
+    Ok([projection, upper_aggr_plan])
 }
 
 /// Check if the given aggregate expression is steppable.
@@ -250,7 +250,7 @@ impl Categorizer {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
                             debug!("After Step Optimize: {ret:?}");
-                            ret.ok()
+                            ret.ok().map(|s| s.to_vec())
                         })),
                         expand_on_parent: true,
                     };
@@ -417,6 +417,14 @@ impl Categorizer {
 
 pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
 
+/// Returns a list of plans that need to be applied to parent plans, in the order of parent to child.
+/// i.e. if this returns `[Projection, Aggregate]`, then the parent plan should be transformed to
+/// ```
+/// Original Parent Plan:
+///     Projection:
+///         Aggregate:
+///             MergeScan: ...
+/// ```
 pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<Vec<LogicalPlan>>>;
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {

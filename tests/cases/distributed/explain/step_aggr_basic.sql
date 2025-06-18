@@ -148,6 +148,65 @@ ORDER BY
     time_window,
     count(i);
 
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN ANALYZE
+SELECT
+    ts::BIGINT + 1,
+    i / 2,
+    count(i)
+FROM
+    integers
+GROUP BY
+    ts::BIGINT + 1,
+    i / 2,
+ORDER BY
+    ts::BIGINT + 1,
+    i / 2,
+;
+
+
 -- test udd/hll_merege pushdown
 CREATE TABLE sink_table (
     time_window TIMESTAMP TIME INDEX,
