@@ -91,11 +91,12 @@ async fn test_scan_without_filtering_deleted() {
     assert_eq!(expected, sort_batches_and_print(&batches, &["tag_0", "ts"]));
 
     // Tries to use seq scan to test it under append mode.
-    let scan = engine
+    let mut scan = engine
         .scan_region(region_id, ScanRequest::default())
         .unwrap();
+    scan.set_filter_deleted(false);
 
-    let seq_scan = scan.scan_without_filter_deleted().unwrap();
+    let seq_scan = scan.seq_scan().await.unwrap();
 
     let stream = seq_scan.build_stream().unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

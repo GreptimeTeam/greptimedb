@@ -1020,6 +1020,13 @@ pub enum Error {
         location: Location,
         source: mito_codec::error::Error,
     },
+
+    #[snafu(display("Unexpected: {reason}"))]
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1063,7 +1070,9 @@ impl ErrorExt for Error {
             | UnexpectedImpureDefault { .. }
             | NoCheckpoint { .. }
             | NoManifests { .. }
-            | InstallManifestTo { .. } => StatusCode::Unexpected,
+            | InstallManifestTo { .. }
+            | Unexpected { .. } => StatusCode::Unexpected,
+
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }

@@ -57,7 +57,7 @@ async fn test_scan_with_min_sst_sequence() {
             sst_min_sequence: file_min_sequence,
             ..Default::default()
         };
-        let scanner = engine.scanner(region_id, request).unwrap();
+        let scanner = engine.scanner(region_id, request).await.unwrap();
         assert_eq!(scanner.num_files(), expected_files);
 
         let stream = scanner.scan().await.unwrap();
@@ -191,7 +191,7 @@ async fn test_series_scan() {
         distribution: Some(TimeSeriesDistribution::PerSeries),
         ..Default::default()
     };
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     let Scanner::Series(mut scanner) = scanner else {
         panic!("Scanner should be series scan");
     };

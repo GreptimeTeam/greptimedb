@@ -98,9 +98,12 @@ use crate::error::{
     SerdeJsonSnafu,
 };
 use crate::manifest::action::RegionEdit;
+use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::region::MitoRegionRef;
 use crate::request::{RegionEditRequest, WorkerRequest};
+use crate::sst::file::FileMeta;
 use crate::wal::entry_distributor::{
     build_wal_entry_distributor_and_receivers, DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
 };
@@ -153,17 +156,13 @@ impl MitoEngine {
 
     /// Returns the region disk/memory statistic.
     pub fn get_region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
-        self.inner
-            .workers
-            .get_region(region_id)
+        self.find_region(region_id)
             .map(|region| region.region_statistic())
     }
 
     /// Returns primary key encoding of the region.
     pub fn get_primary_key_encoding(&self, region_id: RegionId) -> Option<PrimaryKeyEncoding> {
-        self.inner
-            .workers
-            .get_region(region_id)
+        self.find_region(region_id)
             .map(|r| r.primary_key_encoding())
     }
 
@@ -178,14 +177,15 @@ impl MitoEngine {
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scanner(region_id, request)
+            .await
             .map_err(BoxedError::new)?
             .scan()
             .await
     }
 
     /// Returns a scanner to scan for `request`.
-    fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
-        self.scan_region(region_id, request)?.scanner()
+    async fn scanner(&self, region_id: RegionId, request: ScanRequest) -> Result<Scanner> {
+        self.scan_region(region_id, request)?.scanner().await
     }
 
     /// Scans a region.
@@ -225,7 +225,11 @@ impl MitoEngine {
 
     #[cfg(test)]
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
-        self.inner.workers.get_region(id)
+        self.find_region(id)
+    }
+
+    fn find_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
+        self.inner.workers.get_region(region_id)
     }
 
     fn encode_manifest_info_to_extensions(
@@ -244,6 +248,37 @@ impl MitoEngine {
             region_manifest_info, region_id
         );
         Ok(())
+    }
+
+    /// Find the stats of memtables by region_id.
+    pub fn find_memtables_stats(&self, region_id: RegionId) -> Result<Vec<MemtableStats>> {
+        let region = self
+            .find_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        Ok(region
+            .version()
+            .memtables
+            .list_memtables()
+            .iter()
+            .map(|x| x.stats())
+            .collect())
+    }
+
+    /// Find the SST files meta by region_id.
+    pub fn find_files_meta(&self, region_id: RegionId) -> Result<Vec<FileMeta>> {
+        let region = self
+            .find_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        Ok(region
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|x| x.files().map(|f| f.meta_ref()))
+            .cloned()
+            .collect())
     }
 }
 
@@ -336,15 +371,18 @@ impl EngineInner {
         self.workers.stop().await
     }
 
+    fn find_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        self.workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })
+    }
+
     /// Get metadata of a region.
     ///
     /// Returns error if the region doesn't exist.
     fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef> {
         // Reading a region doesn't need to go through the region worker thread.
-        let region = self
-            .workers
-            .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
+        let region = self.find_region(region_id)?;
         Ok(region.metadata())
     }
 
@@ -451,23 +489,15 @@ impl EngineInner {
 
     fn get_last_seq_num(&self, region_id: RegionId) -> Result<Option<SequenceNumber>> {
         // Reading a region doesn't need to go through the region worker thread.
-        let region = self
-            .workers
-            .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-        let version_ctrl = &region.version_control;
-        let seq = Some(version_ctrl.committed_sequence());
-        Ok(seq)
+        let region = self.find_region(region_id)?;
+        Ok(Some(region.find_committed_sequence()))
     }
 
     /// Handles the scan `request` and returns a [ScanRegion].
     fn scan_region(&self, region_id: RegionId, request: ScanRequest) -> Result<ScanRegion> {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
-        let region = self
-            .workers
-            .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
+        let region = self.find_region(region_id)?;
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
@@ -489,11 +519,7 @@ impl EngineInner {
 
     /// Converts the [`RegionRole`].
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<()> {
-        let region = self
-            .workers
-            .get_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-
+        let region = self.find_region(region_id)?;
         region.set_role(role);
         Ok(())
     }
@@ -609,6 +635,7 @@ impl RegionEngine for MitoEngine {
         self.scan_region(region_id, request)
             .map_err(BoxedError::new)?
             .region_scanner()
+            .await
             .map_err(BoxedError::new)
     }
 

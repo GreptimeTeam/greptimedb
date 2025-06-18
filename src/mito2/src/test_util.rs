@@ -55,6 +55,7 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rstest_reuse::template;
+use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
@@ -71,21 +72,14 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
-use crate::sst::file_purger::{FilePurger, FilePurgerRef, PurgeRequest};
+use crate::sst::file_purger::{FilePurger, FilePurgerRef, NoopFilePurger, PurgeRequest};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
 
-#[derive(Debug)]
-pub(crate) struct NoopFilePurger;
-
-impl FilePurger for NoopFilePurger {
-    fn send_request(&self, _request: PurgeRequest) {}
-}
-
 pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
-    Arc::new(NoopFilePurger {})
+    Arc::new(NoopFilePurger)
 }
 
 pub(crate) fn raft_engine_log_store_factory() -> Option<LogStoreFactory> {
@@ -281,6 +275,31 @@ impl TestEnv {
         self.object_store_manager.clone()
     }
 
+    async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+        async fn create<S: LogStore>(
+            zelf: &TestEnv,
+            config: MitoConfig,
+            log_store: Arc<S>,
+        ) -> MitoEngine {
+            let data_home = zelf.data_home().display().to_string();
+            MitoEngine::new(
+                &data_home,
+                config,
+                log_store,
+                zelf.object_store_manager.as_ref().unwrap().clone(),
+                zelf.schema_metadata_manager.clone(),
+                Plugins::new(),
+            )
+            .await
+            .unwrap()
+        }
+
+        match self.log_store.as_ref().unwrap().clone() {
+            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store).await,
+            LogStoreImpl::Kafka(log_store) => create(self, config, log_store).await,
+        }
+    }
+
     /// Creates a new engine with specific config under this env.
     pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
@@ -288,58 +307,13 @@ impl TestEnv {
         let object_store_manager = Arc::new(object_store_manager);
         self.log_store = Some(log_store.clone());
         self.object_store_manager = Some(object_store_manager.clone());
-        let data_home = self.data_home().display().to_string();
 
-        match log_store {
-            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
-                &data_home,
-                config,
-                log_store,
-                object_store_manager,
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
-                &data_home,
-                config,
-                log_store,
-                object_store_manager,
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-        }
+        self.new_mito_engine(config).await
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.
     pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
-        let data_home = self.data_home().display().to_string();
-        match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
-                &data_home,
-                config,
-                log_store,
-                object_store_manager,
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
-                &data_home,
-                config,
-                log_store,
-                object_store_manager,
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-        }
+        self.new_mito_engine(config).await
     }
 
     /// Creates a new engine with specific config and manager/listener/purge_scheduler under this env.
@@ -487,54 +461,12 @@ impl TestEnv {
     /// Reopen the engine.
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
-        match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
-                &self.data_home().display().to_string(),
-                config,
-                log_store,
-                self.object_store_manager.clone().unwrap(),
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
-                &self.data_home().display().to_string(),
-                config,
-                log_store,
-                self.object_store_manager.clone().unwrap(),
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-        }
+        self.new_mito_engine(config).await
     }
 
     /// Open the engine.
     pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => MitoEngine::new(
-                &self.data_home().display().to_string(),
-                config,
-                log_store,
-                self.object_store_manager.clone().unwrap(),
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-            LogStoreImpl::Kafka(log_store) => MitoEngine::new(
-                &self.data_home().display().to_string(),
-                config,
-                log_store,
-                self.object_store_manager.clone().unwrap(),
-                self.schema_metadata_manager.clone(),
-                Plugins::new(),
-            )
-            .await
-            .unwrap(),
-        }
+        self.new_mito_engine(config).await
     }
 
     /// Only initializes the object store manager, returns the default object store.
