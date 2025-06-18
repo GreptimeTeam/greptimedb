@@ -243,7 +243,7 @@ pub struct JaegerQueryParams {
     pub span_kind: Option<String>,
 }
 
-/// Serde deserialization decorator to map empty Strings to None,
+/// Serde deserialization decorator to map empty Strings to None.
 fn empty_string_as_none<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -423,11 +423,11 @@ pub async fn handle_get_trace(
         .start_timer();
 
     // Convert start time and end time from microseconds to nanoseconds.
-    let start_time = query_params.start.map(|start| start * 1000);
-    let end_time = query_params.end.map(|end| end * 1000);
+    let start_time_ns = query_params.start.map(|start_us| start_us * 1000);
+    let end_time_ns = query_params.end.map(|end_us| end_us * 1000);
 
     let output = match handler
-        .get_trace(query_ctx, &trace_id, start_time, end_time)
+        .get_trace(query_ctx, &trace_id, start_time_ns, end_time_ns)
         .await
     {
         Ok(output) => output,
