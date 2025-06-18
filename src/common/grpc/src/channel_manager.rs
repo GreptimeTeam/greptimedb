@@ -201,8 +201,8 @@ impl ChannelManager {
             "http"
         };
 
-        let mut endpoint =
-            Endpoint::new(format!("{http_prefix}://{addr}")).context(CreateChannelSnafu)?;
+        let mut endpoint = Endpoint::new(format!("{http_prefix}://{addr}"))
+            .context(CreateChannelSnafu { addr })?;
 
         if let Some(dur) = self.config().timeout {
             endpoint = endpoint.timeout(dur);
@@ -237,7 +237,7 @@ impl ChannelManager {
         if let Some(tls_config) = &self.inner.client_tls_config {
             endpoint = endpoint
                 .tls_config(tls_config.clone())
-                .context(CreateChannelSnafu)?;
+                .context(CreateChannelSnafu { addr })?;
         }
 
         endpoint = endpoint

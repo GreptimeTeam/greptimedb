@@ -928,7 +928,6 @@ impl ErrorExt for Error {
             | Error::RetryLater { .. }
             | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
-            | Error::NoEnoughAvailableNode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
             | Error::PeerUnavailable { .. }
@@ -1024,6 +1023,8 @@ impl ErrorExt for Error {
             | Error::CreateMySqlPool { .. }
             | Error::ConnectMySql { .. }
             | Error::ParseMySqlUrl { .. } => StatusCode::Internal,
+
+            Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
         }
     }
 

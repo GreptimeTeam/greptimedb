@@ -21,7 +21,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 
-use crate::client::MetaClientBuilder;
+use crate::client::{LeaderProviderRef, MetaClientBuilder};
 
 pub mod client;
 pub mod error;
@@ -76,6 +76,7 @@ pub async fn create_meta_client(
     client_type: MetaClientType,
     meta_client_options: &MetaClientOptions,
     plugins: Option<&Plugins>,
+    leader_provider: Option<LeaderProviderRef>,
 ) -> error::Result<MetaClientRef> {
     info!(
         "Creating {:?} instance with Metasrv addrs {:?}",
@@ -116,9 +117,15 @@ pub async fn create_meta_client(
 
     let mut meta_client = builder.build();
 
-    meta_client
-        .start(&meta_client_options.metasrv_addrs)
-        .await?;
+    if let Some(leader_provider) = leader_provider {
+        meta_client
+            .start_with(leader_provider, &meta_client_options.metasrv_addrs)
+            .await?;
+    } else {
+        meta_client
+            .start(&meta_client_options.metasrv_addrs)
+            .await?;
+    }
 
     meta_client.ask_leader().await?;
 

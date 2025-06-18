@@ -105,6 +105,15 @@ impl GrpcOptions {
             common_telemetry::debug!("detect local IP is not supported on Android");
         }
     }
+
+    /// Create a [GrpcServerConfig] from self's options.
+    pub fn as_config(&self) -> GrpcServerConfig {
+        GrpcServerConfig {
+            max_recv_message_size: self.max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: self.max_send_message_size.as_bytes() as usize,
+            tls: self.tls.clone(),
+        }
+    }
 }
 
 const DEFAULT_GRPC_ADDR_PORT: &str = "4001";

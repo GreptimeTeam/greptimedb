@@ -52,8 +52,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create gRPC channel"))]
+    #[snafu(display("Failed to create gRPC channel from '{addr}'"))]
     CreateChannel {
+        addr: String,
         #[snafu(source)]
         error: tonic::transport::Error,
         #[snafu(implicit)]

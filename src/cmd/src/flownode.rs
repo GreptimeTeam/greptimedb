@@ -283,6 +283,7 @@ impl StartCommand {
             MetaClientType::Flownode { member_id },
             meta_config,
             None,
+            None,
         )
         .await
         .context(MetaClientInitSnafu)?;

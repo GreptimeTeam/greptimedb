@@ -313,6 +313,7 @@ impl StartCommand {
             MetaClientType::Frontend,
             meta_client_options,
             Some(&plugins),
+            None,
         )
         .await
         .context(error::MetaClientInitSnafu)?;
