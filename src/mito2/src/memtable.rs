@@ -86,7 +86,7 @@ pub struct MemtableStats {
     num_ranges: usize,
     /// The maximum sequence number in the memtable.
     max_sequence: SequenceNumber,
-    /// Number of timeseries in memtable.
+    /// Number of estimated timeseries in memtable.
     series_count: usize,
 }
 
