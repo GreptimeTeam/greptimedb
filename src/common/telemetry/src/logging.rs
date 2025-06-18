@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::Sampler;
 use opentelemetry_semantic_conventions::resource;
@@ -387,18 +387,21 @@ pub fn init_global_logging(
                     KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
                 ]));
 
-            let exporter = opentelemetry_otlp::new_exporter().tonic().with_endpoint(
-                opts.otlp_endpoint
-                    .as_ref()
-                    .map(|e| {
-                        if e.starts_with("http") {
-                            e.to_string()
-                        } else {
-                            format!("http://{}", e)
-                        }
-                    })
-                    .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
-            );
+            let exporter = opentelemetry_otlp::new_exporter()
+                .http()
+                .with_endpoint(
+                    opts.otlp_endpoint
+                        .as_ref()
+                        .map(|e| {
+                            if e.starts_with("http") {
+                                e.to_string()
+                            } else {
+                                format!("http://{}", e)
+                            }
+                        })
+                        .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
+                )
+                .with_protocol(Protocol::HttpBinary);
 
             let tracer = opentelemetry_otlp::new_pipeline()
                 .tracing()
