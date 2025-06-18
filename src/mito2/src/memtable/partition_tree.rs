@@ -840,138 +840,21 @@ mod tests {
         ]
     }
 
-    fn key_values_0() -> Vec<(String, String)> {
-        vec![
-            (
-                "__column_4406636445696_aW5zdGFuY2U".to_string(),
-                r#"{"column_schema":{"name":"instance","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":7}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_aG9zdA".to_string(),
-                r#"{"column_schema":{"name":"host","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":6}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_bmFtZXNwYWNl".to_string(),
-                r#"{"column_schema":{"name":"namespace","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":2}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_am9i".to_string(),
-                r#"{"column_schema":{"name":"job","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":8}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_ZW52".to_string(),
-                r#"{"column_schema":{"name":"env","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":5}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_Z3JlcHRpbWVfdmFsdWU".to_string(),
-                r#"{"column_schema":{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":1}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_Z3JlcHRpbWVfdGltZXN0YW1w".to_string(),
-                r#"{"column_schema":{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},"semantic_type":"Timestamp","column_id":0}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_YXBw".to_string(),
-                r#"{"column_schema":{"name":"app","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":3}"#.to_string(),
-            ),
-            (
-                "__region_4406636445696".to_string(),
-                "".to_string(),
-            ),
-        ]
-    }
-
-    fn key_values_1() -> Vec<(String, String)> {
-        vec![
-            (
-                "__column_4402341478400_bmFtZXNwYWNl".to_string(),
-                r#"{"column_schema":{"name":"namespace","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":2}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_Z3JlcHRpbWVfdmFsdWU".to_string(),
-                r#"{"column_schema":{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":1}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_Y2xvdWRfcHJvdmlkZXI".to_string(),
-                r#"{"column_schema":{"name":"cloud_provider","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":4}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_YXBw".to_string(),
-                r#"{"column_schema":{"name":"app","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":3}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_aG9zdA".to_string(),
-                r#"{"column_schema":{"name":"host","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":6}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_ZW52".to_string(),
-                r#"{"column_schema":{"name":"env","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":5}"#.to_string(),
-            ),
-            (
-                "__column_4402341478400_Z3JlcHRpbWVfdGltZXN0YW1w".to_string(),
-                r#"{"column_schema":{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},"semantic_type":"Timestamp","column_id":0}"#.to_string(),
-            ),
-            (
-                "__region_4402341478400".to_string(),
-                "".to_string(),
-            )
-        ]
-    }
-
-    fn key_values_2() -> Vec<(String, String)> {
-        vec![
-            (
-                "__column_4406636445696_Z3JlcHRpbWVfdGltZXN0YW1w".to_string(),
-                r#"{"column_schema":{"name":"greptime_timestamp","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":true,"default_constraint":null,"metadata":{"greptime:time_index":"true"}},"semantic_type":"Timestamp","column_id":0}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_aG9zdA".to_string(),
-                r#"{"column_schema":{"name":"host","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":6}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_bmFtZXNwYWNl".to_string(),
-                r#"{"column_schema":{"name":"namespace","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":2}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_am9i".to_string(),
-                r#"{"column_schema":{"name":"job","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":8}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_aW5zdGFuY2U".to_string(),
-                r#"{"column_schema":{"name":"instance","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":7}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_ZW52".to_string(),
-                r#"{"column_schema":{"name":"env","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":5}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_Z3JlcHRpbWVfdmFsdWU".to_string(),
-                r#"{"column_schema":{"name":"greptime_value","data_type":{"Float64":{}},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":1}"#.to_string(),
-            ),
-            (
-                "__column_4406636445696_YXBw".to_string(),
-                r#"{"column_schema":{"name":"app","data_type":{"String":null},"is_nullable":true,"is_time_index":false,"default_constraint":null,"metadata":{"greptime:inverted_index":"true"}},"semantic_type":"Tag","column_id":3}"#.to_string(),
-            ),
-            (
-                "__region_4406636445696".to_string(),
-                "".to_string(),
-            ),
-        ]
-    }
-
-    fn key_values(metadata: RegionMetadataRef, kv: Vec<(String, String)>) -> KeyValues {
-        let rows = kv
-            .into_iter()
-            .map(|(k, v)| Row {
+    fn key_values<T: AsRef<str>>(
+        metadata: &RegionMetadataRef,
+        keys: impl Iterator<Item = T>,
+    ) -> KeyValues {
+        let rows = keys
+            .map(|c| Row {
                 values: vec![
                     api::v1::Value {
                         value_data: Some(ValueData::TimestampMillisecondValue(0)),
                     },
                     api::v1::Value {
-                        value_data: Some(ValueData::StringValue(k)),
+                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
                     },
                     api::v1::Value {
-                        value_data: Some(ValueData::StringValue(v)),
+                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
                     },
                 ],
             })
@@ -985,7 +868,7 @@ mod tests {
             }),
             write_hint: None,
         };
-        KeyValues::new(&metadata, mutation).unwrap()
+        KeyValues::new(metadata, mutation).unwrap()
     }
 
     fn collect_kvs(
@@ -1019,23 +902,28 @@ mod tests {
             .build(1, &metadata);
 
         memtable
-            .write(&key_values(metadata.clone(), key_values_0()))
+            .write(&key_values(&metadata, ('a'..'h').map(|c| c.to_string())))
             .unwrap();
         memtable.freeze().unwrap();
         let forked = memtable.fork(2, &metadata);
 
         forked
-            .write(&key_values(metadata.clone(), key_values_1()))
+            .write(&key_values(
+                &metadata,
+                ["c", "f", "i", "h", "b", "e", "g"].iter(),
+            ))
             .unwrap();
         forked.freeze().unwrap();
         let forked2 = forked.fork(3, &metadata);
 
-        forked2
-            .write(&key_values(metadata.clone(), key_values_2()))
-            .unwrap();
+        let keys = ["g", "e", "a", "f", "b", "c", "h"];
+        forked2.write(&key_values(&metadata, keys.iter())).unwrap();
 
         let kvs = collect_kvs(forked2.iter(None, None, None).unwrap(), &metadata);
-        let expected = key_values_2().into_iter().collect::<HashMap<_, _>>();
+        let expected = keys
+            .iter()
+            .map(|c| (c.to_string(), c.to_string()))
+            .collect::<HashMap<_, _>>();
         assert_eq!(kvs, expected);
     }
 }
