@@ -48,11 +48,11 @@ use crate::Tool;
 #[derive(Debug, Default, Parser)]
 pub struct RepairLogicalTablesCommand {
     /// The names of the tables to repair.
-    #[clap(long, value_delimiter = ',')]
+    #[clap(long, value_delimiter = ',', alias = "table-name")]
     table_names: Vec<String>,
 
     /// The id of the table to repair.
-    #[clap(long, value_delimiter = ',')]
+    #[clap(long, value_delimiter = ',', alias = "table-id")]
     table_ids: Vec<TableId>,
 
     /// The schema of the tables to repair.
