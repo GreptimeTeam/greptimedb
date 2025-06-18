@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{AskLeaderRequest, RequestHeader, Role};
+use async_trait::async_trait;
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_telemetry::tracing_context::TracingContext;
@@ -29,6 +31,19 @@ use tonic::transport::Channel;
 use crate::client::Id;
 use crate::error;
 use crate::error::Result;
+
+pub type LeaderProviderRef = Arc<dyn LeaderProvider>;
+
+/// Provide [MetaClient] a Metasrv leader's address.
+#[async_trait]
+pub trait LeaderProvider: Debug + Send + Sync {
+    /// Get the leader of the Metasrv. If it returns `None`, or the leader is outdated,
+    /// you can use `ask_leader` to find a new one.
+    fn leader(&self) -> Option<String>;
+
+    /// Find the current leader of the Metasrv.
+    async fn ask_leader(&self) -> Result<String>;
+}
 
 #[derive(Debug)]
 struct LeadershipGroup {
@@ -153,5 +168,16 @@ impl AskLeader {
                 .get(addr)
                 .context(error::CreateChannelSnafu)?,
         ))
+    }
+}
+
+#[async_trait]
+impl LeaderProvider for AskLeader {
+    fn leader(&self) -> Option<String> {
+        self.get_leader()
+    }
+
+    async fn ask_leader(&self) -> Result<String> {
+        self.ask_leader().await
     }
 }

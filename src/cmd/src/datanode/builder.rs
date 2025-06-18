@@ -93,6 +93,7 @@ impl InstanceBuilder {
             MetaClientType::Datanode { member_id },
             meta_client_options,
             Some(&plugins),
+            None,
         )
         .await
         .context(MetaClientInitSnafu)?;

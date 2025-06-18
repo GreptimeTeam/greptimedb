@@ -25,7 +25,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use api::v1::meta::{ProcedureDetailResponse, Role};
-pub use ask_leader::AskLeader;
+pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
 use common_error::ext::BoxedError;
@@ -247,6 +247,8 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
     async fn remove_region_follower(&self, request: RemoveRegionFollowerRequest) -> Result<()>;
 
     async fn start(&self, urls: &[&str]) -> Result<()>;
+
+    async fn start_with(&self, leader_provider: LeaderProviderRef) -> Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -466,6 +468,43 @@ impl MetaClient {
             info!("Cluster client started");
         }
 
+        Ok(())
+    }
+
+    /// Start the client with a [LeaderProvider] and other Metasrv peers' addresses.
+    pub(crate) async fn start_with<U, A>(
+        &mut self,
+        leader_provider: LeaderProviderRef,
+        peers: A,
+    ) -> Result<()>
+    where
+        U: AsRef<str>,
+        A: AsRef<[U]> + Clone,
+    {
+        if let Some(client) = &self.region_follower {
+            info!("Starting region follower client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
+        if let Some(client) = &self.heartbeat {
+            info!("Starting heartbeat client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
+        if let Some(client) = &mut self.store {
+            info!("Starting store client ...");
+            client.start(peers.clone()).await?;
+        }
+
+        if let Some(client) = &self.procedure {
+            info!("Starting procedure client ...");
+            client.start_with(leader_provider.clone()).await?;
+        }
+
+        if let Some(client) = &mut self.cluster {
+            info!("Starting cluster client ...");
+            client.start_with(leader_provider).await?;
+        }
         Ok(())
     }
 
