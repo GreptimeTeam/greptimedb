@@ -33,10 +33,7 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
-use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, MEMTABLE_TYPE, SKIP_WAL_KEY,
-    TTL_KEY,
-};
+use store_api::mito_engine_options::TTL_KEY;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
@@ -600,17 +597,13 @@ fn parse_physical_region_id(request: &RegionCreateRequest) -> Result<RegionId> {
 
 /// Creates the region options for metadata region in metric engine.
 pub(crate) fn region_options_for_metadata_region(
-    mut original: HashMap<String, String>,
+    _original: HashMap<String, String>,
 ) -> HashMap<String, String> {
     // TODO(ruihang, weny): add whitelist for metric engine options.
-    original.remove(APPEND_MODE_KEY);
-    // Don't allow to set primary key encoding for metadata region.
-    original.remove(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING);
-    // Don't allow to set memtable type for metadata region.
-    original.remove(MEMTABLE_TYPE);
-    original.insert(TTL_KEY.to_string(), FOREVER.to_string());
-    original.remove(SKIP_WAL_KEY);
-    original
+    let mut metadata_region_options = HashMap::new();
+    metadata_region_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
+
+    metadata_region_options
 }
 
 #[cfg(test)]
