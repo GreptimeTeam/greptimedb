@@ -25,21 +25,45 @@ use std::sync::Arc;
 
 use arrow_schema::Fields;
 use datafusion_common::{DFSchema, ScalarValue};
-use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
+use datafusion_expr::{Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl};
 use datatypes::arrow::datatypes::{DataType, Field};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+
+use crate::query_engine::DefaultSerializer;
 
 /// Wrappr to make an aggregate function out of a state function.
 #[derive(Debug)]
 pub struct AggregateStateFunctionWrapper {
     inner: AggregateUDF,
     name: String,
+    /// The index of the state in the output of the state function.
+    state_index: usize,
+}
+
+pub struct WrapperArgs<'a> {
+    /// The name of the aggregate function.
+    pub name: &'a str,
+    /// The input types of the aggregate function.
+    pub input_types: &'a [DataType],
+    /// The return type of the aggregate function.
+    pub return_type: &'a DataType,
+    /// The ordering fields of the aggregate function.
+    pub ordering_fields: &'a [Field],
+
+    /// Whether the aggregate function is distinct.
+    pub is_distinct: bool,
+    /// The index of the state in the output of the state function.
+    state_index: usize,
 }
 
 impl AggregateStateFunctionWrapper {
-    pub fn new(inner: AggregateUDF) -> Self {
-        let name = format!("__{}_state_udaf", inner.name());
-        Self { inner, name }
+    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> Self {
+        let name = format!("__{}_state_udaf", args.name);
+        Self {
+            inner,
+            name,
+            state_index: args.state_index,
+        }
     }
 
     pub fn inner(&self) -> &AggregateUDF {
@@ -53,7 +77,10 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
         acc_args: datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         let inner = self.inner.accumulator(acc_args)?;
-        Ok(Box::new(AggregateStateAccumulatorWrapper::new(inner)))
+        Ok(Box::new(AggregateStateAccumulatorWrapper::new(
+            inner,
+            self.state_index,
+        )))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -63,10 +90,10 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
         self.name.as_str()
     }
 
-    /// Return state as a binary, in case the state function has multiple output columns,
-    /// we will serialize the state into a binary format.
+    /// Return state_field[idx] as the output type.
+    ///
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
-        Ok(DataType::Binary)
+        todo!()
     }
     fn signature(&self) -> &datafusion_expr::Signature {
         self.inner.signature()
@@ -85,45 +112,26 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
 #[derive(Debug)]
 pub struct AggregateStateAccumulatorWrapper {
     inner: Box<dyn Accumulator>,
+    /// The index of the state in the output of the state function.
+    state_index: usize,
 }
 
 impl AggregateStateAccumulatorWrapper {
-    pub fn new(inner: Box<dyn Accumulator>) -> Self {
-        Self { inner }
+    pub fn new(inner: Box<dyn Accumulator>, state_index: usize) -> Self {
+        Self { inner, state_index }
     }
 }
 
 impl Accumulator for AggregateStateAccumulatorWrapper {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
-
-        // encode states into LogicalPlan::Values then into substrait plan.
-        // This is a workaround to serialize the state into a binary format.
-
-        // it's either this or have to recompute the state multiple times for aggr functions
-        // that have multiple output columns(i.e. `avg`).
-        let tys = state
-            .iter()
-            .enumerate()
-            .map(|(idx, s)| Field::new(format!("{idx}"), s.data_type(), true))
-            .collect::<Vec<_>>();
-        let fields = Fields::from(tys);
-        let df_schema = DFSchema::from_unqualified_fields(fields, Default::default())?;
-        let exprs = state
-            .into_iter()
-            .map(|s| datafusion_expr::Expr::Literal(s))
-            .collect::<Vec<_>>();
-        let values = datafusion_expr::Values {
-            schema: Arc::new(df_schema),
-            values: vec![exprs],
-        };
-        let plan = datafusion_expr::LogicalPlan::Values(values);
-        let substrait_plan = DFLogicalSubstraitConvertor {}
-            .encode(&plan, DefaultSerializer)
-            .map_err(|e| datafusion_common::DataFusionError::Execution(e.to_string()))?;
-        // TODO: serialize the state into a binary format(maybe protobuf or something else).
-        let bytes = substrait_plan.to_vec();
-        Ok(ScalarValue::Binary(Some(bytes)))
+        let col = state.get(self.state_index).ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal(format!(
+                "State index {} out of bounds for state: {:?}",
+                self.state_index, state
+            ))
+        })?;
+        Ok(col.clone())
     }
 
     fn merge_batch(
@@ -146,5 +154,58 @@ impl Accumulator for AggregateStateAccumulatorWrapper {
 
     fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
         self.inner.state()
+    }
+}
+
+#[derive(Debug)]
+pub struct AggregateMergeFunctionWrapper {
+    inner: AggregateUDF,
+    arg_types: Vec<DataType>,
+    name: String,
+}
+impl AggregateMergeFunctionWrapper {
+    pub fn new(inner: AggregateUDF, input_arg_types: Vec<DataType>) -> Self {
+        let name = format!("__{}_merge_udaf", inner.name());
+        Self {
+            inner,
+            arg_types: input_arg_types,
+            name,
+        }
+    }
+
+    pub fn inner(&self) -> &AggregateUDF {
+        &self.inner
+    }
+}
+impl AggregateUDFImpl for AggregateMergeFunctionWrapper {
+    fn accumulator(
+        &self,
+        acc_args: datafusion_expr::function::AccumulatorArgs,
+    ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        let inner = self.inner.accumulator(acc_args)?;
+        todo!()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self.inner.inner().as_any()
+    }
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        // The return type is the same as the original aggregate function's return type.
+        self.inner.return_type(&self.arg_types)
+    }
+    fn signature(&self) -> &datafusion_expr::Signature {
+        // TODO: use original function's state fields as signature.
+        todo!()
+    }
+
+    fn state_fields(
+        &self,
+        args: datafusion_expr::function::StateFieldsArgs,
+    ) -> datafusion_common::Result<Vec<Field>> {
+        self.inner.state_fields(args)
     }
 }
