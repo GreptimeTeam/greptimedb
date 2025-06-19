@@ -14,6 +14,7 @@
 
 //! logging stuffs, inspired by databend
 use std::env;
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -221,14 +222,14 @@ pub fn init_global_logging(
                     Layer::new()
                         .json()
                         .with_writer(writer)
-                        .with_ansi(atty::is(atty::Stream::Stdout))
+                        .with_ansi(std::io::stdout().is_terminal())
                         .boxed(),
                 )
             } else {
                 Some(
                     Layer::new()
                         .with_writer(writer)
-                        .with_ansi(atty::is(atty::Stream::Stdout))
+                        .with_ansi(std::io::stdout().is_terminal())
                         .boxed(),
                 )
             }
