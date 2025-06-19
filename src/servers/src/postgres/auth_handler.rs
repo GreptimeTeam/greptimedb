@@ -126,7 +126,10 @@ where
 
     // pass generated process id and secret key to client, this information will
     // be sent to postgres client for query cancellation.
-    client.set_pid_and_secret_key(session.process_id() as i32, rand::random::<i32>());
+    client.set_pid_and_secret_key(
+        session.process_id() as i32,
+        session.secret_key().unwrap_or_default(),
+    );
     // set userinfo outside
 }
 
