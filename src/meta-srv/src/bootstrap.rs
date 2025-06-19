@@ -276,6 +276,7 @@ pub async fn metasrv_builder(
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
+            let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
 
             let mut cfg = Config::new();
@@ -284,8 +285,12 @@ pub async fn metasrv_builder(
             // We use a separate pool for election since we need a different session keep-alive idle time.
             let pool = create_postgres_pool_with(&opts.store_addrs, cfg).await?;
 
-            let election_client =
-                ElectionPgClient::new(pool, execution_timeout, meta_lease_ttl, statement_timeout)?;
+            let election_client = ElectionPgClient::new(
+                pool,
+                execution_timeout,
+                idle_session_timeout,
+                statement_timeout,
+            )?;
             let election = PgElection::with_pg_client(
                 opts.grpc.server_addr.clone(),
                 election_client,
@@ -322,6 +327,7 @@ pub async fn metasrv_builder(
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
             let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
+            let innode_lock_wait_timeout = Duration::from_secs(META_LEASE_SECS / 2);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
 
@@ -329,7 +335,7 @@ pub async fn metasrv_builder(
                 pool,
                 execution_timeout,
                 statement_timeout,
-                meta_lease_ttl / 2,
+                innode_lock_wait_timeout,
                 idle_session_timeout,
                 &election_table_name,
             );
