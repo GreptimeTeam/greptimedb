@@ -155,7 +155,7 @@ impl<'a> ElectionSqlFactory<'a> {
 
 enum Executor<'a> {
     Default(MutexGuard<'a, ElectionMysqlClient>),
-    Txn(TransactionWithExuectionTimeout<'a>),
+    Txn(TransactionWithExecutionTimeout<'a>),
 }
 
 impl Executor<'_> {
@@ -399,7 +399,7 @@ impl ElectionMysqlClient {
             .context(MySqlExecutionSnafu { sql })
     }
 
-    async fn transaction(&mut self) -> Result<TransactionWithExuectionTimeout<'_>> {
+    async fn transaction(&mut self) -> Result<TransactionWithExecutionTimeout<'_>> {
         use sqlx::Acquire;
         let client = self.current.as_mut().unwrap();
         let transaction = client
@@ -407,19 +407,19 @@ impl ElectionMysqlClient {
             .await
             .context(MySqlExecutionSnafu { sql: "BEGIN" })?;
 
-        Ok(TransactionWithExuectionTimeout {
+        Ok(TransactionWithExecutionTimeout {
             transaction,
             execution_timeout: self.execution_timeout,
         })
     }
 }
 
-struct TransactionWithExuectionTimeout<'a> {
+struct TransactionWithExecutionTimeout<'a> {
     transaction: MySqlTransaction<'a>,
     execution_timeout: Duration,
 }
 
-impl TransactionWithExuectionTimeout<'_> {
+impl TransactionWithExecutionTimeout<'_> {
     async fn query(
         &mut self,
         query: Query<'_, MySql, MySqlArguments>,
