@@ -599,7 +599,6 @@ fn parse_physical_region_id(request: &RegionCreateRequest) -> Result<RegionId> {
 pub(crate) fn region_options_for_metadata_region(
     original: &HashMap<String, String>,
 ) -> HashMap<String, String> {
-    // TODO(ruihang, weny): add whitelist for metric engine options.
     let mut metadata_region_options = HashMap::new();
     metadata_region_options.insert(TTL_KEY.to_string(), FOREVER.to_string());
 
