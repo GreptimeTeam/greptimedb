@@ -1011,7 +1011,8 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
-fn build_create_table_expr(
+/// Builds a [CreateTableExpr] for the given table and schema.
+pub(crate) fn build_create_table_expr(
     table: &TableReference,
     request_schema: &[ColumnSchema],
     engine: &str,

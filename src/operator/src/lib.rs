@@ -27,6 +27,7 @@ pub mod procedure;
 pub mod region_req_factory;
 pub mod req_convert;
 pub mod request;
+pub mod schema_helper;
 pub mod statement;
 pub mod table;
 #[cfg(test)]

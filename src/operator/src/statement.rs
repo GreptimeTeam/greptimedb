@@ -18,7 +18,7 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
-mod ddl;
+pub(crate) mod ddl;
 mod describe;
 mod dml;
 mod kill;
