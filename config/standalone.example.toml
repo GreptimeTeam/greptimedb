@@ -458,6 +458,10 @@ timeout = "30s"
 ## The timeout for idle sockets being kept-alive.
 pool_idle_timeout = "90s"
 
+## To skip the ssl verification
+## **Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks.
+skip_ssl_validation = false
+
 # Custom storage options
 # [[storage.providers]]
 # name = "S3"

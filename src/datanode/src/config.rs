@@ -144,6 +144,9 @@ pub struct HttpClientConfig {
     /// The timeout for idle sockets being kept-alive.
     #[serde(with = "humantime_serde")]
     pub(crate) pool_idle_timeout: Duration,
+
+    /// Skip SSL certificate validation (insecure)
+    pub skip_ssl_validation: bool,
 }
 
 impl Default for HttpClientConfig {
@@ -153,6 +156,7 @@ impl Default for HttpClientConfig {
             connect_timeout: Duration::from_secs(30),
             timeout: Duration::from_secs(30),
             pool_idle_timeout: Duration::from_secs(90),
+            skip_ssl_validation: false,
         }
     }
 }
@@ -512,6 +516,50 @@ mod tests {
                 assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
             }
             _ => unreachable!(),
+        }
+    }
+    #[test]
+    fn test_skip_ssl_validation_config() {
+        // Test with skip_ssl_validation = true
+        let toml_str_true = r#"
+            [storage]
+            type = "S3"
+            [storage.http_client]
+            skip_ssl_validation = true
+        "#;
+        let opts: DatanodeOptions = toml::from_str(toml_str_true).unwrap();
+        match &opts.storage.store {
+            ObjectStoreConfig::S3(cfg) => {
+                assert!(cfg.http_client.skip_ssl_validation);
+            }
+            _ => panic!("Expected S3 config"),
+        }
+
+        // Test with skip_ssl_validation = false
+        let toml_str_false = r#"
+            [storage]
+            type = "S3"
+            [storage.http_client]
+            skip_ssl_validation = false
+        "#;
+        let opts: DatanodeOptions = toml::from_str(toml_str_false).unwrap();
+        match &opts.storage.store {
+            ObjectStoreConfig::S3(cfg) => {
+                assert!(!cfg.http_client.skip_ssl_validation);
+            }
+            _ => panic!("Expected S3 config"),
+        }
+        // Test default value (should be false)
+        let toml_str_default = r#"
+            [storage]
+            type = "S3"
+        "#;
+        let opts: DatanodeOptions = toml::from_str(toml_str_default).unwrap();
+        match &opts.storage.store {
+            ObjectStoreConfig::S3(cfg) => {
+                assert!(!cfg.http_client.skip_ssl_validation);
+            }
+            _ => panic!("Expected S3 config"),
         }
     }
 }

@@ -212,6 +212,10 @@ pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient>
         .connect_timeout(config.connect_timeout)
         .pool_idle_timeout(config.pool_idle_timeout)
         .timeout(config.timeout)
+        .danger_accept_invalid_certs({
+            info!("skip_ssl_validation: {}", config.skip_ssl_validation);
+            config.skip_ssl_validation
+        })
         .build()
         .context(BuildHttpClientSnafu)?;
     Ok(HttpClient::with(client))
