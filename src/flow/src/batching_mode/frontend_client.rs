@@ -18,7 +18,8 @@ use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
 use api::v1::greptime_request::Request;
-use api::v1::CreateTableExpr;
+use api::v1::query_request::Query;
+use api::v1::{CreateTableExpr, QueryRequest};
 use client::{Client, Database};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -269,6 +270,55 @@ impl FrontendClient {
         .await
     }
 
+    /// Execute a SQL statement on the frontend.
+    pub async fn sql(&self, catalog: &str, schema: &str, sql: &str) -> Result<Output, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+                db.database
+                    .sql(sql)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)
+            }
+            FrontendClient::Standalone { database_client } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .build();
+                let ctx = Arc::new(ctx);
+                {
+                    let database_client = {
+                        database_client
+                            .lock()
+                            .map_err(|e| {
+                                UnexpectedSnafu {
+                                    reason: format!("Failed to lock database client: {e}"),
+                                }
+                                .build()
+                            })?
+                            .as_ref()
+                            .context(UnexpectedSnafu {
+                                reason: "Standalone's frontend instance is not set",
+                            })?
+                            .upgrade()
+                            .context(UnexpectedSnafu {
+                                reason: "Failed to upgrade database client",
+                            })?
+                    };
+                    let req = Request::Query(QueryRequest {
+                        query: Some(Query::Sql(sql.to_string())),
+                    });
+                    database_client
+                        .do_query(req, ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)
+                }
+            }
+        }
+    }
+
     /// Handle a request to frontend
     pub(crate) async fn handle(
         &self,
@@ -318,7 +368,7 @@ impl FrontendClient {
                             })?
                     };
                     let resp: common_query::Output = database_client
-                        .do_query(req.clone(), ctx)
+                        .do_query(req, ctx)
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;

@@ -55,14 +55,32 @@ type FlownodeOptions = GreptimeOptions<flow::FlownodeOptions>;
 pub struct Instance {
     flownode: FlownodeInstance,
 
+    // The components of flownode, which make it easier to expand based
+    // on the components.
+    #[cfg(feature = "enterprise")]
+    components: Components,
+
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
 
+#[cfg(feature = "enterprise")]
+pub struct Components {
+    pub catalog_manager: catalog::CatalogManagerRef,
+    pub fe_client: Arc<FrontendClient>,
+    pub kv_backend: common_meta::kv_backend::KvBackendRef,
+}
+
 impl Instance {
-    pub fn new(flownode: FlownodeInstance, guard: Vec<WorkerGuard>) -> Self {
+    pub fn new(
+        flownode: FlownodeInstance,
+        #[cfg(feature = "enterprise")] components: Components,
+        guard: Vec<WorkerGuard>,
+    ) -> Self {
         Self {
             flownode,
+            #[cfg(feature = "enterprise")]
+            components,
             _guard: guard,
         }
     }
@@ -74,6 +92,11 @@ impl Instance {
     /// allow customizing flownode for downstream projects
     pub fn flownode_mut(&mut self) -> &mut FlownodeInstance {
         &mut self.flownode
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn components(&self) -> &Components {
+        &self.components
     }
 }
 
@@ -350,13 +373,14 @@ impl StartCommand {
         let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
         let frontend_client =
             FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
+        let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             plugins,
             table_metadata_manager,
             catalog_manager.clone(),
             flow_metadata_manager,
-            Arc::new(frontend_client),
+            frontend_client.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
 
@@ -394,6 +418,16 @@ impl StartCommand {
             .set_frontend_invoker(invoker)
             .await;
 
-        Ok(Instance::new(flownode, guard))
+        #[cfg(feature = "enterprise")]
+        let components = Components {
+            catalog_manager: catalog_manager.clone(),
+            fe_client: frontend_client,
+            kv_backend: cached_meta_backend,
+        };
+
+        #[cfg(not(feature = "enterprise"))]
+        return Ok(Instance::new(flownode, guard));
+        #[cfg(feature = "enterprise")]
+        Ok(Instance::new(flownode, components, guard))
     }
 }
