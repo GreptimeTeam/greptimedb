@@ -448,12 +448,12 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporterBuilder {
         });
 
     match protocol {
-        OtlpExportProtocol::Grpc => opentelemetry_otlp::SpanExporterBuilder::Tonic(
+        OtlpExportProtocol::Grpc => SpanExporterBuilder::Tonic(
             opentelemetry_otlp::new_exporter()
                 .tonic()
                 .with_endpoint(endpoint),
         ),
-        OtlpExportProtocol::Http => opentelemetry_otlp::SpanExporterBuilder::Http(
+        OtlpExportProtocol::Http => SpanExporterBuilder::Http(
             opentelemetry_otlp::new_exporter()
                 .http()
                 .with_endpoint(endpoint)
