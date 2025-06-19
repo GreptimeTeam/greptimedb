@@ -46,9 +46,7 @@ use snafu::ResultExt;
 #[cfg(feature = "mysql_kvbackend")]
 use sqlx::mysql::MySqlConnectOptions;
 #[cfg(feature = "mysql_kvbackend")]
-use sqlx::mysql::{MySqlConnection, MySqlPool};
-#[cfg(feature = "mysql_kvbackend")]
-use sqlx::Connection;
+use sqlx::mysql::MySqlPool;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{oneshot, Mutex};
@@ -278,6 +276,7 @@ pub async fn metasrv_builder(
             let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
             let execution_timeout = Duration::from_secs(META_LEASE_SECS);
             let statement_timeout = Duration::from_secs(META_LEASE_SECS);
+            let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
             let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
 
             let mut cfg = Config::new();
@@ -286,8 +285,12 @@ pub async fn metasrv_builder(
             // We use a separate pool for election since we need a different session keep-alive idle time.
             let pool = create_postgres_pool_with(&opts.store_addrs, cfg).await?;
 
-            let election_client =
-                ElectionPgClient::new(pool, execution_timeout, meta_lease_ttl, statement_timeout)?;
+            let election_client = ElectionPgClient::new(
+                pool,
+                execution_timeout,
+                idle_session_timeout,
+                statement_timeout,
+            )?;
             let election = PgElection::with_pg_client(
                 opts.grpc.server_addr.clone(),
                 election_client,
@@ -308,6 +311,10 @@ pub async fn metasrv_builder(
         }
         #[cfg(feature = "mysql_kvbackend")]
         (None, BackendImpl::MysqlStore) => {
+            use std::time::Duration;
+
+            use crate::election::rds::mysql::ElectionMysqlClient;
+
             let pool = create_mysql_pool(&opts.store_addrs).await?;
             let kv_backend =
                 MySqlStore::with_mysql_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
@@ -315,13 +322,29 @@ pub async fn metasrv_builder(
                     .context(error::KvBackendSnafu)?;
             // Since election will acquire a lock of the table, we need a separate table for election.
             let election_table_name = opts.meta_table_name.clone() + "_election";
-            let election_client = create_mysql_client(opts).await?;
+            // We use a separate pool for election since we need a different session keep-alive idle time.
+            let pool = create_mysql_pool(&opts.store_addrs).await?;
+            let execution_timeout = Duration::from_secs(META_LEASE_SECS);
+            let statement_timeout = Duration::from_secs(META_LEASE_SECS);
+            let idle_session_timeout = Duration::from_secs(META_LEASE_SECS);
+            let innode_lock_wait_timeout = Duration::from_secs(META_LEASE_SECS / 2);
+            let meta_lease_ttl = Duration::from_secs(META_LEASE_SECS);
+            let candidate_lease_ttl = Duration::from_secs(CANDIDATE_LEASE_SECS);
+
+            let election_client = ElectionMysqlClient::new(
+                pool,
+                execution_timeout,
+                statement_timeout,
+                innode_lock_wait_timeout,
+                idle_session_timeout,
+                &election_table_name,
+            );
             let election = MySqlElection::with_mysql_client(
                 opts.grpc.server_addr.clone(),
                 election_client,
                 opts.store_key_prefix.clone(),
-                CANDIDATE_LEASE_SECS,
-                META_LEASE_SECS,
+                candidate_lease_ttl,
+                meta_lease_ttl,
                 &election_table_name,
             )
             .await?;
@@ -438,14 +461,6 @@ pub async fn create_mysql_pool(store_addrs: &[String]) -> Result<MySqlPool> {
     let pool = MySqlPool::connect_with(opts)
         .await
         .context(error::CreateMySqlPoolSnafu)?;
-    Ok(pool)
-}
 
-#[cfg(feature = "mysql_kvbackend")]
-async fn create_mysql_client(opts: &MetasrvOptions) -> Result<MySqlConnection> {
-    let opts = setup_mysql_options(&opts.store_addrs).await?;
-    let client = MySqlConnection::connect_with(&opts)
-        .await
-        .context(error::ConnectMySqlSnafu)?;
-    Ok(client)
+    Ok(pool)
 }
