@@ -146,7 +146,10 @@ pub struct GetTableCommand {
 
 impl GetTableCommand {
     pub fn validate(&self) -> Result<(), BoxedError> {
-        if self.table_id.is_none() && self.table_name.is_none() {
+        if matches!(
+            (&self.table_id, &self.table_name),
+            (Some(_), Some(_)) | (None, None)
+        ) {
             return Err(BoxedError::new(
                 InvalidArgumentsSnafu {
                     msg: "You must specify either --table-id or --table-name.",

@@ -54,7 +54,10 @@ pub struct DelTableCommand {
 
 impl DelTableCommand {
     fn validate(&self) -> Result<(), BoxedError> {
-        if self.table_id.is_none() && self.table_name.is_none() {
+        if matches!(
+            (&self.table_id, &self.table_name),
+            (Some(_), Some(_)) | (None, None)
+        ) {
             return Err(BoxedError::new(
                 InvalidArgumentsSnafu {
                     msg: "You must specify either --table-id or --table-name.",
@@ -131,7 +134,7 @@ impl TableMetadataDeleter {
     fn new(kv_backend: KvBackendRef) -> Self {
         Self {
             table_metadata_manager: TableMetadataManager::new_with_custom_tombstone_prefix(
-                kv_backend.clone(),
+                kv_backend,
                 CLI_TOMBSTONE_PREFIX,
             ),
         }
