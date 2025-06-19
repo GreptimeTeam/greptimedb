@@ -79,10 +79,7 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
         acc_args: datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         let inner = self.inner.accumulator(acc_args)?;
-        Ok(Box::new(AggrStateAccumWrapper::new(
-            inner,
-            self.state_index,
-        )))
+        Ok(Box::new(StateAccumWrapper::new(inner, self.state_index)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -134,19 +131,19 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
 /// The wrapper's input is the same as the original aggregate function's input,
 /// and the output is the state function's output.
 #[derive(Debug)]
-pub struct AggrStateAccumWrapper {
+pub struct StateAccumWrapper {
     inner: Box<dyn Accumulator>,
     /// The index of the state in the output of the state function.
     state_index: usize,
 }
 
-impl AggrStateAccumWrapper {
+impl StateAccumWrapper {
     pub fn new(inner: Box<dyn Accumulator>, state_index: usize) -> Self {
         Self { inner, state_index }
     }
 }
 
-impl Accumulator for AggrStateAccumWrapper {
+impl Accumulator for StateAccumWrapper {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
         let col = state.get(self.state_index).ok_or_else(|| {
@@ -182,7 +179,7 @@ impl Accumulator for AggrStateAccumWrapper {
 }
 
 #[derive(Debug)]
-pub struct AggrMergeWrapper {
+pub struct MergeWrapper {
     inner: AggregateUDF,
     name: String,
     /// The signature of the merge function.
@@ -191,14 +188,14 @@ pub struct AggrMergeWrapper {
     state_fields: Vec<Field>,
     final_return_type: DataType,
 }
-impl AggrMergeWrapper {
+impl MergeWrapper {
     pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
         let name = format!("__{}_merge_udaf", inner.name());
         let state_fields_args = StateFieldsArgs {
-            name: &inner.name(),
+            name: inner.name(),
             input_types: args.input_types,
-            return_type: &args.return_type,
-            ordering_fields: &args.ordering_fields,
+            return_type: args.return_type,
+            ordering_fields: args.ordering_fields,
             is_distinct: args.is_distinct,
         };
         let state_fields = inner.state_fields(state_fields_args)?;
@@ -222,13 +219,13 @@ impl AggrMergeWrapper {
     }
 }
 
-impl AggregateUDFImpl for AggrMergeWrapper {
+impl AggregateUDFImpl for MergeWrapper {
     fn accumulator(
         &self,
         acc_args: datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         let inner = self.inner.accumulator(acc_args)?;
-        Ok(Box::new(AggrMergeAccumWrapper::new(inner)))
+        Ok(Box::new(MergeAccum::new(inner)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -257,17 +254,17 @@ impl AggregateUDFImpl for AggrMergeWrapper {
 }
 
 #[derive(Debug)]
-pub struct AggrMergeAccumWrapper {
+pub struct MergeAccum {
     inner: Box<dyn Accumulator>,
 }
 
-impl AggrMergeAccumWrapper {
+impl MergeAccum {
     pub fn new(inner: Box<dyn Accumulator>) -> Self {
         Self { inner }
     }
 }
 
-impl Accumulator for AggrMergeAccumWrapper {
+impl Accumulator for MergeAccum {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         self.inner.evaluate()
     }
