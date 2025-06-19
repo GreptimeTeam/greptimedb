@@ -75,6 +75,10 @@ impl MetricEngineInner {
             let data_region_id = utils::to_data_region_id(physical_region_id);
             let metadata_region_result = results.remove(&metadata_region_id);
             let data_region_result = results.remove(&data_region_id);
+            // Pass the optional `metadata_region_result` and `data_region_result` to
+            // `open_physical_region_with_results`. This function handles errors for each
+            // open physical region request, allowing the process to continue with the
+            // remaining regions even if some requests fail.
             let response = self
                 .open_physical_region_with_results(
                     metadata_region_result,
