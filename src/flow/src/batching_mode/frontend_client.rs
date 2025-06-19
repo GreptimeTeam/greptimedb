@@ -310,7 +310,7 @@ impl FrontendClient {
                         query: Some(Query::Sql(sql.to_string())),
                     });
                     database_client
-                        .do_query(req.clone(), ctx)
+                        .do_query(req, ctx)
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)
@@ -368,7 +368,7 @@ impl FrontendClient {
                             })?
                     };
                     let resp: common_query::Output = database_client
-                        .do_query(req.clone(), ctx)
+                        .do_query(req, ctx)
                         .await
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
