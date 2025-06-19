@@ -92,7 +92,6 @@ impl SchemaHelper {
             .context(CatalogSnafu)
     }
 
-    // TODO(yingwen): Remove Inserter::create_physical_table_on_demand()
     // TODO(yingwen): Can we create the physical table with all columns from the prometheus metrics?
     /// Creates a physical table for metric engine.
     ///
@@ -160,7 +159,6 @@ impl SchemaHelper {
         }
     }
 
-    // TODO(yingwen): Replace StatementExecutor::create_table_inner().
     /// Creates a table by [CreateTableExpr].
     #[tracing::instrument(skip_all)]
     pub async fn create_table_by_expr(
@@ -202,7 +200,6 @@ impl SchemaHelper {
         }
     }
 
-    // TODO(yingwen): Replaces StatementExecutor::create_non_logic_table()
     /// Creates a non-logical table.
     /// - If the schema doesn't exist, returns an error
     /// - If the table already exists:
@@ -303,7 +300,6 @@ impl SchemaHelper {
         Ok(table)
     }
 
-    // TODO(yingwen): Replace StatementExecutor::create_logical_tables
     /// Creates logical tables.
     #[tracing::instrument(skip_all)]
     pub async fn create_logical_tables(
@@ -363,7 +359,6 @@ impl SchemaHelper {
             .collect())
     }
 
-    // TODO(yingwen): Replaces StatementExecutor::alter_table_inner
     /// Alters a table by [AlterTableExpr].
     #[tracing::instrument(skip_all)]
     pub async fn alter_table_by_expr(
@@ -483,7 +478,6 @@ impl SchemaHelper {
         Ok(Output::new_with_affected_rows(0))
     }
 
-    // TODO(yingwen): Replaces StatementExecutor::alter_logical_tables
     /// Alter logical tables.
     pub async fn alter_logical_tables(
         &self,
@@ -547,7 +541,6 @@ impl SchemaHelper {
         &self.catalog_manager
     }
 
-    // TODO(yingwen): Replace StatementExecutor::create_table_procedure
     /// Submits a procedure to create a non-logical table.
     async fn create_table_procedure(
         &self,
@@ -569,7 +562,6 @@ impl SchemaHelper {
             .context(ExecuteDdlSnafu)
     }
 
-    // TODO(yingwen): Replace StatementExecutor::create_logical_tables_procedure
     /// Submits a procedure to create logical tables.
     async fn create_logical_tables_procedure(
         &self,
@@ -587,7 +579,6 @@ impl SchemaHelper {
             .context(ExecuteDdlSnafu)
     }
 
-    // TODO(yingwen): Replace StatementExecutor::alter_logical_tables_procedure
     /// Submits a procedure to alter logical tables.
     async fn alter_logical_tables_procedure(
         &self,

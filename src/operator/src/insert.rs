@@ -22,8 +22,8 @@ use api::v1::region::{
     RegionRequestHeader,
 };
 use api::v1::{
-    AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
-    RowInsertRequest, RowInsertRequests, SemanticType,
+    AlterTableExpr, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest,
+    RowInsertRequests, SemanticType,
 };
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
@@ -34,7 +34,6 @@ use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
@@ -48,9 +47,7 @@ use snafu::ResultExt;
 use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
-use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
-};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, MERGE_MODE_KEY};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::TableInfo;
@@ -280,7 +277,8 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         // check and create physical table
-        self.create_physical_table_on_demand(&ctx, physical_table.clone())
+        self.schema_helper
+            .create_metric_physical_table(&ctx, physical_table.clone())
             .await?;
 
         // check and create logical tables
@@ -665,69 +663,6 @@ impl Inserter {
             instant_table_ids,
             table_infos,
         })
-    }
-
-    async fn create_physical_table_on_demand(
-        &self,
-        ctx: &QueryContextRef,
-        physical_table: String,
-    ) -> Result<()> {
-        let catalog_name = ctx.current_catalog();
-        let schema_name = ctx.current_schema();
-
-        // check if exist
-        if self
-            .get_table(catalog_name, &schema_name, &physical_table)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
-        info!("Physical metric table `{table_reference}` does not exist, try creating table");
-
-        // schema with timestamp and field column
-        let default_schema = vec![
-            ColumnSchema {
-                column_name: GREPTIME_TIMESTAMP.to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as _,
-                semantic_type: SemanticType::Timestamp as _,
-                datatype_extension: None,
-                options: None,
-            },
-            ColumnSchema {
-                column_name: GREPTIME_VALUE.to_string(),
-                datatype: ColumnDataType::Float64 as _,
-                semantic_type: SemanticType::Field as _,
-                datatype_extension: None,
-                options: None,
-            },
-        ];
-        let create_table_expr =
-            &mut build_create_table_expr(&table_reference, &default_schema, default_engine())?;
-
-        create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
-        create_table_expr
-            .table_options
-            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
-
-        // create physical table
-        let res = self
-            .schema_helper
-            .create_table_by_expr(create_table_expr, None, ctx.clone())
-            .await;
-
-        match res {
-            Ok(_) => {
-                info!("Successfully created table {table_reference}",);
-                Ok(())
-            }
-            Err(err) => {
-                error!(err; "Failed to create table {table_reference}");
-                Err(err)
-            }
-        }
     }
 
     async fn get_table(
