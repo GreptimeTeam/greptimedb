@@ -250,6 +250,7 @@ impl Categorizer {
                             debug!("After Step Optimize: {ret:?}");
                             ret.ok().map(|s| TransformerAction {
                                 extra_parent_plans: s.to_vec(),
+                                new_child_plan: None,
                             })
                         })),
                     };
@@ -430,6 +431,8 @@ pub struct TransformerAction {
     ///             MergeScan: ...
     /// ```
     pub extra_parent_plans: Vec<LogicalPlan>,
+    /// new child plan, if None, use the original plan.
+    pub new_child_plan: Option<LogicalPlan>,
 }
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {

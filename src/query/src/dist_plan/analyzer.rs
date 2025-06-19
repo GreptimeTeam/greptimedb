@@ -156,6 +156,7 @@ struct PlanRewriter {
     partition_cols: Option<Vec<String>>,
     column_requirements: HashSet<Column>,
     expand_on_next_call: bool,
+    new_child_plan: Option<LogicalPlan>,
 }
 
 impl PlanRewriter {
@@ -211,6 +212,7 @@ impl PlanRewriter {
                     self.stage
                         .extend(transformer_actions.extra_parent_plans.into_iter().rev());
                     self.expand_on_next_call = true;
+                    self.new_child_plan = transformer_actions.new_child_plan;
                 }
             }
             Commutativity::NonCommutative
@@ -286,6 +288,10 @@ impl PlanRewriter {
     }
 
     fn expand(&mut self, mut on_node: LogicalPlan) -> DfResult<LogicalPlan> {
+        if let Some(new_child_plan) = self.new_child_plan.take() {
+            // if there is a new child plan, use it as the new root
+            on_node = new_child_plan;
+        }
         // store schema before expand
         let schema = on_node.schema().clone();
         let mut rewriter = EnforceDistRequirementRewriter {
