@@ -93,7 +93,8 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         Precision::Nanosecond,
         &mut row,
     )?;
-    // write ts fields
+
+    // write fields
     let fields = vec![
         make_column_data(
             "timestamp_end",
@@ -105,22 +106,10 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
             ColumnDataType::Uint64,
             ValueData::U64Value(span.end_in_nanosecond - span.start_in_nanosecond),
         ),
-    ];
-    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
-
-    // write fields
-    if let Some(parent_span_id) = span.parent_span_id {
-        row_writer::write_fields(
-            writer,
-            std::iter::once(make_string_column_data(
-                PARENT_SPAN_ID_COLUMN,
-                parent_span_id,
-            )),
-            &mut row,
-        )?;
-    }
-
-    let fields = vec![
+        make_string_column_data(
+            PARENT_SPAN_ID_COLUMN,
+            span.parent_span_id.unwrap_or_default(), // If the parent span id is not set, use an empty string.
+        ),
         make_string_column_data(TRACE_ID_COLUMN, span.trace_id),
         make_string_column_data(SPAN_ID_COLUMN, span.span_id),
         make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
