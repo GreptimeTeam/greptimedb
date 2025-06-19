@@ -1152,60 +1152,6 @@ impl StatementExecutor {
         Ok(Output::new_with_affected_rows(0))
     }
 
-    /// Verifies an alter and returns whether it is necessary to perform the alter.
-    ///
-    /// # Returns
-    ///
-    /// Returns true if the alter need to be porformed; otherwise, it returns false.
-    fn verify_alter(
-        &self,
-        table_id: TableId,
-        table_info: Arc<TableInfo>,
-        expr: AlterTableExpr,
-    ) -> Result<bool> {
-        let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
-            .context(AlterExprToRequestSnafu)?;
-
-        let AlterTableRequest {
-            table_name,
-            alter_kind,
-            ..
-        } = &request;
-
-        if let AlterKind::RenameTable { new_table_name } = alter_kind {
-            ensure!(
-                NAME_PATTERN_REG.is_match(new_table_name),
-                error::UnexpectedSnafu {
-                    violated: format!("Invalid table name: {}", new_table_name)
-                }
-            );
-        } else if let AlterKind::AddColumns { columns } = alter_kind {
-            // If all the columns are marked as add_if_not_exists and they already exist in the table,
-            // there is no need to perform the alter.
-            let column_names: HashSet<_> = table_info
-                .meta
-                .schema
-                .column_schemas()
-                .iter()
-                .map(|schema| &schema.name)
-                .collect();
-            if columns.iter().all(|column| {
-                column_names.contains(&column.column_schema.name) && column.add_if_not_exists
-            }) {
-                return Ok(false);
-            }
-        }
-
-        let _ = table_info
-            .meta
-            .builder_with_alter_kind(table_name, &request.alter_kind)
-            .context(error::TableSnafu)?
-            .build()
-            .context(error::BuildTableMetaSnafu { table_name })?;
-
-        Ok(true)
-    }
-
     #[tracing::instrument(skip_all)]
     pub async fn alter_table(
         &self,
@@ -1258,7 +1204,7 @@ impl StatementExecutor {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        let need_alter = self.verify_alter(table_id, table.table_info(), expr.clone())?;
+        let need_alter = verify_alter(table_id, table.table_info(), expr.clone())?;
         if !need_alter {
             return Ok(Output::new_with_affected_rows(0));
         }
@@ -1583,6 +1529,59 @@ impl StatementExecutor {
             .await
             .context(error::ExecuteDdlSnafu)
     }
+}
+
+/// Verifies an alter and returns whether it is necessary to perform the alter.
+///
+/// # Returns
+///
+/// Returns true if the alter need to be porformed; otherwise, it returns false.
+pub(crate) fn verify_alter(
+    table_id: TableId,
+    table_info: Arc<TableInfo>,
+    expr: AlterTableExpr,
+) -> Result<bool> {
+    let request: AlterTableRequest =
+        common_grpc_expr::alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
+
+    let AlterTableRequest {
+        table_name,
+        alter_kind,
+        ..
+    } = &request;
+
+    if let AlterKind::RenameTable { new_table_name } = alter_kind {
+        ensure!(
+            NAME_PATTERN_REG.is_match(new_table_name),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid table name: {}", new_table_name)
+            }
+        );
+    } else if let AlterKind::AddColumns { columns } = alter_kind {
+        // If all the columns are marked as add_if_not_exists and they already exist in the table,
+        // there is no need to perform the alter.
+        let column_names: HashSet<_> = table_info
+            .meta
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|schema| &schema.name)
+            .collect();
+        if columns.iter().all(|column| {
+            column_names.contains(&column.column_schema.name) && column.add_if_not_exists
+        }) {
+            return Ok(false);
+        }
+    }
+
+    let _ = table_info
+        .meta
+        .builder_with_alter_kind(table_name, &request.alter_kind)
+        .context(error::TableSnafu)?
+        .build()
+        .context(error::BuildTableMetaSnafu { table_name })?;
+
+    Ok(true)
 }
 
 /// Parse partition statement [Partitions] into [MetaPartition] and partition columns.
