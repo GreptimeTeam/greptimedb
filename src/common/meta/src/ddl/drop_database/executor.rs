@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
 
 use common_procedure::Status;
 use common_telemetry::info;
@@ -25,7 +24,7 @@ use table::table_name::TableName;
 use crate::ddl::drop_database::cursor::DropDatabaseCursor;
 use crate::ddl::drop_database::{DropDatabaseContext, DropTableTarget, State};
 use crate::ddl::drop_table::executor::DropTableExecutor;
-use crate::ddl::utils::extract_region_wal_options;
+use crate::ddl::utils::get_region_wal_options;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
@@ -109,17 +108,12 @@ impl State for DropDatabaseExecutor {
         );
 
         // Deletes topic-region mapping if dropping physical table
-        let region_wal_options =
-            if let TableRouteValue::Physical(table_route_value) = &table_route_value {
-                let datanode_table_values = ddl_ctx
-                    .table_metadata_manager
-                    .datanode_table_manager()
-                    .regions(self.physical_table_id, table_route_value)
-                    .await?;
-                extract_region_wal_options(&datanode_table_values)?
-            } else {
-                HashMap::new()
-            };
+        let region_wal_options = get_region_wal_options(
+            &ddl_ctx.table_metadata_manager,
+            &table_route_value,
+            self.physical_table_id,
+        )
+        .await?;
 
         executor
             .on_destroy_metadata(ddl_ctx, &table_route_value, &region_wal_options)

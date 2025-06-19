@@ -20,7 +20,6 @@ use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -30,7 +29,7 @@ use futures::TryStreamExt;
 
 use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
-use crate::metadata::control::utils::{decode_key_value, json_fromatter};
+use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_fromatter};
 use crate::Tool;
 
 /// Getting metadata from metadata store.
@@ -130,8 +129,12 @@ pub struct GetTableCommand {
     table_name: Option<String>,
 
     /// The schema name of the table.
-    #[clap(long)]
-    schema_name: Option<String>,
+    #[clap(long, default_value = DEFAULT_SCHEMA_NAME)]
+    schema_name: String,
+
+    /// The catalog name of the table.
+    #[clap(long, default_value = DEFAULT_CATALOG_NAME)]
+    catalog_name: String,
 
     /// Pretty print the output.
     #[clap(long, default_value = "false")]
@@ -143,7 +146,10 @@ pub struct GetTableCommand {
 
 impl GetTableCommand {
     pub fn validate(&self) -> Result<(), BoxedError> {
-        if self.table_id.is_none() && self.table_name.is_none() {
+        if matches!(
+            (&self.table_id, &self.table_name),
+            (Some(_), Some(_)) | (None, None)
+        ) {
             return Err(BoxedError::new(
                 InvalidArgumentsSnafu {
                     msg: "You must specify either --table-id or --table-name.",
@@ -159,7 +165,8 @@ struct GetTableTool {
     kvbackend: KvBackendRef,
     table_id: Option<u32>,
     table_name: Option<String>,
-    schema_name: Option<String>,
+    schema_name: String,
+    catalog_name: String,
     pretty: bool,
 }
 
@@ -172,23 +179,20 @@ impl Tool for GetTableTool {
         let table_route_manager = table_metadata_manager.table_route_manager();
 
         let table_id = if let Some(table_name) = &self.table_name {
-            let catalog = DEFAULT_CATALOG_NAME.to_string();
-            let schema_name = self
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-            let key = TableNameKey::new(&catalog, &schema_name, table_name);
+            let catalog_name = &self.catalog_name;
+            let schema_name = &self.schema_name;
 
-            let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
+            let Some(table_id) =
+                get_table_id_by_name(table_name_manager, catalog_name, schema_name, table_name)
+                    .await?
             else {
                 println!(
                     "Table({}) not found",
-                    format_full_table_name(&catalog, &schema_name, table_name)
+                    format_full_table_name(catalog_name, schema_name, table_name)
                 );
                 return Ok(());
             };
-
-            table_name.table_id()
+            table_id
         } else {
             // Safety: we have validated that table_id or table_name is not None
             self.table_id.unwrap()
@@ -236,6 +240,7 @@ impl GetTableCommand {
             table_id: self.table_id,
             table_name: self.table_name.clone(),
             schema_name: self.schema_name.clone(),
+            catalog_name: self.catalog_name.clone(),
             pretty: self.pretty,
         }))
     }

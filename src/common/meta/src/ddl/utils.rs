@@ -42,7 +42,8 @@ use crate::error::{
 };
 use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::TableMetadataManagerRef;
+use crate::key::table_route::TableRouteValue;
+use crate::key::{TableMetadataManager, TableMetadataManagerRef};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_follower_regions, find_followers, RegionRoute};
@@ -184,6 +185,25 @@ pub fn parse_region_wal_options(
             .context(ParseWalOptionsSnafu { wal_options })?;
         region_wal_options.insert(*region_number, wal_option);
     }
+    Ok(region_wal_options)
+}
+
+/// Gets the wal options for a table.
+pub async fn get_region_wal_options(
+    table_metadata_manager: &TableMetadataManager,
+    table_route_value: &TableRouteValue,
+    physical_table_id: TableId,
+) -> Result<HashMap<RegionNumber, WalOptions>> {
+    let region_wal_options =
+        if let TableRouteValue::Physical(table_route_value) = &table_route_value {
+            let datanode_table_values = table_metadata_manager
+                .datanode_table_manager()
+                .regions(physical_table_id, table_route_value)
+                .await?;
+            extract_region_wal_options(&datanode_table_values)?
+        } else {
+            HashMap::new()
+        };
     Ok(region_wal_options)
 }
 

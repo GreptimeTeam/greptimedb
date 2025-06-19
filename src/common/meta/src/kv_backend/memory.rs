@@ -54,20 +54,20 @@ impl<T> MemoryKvBackend<T> {
         kvs.clear();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     /// Returns true if the `kvs` is empty.
     pub fn is_empty(&self) -> bool {
         self.kvs.read().unwrap().is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     /// Returns the `kvs`.
     pub fn dump(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
         let kvs = self.kvs.read().unwrap();
         kvs.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     /// Returns the length of `kvs`
     pub fn len(&self) -> usize {
         self.kvs.read().unwrap().len()

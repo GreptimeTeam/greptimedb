@@ -12,26 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod del;
 mod get;
+#[cfg(test)]
+mod test_utils;
 mod utils;
 
-use clap::Subcommand;
-use common_error::ext::BoxedError;
-use get::GetCommand;
-
-use crate::Tool;
-
-/// Subcommand for metadata control, including getting metadata from metadata store
-#[derive(Subcommand)]
-pub enum ControlCommand {
-    #[clap(subcommand)]
-    Get(GetCommand),
-}
-
-impl ControlCommand {
-    pub async fn build(&self) -> Result<Box<dyn Tool>, BoxedError> {
-        match self {
-            ControlCommand::Get(cmd) => cmd.build().await,
-        }
-    }
-}
+pub(crate) use del::DelCommand;
+pub(crate) use get::GetCommand;

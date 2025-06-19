@@ -25,20 +25,32 @@ use crate::rpc::store::BatchGetRequest;
 /// [TombstoneManager] provides the ability to:
 /// - logically delete values
 /// - restore the deleted values
-pub(crate) struct TombstoneManager {
+pub struct TombstoneManager {
     kv_backend: KvBackendRef,
+    tombstone_prefix: String,
 }
 
 const TOMBSTONE_PREFIX: &str = "__tombstone/";
 
-fn to_tombstone(key: &[u8]) -> Vec<u8> {
-    [TOMBSTONE_PREFIX.as_bytes(), key].concat()
-}
-
 impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self { kv_backend }
+        Self {
+            kv_backend,
+            tombstone_prefix: TOMBSTONE_PREFIX.to_string(),
+        }
+    }
+
+    /// Returns [TombstoneManager] with a custom tombstone prefix.
+    pub fn new_with_prefix(kv_backend: KvBackendRef, prefix: &str) -> Self {
+        Self {
+            kv_backend,
+            tombstone_prefix: prefix.to_string(),
+        }
+    }
+
+    pub fn to_tombstone(&self, key: &[u8]) -> Vec<u8> {
+        [self.tombstone_prefix.as_bytes(), key].concat()
     }
 
     /// Moves value to `dest_key`.
@@ -67,7 +79,7 @@ impl TombstoneManager {
         (txn, TxnOpGetResponseSet::filter(src_key))
     }
 
-    async fn move_values_inner(&self, keys: &[Vec<u8>], dest_keys: &[Vec<u8>]) -> Result<()> {
+    async fn move_values_inner(&self, keys: &[Vec<u8>], dest_keys: &[Vec<u8>]) -> Result<usize> {
         ensure!(
             keys.len() == dest_keys.len(),
             error::UnexpectedSnafu {
@@ -102,7 +114,7 @@ impl TombstoneManager {
                 .unzip();
             let mut resp = self.kv_backend.txn(Txn::merge_all(txns)).await?;
             if resp.succeeded {
-                return Ok(());
+                return Ok(keys.len());
             }
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
             // Updates results.
@@ -125,7 +137,9 @@ impl TombstoneManager {
     }
 
     /// Moves values to `dest_key`.
-    async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<()> {
+    ///
+    /// Returns the number of keys that were moved.
+    async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<usize> {
         let chunk_size = self.kv_backend.max_txn_ops() / 2;
         if keys.len() > chunk_size {
             let keys_chunks = keys.chunks(chunk_size).collect::<Vec<_>>();
@@ -134,7 +148,7 @@ impl TombstoneManager {
                 self.move_values_inner(keys, dest_keys).await?;
             }
 
-            Ok(())
+            Ok(keys.len())
         } else {
             self.move_values_inner(&keys, &dest_keys).await
         }
@@ -145,11 +159,13 @@ impl TombstoneManager {
     /// Preforms to:
     /// - deletes origin values.
     /// - stores tombstone values.
-    pub(crate) async fn create(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+    ///
+    /// Returns the number of keys that were moved.
+    pub async fn create(&self, keys: Vec<Vec<u8>>) -> Result<usize> {
         let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
             .into_iter()
             .map(|key| {
-                let tombstone_key = to_tombstone(&key);
+                let tombstone_key = self.to_tombstone(&key);
                 (key, tombstone_key)
             })
             .unzip();
@@ -162,11 +178,13 @@ impl TombstoneManager {
     /// Preforms to:
     /// - restore origin value.
     /// - deletes tombstone values.
-    pub(crate) async fn restore(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+    ///
+    /// Returns the number of keys that were restored.
+    pub async fn restore(&self, keys: Vec<Vec<u8>>) -> Result<usize> {
         let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
             .into_iter()
             .map(|key| {
-                let tombstone_key = to_tombstone(&key);
+                let tombstone_key = self.to_tombstone(&key);
                 (tombstone_key, key)
             })
             .unzip();
@@ -175,16 +193,18 @@ impl TombstoneManager {
     }
 
     /// Deletes tombstones values for the specified `keys`.
-    pub(crate) async fn delete(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+    ///
+    /// Returns the number of keys that were deleted.
+    pub async fn delete(&self, keys: Vec<Vec<u8>>) -> Result<usize> {
         let operations = keys
             .iter()
-            .map(|key| TxnOp::Delete(to_tombstone(key)))
+            .map(|key| TxnOp::Delete(self.to_tombstone(key)))
             .collect::<Vec<_>>();
 
         let txn = Txn::new().and_then(operations);
         // Always success.
         let _ = self.kv_backend.txn(txn).await?;
-        Ok(())
+        Ok(keys.len())
     }
 }
 
@@ -194,7 +214,6 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::to_tombstone;
     use crate::error::Error;
     use crate::key::tombstone::TombstoneManager;
     use crate::kv_backend::memory::MemoryKvBackend;
@@ -246,7 +265,7 @@ mod tests {
         assert!(!kv_backend.exists(b"foo").await.unwrap());
         assert_eq!(
             kv_backend
-                .get(&to_tombstone(b"bar"))
+                .get(&tombstone_manager.to_tombstone(b"bar"))
                 .await
                 .unwrap()
                 .unwrap()
@@ -255,7 +274,7 @@ mod tests {
         );
         assert_eq!(
             kv_backend
-                .get(&to_tombstone(b"foo"))
+                .get(&tombstone_manager.to_tombstone(b"foo"))
                 .await
                 .unwrap()
                 .unwrap()
@@ -287,7 +306,7 @@ mod tests {
             kv_backend.clone(),
             &[MoveValue {
                 key: b"bar".to_vec(),
-                dest_key: to_tombstone(b"bar"),
+                dest_key: tombstone_manager.to_tombstone(b"bar"),
                 value: b"baz".to_vec(),
             }],
         )
@@ -364,7 +383,7 @@ mod tests {
             .iter()
             .map(|(key, value)| MoveValue {
                 key: key.clone(),
-                dest_key: to_tombstone(key),
+                dest_key: tombstone_manager.to_tombstone(key),
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
@@ -409,7 +428,7 @@ mod tests {
             .iter()
             .map(|(key, value)| MoveValue {
                 key: key.clone(),
-                dest_key: to_tombstone(key),
+                dest_key: tombstone_manager.to_tombstone(key),
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
@@ -462,7 +481,7 @@ mod tests {
             .iter()
             .map(|(key, value)| MoveValue {
                 key: key.clone(),
-                dest_key: to_tombstone(key),
+                dest_key: tombstone_manager.to_tombstone(key),
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
@@ -502,7 +521,7 @@ mod tests {
             .iter()
             .map(|(key, value)| MoveValue {
                 key: key.clone(),
-                dest_key: to_tombstone(key),
+                dest_key: tombstone_manager.to_tombstone(key),
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
@@ -537,7 +556,7 @@ mod tests {
             .iter()
             .map(|(key, value)| MoveValue {
                 key: key.clone(),
-                dest_key: to_tombstone(key),
+                dest_key: tombstone_manager.to_tombstone(key),
                 value: value.clone(),
             })
             .collect::<Vec<_>>();
