@@ -549,7 +549,7 @@ impl StartCommand {
         // for standalone not use grpc, but get a handler to frontend grpc client without
         // actually make a connection
         let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler();
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),

@@ -121,7 +121,9 @@ impl Default for FlownodeOptions {
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
-            query: QueryOptions::default(),
+            // flownode's query option is set to 1 to throttle flow's query so
+            // that it won't use too much cpu or memory
+            query: QueryOptions { parallelism: 1 },
             user_provider: None,
         }
     }
