@@ -79,12 +79,7 @@ impl MetricEngineInner {
             .context(MitoCatchupOperationSnafu)
             .map(|response| response.affected_rows)?;
 
-        let primary_key_encoding = self.mito.get_primary_key_encoding(data_region_id).context(
-            PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            },
-        )?;
-        self.recover_states(region_id, primary_key_encoding, physical_region_options)
+        self.recover_states(region_id, physical_region_options)
             .await?;
         Ok(0)
     }

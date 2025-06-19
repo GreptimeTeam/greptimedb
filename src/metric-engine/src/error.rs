@@ -49,6 +49,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("No open region result for region {}", region_id))]
+    NoOpenRegionResult {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to close mito region, region id: {}", region_id))]
     CloseMitoRegion {
         region_id: RegionId,
@@ -328,7 +335,8 @@ impl ErrorExt for Error {
             | ParseRegionId { .. }
             | InvalidMetadata { .. }
             | SetSkippingIndexOption { .. }
-            | SerializeRegionManifestInfo { .. } => StatusCode::Unexpected,
+            | SerializeRegionManifestInfo { .. }
+            | NoOpenRegionResult { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound
