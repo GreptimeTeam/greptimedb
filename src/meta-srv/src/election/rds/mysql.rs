@@ -239,25 +239,16 @@ impl ElectionMysqlClient {
         }
     }
 
-    fn set_session_wait_timeout_sql(&self) -> String {
-        format!(
-            "SET SESSION wait_timeout = {};",
-            self.wait_timeout.as_secs()
-        )
+    fn set_session_wait_timeout_sql() -> &'static str {
+        "SET SESSION wait_timeout = ?;"
     }
 
-    fn set_session_lock_wait_timeout_sql(&self) -> String {
-        format!(
-            "SET SESSION innodb_lock_wait_timeout = {};",
-            self.innode_lock_wait_timeout.as_secs()
-        )
+    fn set_session_lock_wait_timeout_sql() -> &'static str {
+        "SET SESSION innodb_lock_wait_timeout = ?;"
     }
 
-    fn set_session_max_execution_time_sql(&self) -> String {
-        format!(
-            "SET SESSION max_execution_time = {};",
-            self.max_execution_time.as_millis()
-        )
+    fn set_session_max_execution_time_sql() -> &'static str {
+        "SET SESSION max_execution_time = ?;"
     }
 
     fn create_table_sql(&self) -> String {
@@ -305,19 +296,22 @@ impl ElectionMysqlClient {
             self.current = Some(client);
             if !self.wait_timeout.is_zero() {
                 // Set wait timeout to avoid idle connection.
-                let set_session_wait_timeout_sql = self.set_session_wait_timeout_sql();
-                let query = sqlx::query(&set_session_wait_timeout_sql);
-                self.execute(query, &set_session_wait_timeout_sql).await?;
+                let set_session_wait_timeout_sql = Self::set_session_wait_timeout_sql();
+                let query =
+                    sqlx::query(set_session_wait_timeout_sql).bind(self.wait_timeout.as_secs());
+                self.execute(query, set_session_wait_timeout_sql).await?;
             }
             // Set lock wait timeout to avoid waiting too long.
-            let set_session_lock_wait_timeout_sql = self.set_session_lock_wait_timeout_sql();
-            let query = sqlx::query(&set_session_lock_wait_timeout_sql);
-            self.execute(query, &set_session_lock_wait_timeout_sql)
+            let set_session_lock_wait_timeout_sql = Self::set_session_lock_wait_timeout_sql();
+            let query = sqlx::query(set_session_lock_wait_timeout_sql)
+                .bind(self.innode_lock_wait_timeout.as_secs());
+            self.execute(query, set_session_lock_wait_timeout_sql)
                 .await?;
             // Set max execution time to avoid long-running queries.
-            let set_session_max_execution_time_sql = self.set_session_max_execution_time_sql();
-            let query = sqlx::query(&set_session_lock_wait_timeout_sql);
-            self.execute(query, &set_session_max_execution_time_sql)
+            let set_session_max_execution_time_sql = Self::set_session_max_execution_time_sql();
+            let query = sqlx::query(set_session_max_execution_time_sql)
+                .bind(self.max_execution_time.as_millis() as u64);
+            self.execute(query, set_session_max_execution_time_sql)
                 .await?;
             // Set session isolation level.
             self.set_session_isolation_level().await?;
