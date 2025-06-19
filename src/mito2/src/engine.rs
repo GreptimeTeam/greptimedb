@@ -250,35 +250,32 @@ impl MitoEngine {
         Ok(())
     }
 
-    /// Find the stats of memtables by region_id.
-    pub fn find_memtables_stats(&self, region_id: RegionId) -> Result<Vec<MemtableStats>> {
+    /// Find the current version's memtables and SSTs stats by region_id.
+    /// The stats must be collected in one place one time to ensure data consistency.
+    pub fn find_memtable_and_sst_stats(
+        &self,
+        region_id: RegionId,
+    ) -> Result<(Vec<MemtableStats>, Vec<FileMeta>)> {
         let region = self
             .find_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        Ok(region
-            .version()
+        let version = region.version();
+        let memtable_stats = version
             .memtables
             .list_memtables()
             .iter()
             .map(|x| x.stats())
-            .collect())
-    }
+            .collect::<Vec<_>>();
 
-    /// Find the SST files meta by region_id.
-    pub fn find_files_meta(&self, region_id: RegionId) -> Result<Vec<FileMeta>> {
-        let region = self
-            .find_region(region_id)
-            .context(RegionNotFoundSnafu { region_id })?;
-
-        Ok(region
-            .version()
+        let sst_stats = version
             .ssts
             .levels()
             .iter()
-            .flat_map(|x| x.files().map(|f| f.meta_ref()))
+            .flat_map(|level| level.files().map(|x| x.meta_ref()))
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        Ok((memtable_stats, sst_stats))
     }
 }
 
