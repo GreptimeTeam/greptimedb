@@ -425,6 +425,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Leader lease expired"))]
+    LeaderLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Leader lease changed during election"))]
+    LeaderLeaseChanged {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table {} not found", name))]
     TableNotFound {
         name: String,
@@ -928,6 +940,8 @@ impl ErrorExt for Error {
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::NoLeader { .. }
+            | Error::LeaderLeaseExpired { .. }
+            | Error::LeaderLeaseChanged { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
             | Error::Range { .. }

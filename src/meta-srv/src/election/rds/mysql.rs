@@ -32,8 +32,9 @@ use crate::election::{
     CANDIDATES_ROOT, ELECTION_KEY,
 };
 use crate::error::{
-    AcquireMySqlClientSnafu, DecodeSqlValueSnafu, DeserializeFromJsonSnafu, MySqlExecutionSnafu,
-    NoLeaderSnafu, Result, SerializeToJsonSnafu, SqlExecutionTimeoutSnafu, UnexpectedSnafu,
+    AcquireMySqlClientSnafu, DecodeSqlValueSnafu, DeserializeFromJsonSnafu,
+    LeaderLeaseChangedSnafu, LeaderLeaseExpiredSnafu, MySqlExecutionSnafu, NoLeaderSnafu, Result,
+    SerializeToJsonSnafu, SqlExecutionTimeoutSnafu, UnexpectedSnafu,
 };
 use crate::metasrv::{ElectionRef, LeaderValue, MetasrvNodeInfo};
 
@@ -318,8 +319,21 @@ impl ElectionMysqlClient {
             let query = sqlx::query(&set_session_lock_wait_timeout_sql);
             self.execute(query, &set_session_max_execution_time_sql)
                 .await?;
+            // Set session isolation level.
+            self.set_session_isolation_level().await?;
             self.check_version(&self.check_version_sql()).await?;
         }
+        Ok(())
+    }
+
+    /// Set session isolation level to serializable.
+    ///
+    /// # Panics
+    /// if `current` is `None`.
+    async fn set_session_isolation_level(&mut self) -> Result<()> {
+        let sql = "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE";
+        let query = sqlx::query(sql);
+        self.execute(query, sql).await?;
         Ok(())
     }
 
@@ -405,11 +419,13 @@ impl ElectionMysqlClient {
     }
 
     async fn transaction(&mut self) -> Result<TransactionWithExuectionTimeout<'_>> {
-        let transaction = self
-            .pool
+        use sqlx::Acquire;
+        let client = self.current.as_mut().unwrap();
+        let transaction = client
             .begin()
             .await
             .context(MySqlExecutionSnafu { sql: "BEGIN" })?;
+
         Ok(TransactionWithExuectionTimeout {
             transaction,
             execution_timeout: self.execution_timeout,
@@ -642,7 +658,7 @@ impl Election for MySqlElection {
         let mut keep_alive_interval = tokio::time::interval(self.meta_lease_ttl / 2);
         keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            let _ = self.do_campaign().await;
+            self.do_campaign().await?;
             keep_alive_interval.tick().await;
         }
     }
@@ -813,14 +829,21 @@ impl MySqlElection {
     /// Attempts to acquire leadership by executing a campaign. This function continuously checks
     /// if the current lease is still valid.
     async fn do_campaign(&self) -> Result<()> {
-        let client = self.client.lock().await;
-        let executor = Executor::Default(client);
-        let mut lease = Lease::default();
-        match (
-            self.lease_check(executor, &mut lease).await,
-            self.is_leader(),
-            self.leader_value == lease.leader_value,
-        ) {
+        let lease = {
+            let client = self.client.lock().await;
+            let mut executor = Executor::Default(client);
+            self.get_value_with_lease(&self.election_key(), &mut executor)
+                .await?
+        };
+
+        let is_leader = self.is_leader();
+        // If current leader value is the same as the leader value in the remote lease,
+        // it means the current leader is still valid.
+        let is_current_leader = lease
+            .as_ref()
+            .map(|lease| lease.leader_value == self.leader_value)
+            .unwrap_or(false);
+        match (self.lease_check(&lease), is_leader, is_current_leader) {
             // If the leader lease is valid and I'm the leader, renew the lease.
             (Ok(_), true, true) => {
                 let mut client = self.client.lock().await;
@@ -828,24 +851,28 @@ impl MySqlElection {
                 let mut executor = Executor::Txn(txn);
                 let query = sqlx::query(&self.sql_set.campaign);
                 executor.query(query, &self.sql_set.campaign).await?;
-                self.renew_lease(executor, lease).await?;
+                // Safety: Checked if lease is not None above.
+                self.renew_lease(executor, lease.unwrap()).await?;
             }
             // If the leader lease expires and I'm the leader, notify the leader watcher and step down.
             // Another instance should be elected as the leader in this case.
-            (Err(_), true, _) | (Ok(_), true, false) => {
+            (Err(err), true, _) => {
+                warn!(err; "Leader lease expired, step down...");
+                self.step_down_without_lock().await?;
+            }
+            (Ok(_), true, false) => {
                 warn!("Leader lease expired, step down...");
                 self.step_down_without_lock().await?;
             }
             // If the leader lease expires and I'm not the leader, elect myself.
-            (Err(_), false, _) => {
-                warn!("Leader lease expired, elected.");
+            (Err(err), false, _) => {
+                warn!(err; "Leader lease expired, elect myself.");
                 let mut client = self.client.lock().await;
                 let txn = client.transaction().await?;
                 let mut executor = Executor::Txn(txn);
                 let query = sqlx::query(&self.sql_set.campaign);
                 executor.query(query, &self.sql_set.campaign).await?;
-                self.elected(&mut executor).await?;
-                executor.commit().await?;
+                self.elected(executor, lease).await?;
             }
             // If the leader lease is valid and I'm the leader, but I don't think I'm the leader.
             // Just re-elect myself.
@@ -856,8 +883,8 @@ impl MySqlElection {
                 let mut executor = Executor::Txn(txn);
                 let query = sqlx::query(&self.sql_set.campaign);
                 executor.query(query, &self.sql_set.campaign).await?;
-                self.elected(&mut executor).await?;
-                executor.commit().await?;
+                // Safety: Checked if lease is not None above.
+                self.renew_lease(executor, lease.unwrap()).await?;
             }
             // If the leader lease is valid and I'm not the leader, do nothing.
             (Ok(_), false, false) => {}
@@ -877,6 +904,22 @@ impl MySqlElection {
         )
         .await?;
         executor.commit().await?;
+
+        if !self.is_leader() {
+            let key = self.election_key();
+            let leader_key = RdsLeaderKey {
+                name: self.leader_value.clone().into_bytes(),
+                key: key.clone().into_bytes(),
+                ..Default::default()
+            };
+            send_leader_change_and_set_flags(
+                &self.is_leader,
+                &self.leader_infancy,
+                &self.leader_watcher,
+                LeaderChangeMessage::Elected(Arc::new(leader_key)),
+            );
+        }
+
         Ok(())
     }
 
@@ -888,17 +931,12 @@ impl MySqlElection {
     ///   to re-initiate the campaign. If the leader failed to renew the lease, its session will expire and the lock
     ///   will be released.
     /// - **Case 2**: If all checks pass, the function returns without performing any actions.
-    async fn lease_check(&self, mut executor: Executor<'_>, lease: &mut Lease) -> Result<()> {
-        let key = self.election_key();
-        let check_lease = self
-            .get_value_with_lease(&key, &mut executor)
-            .await?
-            .context(NoLeaderSnafu)?;
-        *lease = check_lease;
+    fn lease_check(&self, lease: &Option<Lease>) -> Result<Lease> {
+        let lease = lease.as_ref().context(NoLeaderSnafu)?;
         // Case 1: Lease expired
-        ensure!(lease.expire_time > lease.current, NoLeaderSnafu);
+        ensure!(lease.expire_time > lease.current, LeaderLeaseExpiredSnafu);
         // Case 2: Everything is fine
-        Ok(())
+        Ok(lease.clone())
     }
 
     /// Still consider itself as the leader locally but failed to acquire the lock. Step down without deleting the key.
@@ -920,21 +958,31 @@ impl MySqlElection {
 
     /// Elected as leader. The leader should put the key and notify the leader watcher.
     /// Caution: Should only elected while holding the lock.
-    async fn elected(&self, executor: &mut Executor<'_>) -> Result<()> {
+    async fn elected(
+        &self,
+        mut executor: Executor<'_>,
+        expected_lease: Option<Lease>,
+    ) -> Result<()> {
         let key = self.election_key();
         let leader_key = RdsLeaderKey {
             name: self.leader_value.clone().into_bytes(),
             key: key.clone().into_bytes(),
             ..Default::default()
         };
-        self.delete_value(&key, executor).await?;
+        let remote_lease = self.get_value_with_lease(&key, &mut executor).await?;
+        ensure!(
+            expected_lease.map(|lease| lease.origin) == remote_lease.map(|lease| lease.origin),
+            LeaderLeaseChangedSnafu
+        );
+        self.delete_value(&key, &mut executor).await?;
         self.put_value_with_lease(
             &key,
             &self.leader_value,
             self.meta_lease_ttl.as_secs(),
-            executor,
+            &mut executor,
         )
         .await?;
+        executor.commit().await?;
 
         send_leader_change_and_set_flags(
             &self.is_leader,
@@ -1207,15 +1255,18 @@ mod tests {
         drop_table(&mysql_election.client, table_name).await;
     }
 
-    async fn elected(election: &MySqlElection, table_name: &str) {
+    async fn elected(
+        election: &MySqlElection,
+        table_name: &str,
+        expected_lease: Option<Lease>,
+    ) -> Result<()> {
         let mut client = election.client.lock().await;
         let txn = client.transaction().await.unwrap();
         let mut executor = Executor::Txn(txn);
         let raw_query = format!("SELECT * FROM {} FOR UPDATE;", table_name);
         let query = sqlx::query(&raw_query);
         let _ = executor.query(query, &raw_query).await.unwrap();
-        election.elected(&mut executor).await.unwrap();
-        executor.commit().await.unwrap();
+        election.elected(executor, expected_lease).await
     }
 
     async fn get_lease(election: &MySqlElection) -> Option<Lease> {
@@ -1225,6 +1276,107 @@ mod tests {
             .get_value_with_lease(&election.election_key(), &mut executor)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_elected_with_incorrect_lease_fails() {
+        maybe_skip_mysql_integration_test!();
+        let leader_value = "test_leader".to_string();
+        let candidate_lease_ttl = Duration::from_secs(5);
+        let meta_lease_ttl = Duration::from_secs(2);
+        let execution_timeout = Duration::from_secs(10);
+        let idle_session_timeout = Duration::from_secs(0);
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_elected_failed_greptime_metakv";
+        let client = create_mysql_client(Some(table_name), execution_timeout, idle_session_timeout)
+            .await
+            .unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let leader_mysql_election = MySqlElection {
+            leader_value: leader_value.clone(),
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: uuid,
+            candidate_lease_ttl,
+            meta_lease_ttl,
+            sql_set: ElectionSqlFactory::new(table_name).build(),
+        };
+
+        let incorrect_lease = Lease::default();
+        let err = elected(&leader_mysql_election, table_name, Some(incorrect_lease))
+            .await
+            .unwrap_err();
+        assert_matches!(err, error::Error::LeaderLeaseChanged { .. });
+        let lease = get_lease(&leader_mysql_election).await;
+        assert!(lease.is_none());
+        drop_table(&leader_mysql_election.client, table_name).await;
+    }
+
+    #[tokio::test]
+    async fn test_reelection_with_idle_session_timeout() {
+        maybe_skip_mysql_integration_test!();
+        let leader_value = "test_leader".to_string();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let table_name = "test_reelection_greptime_metakv";
+        let candidate_lease_ttl = Duration::from_secs(5);
+        let meta_lease_ttl = Duration::from_secs(5);
+        let execution_timeout = Duration::from_secs(10);
+        let idle_session_timeout = Duration::from_secs(2);
+        let client = create_mysql_client(Some(table_name), execution_timeout, idle_session_timeout)
+            .await
+            .unwrap();
+
+        let (tx, _) = broadcast::channel(100);
+        let leader_mysql_election = MySqlElection {
+            leader_value: leader_value.clone(),
+            client,
+            is_leader: AtomicBool::new(false),
+            leader_infancy: AtomicBool::new(true),
+            leader_watcher: tx,
+            store_key_prefix: uuid,
+            candidate_lease_ttl,
+            meta_lease_ttl,
+            sql_set: ElectionSqlFactory::new(table_name).build(),
+        };
+
+        elected(&leader_mysql_election, table_name, None)
+            .await
+            .unwrap();
+        let lease = get_lease(&leader_mysql_election).await.unwrap();
+        assert_eq!(lease.leader_value, leader_value);
+        assert!(lease.expire_time > lease.current);
+        assert!(leader_mysql_election.is_leader());
+        // Wait for mysql server close the inactive connection.
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        // Should be failed.
+        leader_mysql_election
+            .client
+            .lock()
+            .await
+            .query(sqlx::query("SELECT 1"), "SELECT 1")
+            .await
+            .unwrap_err();
+        // Reset the client.
+        leader_mysql_election
+            .client
+            .lock()
+            .await
+            .reset_client()
+            .await
+            .unwrap();
+
+        // Should able to re-elected.
+        elected(&leader_mysql_election, table_name, Some(lease.clone()))
+            .await
+            .unwrap();
+        let lease = get_lease(&leader_mysql_election).await.unwrap();
+        assert_eq!(lease.leader_value, leader_value);
+        assert!(lease.expire_time > lease.current);
+        assert!(leader_mysql_election.is_leader());
+        drop_table(&leader_mysql_election.client, table_name).await;
     }
 
     #[tokio::test]
@@ -1254,7 +1406,9 @@ mod tests {
             sql_set: ElectionSqlFactory::new(table_name).build(),
         };
 
-        elected(&leader_mysql_election, table_name).await;
+        elected(&leader_mysql_election, table_name, None)
+            .await
+            .unwrap();
         let lease = get_lease(&leader_mysql_election).await.unwrap();
         assert_eq!(lease.leader_value, leader_value);
         assert!(lease.expire_time > lease.current);
@@ -1294,7 +1448,9 @@ mod tests {
             _ => panic!("Expected LeaderChangeMessage::StepDown"),
         }
 
-        elected(&leader_mysql_election, table_name).await;
+        elected(&leader_mysql_election, table_name, Some(lease.clone()))
+            .await
+            .unwrap();
         let lease = get_lease(&leader_mysql_election).await.unwrap();
         assert_eq!(lease.leader_value, leader_value);
         assert!(lease.expire_time > lease.current);
