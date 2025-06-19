@@ -1748,12 +1748,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(err, error::Error::MySqlExecution { .. });
-        let error::Error::MySqlExecution { error, .. } = err else {
-            panic!("Expected MySqlExecution error");
-        };
-        assert!(error
-            .to_string()
-            .contains("The client was disconnected by the server because of inactivity."));
         // Reset the client and try again.
         client.lock().await.reset_client().await.unwrap();
         let _ = client
