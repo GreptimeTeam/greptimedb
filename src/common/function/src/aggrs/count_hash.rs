@@ -202,7 +202,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         opt_filter: Option<&BooleanArray>,
         total_num_groups: usize,
     ) -> Result<()> {
-        assert_eq!(values.len(), 1, "COUNT DISTINCT expects a single argument");
+        assert_eq!(values.len(), 1, "count_hash expects a single argument");
         self.ensure_sets(total_num_groups);
 
         let array = &values[0];
@@ -285,7 +285,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         assert_eq!(
             values.len(),
             1,
-            "COUNT DISTINCT merge expects a single state array"
+            "count_hash merge expects a single state array"
         );
         self.ensure_sets(total_num_groups);
 
@@ -299,7 +299,6 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
                 // Add each value to our set for this group
                 for j in 0..inner_array.len() {
                     if !inner_array.is_null(j) {
-                        // let scalar = ScalarValue::try_from_array(&inner_array, j)?;
                         self.distinct_sets[group_idx].insert(inner_array.value(j));
                     }
                 }
@@ -349,14 +348,13 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         values: &[ArrayRef],
         opt_filter: Option<&BooleanArray>,
     ) -> Result<Vec<ArrayRef>> {
-        // For a single distinct value per row, create a list array with that value
-        assert_eq!(values.len(), 1, "COUNT DISTINCT expects a single argument");
+        // For a single hash value per row, create a list array with that value
+        assert_eq!(values.len(), 1, "count_hash expects a single argument");
         let values = ArrayRef::clone(&values[0]);
 
         let offsets = OffsetBuffer::new(ScalarBuffer::from_iter(0..values.len() as i32 + 1));
         let nulls = filtered_null_mask(opt_filter, &values);
         let list_array = ListArray::new(
-            // Arc::new(Field::new_list_field(values.data_type().clone(), true)),
             Arc::new(Field::new_list_field(DataType::UInt64, true)),
             offsets,
             values,
@@ -382,8 +380,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         // Instead of iterating through all values which is expensive, use an approximation
         for set in &self.distinct_sets {
             // Base size of the HashSet
-            size += set.capacity() * size_of::<(HashValueType, ())>();
-            size += size_of::<HashValueType>() * set.len();
+            size += set.capacity() * size_of::<HashValueType>();
         }
 
         size
@@ -399,18 +396,9 @@ struct CountHashAccumulator {
 
 impl CountHashAccumulator {
     // calculating the size for fixed length values, taking first batch size *
-    // number of batches This method is faster than .full_size(), however it is
-    // not suitable for variable length values like strings or complex types
+    // number of batches.
     fn fixed_size(&self) -> usize {
-        size_of_val(self)
-            + (size_of::<HashValueType>() * self.values.capacity())
-            + self
-                .values
-                .iter()
-                .next()
-                .map(|vals| size_of::<HashValueType>() - size_of_val(vals))
-                .unwrap_or(0)
-            + size_of::<DataType>()
+        size_of_val(self) + (size_of::<HashValueType>() * self.values.capacity())
     }
 }
 
