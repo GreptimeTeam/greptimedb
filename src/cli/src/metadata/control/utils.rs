@@ -46,12 +46,12 @@ pub async fn get_table_id_by_name(
     table_name: &str,
 ) -> Result<Option<TableId>, BoxedError> {
     let table_name_key = TableNameKey::new(catalog_name, schema_name, table_name);
-    let Some(table_name) = table_name_manager
+    let Some(table_name_value) = table_name_manager
         .get(table_name_key)
         .await
         .map_err(BoxedError::new)?
     else {
         return Ok(None);
     };
-    Ok(Some(table_name.table_id()))
+    Ok(Some(table_name_value.table_id()))
 }

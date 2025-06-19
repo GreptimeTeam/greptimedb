@@ -20,7 +20,6 @@ use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -30,7 +29,7 @@ use futures::TryStreamExt;
 
 use crate::error::InvalidArgumentsSnafu;
 use crate::metadata::common::StoreConfig;
-use crate::metadata::control::utils::{decode_key_value, json_fromatter};
+use crate::metadata::control::utils::{decode_key_value, get_table_id_by_name, json_fromatter};
 use crate::Tool;
 
 /// Getting metadata from metadata store.
@@ -179,9 +178,10 @@ impl Tool for GetTableTool {
         let table_id = if let Some(table_name) = &self.table_name {
             let catalog_name = &self.catalog_name;
             let schema_name = &self.schema_name;
-            let key = TableNameKey::new(catalog_name, schema_name, table_name);
 
-            let Some(table_name) = table_name_manager.get(key).await.map_err(BoxedError::new)?
+            let Some(table_id) =
+                get_table_id_by_name(table_name_manager, catalog_name, schema_name, table_name)
+                    .await?
             else {
                 println!(
                     "Table({}) not found",
@@ -189,8 +189,7 @@ impl Tool for GetTableTool {
                 );
                 return Ok(());
             };
-
-            table_name.table_id()
+            table_id
         } else {
             // Safety: we have validated that table_id or table_name is not None
             self.table_id.unwrap()
