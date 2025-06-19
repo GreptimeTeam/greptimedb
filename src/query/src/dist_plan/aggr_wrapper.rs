@@ -21,15 +21,10 @@
 //! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
 //!
 
-use std::sync::Arc;
-
-use arrow_schema::Fields;
-use datafusion_common::{DFSchema, ScalarValue};
-use datafusion_expr::{Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl};
+use datafusion_common::ScalarValue;
+use datafusion_expr::function::StateFieldsArgs;
+use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
 use datatypes::arrow::datatypes::{DataType, Field};
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-
-use crate::query_engine::DefaultSerializer;
 
 /// Wrappr to make an aggregate function out of a state function.
 #[derive(Debug)]
@@ -38,6 +33,11 @@ pub struct AggregateStateFunctionWrapper {
     name: String,
     /// The index of the state in the output of the state function.
     state_index: usize,
+    /// The ordering fields of the aggregate function.
+    pub ordering_fields: Vec<Field>,
+
+    /// Whether the aggregate function is distinct.
+    pub is_distinct: bool,
 }
 
 pub struct WrapperArgs<'a> {
@@ -58,11 +58,13 @@ pub struct WrapperArgs<'a> {
 
 impl AggregateStateFunctionWrapper {
     pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> Self {
-        let name = format!("__{}_state_udaf", args.name);
+        let name = format!("__{}_state_udaf_{}", args.name, args.state_index);
         Self {
             inner,
             name,
             state_index: args.state_index,
+            ordering_fields: args.ordering_fields.to_vec(),
+            is_distinct: args.is_distinct,
         }
     }
 
@@ -77,7 +79,7 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
         acc_args: datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         let inner = self.inner.accumulator(acc_args)?;
-        Ok(Box::new(AggregateStateAccumulatorWrapper::new(
+        Ok(Box::new(AggrStateAccumWrapper::new(
             inner,
             self.state_index,
         )))
@@ -93,36 +95,58 @@ impl AggregateUDFImpl for AggregateStateFunctionWrapper {
     /// Return state_field[idx] as the output type.
     ///
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
-        todo!()
-    }
-    fn signature(&self) -> &datafusion_expr::Signature {
-        self.inner.signature()
+        let old_return_type = self.inner.return_type(arg_types)?;
+        let state_fields_args = StateFieldsArgs {
+            name: &self.name,
+            input_types: arg_types,
+            return_type: &old_return_type,
+            ordering_fields: &self.ordering_fields,
+            is_distinct: self.is_distinct,
+        };
+        let state_fields = self.inner.state_fields(state_fields_args)?;
+        let ret = state_fields
+            .get(self.state_index)
+            .ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(format!(
+                    "State index {} out of bounds for state fields: {:?}",
+                    self.state_index, state_fields
+                ))
+            })?
+            .data_type()
+            .clone();
+        Ok(ret)
     }
 
+    /// The state function's output fields are the same as the original aggregate function's state fields.
     fn state_fields(
         &self,
         args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<Field>> {
         self.inner.state_fields(args)
     }
+
+    /// The state function's signature is the same as the original aggregate function's signature,
+    fn signature(&self) -> &datafusion_expr::Signature {
+        self.inner.signature()
+    }
 }
 
 /// The wrapper's input is the same as the original aggregate function's input,
 /// and the output is the state function's output.
 #[derive(Debug)]
-pub struct AggregateStateAccumulatorWrapper {
+pub struct AggrStateAccumWrapper {
     inner: Box<dyn Accumulator>,
     /// The index of the state in the output of the state function.
     state_index: usize,
 }
 
-impl AggregateStateAccumulatorWrapper {
+impl AggrStateAccumWrapper {
     pub fn new(inner: Box<dyn Accumulator>, state_index: usize) -> Self {
         Self { inner, state_index }
     }
 }
 
-impl Accumulator for AggregateStateAccumulatorWrapper {
+impl Accumulator for AggrStateAccumWrapper {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
         let col = state.get(self.state_index).ok_or_else(|| {
@@ -158,32 +182,53 @@ impl Accumulator for AggregateStateAccumulatorWrapper {
 }
 
 #[derive(Debug)]
-pub struct AggregateMergeFunctionWrapper {
+pub struct AggrMergeWrapper {
     inner: AggregateUDF,
-    arg_types: Vec<DataType>,
     name: String,
+    /// The signature of the merge function.
+    /// It is the `state_fields` of the original aggregate function.
+    merge_signature: datafusion_expr::Signature,
+    state_fields: Vec<Field>,
+    final_return_type: DataType,
 }
-impl AggregateMergeFunctionWrapper {
-    pub fn new(inner: AggregateUDF, input_arg_types: Vec<DataType>) -> Self {
+impl AggrMergeWrapper {
+    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
         let name = format!("__{}_merge_udaf", inner.name());
-        Self {
+        let state_fields_args = StateFieldsArgs {
+            name: &inner.name(),
+            input_types: args.input_types,
+            return_type: &args.return_type,
+            ordering_fields: &args.ordering_fields,
+            is_distinct: args.is_distinct,
+        };
+        let state_fields = inner.state_fields(state_fields_args)?;
+        let tys = state_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        let signature =
+            datafusion_expr::Signature::exact(tys, datafusion_expr::Volatility::Immutable);
+        Ok(Self {
             inner,
-            arg_types: input_arg_types,
             name,
-        }
+            merge_signature: signature,
+            state_fields,
+            final_return_type: args.return_type.clone(),
+        })
     }
 
     pub fn inner(&self) -> &AggregateUDF {
         &self.inner
     }
 }
-impl AggregateUDFImpl for AggregateMergeFunctionWrapper {
+
+impl AggregateUDFImpl for AggrMergeWrapper {
     fn accumulator(
         &self,
         acc_args: datafusion_expr::function::AccumulatorArgs,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         let inner = self.inner.accumulator(acc_args)?;
-        todo!()
+        Ok(Box::new(AggrMergeAccumWrapper::new(inner)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -195,17 +240,52 @@ impl AggregateUDFImpl for AggregateMergeFunctionWrapper {
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         // The return type is the same as the original aggregate function's return type.
-        self.inner.return_type(&self.arg_types)
+        // notice here return type is fixed, instead of using the input types to determine the return type.
+        // as the input type now is actually `state_fields`'s data type, and can't be use to determine the output type
+        Ok(self.final_return_type.clone())
     }
     fn signature(&self) -> &datafusion_expr::Signature {
-        // TODO: use original function's state fields as signature.
-        todo!()
+        &self.merge_signature
     }
 
     fn state_fields(
         &self,
-        args: datafusion_expr::function::StateFieldsArgs,
+        _args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<Field>> {
-        self.inner.state_fields(args)
+        Ok(self.state_fields.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct AggrMergeAccumWrapper {
+    inner: Box<dyn Accumulator>,
+}
+
+impl AggrMergeAccumWrapper {
+    pub fn new(inner: Box<dyn Accumulator>) -> Self {
+        Self { inner }
+    }
+}
+
+impl Accumulator for AggrMergeAccumWrapper {
+    fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
+        self.inner.evaluate()
+    }
+
+    fn merge_batch(&mut self, states: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
+        self.inner.merge_batch(states)
+    }
+
+    fn update_batch(&mut self, values: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
+        // input is also states
+        self.inner.merge_batch(values)
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
+        self.inner.state()
     }
 }
