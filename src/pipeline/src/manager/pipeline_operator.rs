@@ -88,7 +88,6 @@ impl PipelineOperator {
             catalog.to_string(),
             Arc::new(PipelineTable::new(
                 self.inserter.clone(),
-                self.statement_executor.clone(),
                 table,
                 self.query_engine.clone(),
             )),

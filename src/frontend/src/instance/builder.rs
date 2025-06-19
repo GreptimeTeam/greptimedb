@@ -30,6 +30,7 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
+use operator::schema_helper::SchemaHelper;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
@@ -130,8 +131,15 @@ impl FrontendBuilder {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
 
-        let inserter = Arc::new(Inserter::new(
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let schema_helper = SchemaHelper::new(
             self.catalog_manager.clone(),
+            table_metadata_manager.clone(),
+            self.procedure_executor.clone(),
+            local_cache_invalidator.clone(),
+        );
+        let inserter = Arc::new(Inserter::new(
+            schema_helper,
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
@@ -176,7 +184,7 @@ impl FrontendBuilder {
             self.catalog_manager.clone(),
             query_engine.clone(),
             self.procedure_executor,
-            kv_backend.clone(),
+            kv_backend,
             local_cache_invalidator,
             inserter.clone(),
             table_route_cache,
@@ -219,7 +227,7 @@ impl FrontendBuilder {
             plugins,
             inserter,
             deleter,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            table_metadata_manager,
             slow_query_recorder,
             limiter,
             process_manager,

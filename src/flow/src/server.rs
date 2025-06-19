@@ -26,7 +26,7 @@ use common_error::ext::BoxedError;
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::{Flownode, NodeManagerRef};
 use common_query::Output;
@@ -37,6 +37,7 @@ use greptime_proto::v1::flow::{flow_server, FlowRequest, FlowResponse, InsertReq
 use itertools::Itertools;
 use operator::delete::Deleter;
 use operator::insert::Inserter;
+use operator::schema_helper::SchemaHelper;
 use operator::statement::StatementExecutor;
 use partition::manager::PartitionRuleManager;
 use query::{QueryEngine, QueryEngineFactory};
@@ -546,8 +547,14 @@ impl FrontendInvoker {
                 name: TABLE_FLOWNODE_SET_CACHE_NAME,
             })?;
 
-        let inserter = Arc::new(Inserter::new(
+        let schema_helper = SchemaHelper::new(
             catalog_manager.clone(),
+            Arc::new(TableMetadataManager::new(kv_backend.clone())),
+            procedure_executor.clone(),
+            layered_cache_registry.clone(),
+        );
+        let inserter = Arc::new(Inserter::new(
+            schema_helper,
             partition_manager.clone(),
             node_manager.clone(),
             table_flownode_cache,
@@ -588,7 +595,7 @@ impl FrontendInvoker {
             .start_timer();
 
         self.inserter
-            .handle_row_inserts(requests, ctx, &self.statement_executor, false, false)
+            .handle_row_inserts(requests, ctx, false, false)
             .await
             .map_err(BoxedError::new)
             .context(common_frontend::error::ExternalSnafu)

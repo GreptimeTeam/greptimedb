@@ -116,8 +116,7 @@ impl Frontend {
         if let Some(t) = self.export_metrics_task.as_ref() {
             if t.send_by_handler {
                 let inserter = self.instance.inserter().clone();
-                let statement_executor = self.instance.statement_executor().clone();
-                let handler = ExportMetricHandler::new_handler(inserter, statement_executor);
+                let handler = ExportMetricHandler::new_handler(inserter);
                 t.start(Some(handler)).context(error::StartServerSnafu)?
             } else {
                 t.start(None).context(error::StartServerSnafu)?;

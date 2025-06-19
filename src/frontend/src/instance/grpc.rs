@@ -408,7 +408,7 @@ impl Instance {
         ctx: QueryContextRef,
     ) -> Result<Output> {
         self.inserter
-            .handle_column_inserts(requests, ctx, self.statement_executor.as_ref())
+            .handle_column_inserts(requests, ctx)
             .await
             .context(TableOperationSnafu)
     }
@@ -422,13 +422,7 @@ impl Instance {
         is_single_value: bool,
     ) -> Result<Output> {
         self.inserter
-            .handle_row_inserts(
-                requests,
-                ctx,
-                self.statement_executor.as_ref(),
-                accommodate_existing_schema,
-                is_single_value,
-            )
+            .handle_row_inserts(requests, ctx, accommodate_existing_schema, is_single_value)
             .await
             .context(TableOperationSnafu)
     }
@@ -441,10 +435,7 @@ impl Instance {
     ) -> Result<Output> {
         self.inserter
             .handle_last_non_null_inserts(
-                requests,
-                ctx,
-                self.statement_executor.as_ref(),
-                true,
+                requests, ctx, true,
                 // Influx protocol may writes multiple fields (values).
                 false,
             )
@@ -460,7 +451,7 @@ impl Instance {
         physical_table: String,
     ) -> Result<Output> {
         self.inserter
-            .handle_metric_row_inserts(requests, ctx, &self.statement_executor, physical_table)
+            .handle_metric_row_inserts(requests, ctx, physical_table)
             .await
             .context(TableOperationSnafu)
     }

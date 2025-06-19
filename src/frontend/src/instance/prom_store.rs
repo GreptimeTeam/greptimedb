@@ -28,7 +28,6 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::InserterRef;
-use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
 use servers::http::header::{collect_plan_metrics, CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
@@ -271,18 +270,11 @@ impl PromStoreProtocolHandler for Instance {
 /// so only implement `PromStoreProtocolHandler::write` method.
 pub struct ExportMetricHandler {
     inserter: InserterRef,
-    statement_executor: Arc<StatementExecutor>,
 }
 
 impl ExportMetricHandler {
-    pub fn new_handler(
-        inserter: InserterRef,
-        statement_executor: Arc<StatementExecutor>,
-    ) -> PromStoreProtocolHandlerRef {
-        Arc::new(Self {
-            inserter,
-            statement_executor,
-        })
+    pub fn new_handler(inserter: InserterRef) -> PromStoreProtocolHandlerRef {
+        Arc::new(Self { inserter })
     }
 }
 
@@ -295,12 +287,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         _: bool,
     ) -> ServerResult<Output> {
         self.inserter
-            .handle_metric_row_inserts(
-                request,
-                ctx,
-                &self.statement_executor,
-                GREPTIME_PHYSICAL_TABLE.to_string(),
-            )
+            .handle_metric_row_inserts(request, ctx, GREPTIME_PHYSICAL_TABLE.to_string())
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)

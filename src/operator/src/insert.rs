@@ -25,7 +25,6 @@ use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, SemanticType,
 };
-use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
     default_engine, trace_services_table_name, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN,
@@ -63,7 +62,7 @@ use table::table_reference::TableReference;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
+    ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
     InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_helper;
@@ -72,10 +71,10 @@ use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
     fill_reqs_with_impure_default, ColumnToRow, RowToRegion, StatementToRegion, TableToRegion,
 };
-use crate::statement::StatementExecutor;
+use crate::schema_helper::SchemaHelper;
 
 pub struct Inserter {
-    catalog_manager: CatalogManagerRef,
+    schema_helper: SchemaHelper,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
@@ -127,13 +126,13 @@ pub struct InstantAndNormalInsertRequests {
 
 impl Inserter {
     pub fn new(
-        catalog_manager: CatalogManagerRef,
+        schema_helper: SchemaHelper,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         table_flownode_set_cache: TableFlownodeSetCacheRef,
     ) -> Self {
         Self {
-            catalog_manager,
+            schema_helper,
             partition_manager,
             node_manager,
             table_flownode_set_cache,
@@ -144,10 +143,9 @@ impl Inserter {
         &self,
         requests: InsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let row_inserts = ColumnToRow::convert(requests)?;
-        self.handle_row_inserts(row_inserts, ctx, statement_executor, false, false)
+        self.handle_row_inserts(row_inserts, ctx, false, false)
             .await
     }
 
@@ -156,7 +154,6 @@ impl Inserter {
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<Output> {
@@ -164,7 +161,6 @@ impl Inserter {
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
-            statement_executor,
             AutoCreateTableType::Physical,
             accommodate_existing_schema,
             is_single_value,
@@ -177,12 +173,10 @@ impl Inserter {
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
-            statement_executor,
             AutoCreateTableType::Log,
             false,
             false,
@@ -194,12 +188,10 @@ impl Inserter {
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
-            statement_executor,
             AutoCreateTableType::Trace,
             false,
             false,
@@ -212,14 +204,12 @@ impl Inserter {
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<Output> {
         self.handle_row_inserts_with_create_type(
             requests,
             ctx,
-            statement_executor,
             AutoCreateTableType::LastNonNull,
             accommodate_existing_schema,
             is_single_value,
@@ -232,7 +222,6 @@ impl Inserter {
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
         create_type: AutoCreateTableType,
         accommodate_existing_schema: bool,
         is_single_value: bool,
@@ -254,7 +243,6 @@ impl Inserter {
                 &mut requests,
                 &ctx,
                 create_type,
-                statement_executor,
                 accommodate_existing_schema,
                 is_single_value,
             )
@@ -280,7 +268,6 @@ impl Inserter {
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
-        statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
         // remove empty requests
@@ -293,7 +280,7 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         // check and create physical table
-        self.create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
+        self.create_physical_table_on_demand(&ctx, physical_table.clone())
             .await?;
 
         // check and create logical tables
@@ -305,7 +292,6 @@ impl Inserter {
                 &mut requests,
                 &ctx,
                 AutoCreateTableType::Logical(physical_table.to_string()),
-                statement_executor,
                 true,
                 true,
             )
@@ -350,10 +336,13 @@ impl Inserter {
         insert: &Insert,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let (inserts, table_info) =
-            StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx)
-                .await?;
+        let (inserts, table_info) = StatementToRegion::new(
+            self.schema_helper.catalog_manager().as_ref(),
+            &self.partition_manager,
+            ctx,
+        )
+        .convert(insert, ctx)
+        .await?;
 
         let table_infos =
             HashMap::from_iter([(table_info.table_id(), table_info.clone())].into_iter());
@@ -482,7 +471,6 @@ impl Inserter {
         requests: &mut RowInsertRequests,
         ctx: &QueryContextRef,
         auto_create_table_type: AutoCreateTableType,
-        statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<CreateAlterTableResult> {
@@ -543,7 +531,7 @@ impl Inserter {
                         instant_table_ids.insert(table_info.table_id());
                     }
                     table_infos.insert(table_info.table_id(), table.table_info());
-                    if let Some(alter_expr) = self.get_alter_table_expr_on_demand(
+                    if let Some(alter_expr) = Self::get_alter_table_expr_on_demand(
                         req,
                         &table,
                         ctx,
@@ -565,9 +553,7 @@ impl Inserter {
             AutoCreateTableType::Logical(_) => {
                 if !create_tables.is_empty() {
                     // Creates logical tables in batch.
-                    let tables = self
-                        .create_logical_tables(create_tables, ctx, statement_executor)
-                        .await?;
+                    let tables = self.create_logical_tables(create_tables, ctx).await?;
 
                     for table in tables {
                         let table_info = table.table_info();
@@ -579,7 +565,7 @@ impl Inserter {
                 }
                 if !alter_tables.is_empty() {
                     // Alter logical tables in batch.
-                    statement_executor
+                    self.schema_helper
                         .alter_logical_tables(alter_tables, ctx.clone())
                         .await?;
                 }
@@ -590,9 +576,7 @@ impl Inserter {
                 // note that auto create table shouldn't be ttl instant table
                 // for it's a very unexpected behavior and should be set by user explicitly
                 for create_table in create_tables {
-                    let table = self
-                        .create_physical_table(create_table, None, ctx, statement_executor)
-                        .await?;
+                    let table = self.create_physical_table(create_table, None, ctx).await?;
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
@@ -600,8 +584,8 @@ impl Inserter {
                     table_infos.insert(table_info.table_id(), table.table_info());
                 }
                 for alter_expr in alter_tables.into_iter() {
-                    statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                    self.schema_helper
+                        .alter_table_by_expr(alter_expr, ctx.clone())
                         .await?;
                 }
             }
@@ -619,9 +603,7 @@ impl Inserter {
                         create_table
                             .table_options
                             .insert(APPEND_MODE_KEY.to_string(), "false".to_string());
-                        let table = self
-                            .create_physical_table(create_table, None, ctx, statement_executor)
-                            .await?;
+                        let table = self.create_physical_table(create_table, None, ctx).await?;
                         let table_info = table.table_info();
                         if table_info.is_ttl_instant_table() {
                             instant_table_ids.insert(table_info.table_id());
@@ -662,12 +644,7 @@ impl Inserter {
                         );
 
                         let table = self
-                            .create_physical_table(
-                                create_table,
-                                Some(partitions),
-                                ctx,
-                                statement_executor,
-                            )
+                            .create_physical_table(create_table, Some(partitions), ctx)
                             .await?;
                         let table_info = table.table_info();
                         if table_info.is_ttl_instant_table() {
@@ -677,8 +654,8 @@ impl Inserter {
                     }
                 }
                 for alter_expr in alter_tables.into_iter() {
-                    statement_executor
-                        .alter_table_inner(alter_expr, ctx.clone())
+                    self.schema_helper
+                        .alter_table_by_expr(alter_expr, ctx.clone())
                         .await?;
                 }
             }
@@ -694,7 +671,6 @@ impl Inserter {
         &self,
         ctx: &QueryContextRef,
         physical_table: String,
-        statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
@@ -737,8 +713,9 @@ impl Inserter {
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
 
         // create physical table
-        let res = statement_executor
-            .create_table_inner(create_table_expr, None, ctx.clone())
+        let res = self
+            .schema_helper
+            .create_table_by_expr(create_table_expr, None, ctx.clone())
             .await;
 
         match res {
@@ -759,10 +736,7 @@ impl Inserter {
         schema: &str,
         table: &str,
     ) -> Result<Option<TableRef>> {
-        self.catalog_manager
-            .table(catalog, schema, table, None)
-            .await
-            .context(CatalogSnafu)
+        self.schema_helper.get_table(catalog, schema, table).await
     }
 
     fn get_create_table_expr_on_demand(
@@ -830,7 +804,6 @@ impl Inserter {
     /// When `accommodate_existing_schema` is true and `is_single_value` is true, it also consider fields when modifying the
     /// input `req`.
     fn get_alter_table_expr_on_demand(
-        &self,
         req: &mut RowInsertRequest,
         table: &TableRef,
         ctx: &QueryContextRef,
@@ -918,7 +891,6 @@ impl Inserter {
         mut create_table_expr: CreateTableExpr,
         partitions: Option<Partitions>,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
         {
             let table_ref = TableReference::full(
@@ -929,8 +901,9 @@ impl Inserter {
 
             info!("Table `{table_ref}` does not exist, try creating table");
         }
-        let res = statement_executor
-            .create_table_inner(&mut create_table_expr, partitions, ctx.clone())
+        let res = self
+            .schema_helper
+            .create_table_by_expr(&mut create_table_expr, partitions, ctx.clone())
             .await;
 
         let table_ref = TableReference::full(
@@ -958,9 +931,9 @@ impl Inserter {
         &self,
         create_table_exprs: Vec<CreateTableExpr>,
         ctx: &QueryContextRef,
-        statement_executor: &StatementExecutor,
     ) -> Result<Vec<TableRef>> {
-        let res = statement_executor
+        let res = self
+            .schema_helper
             .create_logical_tables(&create_table_exprs, ctx.clone())
             .await;
 
@@ -1145,19 +1118,14 @@ mod tests {
 
     use api::v1::{ColumnSchema as GrpcColumnSchema, RowInsertRequest, Rows, SemanticType, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_meta::cache::new_table_flownode_set_cache;
-    use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
-    use common_meta::test_util::MockDatanodeManager;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use moka::future::Cache;
     use session::context::QueryContext;
     use table::dist_table::DummyDataSource;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
     use table::TableRef;
 
     use super::*;
-    use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
 
     fn make_table_ref_with_schema(ts_name: &str, field_name: &str) -> TableRef {
         let schema = datatypes::schema::SchemaBuilder::try_from_columns(vec![
@@ -1237,20 +1205,8 @@ mod tests {
             DEFAULT_SCHEMA_NAME,
         ));
 
-        let kv_backend = prepare_mocked_backend().await;
-        let inserter = Inserter::new(
-            catalog::memory::MemoryCatalogManager::new(),
-            create_partition_rule_manager(kv_backend.clone()).await,
-            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
-            Arc::new(new_table_flownode_set_cache(
-                String::new(),
-                Cache::new(100),
-                kv_backend.clone(),
-            )),
-        );
-        let alter_expr = inserter
-            .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)
-            .unwrap();
+        let alter_expr =
+            Inserter::get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true).unwrap();
         assert!(alter_expr.is_none());
 
         // The request's schema should have updated names for timestamp and field columns

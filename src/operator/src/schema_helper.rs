@@ -62,7 +62,7 @@ lazy_static! {
     static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
 }
 
-/// Helper to query and manipulate table schemas.
+/// Helper to query and manipulate (CREATE/ALTER) table schemas.
 #[derive(Clone)]
 pub struct SchemaHelper {
     catalog_manager: CatalogManagerRef,

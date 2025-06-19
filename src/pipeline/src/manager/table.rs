@@ -30,7 +30,6 @@ use datatypes::timestamp::TimestampNanosecond;
 use datatypes::vectors::{StringVector, TimestampNanosecondVector, Vector};
 use itertools::Itertools;
 use operator::insert::InserterRef;
-use operator::statement::StatementExecutorRef;
 use query::dataframe::DataFrame;
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
@@ -61,7 +60,6 @@ pub(crate) const EMPTY_SCHEMA_NAME: &str = "";
 /// Every catalog has its own pipeline table.
 pub struct PipelineTable {
     inserter: InserterRef,
-    statement_executor: StatementExecutorRef,
     table: TableRef,
     query_engine: QueryEngineRef,
     cache: PipelineCache,
@@ -69,15 +67,9 @@ pub struct PipelineTable {
 
 impl PipelineTable {
     /// Create a new PipelineTable.
-    pub fn new(
-        inserter: InserterRef,
-        statement_executor: StatementExecutorRef,
-        table: TableRef,
-        query_engine: QueryEngineRef,
-    ) -> Self {
+    pub fn new(inserter: InserterRef, table: TableRef, query_engine: QueryEngineRef) -> Self {
         Self {
             inserter,
-            statement_executor,
             table,
             query_engine,
             cache: PipelineCache::new(),
@@ -232,13 +224,7 @@ impl PipelineTable {
 
         let output = self
             .inserter
-            .handle_row_inserts(
-                requests,
-                Self::query_ctx(&table_info),
-                &self.statement_executor,
-                false,
-                false,
-            )
+            .handle_row_inserts(requests, Self::query_ctx(&table_info), false, false)
             .await
             .context(InsertPipelineSnafu)?;
 

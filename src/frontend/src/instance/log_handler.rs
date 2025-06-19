@@ -135,7 +135,7 @@ impl Instance {
         };
 
         self.inserter
-            .handle_log_inserts(log, ctx, self.statement_executor.as_ref())
+            .handle_log_inserts(log, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)
@@ -157,7 +157,7 @@ impl Instance {
         };
 
         self.inserter
-            .handle_trace_inserts(rows, ctx, self.statement_executor.as_ref())
+            .handle_trace_inserts(rows, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)

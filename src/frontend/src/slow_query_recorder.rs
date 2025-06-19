@@ -233,7 +233,7 @@ impl SlowQueryEventHandler {
             .into();
 
         self.inserter
-            .handle_row_inserts(requests, query_ctx, &self.statement_executor, false, false)
+            .handle_row_inserts(requests, query_ctx, false, false)
             .await
             .context(TableOperationSnafu)?;
 
