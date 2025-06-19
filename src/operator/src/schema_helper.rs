@@ -27,14 +27,12 @@ use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::key::{TableMetadataManagerRef, NAME_PATTERN};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::Partition;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_query::Output;
 use common_telemetry::tracing;
-use lazy_static::lazy_static;
-use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
@@ -54,13 +52,7 @@ use crate::error::{
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::insert::build_create_table_expr;
-use crate::statement::ddl::{create_table_info, parse_partitions, verify_alter};
-
-// TODO(yingwen): Replaces operator::statement::ddl::NAME_PATTERN_REG
-lazy_static! {
-    /// Regex to validate table name.
-    static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
-}
+use crate::statement::ddl::{create_table_info, parse_partitions, verify_alter, NAME_PATTERN_REG};
 
 /// Helper to query and manipulate (CREATE/ALTER) table schemas.
 #[derive(Clone)]

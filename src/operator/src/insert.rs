@@ -74,7 +74,7 @@ use crate::req_convert::insert::{
 use crate::schema_helper::SchemaHelper;
 
 pub struct Inserter {
-    schema_helper: SchemaHelper,
+    pub(crate) schema_helper: SchemaHelper,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
