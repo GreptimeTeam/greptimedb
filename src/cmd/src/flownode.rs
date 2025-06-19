@@ -74,11 +74,12 @@ pub struct Components {
 impl Instance {
     pub fn new(
         flownode: FlownodeInstance,
-        components: Components,
+        #[cfg(feature = "enterprise")] components: Components,
         guard: Vec<WorkerGuard>,
     ) -> Self {
         Self {
             flownode,
+            #[cfg(feature = "enterprise")]
             components,
             _guard: guard,
         }
