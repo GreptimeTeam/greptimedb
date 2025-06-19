@@ -133,7 +133,7 @@ impl KeyDictBuilder {
         // Computes key position and then alter pk index.
         let mut key_positions = vec![0; self.pk_to_index.len()];
 
-        for (i, (_full_pk, (pk_index, sparse_key))) in (std::mem::take(&mut self.pk_to_index))
+        for (i, (full_pk, (pk_index, sparse_key))) in (std::mem::take(&mut self.pk_to_index))
             .into_iter()
             .enumerate()
         {
@@ -142,6 +142,7 @@ impl KeyDictBuilder {
             if let Some(sparse_key) = sparse_key {
                 pk_to_index_map.insert(sparse_key, i as PkIndex);
             }
+            pk_to_index_map.insert(full_pk, i as PkIndex);
         }
 
         self.num_keys = 0;
@@ -471,5 +472,22 @@ mod tests {
 
         assert!(!builder.is_full());
         assert_eq!(0, builder.insert_key(b"a0", None, &mut metrics));
+    }
+
+    #[test]
+    fn test_builder_finish_with_sparse_key() {
+        let mut builder = KeyDictBuilder::new((MAX_KEYS_PER_BLOCK * 2).into());
+        let mut metrics = WriteMetrics::default();
+        let full_key = "42".to_string();
+        let sparse_key = &[42u8];
+
+        builder.insert_key(full_key.as_bytes(), Some(sparse_key), &mut metrics);
+        let (dict, pk_to_pk_id) = builder.finish().unwrap();
+        assert_eq!(dict.key_positions.len(), 1);
+        assert_eq!(dict.dict_blocks.len(), 1);
+        assert_eq!(
+            pk_to_pk_id.get(sparse_key.as_slice()),
+            pk_to_pk_id.get(full_key.as_bytes())
+        );
     }
 }
