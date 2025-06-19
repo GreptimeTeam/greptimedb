@@ -832,15 +832,6 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
-    #[snafu(display("Failed to connect to mysql"))]
-    ConnectMySql {
-        #[snafu(source)]
-        error: sqlx::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to acquire mysql client from pool"))]
     AcquireMySqlClient {
         #[snafu(source)]
@@ -1053,7 +1044,6 @@ impl ErrorExt for Error {
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
-            | Error::ConnectMySql { .. }
             | Error::ParseMySqlUrl { .. }
             | Error::DecodeSqlValue { .. }
             | Error::AcquireMySqlClient { .. } => StatusCode::Internal,
