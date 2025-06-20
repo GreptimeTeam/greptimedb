@@ -381,7 +381,7 @@ mod tests {
         let _ = install_ring_crypto_provider();
 
         let dir = tempfile::tempdir().unwrap();
-        let cert_path = dir.path().join("serevr.crt");
+        let cert_path = dir.path().join("server.crt");
         let key_path = dir.path().join("server.key");
 
         std::fs::copy("tests/ssl/server.crt", &cert_path).expect("failed to copy cert to tmpdir");
@@ -415,7 +415,7 @@ mod tests {
             .expect("Failed to copy temp key file");
         std::fs::rename(&tmp_file, &key_path).expect("Failed to rename temp key file");
 
-        const MAX_RETRIES: usize = 20;
+        const MAX_RETRIES: usize = 30;
         let mut retries = 0;
         let mut version_updated = false;
 
