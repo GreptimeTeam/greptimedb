@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
+
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
 use strum::Display;
@@ -61,4 +63,43 @@ pub struct ScanRequest {
     pub sst_min_sequence: Option<SequenceNumber>,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
+}
+
+impl Display for ScanRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ScanRequest {{")?;
+        if let Some(projection) = &self.projection {
+            write!(f, "projection: {:?},", projection)?;
+        }
+        if !self.filters.is_empty() {
+            write!(
+                f,
+                ", filters: [{}]",
+                self.filters
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
+        }
+        if let Some(output_ordering) = &self.output_ordering {
+            write!(f, ", output_ordering: {:?}", output_ordering)?;
+        }
+        if let Some(limit) = &self.limit {
+            write!(f, ", limit: {}", limit)?;
+        }
+        if let Some(series_row_selector) = &self.series_row_selector {
+            write!(f, ", series_row_selector: {}", series_row_selector)?;
+        }
+        if let Some(sequence) = &self.sequence {
+            write!(f, ", sequence: {}", sequence)?;
+        }
+        if let Some(sst_min_sequence) = &self.sst_min_sequence {
+            write!(f, ", sst_min_sequence: {}", sst_min_sequence)?;
+        }
+        if let Some(distribution) = &self.distribution {
+            write!(f, ", distribution: {}", distribution)?;
+        }
+        write!(f, "}}")
+    }
 }

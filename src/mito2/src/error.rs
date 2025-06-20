@@ -1064,6 +1064,7 @@ impl ErrorExt for Error {
             | NoCheckpoint { .. }
             | NoManifests { .. }
             | InstallManifestTo { .. } => StatusCode::Unexpected,
+
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }

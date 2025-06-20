@@ -95,6 +95,7 @@ async fn test_last_row(append_mode: bool) {
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
     assert_eq!(3, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
