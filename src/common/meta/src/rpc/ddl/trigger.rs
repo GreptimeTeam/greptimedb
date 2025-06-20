@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use api::v1::meta::CreateTriggerTask as PbCreateTriggerTask;
+use api::v1::meta::{
+    CreateTriggerTask as PbCreateTriggerTask, DropTriggerTask as PbDropTriggerTask,
+};
 use api::v1::notify_channel::ChannelType as PbChannelType;
 use api::v1::{
-    CreateTriggerExpr, NotifyChannel as PbNotifyChannel, WebhookOptions as PbWebhookOptions,
+    CreateTriggerExpr as PbCreateTriggerExpr, DropTriggerExpr as PbDropTriggerExpr,
+    NotifyChannel as PbNotifyChannel, WebhookOptions as PbWebhookOptions,
 };
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -56,7 +59,7 @@ impl From<CreateTriggerTask> for PbCreateTriggerTask {
             .map(PbNotifyChannel::from)
             .collect();
 
-        let expr = CreateTriggerExpr {
+        let expr = PbCreateTriggerExpr {
             catalog_name: task.catalog_name,
             trigger_name: task.trigger_name,
             create_if_not_exists: task.if_not_exists,
@@ -139,12 +142,55 @@ impl TryFrom<PbNotifyChannel> for NotifyChannel {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropTriggerTask {
+    pub catalog_name: String,
+    pub trigger_name: String,
+    pub drop_if_exists: bool,
+}
+
+impl From<DropTriggerTask> for PbDropTriggerTask {
+    fn from(task: DropTriggerTask) -> Self {
+        let expr = PbDropTriggerExpr {
+            catalog_name: task.catalog_name,
+            trigger_name: task.trigger_name,
+            drop_if_exists: task.drop_if_exists,
+        };
+
+        PbDropTriggerTask {
+            drop_trigger: Some(expr),
+        }
+    }
+}
+
+impl TryFrom<PbDropTriggerTask> for DropTriggerTask {
+    type Error = error::Error;
+
+    fn try_from(task: PbDropTriggerTask) -> Result<Self> {
+        let expr = task.drop_trigger.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected drop_trigger",
+        })?;
+
+        Ok(DropTriggerTask {
+            catalog_name: expr.catalog_name,
+            trigger_name: expr.trigger_name,
+            drop_if_exists: expr.drop_if_exists,
+        })
+    }
+}
+
 impl DdlTask {
     /// Creates a [`DdlTask`] to create a trigger.
     pub fn new_create_trigger(expr: CreateTriggerTask) -> Self {
         DdlTask::CreateTrigger(expr)
     }
+
+    /// Creates a [`DdlTask`] to drop a trigger.
+    pub fn new_drop_trigger(expr: DropTriggerTask) -> Self {
+        DdlTask::DropTrigger(expr)
+    }
 }
+// TODO(fys): add more tessts for drop trigger
 
 #[cfg(test)]
 mod tests {

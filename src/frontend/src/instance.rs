@@ -513,6 +513,8 @@ pub fn check_permission(
         | Statement::AlterDatabase(_)
         | Statement::DropFlow(_)
         | Statement::Use(_) => {}
+        #[cfg(feature = "enterprise")]
+        Statement::DropTrigger(_) => {}
         Statement::ShowCreateDatabase(stmt) => {
             validate_database(&stmt.database_name, query_ctx)?;
         }

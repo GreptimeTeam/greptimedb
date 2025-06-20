@@ -50,7 +50,11 @@ use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
+use crate::rpc::ddl::trigger::DropTriggerTask;
+#[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::DdlTask::DropTrigger;
 use crate::rpc::ddl::DdlTask::{
     AlterDatabase, AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables,
     CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
@@ -86,6 +90,14 @@ pub trait TriggerDdlManager: Send + Sync {
     async fn create_trigger(
         &self,
         create_trigger_task: CreateTriggerTask,
+        procedure_manager: ProcedureManagerRef,
+        ddl_context: DdlContext,
+        query_context: QueryContext,
+    ) -> Result<SubmitDdlTaskResponse>;
+
+    async fn drop_trigger(
+        &self,
+        drop_trigger_task: DropTriggerTask,
         procedure_manager: ProcedureManagerRef,
         ddl_context: DdlContext,
         query_context: QueryContext,
@@ -640,6 +652,28 @@ async fn handle_drop_flow_task(
     })
 }
 
+#[cfg(feature = "enterprise")]
+async fn handle_drop_trigger_task(
+    ddl_manager: &DdlManager,
+    drop_trigger_task: DropTriggerTask,
+    query_context: QueryContext,
+) -> Result<SubmitDdlTaskResponse> {
+    let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
+        return UnsupportedSnafu {
+            operation: "drop trigger",
+        }
+        .fail();
+    };
+
+    m.drop_trigger(
+        drop_trigger_task,
+        ddl_manager.procedure_manager.clone(),
+        ddl_manager.ddl_context.clone(),
+        query_context,
+    )
+    .await
+}
+
 async fn handle_drop_view_task(
     ddl_manager: &DdlManager,
     drop_view_task: DropViewTask,
@@ -827,6 +861,11 @@ impl ProcedureExecutor for DdlManager {
                     handle_create_flow_task(self, create_flow_task, request.query_context.into())
                         .await
                 }
+                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
+                CreateView(create_view_task) => {
+                    handle_create_view_task(self, create_view_task).await
+                }
+                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
                     handle_create_trigger_task(
@@ -836,11 +875,11 @@ impl ProcedureExecutor for DdlManager {
                     )
                     .await
                 }
-                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
-                CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task).await
+                #[cfg(feature = "enterprise")]
+                DropTrigger(drop_trigger_task) => {
+                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context.into())
+                        .await
                 }
-                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
             }
         }
         .trace(span)

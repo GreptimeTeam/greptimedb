@@ -195,6 +195,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Invalid trigger name: {}", name))]
+    InvalidTriggerName {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid flow query: {}", reason))]
     InvalidFlowQuery {
         reason: String,
@@ -444,6 +452,9 @@ impl ErrorExt for Error {
             | InvalidPartitionNumber { .. }
             | UnsupportedUnaryOp { .. }
             | ConvertStr { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            InvalidTriggerName { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } | NegativeInterval { .. } => {
