@@ -218,7 +218,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         }
 
         // ensure fields and type
-        ensure!(fields.len() > 0, TransformFieldMustBeSetSnafu {});
+        ensure!(!fields.is_empty(), TransformFieldMustBeSetSnafu);
         ensure!(
             type_ != Value::Null,
             TransformTypeMustBeSetSnafu {
