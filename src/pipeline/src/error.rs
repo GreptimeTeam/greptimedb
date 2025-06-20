@@ -390,10 +390,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform {fields:?} type MUST BE set before default {default}"))]
+    #[snafu(display("Transform fields must be set."))]
+    TransformFieldMustBeSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform {fields:?} type MUST BE set."))]
     TransformTypeMustBeSet {
         fields: String,
-        default: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -874,6 +878,7 @@ impl ErrorExt for Error {
             | UrlEncodingDecode { .. }
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
+            | TransformFieldMustBeSet { .. }
             | TransformTypeMustBeSet { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }

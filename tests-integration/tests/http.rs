@@ -108,6 +108,7 @@ macro_rules! http_tests {
                 test_pipeline_context,
                 test_pipeline_with_vrl,
                 test_pipeline_with_hint_vrl,
+                test_pipeline_2,
                 test_pipeline_skip_error,
 
                 test_otlp_metrics,
@@ -2490,6 +2491,87 @@ transform:
         &client,
         "show tables",
         "[[\"d_table_2436\"],[\"demo\"],[\"numbers\"]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_2(storage_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_http_app_with_frontend(storage_type, "test_pipeline_2").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+version: v2
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+
+transform:
+  - field: id1
+    type: int32
+    index: inverted
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/root")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "id1": "123",
+    "id2": "2436",
+    "time": "2024-05-25 20:16:37.217"
+  }
+]
+"#;
+    let res = client
+        .post("/v1/events/logs?db=public&table=d_table&pipeline_name=root")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // CREATE TABLE IF NOT EXISTS "d_table" (
+    //     "id1" INT NULL INVERTED INDEX,
+    //     "time" TIMESTAMP(9) NOT NULL,
+    //     "id2" STRING NULL,
+    //     TIME INDEX ("time")
+    //   )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //   )
+    validate_data(
+        "test_pipeline_2_schema",
+        &client,
+        "show create table d_table",
+        "[[\"d_table\",\"CREATE TABLE IF NOT EXISTS \\\"d_table\\\" (\\n  \\\"id1\\\" INT NULL INVERTED INDEX,\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"id2\\\" STRING NULL,\\n  TIME INDEX (\\\"time\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]",
+    )
+    .await;
+
+    validate_data(
+        "test_pipeline_2_data",
+        &client,
+        "select * from d_table",
+        "[[123,1716668197217000000,\"2436\"]]",
     )
     .await;
 

@@ -15,11 +15,11 @@
 pub mod index;
 pub mod transformer;
 
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
-    TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
+    TransformFieldMustBeSetSnafu, TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{yaml_bool, yaml_new_field, yaml_new_fields, yaml_string};
@@ -216,25 +216,30 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 _ => {}
             }
         }
-        let mut final_default = None;
 
-        if let Some(default_value) = default {
-            match (&type_, &default_value) {
-                (Value::Null, _) => {
-                    return TransformTypeMustBeSetSnafu {
-                        fields: format!("{:?}", fields),
-                        default: default_value.to_string(),
-                    }
-                    .fail();
-                }
-                (_, Value::Null) => {} // if default is not set, then it will be regarded as default null
-                (_, _) => {
+        // ensure fields and type
+        ensure!(fields.len() > 0, TransformFieldMustBeSetSnafu {});
+        ensure!(
+            type_ != Value::Null,
+            TransformTypeMustBeSetSnafu {
+                fields: format!("{:?}", fields)
+            }
+        );
+
+        let final_default = if let Some(default_value) = default {
+            match default_value {
+                // if default is not set, then it will be regarded as default null
+                Value::Null => None,
+                _ => {
                     let target = type_.parse_str_value(default_value.to_str_value().as_str())?;
-                    final_default = Some(target);
                     on_failure = Some(OnFailure::Default);
+                    Some(target)
                 }
             }
-        }
+        } else {
+            None
+        };
+
         let builder = Transform {
             fields,
             type_,
