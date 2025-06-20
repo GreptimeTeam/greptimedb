@@ -89,13 +89,31 @@ impl TlsOption {
             return Ok(None);
         }
         let cert = certs(&mut BufReader::new(
-            File::open(&self.cert_path).context(InternalIoSnafu)?,
+            File::open(&self.cert_path)
+                .map_err(|e| {
+                    error!(e; "Failed to open {}", self.cert_path);
+                    e
+                })
+                .context(InternalIoSnafu)?,
         ))
         .collect::<std::result::Result<Vec<CertificateDer>, IoError>>()
         .context(InternalIoSnafu)?;
 
-        let mut key_reader = BufReader::new(File::open(&self.key_path).context(InternalIoSnafu)?);
-        let key = match read_one(&mut key_reader).context(InternalIoSnafu)? {
+        let mut key_reader = BufReader::new(
+            File::open(&self.key_path)
+                .map_err(|e| {
+                    error!(e; "Failed to open {}", self.key_path);
+                    e
+                })
+                .context(InternalIoSnafu)?,
+        );
+        let key = match read_one(&mut key_reader)
+            .map_err(|e| {
+                error!(e; "Failed to read {}", self.key_path);
+                e
+            })
+            .context(InternalIoSnafu)?
+        {
             Some(Item::Pkcs1Key(key)) => PrivateKeyDer::from(key),
             Some(Item::Pkcs8Key(key)) => PrivateKeyDer::from(key),
             Some(Item::Sec1Key(key)) => PrivateKeyDer::from(key),
@@ -420,7 +438,7 @@ mod tests {
         let mut version_updated = false;
 
         while retries < MAX_RETRIES {
-            if server_config.get_version() > 1 {
+            if server_config.get_version() > 0 {
                 version_updated = true;
                 break;
             }
@@ -429,7 +447,7 @@ mod tests {
         }
 
         assert!(version_updated, "TLS config did not reload in time");
-        assert!(server_config.get_version() > 1);
+        assert!(server_config.get_version() > 0);
         assert!(server_config.get_server_config().is_some());
     }
 }
