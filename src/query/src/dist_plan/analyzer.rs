@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
@@ -148,12 +149,14 @@ struct PlanRewriter {
     level: usize,
     /// Simulated stack for the `rewrite` recursion
     stack: Vec<(LogicalPlan, usize)>,
-    /// Stages to be expanded
+    /// Stages to be expanded, will be added as parent node of merge scan one by one
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
     column_requirements: HashSet<Column>,
+    expand_on_next_call: bool,
+    new_child_plan: Option<LogicalPlan>,
 }
 
 impl PlanRewriter {
@@ -174,6 +177,10 @@ impl PlanRewriter {
         {
             return true;
         }
+        if self.expand_on_next_call {
+            self.expand_on_next_call = false;
+            return true;
+        }
         match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
@@ -190,12 +197,22 @@ impl PlanRewriter {
                     self.stage.push(plan)
                 }
             }
-            Commutativity::TransformedCommutative(transformer) => {
+            Commutativity::TransformedCommutative { transformer } => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan)
+                    && let Some(transformer_actions) = transformer(plan)
                 {
-                    self.update_column_requirements(&plan);
-                    self.stage.push(plan)
+                    debug!(
+                        "PlanRewriter: transformed plan: {:#?}\n from {plan}",
+                        transformer_actions.extra_parent_plans
+                    );
+                    if let Some(last_stage) = transformer_actions.extra_parent_plans.last() {
+                        // update the column requirements from the last stage
+                        self.update_column_requirements(last_stage);
+                    }
+                    self.stage
+                        .extend(transformer_actions.extra_parent_plans.into_iter().rev());
+                    self.expand_on_next_call = true;
+                    self.new_child_plan = transformer_actions.new_child_plan;
                 }
             }
             Commutativity::NonCommutative
@@ -271,6 +288,10 @@ impl PlanRewriter {
     }
 
     fn expand(&mut self, mut on_node: LogicalPlan) -> DfResult<LogicalPlan> {
+        if let Some(new_child_plan) = self.new_child_plan.take() {
+            // if there is a new child plan, use it as the new root
+            on_node = new_child_plan;
+        }
         // store schema before expand
         let schema = on_node.schema().clone();
         let mut rewriter = EnforceDistRequirementRewriter {
@@ -391,10 +412,21 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(Transformed::yes(node));
         };
 
+        let parent = parent.clone();
+
         // TODO(ruihang): avoid this clone
-        if self.should_expand(&parent.clone()) {
+        if self.should_expand(&parent) {
             // TODO(ruihang): does this work for nodes with multiple children?;
-            let node = self.expand(node)?;
+            debug!("PlanRewriter: should expand child:\n {node}\n Of Parent: {parent}");
+            let node = self.expand(node);
+            debug!(
+                "PlanRewriter: expanded plan: {}",
+                match &node {
+                    Ok(n) => n.to_string(),
+                    Err(e) => format!("Error expanding plan: {e}"),
+                }
+            );
+            let node = node?;
             self.pop_stack();
             return Ok(Transformed::yes(node));
         }
