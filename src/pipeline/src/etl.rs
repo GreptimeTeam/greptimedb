@@ -32,8 +32,8 @@ use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
-    YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, Error, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu,
+    InvalidVersionNumberSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_row;
@@ -64,7 +64,7 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
 
             let description = doc[DESCRIPTION].as_str().map(|s| s.to_string());
 
-            let doc_version = (&doc[DOC_VERSION]).into();
+            let doc_version = (&doc[DOC_VERSION]).try_into()?;
 
             let processors = if let Some(v) = doc[PROCESSORS].as_vec() {
                 v.try_into()?
@@ -153,11 +153,34 @@ pub enum PipelineDocVersion {
     V2,
 }
 
-impl From<&Yaml> for PipelineDocVersion {
-    fn from(value: &Yaml) -> Self {
-        match value.as_str() {
-            Some("v2") => PipelineDocVersion::V2,
-            _ => PipelineDocVersion::V1,
+impl TryFrom<&Yaml> for PipelineDocVersion {
+    type Error = Error;
+
+    fn try_from(value: &Yaml) -> Result<Self> {
+        if value.is_badvalue() || value.is_null() {
+            return Ok(PipelineDocVersion::V1);
+        }
+
+        let version = match value {
+            Yaml::String(s) => s
+                .parse::<i64>()
+                .map_err(|_| InvalidVersionNumberSnafu { version: s.clone() }.build())?,
+            Yaml::Integer(i) => *i,
+            _ => {
+                return InvalidVersionNumberSnafu {
+                    version: value.as_str().unwrap_or_default().to_string(),
+                }
+                .fail();
+            }
+        };
+
+        match version {
+            1 => Ok(PipelineDocVersion::V1),
+            2 => Ok(PipelineDocVersion::V2),
+            _ => InvalidVersionNumberSnafu {
+                version: version.to_string(),
+            }
+            .fail(),
         }
     }
 }

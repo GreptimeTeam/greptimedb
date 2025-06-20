@@ -427,6 +427,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Invalid Pipeline doc version number: {}", version))]
+    InvalidVersionNumber {
+        version: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Null type not supported"))]
     CoerceUnsupportedNullType {
         #[snafu(implicit)]
@@ -884,6 +890,7 @@ impl ErrorExt for Error {
             | TransformMultipleTimestampIndex { .. }
             | TransformTimestampIndexCount { .. }
             | AutoTransformOneTimestamp { .. }
+            | InvalidVersionNumber { .. }
             | CoerceUnsupportedNullType { .. }
             | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }

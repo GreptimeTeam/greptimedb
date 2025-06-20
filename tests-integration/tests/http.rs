@@ -2505,7 +2505,7 @@ pub async fn test_pipeline_2(storage_type: StorageType) {
     let client = TestClient::new(app).await;
 
     let pipeline = r#"
-version: v2
+version: 2
 processors:
   - date:
       field: time
