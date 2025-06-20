@@ -235,14 +235,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Processor {processor}: invalid format {s}"))]
-    DateInvalidFormat {
-        s: String,
-        processor: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid Pattern: '{s}'. {detail}"))]
     DissectInvalidPattern {
         s: String,
@@ -857,7 +849,6 @@ impl ErrorExt for Error {
             | DateParse { .. }
             | DateFailedToGetLocalTimezone { .. }
             | DateFailedToGetTimestamp { .. }
-            | DateInvalidFormat { .. }
             | DissectInvalidPattern { .. }
             | DissectEmptyPattern { .. }
             | DissectSplitExceedsInput { .. }
