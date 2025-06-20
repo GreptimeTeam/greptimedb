@@ -69,7 +69,7 @@ impl Display for ScanRequest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "ScanRequest {{")?;
         if let Some(projection) = &self.projection {
-            write!(f, "projection: {:?},", projection)?;
+            write!(f, "projection: {:?}", projection)?;
         }
         if !self.filters.is_empty() {
             write!(

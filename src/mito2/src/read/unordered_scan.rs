@@ -20,23 +20,24 @@ use std::time::Instant;
 
 use async_stream::{stream, try_stream};
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
-use snafu::ResultExt;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::range::RangeBuilderList;
+use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
+use crate::sst::file::FileTimeRange;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -93,52 +94,67 @@ impl UnorderedScan {
         part_range_id: usize,
         part_metrics: PartitionMetrics,
         range_builder_list: Arc<RangeBuilderList>,
-    ) -> impl Stream<Item = Result<Batch>> {
-        stream! {
+    ) -> Result<impl Stream<Item = Result<Batch>>> {
+        fn build_scan_stream(
+            context: Arc<StreamContext>,
+            index: RowGroupIndex,
+            time_range: FileTimeRange,
+            metrics: PartitionMetrics,
+            range_builder_list: Arc<RangeBuilderList>,
+        ) -> Result<impl Stream<Item = Result<Batch>>> {
+            let stream = if context.is_mem_range_index(index) {
+                scan_mem_ranges(context, metrics, index, time_range).boxed()
+            } else {
+                scan_file_ranges(
+                    context,
+                    metrics,
+                    index,
+                    "unordered_scan_files",
+                    range_builder_list,
+                )
+                .boxed()
+            };
+            Ok(stream)
+        }
+
+        let stream = stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
-                if stream_ctx.is_mem_range_index(*index) {
-                    let stream = scan_mem_ranges(
-                        stream_ctx.clone(),
-                        part_metrics.clone(),
-                        *index,
-                        range_meta.time_range,
-                    );
-                    for await batch in stream {
-                        yield batch;
-                    }
-                } else {
-                    let stream = scan_file_ranges(
-                        stream_ctx.clone(),
-                        part_metrics.clone(),
-                        *index,
-                        "unordered_scan_files",
-                        range_builder_list.clone(),
-                    );
-                    for await batch in stream {
-                        yield batch;
-                    }
+                let stream = build_scan_stream(
+                    stream_ctx.clone(),
+                    *index,
+                    range_meta.time_range,
+                    part_metrics.clone(),
+                    range_builder_list.clone(),
+                )?;
+                for await batch in stream {
+                    yield batch;
                 }
             }
-        }
+        };
+        Ok(stream)
     }
 
-    fn scan_partition_impl(
-        &self,
-        metrics_set: &ExecutionPlanMetricsSet,
-        partition: usize,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        if partition >= self.properties.partitions.len() {
-            return Err(BoxedError::new(
-                PartitionOutOfRangeSnafu {
-                    given: partition,
-                    all: self.properties.partitions.len(),
-                }
-                .build(),
-            ));
-        }
+    /// Scan [`Batch`] in all partitions one by one.
+    pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
 
+        let streams = (0..self.properties.partitions.len())
+            .map(|partition| {
+                let metrics = self.partition_metrics(partition, &metrics_set);
+                self.scan_batch_in_partition(partition, metrics)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Box::pin(futures::stream::iter(streams).flatten()))
+    }
+
+    fn partition_metrics(
+        &self,
+        partition: usize,
+        metrics_set: &ExecutionPlanMetricsSet,
+    ) -> PartitionMetrics {
         let part_metrics = PartitionMetrics::new(
             self.stream_ctx.input.mapper.metadata().region_id,
             partition,
@@ -147,6 +163,45 @@ impl UnorderedScan {
             metrics_set,
         );
         self.metrics_list.set(partition, part_metrics.clone());
+        part_metrics
+    }
+
+    fn scan_partition_impl(
+        &self,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream> {
+        let metrics = self.partition_metrics(partition, &metrics_set);
+
+        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
+
+        let input = &self.stream_ctx.input;
+        let record_batch_stream = ConvertBatchStream::new(
+            batch_stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+
+        Ok(Box::pin(RecordBatchStreamWrapper::new(
+            input.mapper.output_schema(),
+            Box::pin(record_batch_stream),
+        )))
+    }
+
+    fn scan_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+    ) -> Result<ScanBatchStream> {
+        ensure!(
+            partition < self.properties.partitions.len(),
+            PartitionOutOfRangeSnafu {
+                given: partition,
+                all: self.properties.partitions.len(),
+            }
+        );
+
         let stream_ctx = self.stream_ctx.clone();
         let part_ranges = self.properties.partitions[partition].clone();
         let distinguish_range = self.properties.distinguish_partition_range;
@@ -154,7 +209,6 @@ impl UnorderedScan {
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let cache = &stream_ctx.input.cache_strategy;
             let range_builder_list = Arc::new(RangeBuilderList::new(
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
@@ -173,9 +227,9 @@ impl UnorderedScan {
                     part_range.identifier,
                     part_metrics.clone(),
                     range_builder_list.clone(),
-                );
+                )?;
                 for await batch in stream {
-                    let batch = batch.map_err(BoxedError::new).context(ExternalSnafu)?;
+                    let batch = batch?;
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
@@ -194,11 +248,8 @@ impl UnorderedScan {
                         &batch,
                     );
 
-                    let convert_start = Instant::now();
-                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
-                    metrics.convert_cost += convert_start.elapsed();
                     let yield_start = Instant::now();
-                    yield record_batch;
+                    yield ScanBatch::Normal(batch);
                     metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
@@ -208,22 +259,15 @@ impl UnorderedScan {
                 // The query engine can use this to optimize some queries.
                 if distinguish_range {
                     let yield_start = Instant::now();
-                    yield stream_ctx.input.mapper.empty_record_batch();
+                    yield ScanBatch::Normal(Batch::empty());
                     metrics.yield_cost += yield_start.elapsed();
                 }
 
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
-
-            part_metrics.on_finish();
         };
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.stream_ctx.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 }
 
@@ -251,6 +295,7 @@ impl RegionScanner for UnorderedScan {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(metrics_set, partition)
+            .map_err(BoxedError::new)
     }
 
     fn has_predicate(&self) -> bool {
