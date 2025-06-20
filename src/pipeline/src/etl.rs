@@ -543,9 +543,9 @@ transform:
             ),
         ];
         // manually set schema
-        let sechema = pipeline.schemas().unwrap();
-        for i in 0..sechema.len() {
-            let schema = &sechema[i];
+        let schema = pipeline.schemas().unwrap();
+        for i in 0..schema.len() {
+            let schema = &schema[i];
             let value = &result.0.values[i];
             assert_eq!(schema.datatype, test[i].0);
             assert_eq!(value.value_data, test[i].1);
