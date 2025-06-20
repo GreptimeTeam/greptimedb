@@ -298,52 +298,34 @@ impl Pipeline {
         let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
         let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
-        // do transform first
-        let mut transformed_values =
-            Vec::with_capacity(val.as_map().map(|m| m.len()).unwrap_or(32));
-
-        if let TransformerMode::GreptimeTransformer(transformer) = self.transformer() {
-            // note now transform will remove the field from the val
-            let values = transformer.transform_mut(&mut val, self.is_v1())?;
-            transformed_values.extend(values);
-            if self.is_v1() {
-                // v1 dont combine with auto-transform
-                // so return immediately
-                return Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                    opt,
-                    row: Row {
-                        values: transformed_values,
-                    },
-                    table_suffix,
-                }));
+        let row = match self.transformer() {
+            TransformerMode::GreptimeTransformer(greptime_transformer) => {
+                let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
+                if self.is_v1() {
+                    // v1 dont combine with auto-transform
+                    // so return immediately
+                    return Ok(PipelineExecOutput::Transformed(TransformedOutput {
+                        opt,
+                        row: Row { values },
+                        table_suffix,
+                    }));
+                }
+                // continue v2 process, check ts column and set the rest fields with auto-transform
+                // if transformer presents, then ts has been set
+                values_to_row(schema_info, val, pipeline_ctx, Some(values))?
             }
-        }
+            TransformerMode::AutoTransform(ts_name, time_unit) => {
+                // infer ts from the context
+                // we've check that only one timestamp should exist
 
-        // continue v2 process, check ts column and set the rest fields with auto-transform
-        // if transformer presents, then ts has been set
-        let row = if matches!(self.transformer(), TransformerMode::GreptimeTransformer(_)) {
-            // ts has been set
-            values_to_row(schema_info, val, pipeline_ctx, Some(transformed_values))?
-        } else {
-            // infer ts from the context
-            // we've check that only one timestamp should exist
-            let (name, ts) = val
-                .as_map()
-                .and_then(|m| {
-                    m.iter().find_map(|(k, v)| match v {
-                        Value::Timestamp(ts) => Some((k, ts)),
-                        _ => None,
-                    })
-                })
-                .context(AutoTransformOneTimestampSnafu)?;
-
-            // Create pipeline context with the found timestamp
-            let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
-                IdentityTimeIndex::Epoch(name.to_string(), ts.get_unit(), false),
-            ));
-            let n_ctx =
-                PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-            values_to_row(schema_info, val, &n_ctx, Some(transformed_values))?
+                // Create pipeline context with the found timestamp
+                let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                    IdentityTimeIndex::Epoch(ts_name.to_string(), *time_unit, false),
+                ));
+                let n_ctx =
+                    PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
+                values_to_row(schema_info, val, &n_ctx, None)?
+            }
         };
 
         Ok(PipelineExecOutput::Transformed(TransformedOutput {
