@@ -991,6 +991,7 @@ providers = []
 pool_max_idle_per_host = 1024
 connect_timeout = "30s"
 timeout = "30s"
+skip_ssl_validation = false
 pool_idle_timeout = "1m 30s""#,
             store_type
         )
@@ -1173,6 +1174,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
     let inconsistent_results = [
         "dir =",
         "log_format =",
+        "skip_ssl_validation =",
         "data_home =",
         "bucket =",
         "root =",
