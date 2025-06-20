@@ -30,7 +30,7 @@ use datafusion_common::Column;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::Expr;
 use smallvec::SmallVec;
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
@@ -48,6 +48,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
+use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{Batch, Source};
 use crate::region::options::MergeMode;
@@ -80,6 +81,15 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.build_stream(),
             Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
             Scanner::Series(series_scan) => series_scan.build_stream().await,
+        }
+    }
+
+    /// Create a stream of [`Batch`] by this scanner.
+    pub(crate) fn scan_batch(&self) -> Result<ScanBatchStream> {
+        match self {
+            Scanner::Seq(x) => x.scan_all_partitions(),
+            Scanner::Unordered(x) => x.scan_all_partitions(),
+            Scanner::Series(x) => x.scan_all_partitions(),
         }
     }
 }
@@ -259,7 +269,6 @@ impl ScanRegion {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
         self.filter_deleted = filter_deleted;
     }
@@ -896,6 +905,10 @@ impl ScanInput {
     /// Returns number of SST files to scan.
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
+    }
+
+    pub fn region_metadata(&self) -> &RegionMetadataRef {
+        self.mapper.metadata()
     }
 }
 

@@ -23,6 +23,7 @@ use common_telemetry::debug;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use futures::Stream;
 use prometheus::IntGauge;
+use smallvec::SmallVec;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -34,6 +35,7 @@ use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{Batch, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Verbose scan metrics for a partition.
@@ -188,7 +190,6 @@ impl ScanMetricsSet {
             prepare_scan_cost,
             build_reader_cost,
             scan_cost,
-            convert_cost,
             yield_cost,
             num_batches,
             num_rows,
@@ -199,7 +200,6 @@ impl ScanMetricsSet {
         self.prepare_scan_cost += *prepare_scan_cost;
         self.build_reader_cost += *build_reader_cost;
         self.scan_cost += *scan_cost;
-        self.convert_cost += *convert_cost;
         self.yield_cost += *yield_cost;
         self.num_rows += *num_rows;
         self.num_batches += *num_batches;
@@ -400,7 +400,7 @@ impl PartitionMetricsList {
 
 /// Metrics while reading a partition.
 #[derive(Clone)]
-pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
+pub struct PartitionMetrics(Arc<PartitionMetricsInner>);
 
 impl PartitionMetrics {
     pub(crate) fn new(
@@ -441,7 +441,7 @@ impl PartitionMetrics {
         metrics.num_mem_ranges += num;
     }
 
-    pub(crate) fn inc_num_file_ranges(&self, num: usize) {
+    pub fn inc_num_file_ranges(&self, num: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.num_file_ranges += num;
     }
@@ -452,6 +452,11 @@ impl PartitionMetrics {
 
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.build_reader_cost += cost;
+    }
+
+    pub(crate) fn inc_convert_batch_cost(&self, cost: Duration) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.convert_cost += cost;
     }
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.
@@ -548,6 +553,28 @@ pub(crate) fn scan_file_ranges(
         let ranges = range_builder.build_file_ranges(&stream_ctx.input, index, &mut reader_metrics).await?;
         part_metrics.inc_num_file_ranges(ranges.len());
 
+        let stream = build_file_range_scan_stream(
+            stream_ctx,
+            part_metrics,
+            &mut reader_metrics,
+            read_type,
+            ranges,
+        );
+        for await batch in stream {
+            yield batch?;
+        }
+    }
+}
+
+/// Build a stream of [`FileRange`] to scan.
+pub fn build_file_range_scan_stream<'a>(
+    stream_ctx: Arc<StreamContext>,
+    part_metrics: PartitionMetrics,
+    reader_metrics: &'a mut ReaderMetrics,
+    read_type: &'static str,
+    ranges: SmallVec<[FileRange; 2]>,
+) -> impl Stream<Item = Result<Batch>> + 'a {
+    try_stream! {
         for range in ranges {
             let build_reader_start = Instant::now();
             let reader = range.reader(stream_ctx.input.series_row_selector).await?;
@@ -570,6 +597,6 @@ pub(crate) fn scan_file_ranges(
         // Reports metrics.
         reader_metrics.observe_rows(read_type);
         reader_metrics.filter_metrics.observe();
-        part_metrics.merge_reader_metrics(&reader_metrics);
+        part_metrics.merge_reader_metrics(reader_metrics);
     }
 }
