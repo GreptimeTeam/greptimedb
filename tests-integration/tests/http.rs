@@ -1174,7 +1174,6 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
     let inconsistent_results = [
         "dir =",
         "log_format =",
-        "skip_ssl_validation =",
         "data_home =",
         "bucket =",
         "root =",
