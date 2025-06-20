@@ -204,12 +204,12 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    NewTransformed(NewTransformedInner),
+    Transformed(TransformedOutput),
     DispatchedTo(DispatchedTo, Value),
 }
 
 #[derive(Debug)]
-pub struct NewTransformedInner {
+pub struct TransformedOutput {
     pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
@@ -218,7 +218,7 @@ pub struct NewTransformedInner {
 impl PipelineExecOutput {
     // Note: This is a test only function, do not use it in production.
     pub fn into_transformed(self) -> Option<(Row, Option<String>)> {
-        if let Self::NewTransformed(NewTransformedInner {
+        if let Self::Transformed(TransformedOutput {
             row, table_suffix, ..
         }) = self
         {
@@ -304,12 +304,12 @@ impl Pipeline {
 
         if let TransformerMode::GreptimeTransformer(transformer) = self.transformer() {
             // note now transform will remove the field from the val
-            let values = transformer.transform_mut(&mut val)?;
+            let values = transformer.transform_mut(&mut val, self.is_v1())?;
             transformed_values.extend(values);
             if self.is_v1() {
                 // v1 dont combine with auto-transform
                 // so return immediately
-                return Ok(PipelineExecOutput::NewTransformed(NewTransformedInner {
+                return Ok(PipelineExecOutput::Transformed(TransformedOutput {
                     opt,
                     row: Row {
                         values: transformed_values,
@@ -346,7 +346,7 @@ impl Pipeline {
             values_to_row(schema_info, val, &n_ctx, Some(transformed_values))?
         };
 
-        Ok(PipelineExecOutput::NewTransformed(NewTransformedInner {
+        Ok(PipelineExecOutput::Transformed(TransformedOutput {
             opt,
             row,
             table_suffix,

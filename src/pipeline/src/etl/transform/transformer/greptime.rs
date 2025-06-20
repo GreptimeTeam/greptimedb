@@ -218,13 +218,19 @@ impl GreptimeTransformer {
         Ok(GreptimeTransformer { transforms, schema })
     }
 
-    pub fn transform_mut(&self, pipeline_map: &mut Value) -> Result<Vec<GreptimeValue>> {
+    pub fn transform_mut(
+        &self,
+        pipeline_map: &mut Value,
+        is_v1: bool,
+    ) -> Result<Vec<GreptimeValue>> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
                 let column_name = field.input_field();
-                match pipeline_map.remove(column_name) {
+
+                // let keep us `get` here to be compatible with v1
+                match pipeline_map.get(column_name) {
                     Some(v) => {
                         let value_data = coerce_value(v, transform)?;
                         // every transform fields has only one output field
@@ -234,9 +240,9 @@ impl GreptimeTransformer {
                         let value_data = match transform.on_failure {
                             Some(crate::etl::transform::OnFailure::Default) => {
                                 match transform.get_default() {
-                                    Some(default) => coerce_value(default.clone(), transform)?,
+                                    Some(default) => coerce_value(default, transform)?,
                                     None => match transform.get_default_value_when_data_is_none() {
-                                        Some(default) => coerce_value(default, transform)?,
+                                        Some(default) => coerce_value(&default, transform)?,
                                         None => None,
                                     },
                                 }
@@ -251,6 +257,11 @@ impl GreptimeTransformer {
                     }
                 }
                 output_index += 1;
+                if !is_v1 {
+                    // remove the column from the pipeline_map
+                    // so that the auto-transform can use the rest fields
+                    pipeline_map.remove(column_name);
+                }
             }
         }
         Ok(values)

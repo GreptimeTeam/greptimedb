@@ -166,24 +166,24 @@ fn coerce_type(transform: &Transform) -> Result<(ColumnDataType, Option<ColumnDa
     }
 }
 
-pub(crate) fn coerce_value(val: Value, transform: &Transform) -> Result<Option<ValueData>> {
+pub(crate) fn coerce_value(val: &Value, transform: &Transform) -> Result<Option<ValueData>> {
     match val {
         Value::Null => Ok(None),
 
-        Value::Int8(n) => coerce_i64_value(n as i64, transform),
-        Value::Int16(n) => coerce_i64_value(n as i64, transform),
-        Value::Int32(n) => coerce_i64_value(n as i64, transform),
-        Value::Int64(n) => coerce_i64_value(n, transform),
+        Value::Int8(n) => coerce_i64_value(*n as i64, transform),
+        Value::Int16(n) => coerce_i64_value(*n as i64, transform),
+        Value::Int32(n) => coerce_i64_value(*n as i64, transform),
+        Value::Int64(n) => coerce_i64_value(*n, transform),
 
-        Value::Uint8(n) => coerce_u64_value(n as u64, transform),
-        Value::Uint16(n) => coerce_u64_value(n as u64, transform),
-        Value::Uint32(n) => coerce_u64_value(n as u64, transform),
-        Value::Uint64(n) => coerce_u64_value(n, transform),
+        Value::Uint8(n) => coerce_u64_value(*n as u64, transform),
+        Value::Uint16(n) => coerce_u64_value(*n as u64, transform),
+        Value::Uint32(n) => coerce_u64_value(*n as u64, transform),
+        Value::Uint64(n) => coerce_u64_value(*n, transform),
 
-        Value::Float32(n) => coerce_f64_value(n as f64, transform),
-        Value::Float64(n) => coerce_f64_value(n, transform),
+        Value::Float32(n) => coerce_f64_value(*n as f64, transform),
+        Value::Float64(n) => coerce_f64_value(*n, transform),
 
-        Value::Boolean(b) => coerce_bool_value(b, transform),
+        Value::Boolean(b) => coerce_bool_value(*b, transform),
         Value::String(s) => coerce_string_value(s, transform),
 
         Value::Timestamp(input_timestamp) => match &transform.type_ {
@@ -376,11 +376,8 @@ macro_rules! coerce_string_value {
             Err(_) => match $transform.on_failure {
                 Some(OnFailure::Ignore) => Ok(None),
                 Some(OnFailure::Default) => match $transform.get_default() {
-                    Some(default) => coerce_value(default.clone(), $transform),
-                    None => coerce_value(
-                        $transform.get_type_matched_default_val().clone(),
-                        $transform,
-                    ),
+                    Some(default) => coerce_value(default, $transform),
+                    None => coerce_value($transform.get_type_matched_default_val(), $transform),
                 },
                 None => CoerceStringToTypeSnafu {
                     s: $s,
@@ -392,7 +389,7 @@ macro_rules! coerce_string_value {
     };
 }
 
-fn coerce_string_value(s: String, transform: &Transform) -> Result<Option<ValueData>> {
+fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<ValueData>> {
     match transform.type_ {
         Value::Int8(_) => {
             coerce_string_value!(s, transform, i32, I8Value)
@@ -449,7 +446,7 @@ fn coerce_string_value(s: String, transform: &Transform) -> Result<Option<ValueD
     }
 }
 
-fn coerce_json_value(v: Value, transform: &Transform) -> Result<Option<ValueData>> {
+fn coerce_json_value(v: &Value, transform: &Transform) -> Result<Option<ValueData>> {
     match &transform.type_ {
         Value::Array(_) | Value::Map(_) => (),
         t => {
@@ -495,14 +492,14 @@ mod tests {
         // valid string
         {
             let val = Value::String("123".to_string());
-            let result = coerce_value(val, &transform).unwrap();
+            let result = coerce_value(&val, &transform).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(123)));
         }
 
         // invalid string
         {
             let val = Value::String("hello".to_string());
-            let result = coerce_value(val, &transform);
+            let result = coerce_value(&val, &transform);
             assert!(result.is_err());
         }
     }
@@ -519,7 +516,7 @@ mod tests {
         };
 
         let val = Value::String("hello".to_string());
-        let result = coerce_value(val, &transform).unwrap();
+        let result = coerce_value(&val, &transform).unwrap();
         assert_eq!(result, None);
     }
 
@@ -537,7 +534,7 @@ mod tests {
         // with no explicit default value
         {
             let val = Value::String("hello".to_string());
-            let result = coerce_value(val, &transform).unwrap();
+            let result = coerce_value(&val, &transform).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(0)));
         }
 
@@ -545,7 +542,7 @@ mod tests {
         {
             transform.default = Some(Value::Int32(42));
             let val = Value::String("hello".to_string());
-            let result = coerce_value(val, &transform).unwrap();
+            let result = coerce_value(&val, &transform).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(42)));
         }
     }

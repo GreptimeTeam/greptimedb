@@ -20,8 +20,8 @@ use api::greptime_proto;
 use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequest, Rows, SemanticType};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
-    unwrap_or_continue_if_err, ContextReq, DispatchedTo, NewTransformedInner, Pipeline,
-    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformerMode, Value,
+    unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode, Value,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
@@ -156,7 +156,7 @@ async fn run_custom_pipeline(
 
         let r = unwrap_or_continue_if_err!(result, skip_error);
         match r {
-            PipelineExecOutput::NewTransformed(NewTransformedInner {
+            PipelineExecOutput::Transformed(TransformedOutput {
                 opt,
                 row,
                 table_suffix,
