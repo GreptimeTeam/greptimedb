@@ -90,10 +90,7 @@ impl TlsOption {
         }
         let cert = certs(&mut BufReader::new(
             File::open(&self.cert_path)
-                .map_err(|e| {
-                    error!(e; "Failed to open {}", self.cert_path);
-                    e
-                })
+                .inspect_err(|e| error!(e; "Failed to open {}", self.cert_path))
                 .context(InternalIoSnafu)?,
         ))
         .collect::<std::result::Result<Vec<CertificateDer>, IoError>>()
@@ -101,17 +98,11 @@ impl TlsOption {
 
         let mut key_reader = BufReader::new(
             File::open(&self.key_path)
-                .map_err(|e| {
-                    error!(e; "Failed to open {}", self.key_path);
-                    e
-                })
+                .inspect_err(|e| error!(e; "Failed to open {}", self.key_path))
                 .context(InternalIoSnafu)?,
         );
         let key = match read_one(&mut key_reader)
-            .map_err(|e| {
-                error!(e; "Failed to read {}", self.key_path);
-                e
-            })
+            .inspect_err(|e| error!(e; "Failed to read {}", self.key_path))
             .context(InternalIoSnafu)?
         {
             Some(Item::Pkcs1Key(key)) => PrivateKeyDer::from(key),
