@@ -81,7 +81,7 @@ pub type InserterRef = Arc<Inserter>;
 
 /// Hint for the table type to create automatically.
 #[derive(Clone)]
-enum AutoCreateTableType {
+pub(crate) enum AutoCreateTableType {
     /// A logical table with the physical table name.
     Logical(String),
     /// A physical table.
@@ -680,38 +680,9 @@ impl Inserter {
         create_type: &AutoCreateTableType,
         ctx: &QueryContextRef,
     ) -> Result<CreateTableExpr> {
-        let mut table_options = Vec::with_capacity(4);
-        for key in VALID_TABLE_OPTION_KEYS {
-            if let Some(value) = ctx.extension(key) {
-                table_options.push((key, value));
-            }
-        }
-
         let mut engine_name = default_engine();
-        match create_type {
-            AutoCreateTableType::Logical(physical_table) => {
-                engine_name = METRIC_ENGINE_NAME;
-                table_options.push((LOGICAL_TABLE_METADATA_KEY, physical_table));
-            }
-            AutoCreateTableType::Physical => {
-                if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
-                    table_options.push((APPEND_MODE_KEY, append_mode));
-                }
-                if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
-                    table_options.push((MERGE_MODE_KEY, merge_mode));
-                }
-            }
-            // Set append_mode to true for log table.
-            // because log tables should keep rows with the same ts and tags.
-            AutoCreateTableType::Log => {
-                table_options.push((APPEND_MODE_KEY, "true"));
-            }
-            AutoCreateTableType::LastNonNull => {
-                table_options.push((MERGE_MODE_KEY, "last_non_null"));
-            }
-            AutoCreateTableType::Trace => {
-                table_options.push((APPEND_MODE_KEY, "true"));
-            }
+        if matches!(create_type, AutoCreateTableType::Logical(_)) {
+            engine_name = METRIC_ENGINE_NAME;
         }
 
         let schema = ctx.current_schema();
@@ -722,11 +693,9 @@ impl Inserter {
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
 
         info!("Table `{table_ref}` does not exist, try creating table");
-        for (k, v) in table_options {
-            create_table_expr
-                .table_options
-                .insert(k.to_string(), v.to_string());
-        }
+
+        // Use the common fill_table_options_for_create function to populate table options
+        fill_table_options_for_create(&mut create_table_expr.table_options, create_type, ctx);
 
         Ok(create_table_expr)
     }
@@ -917,6 +886,47 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Fill table options for a new table by create type.
+pub(crate) fn fill_table_options_for_create(
+    table_options: &mut std::collections::HashMap<String, String>,
+    create_type: &AutoCreateTableType,
+    ctx: &QueryContextRef,
+) {
+    for key in VALID_TABLE_OPTION_KEYS {
+        if let Some(value) = ctx.extension(key) {
+            table_options.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    match create_type {
+        AutoCreateTableType::Logical(physical_table) => {
+            table_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_table.to_string(),
+            );
+        }
+        AutoCreateTableType::Physical => {
+            if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
+                table_options.insert(APPEND_MODE_KEY.to_string(), append_mode.to_string());
+            }
+            if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
+                table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
+            }
+        }
+        // Set append_mode to true for log table.
+        // because log tables should keep rows with the same ts and tags.
+        AutoCreateTableType::Log => {
+            table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+        }
+        AutoCreateTableType::LastNonNull => {
+            table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        }
+        AutoCreateTableType::Trace => {
+            table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+        }
+    }
 }
 
 /// Builds a [CreateTableExpr] for the given table and schema.

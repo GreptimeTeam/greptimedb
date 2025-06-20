@@ -18,10 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::alter_table_expr::Kind;
-use api::v1::{
-    AddColumn, AddColumns, AlterTableExpr, ColumnDataType, ColumnDef, ColumnSchema,
-    CreateTableExpr, SemanticType,
-};
+use api::v1::{AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, SemanticType};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     default_engine, is_readonly_schema, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
@@ -57,7 +54,7 @@ use crate::error::{
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnexpectedSnafu,
 };
 use crate::expr_helper;
-use crate::insert::build_create_table_expr;
+use crate::insert::{build_create_table_expr, fill_table_options_for_create, AutoCreateTableType};
 use crate::statement::ddl::{create_table_info, parse_partitions, verify_alter, NAME_PATTERN_REG};
 
 /// Helper to query and manipulate (CREATE/ALTER) table schemas.
@@ -688,10 +685,12 @@ async fn ensure_logical_tables_for_metrics(
                     METRIC_ENGINE_NAME,
                 )?;
                 create_expr.create_if_not_exists = true;
-                // Add the logical table metadata key to link with physical table
-                create_expr.table_options.insert(
-                    LOGICAL_TABLE_METADATA_KEY.to_string(),
-                    physical_table_name.clone(),
+                let create_type = AutoCreateTableType::Logical(physical_table_name.clone());
+                // Fill table options.
+                fill_table_options_for_create(
+                    &mut create_expr.table_options,
+                    &create_type,
+                    query_ctx,
                 );
 
                 tables_to_create.push(create_expr);
