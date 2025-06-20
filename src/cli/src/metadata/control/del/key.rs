@@ -27,7 +27,6 @@ use crate::Tool;
 #[derive(Debug, Default, Parser)]
 pub struct DelKeyCommand {
     /// The key to delete from the metadata store.
-    #[clap(long)]
     key: String,
 
     /// Delete key-value pairs with the given prefix.
