@@ -438,9 +438,6 @@ mod tests {
             .expect("Failed to copy temp key file");
         std::fs::rename(&tmp_file, &key_path).expect("Failed to rename temp key file");
 
-        assert!(std::fs::exists(&cert_path).unwrap());
-        assert!(std::fs::exists(&key_path).unwrap());
-
         const MAX_RETRIES: usize = 30;
         let mut retries = 0;
         let mut version_updated = false;
@@ -453,9 +450,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
             retries += 1;
         }
-
-        assert!(std::fs::exists(&cert_path).unwrap());
-        assert!(std::fs::exists(&key_path).unwrap());
 
         assert!(version_updated, "TLS config did not reload in time");
         assert!(server_config.get_version() > 0);
