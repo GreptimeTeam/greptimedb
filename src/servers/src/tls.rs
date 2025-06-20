@@ -228,6 +228,8 @@ pub fn maybe_watch_tls_config(tls_server_config: Arc<ReloadableTlsServerConfig>)
                         info!("Detected TLS cert/key file change: {:?}", event);
                         if let Err(err) = tls_server_config_for_watcher.reload() {
                             error!(err; "Failed to reload TLS server config");
+                        } else {
+                            info!("Reloaded TLS cert/key file successfully.");
                         }
                     }
                     _ => {}
@@ -405,6 +407,9 @@ mod tests {
         std::fs::copy("tests/ssl/server.crt", &cert_path).expect("failed to copy cert to tmpdir");
         std::fs::copy("tests/ssl/server-rsa.key", &key_path).expect("failed to copy key to tmpdir");
 
+        assert!(std::fs::exists(&cert_path).unwrap());
+        assert!(std::fs::exists(&key_path).unwrap());
+
         let server_tls = TlsOption {
             mode: TlsMode::Require,
             cert_path: cert_path
@@ -433,6 +438,9 @@ mod tests {
             .expect("Failed to copy temp key file");
         std::fs::rename(&tmp_file, &key_path).expect("Failed to rename temp key file");
 
+        assert!(std::fs::exists(&cert_path).unwrap());
+        assert!(std::fs::exists(&key_path).unwrap());
+
         const MAX_RETRIES: usize = 30;
         let mut retries = 0;
         let mut version_updated = false;
@@ -445,6 +453,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
             retries += 1;
         }
+
+        assert!(std::fs::exists(&cert_path).unwrap());
+        assert!(std::fs::exists(&key_path).unwrap());
 
         assert!(version_updated, "TLS config did not reload in time");
         assert!(server_config.get_version() > 1);
