@@ -991,7 +991,8 @@ providers = []
 pool_max_idle_per_host = 1024
 connect_timeout = "30s"
 timeout = "30s"
-pool_idle_timeout = "1m 30s""#,
+pool_idle_timeout = "1m 30s"
+skip_ssl_validation = false"#,
             store_type
         )
     } else {
