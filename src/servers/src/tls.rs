@@ -410,17 +410,25 @@ mod tests {
         assert_eq!(0, server_config.get_version());
         assert!(server_config.get_server_config().is_some());
 
-        std::fs::copy("tests/ssl/server-pkcs8.key", &key_path)
-            .expect("failed to copy key to tmpdir");
+        let tmp_file = key_path.with_extension("tmp");
+        std::fs::copy("tests/ssl/server-pkcs8.key", &tmp_file)
+            .expect("Failed to copy temp key file");
+        std::fs::rename(&tmp_file, &key_path).expect("Failed to rename temp key file");
 
-        // waiting for async load
-        #[cfg(not(target_os = "windows"))]
-        let timeout_millis = 300;
-        #[cfg(target_os = "windows")]
-        let timeout_millis = 2000;
+        const MAX_RETRIES: usize = 20;
+        let mut retries = 0;
+        let mut version_updated = false;
 
-        std::thread::sleep(std::time::Duration::from_millis(timeout_millis));
+        while retries < MAX_RETRIES {
+            if server_config.get_version() > 1 {
+                version_updated = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            retries += 1;
+        }
 
+        assert!(version_updated, "TLS config did not reload in time");
         assert!(server_config.get_version() > 1);
         assert!(server_config.get_server_config().is_some());
     }
