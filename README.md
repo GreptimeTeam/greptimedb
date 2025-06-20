@@ -21,8 +21,8 @@
 <a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
 <img src="https://img.shields.io/github/v/release/GreptimeTeam/greptimedb.svg" alt="Version"/>
 </a>
-<a href="https://github.com/GreptimeTeam/greptimedb/releases/latest">
-<img src="https://img.shields.io/github/release-date/GreptimeTeam/greptimedb.svg" alt="Releases"/>
+<a href="https://github.com/GreptimeTeam/greptimedb/commits/main">
+<img src="https://img.shields.io/github/commit-activity/w/GreptimeTeam/greptimedb" alt="Commit Activity"/>
 </a>
 <a href="https://hub.docker.com/r/greptime/greptimedb/">
 <img src="https://img.shields.io/docker/pulls/greptime/greptimedb.svg" alt="Docker Pulls"/>
