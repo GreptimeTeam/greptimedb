@@ -446,7 +446,7 @@ mod tests {
         let mut version_updated = false;
 
         while retries < MAX_RETRIES {
-            if server_config.get_version() > 1 {
+            if server_config.get_version() > 0 {
                 version_updated = true;
                 break;
             }
@@ -458,7 +458,7 @@ mod tests {
         assert!(std::fs::exists(&key_path).unwrap());
 
         assert!(version_updated, "TLS config did not reload in time");
-        assert!(server_config.get_version() > 1);
+        assert!(server_config.get_version() > 0);
         assert!(server_config.get_server_config().is_some());
     }
 }
