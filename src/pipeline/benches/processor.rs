@@ -17,8 +17,7 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::error::Result;
 use pipeline::{
-    json_to_map, parse, Content, GreptimePipelineParams, Pipeline, PipelineContext,
-    PipelineDefinition, SchemaInfo,
+    json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo,
 };
 use serde_json::{Deserializer, Value};
 
@@ -242,12 +241,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     let pipeline = prepare_pipeline();
-    let pipeline = Arc::new(pipeline);
-    let schema = pipeline.schemas().unwrap();
-    let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
 
-    let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
-    let pipeline_param = GreptimePipelineParams::default();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
     let pipeline_ctx = PipelineContext::new(
         &pipeline_def,
         &pipeline_param,

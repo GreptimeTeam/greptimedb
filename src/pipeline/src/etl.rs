@@ -21,7 +21,6 @@ pub mod value;
 
 use std::collections::BTreeMap;
 
-use ahash::HashMap;
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
@@ -40,31 +39,6 @@ use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_row;
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo};
-
-/// Macro to set up pipeline objects with Arc, schema_info, and pipeline_ctx
-///
-/// Usage:
-/// ```rust
-/// let (pipeline, schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
-/// let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_param, Channel::Unknown);
-/// ```
-#[macro_export]
-macro_rules! setup_pipeline {
-    ($pipeline:expr) => {{
-        use std::sync::Arc;
-
-        use $crate::{GreptimePipelineParams, Pipeline, PipelineDefinition, SchemaInfo};
-
-        let pipeline: Arc<Pipeline> = Arc::new($pipeline);
-        let schema = pipeline.schemas().unwrap();
-        let schema_info = SchemaInfo::from_schema_list(schema.clone());
-
-        let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
-        let pipeline_param = GreptimePipelineParams::default();
-
-        (pipeline, schema_info, pipeline_def, pipeline_param)
-    }};
-}
 
 const DESCRIPTION: &str = "description";
 const DOC_VERSION: &str = "version";
@@ -165,8 +139,17 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum PipelineDocVersion {
+    /// 1. All fields meant to be preserved have to explicitly set in the transform section.
+    /// 2. Or no transform is set, then the auto-transform will be used.
     #[default]
     V1,
+
+    /// A combination of transform and auto-transform.
+    /// First it goes through the transform section,
+    /// then use auto-transform to set the rest fields.
+    ///
+    /// This is useful if you only want to set the index field,
+    /// and let the normal fields be auto-inferred.
     V2,
 }
 
@@ -221,8 +204,6 @@ impl DispatchedTo {
 /// The result of pipeline execution
 #[derive(Debug)]
 pub enum PipelineExecOutput {
-    // Transformed(TransformedOutput),
-    // AutoTransform(AutoTransformOutput),
     NewTransformed(NewTransformedInner),
     DispatchedTo(DispatchedTo, Value),
 }
@@ -232,22 +213,6 @@ pub struct NewTransformedInner {
     pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
-}
-
-#[derive(Debug)]
-pub struct TransformedOutput {
-    pub opt: ContextOpt,
-    pub row: Row,
-    pub table_suffix: Option<String>,
-    pub pipeline_map: Value,
-}
-
-#[derive(Debug)]
-pub struct AutoTransformOutput {
-    pub table_suffix: Option<String>,
-    // ts_column_name -> unit
-    pub ts_unit_map: HashMap<String, TimeUnit>,
-    pub pipeline_map: Value,
 }
 
 impl PipelineExecOutput {
@@ -329,23 +294,21 @@ impl Pipeline {
         }
 
         // extract the options first
+        // this might be a breaking change, for table_suffix is now right after the processors
         let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
         let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
         // do transform first
         let mut transformed_values =
             Vec::with_capacity(val.as_map().map(|m| m.len()).unwrap_or(32));
-        // let mut schema_info = self
-        //     .transformer()
-        //     .map(|t| SchemaInfo::from_schema_list(t.schemas().clone()))
-        //     .unwrap_or_default();
 
-        if let Some(transformer) = self.get_greptime_transformer() {
+        if let TransformerMode::GreptimeTransformer(transformer) = self.transformer() {
             // note now transform will remove the field from the val
             let values = transformer.transform_mut(&mut val)?;
             transformed_values.extend(values);
             if self.is_v1() {
-                // return immediately
+                // v1 dont combine with auto-transform
+                // so return immediately
                 return Ok(PipelineExecOutput::NewTransformed(NewTransformedInner {
                     opt,
                     row: Row {
@@ -356,30 +319,28 @@ impl Pipeline {
             }
         }
 
-        // continue v2 process
-        // check ts column
-        let row = if self.get_greptime_transformer().is_some() {
+        // continue v2 process, check ts column and set the rest fields with auto-transform
+        // if transformer presents, then ts has been set
+        let row = if matches!(self.transformer(), TransformerMode::GreptimeTransformer(_)) {
             // ts has been set
             values_to_row(schema_info, val, pipeline_ctx, Some(transformed_values))?
         } else {
             // infer ts from the context
             // we've check that only one timestamp should exist
-            let a = val.as_map().map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| match v {
+            let (name, ts) = val
+                .as_map()
+                .and_then(|m| {
+                    m.iter().find_map(|(k, v)| match v {
                         Value::Timestamp(ts) => Some((k, ts)),
                         _ => None,
                     })
-                    .collect_vec()
-            });
-            ensure!(
-                a.as_ref().is_some_and(|v| v.len() == 1),
-                AutoTransformOneTimestampSnafu
-            );
-            let a = a.unwrap();
-            let (name, ts) = a.first().unwrap();
-            let c_ts = IdentityTimeIndex::Epoch(name.to_string(), ts.get_unit(), false);
-            let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(c_ts));
+                })
+                .context(AutoTransformOneTimestampSnafu)?;
+
+            // Create pipeline context with the found timestamp
+            let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                IdentityTimeIndex::Epoch(name.to_string(), ts.get_unit(), false),
+            ));
             let n_ctx =
                 PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
             values_to_row(schema_info, val, &n_ctx, Some(transformed_values))?
@@ -390,45 +351,6 @@ impl Pipeline {
             row,
             table_suffix,
         }))
-
-        // let row = unwrap_or_continue_if_err!(
-        //     ,
-        //     skip_error
-        // );
-
-        // Ok(PipelineExecOutput::Transformed(TransformedOutput {
-        //     opt,
-        //     row,
-        //     table_suffix,
-        //     // pipeline_map: val,
-        // }))
-        // do transform
-        // if let Some(transformer) = self.transformer() {
-        //     let values = transformer.transform_mut(&mut val)?;
-        //     let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
-
-        //     Ok(PipelineExecOutput::Transformed(TransformedOutput {
-        //         opt,
-        //         row,
-        //         table_suffix,
-        //         pipeline_map: val,
-        //     }))
-        // } else {
-        //     let mut ts_unit_map = HashMap::with_capacity(4);
-        //     // get all ts values
-        //     for (k, v) in val.as_map_mut().context(ValueMustBeMapSnafu)? {
-        //         if let Value::Timestamp(ts) = v {
-        //             if !ts_unit_map.contains_key(k) {
-        //                 ts_unit_map.insert(k.clone(), ts.get_unit());
-        //             }
-        //         }
-        //     }
-        //     Ok(PipelineExecOutput::AutoTransform(AutoTransformOutput {
-        //         table_suffix,
-        //         ts_unit_map,
-        //         pipeline_map: val,
-        //     }))
-        // }
     }
 
     pub fn processors(&self) -> &processor::Processors {
@@ -439,13 +361,7 @@ impl Pipeline {
         &self.transformer
     }
 
-    pub fn get_greptime_transformer(&self) -> Option<&GreptimeTransformer> {
-        match &self.transformer {
-            TransformerMode::GreptimeTransformer(t) => Some(t),
-            TransformerMode::AutoTransform(_, _) => None,
-        }
-    }
-
+    // the method is for test purpose
     pub fn schemas(&self) -> Option<&Vec<greptime_proto::v1::ColumnSchema>> {
         match &self.transformer {
             TransformerMode::GreptimeTransformer(t) => Some(t.schemas()),
@@ -461,6 +377,31 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+/// This macro is test only, do not use it in production.
+/// The schema_info cannot be used in auto-transform ts-infer mode for lacking the ts schema.
+///
+/// Usage:
+/// ```rust
+/// let (pipeline, schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+/// let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_param, Channel::Unknown);
+/// ```
+#[macro_export]
+macro_rules! setup_pipeline {
+    ($pipeline:expr) => {{
+        use std::sync::Arc;
+
+        use $crate::{GreptimePipelineParams, Pipeline, PipelineDefinition, SchemaInfo};
+
+        let pipeline: Arc<Pipeline> = Arc::new($pipeline);
+        let schema = pipeline.schemas().unwrap();
+        let schema_info = SchemaInfo::from_schema_list(schema.clone());
+
+        let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
+        let pipeline_param = GreptimePipelineParams::default();
+
+        (pipeline, schema_info, pipeline_def, pipeline_param)
+    }};
+}
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

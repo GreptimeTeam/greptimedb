@@ -118,8 +118,6 @@ async fn run_custom_pipeline(
     let arr_len = pipeline_maps.len();
     let mut transformed_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
-    // let mut auto_map = HashMap::new();
-    // let mut auto_map_ts_keys = HashMap::new();
 
     let mut schema_info = match pipeline.transformer() {
         TransformerMode::GreptimeTransformer(greptime_transformer) => {
@@ -166,27 +164,6 @@ async fn run_custom_pipeline(
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
                 push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
             }
-            // PipelineExecOutput::Transformed(TransformedOutput {
-            //     opt,
-            //     row,
-            //     table_suffix,
-            //     pipeline_map: _val,
-            // }) => {
-            //     let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-            //     push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
-            // }
-            // PipelineExecOutput::AutoTransform(AutoTransformOutput {
-            //     table_suffix,
-            //     ts_unit_map,
-            //     pipeline_map,
-            // }) => {
-            //     let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-            //     push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
-            //     auto_map_ts_keys
-            //         .entry(act_table_name)
-            //         .or_insert_with(HashMap::new)
-            //         .extend(ts_unit_map);
-            // }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
             }
@@ -214,51 +191,6 @@ async fn run_custom_pipeline(
             },
         );
     }
-
-    // if let Some(s) = pipeline.schemas() {
-    //     // transformed
-
-    //     // if current pipeline generates some transformed results, build it as
-    //     // `RowInsertRequest` and append to results. If the pipeline doesn't
-    //     // have dispatch, this will be only output of the pipeline.
-    // } else {
-    //     // auto map
-    //     for (table_name, pipeline_maps) in auto_map {
-    //         if pipeline_maps.is_empty() {
-    //             continue;
-    //         }
-
-    //         let ts_unit_map = auto_map_ts_keys
-    //             .remove(&table_name)
-    //             .context(AutoTransformOneTimestampSnafu)
-    //             .context(PipelineSnafu)?;
-    //         // only one timestamp key is allowed
-    //         // which will be converted to ts index
-    //         let (ts_key, unit) = ts_unit_map
-    //             .into_iter()
-    //             .exactly_one()
-    //             .map_err(|_| AutoTransformOneTimestampSnafu.build())
-    //             .context(PipelineSnafu)?;
-
-    //         let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
-    //         let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
-    //         let next_pipeline_ctx =
-    //             PipelineContext::new(&new_def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-
-    //         let reqs = run_identity_pipeline(
-    //             handler,
-    //             &next_pipeline_ctx,
-    //             PipelineIngestRequest {
-    //                 table: table_name,
-    //                 values: pipeline_maps,
-    //             },
-    //             query_ctx,
-    //         )
-    //         .await?;
-
-    //         results.merge(reqs);
-    //     }
-    // }
 
     // if current pipeline contains dispatcher and has several rules, we may
     // already accumulated several dispatched rules and rows.

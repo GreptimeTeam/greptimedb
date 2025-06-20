@@ -12,13 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{
-    json_to_map, parse, Content, GreptimePipelineParams, Pipeline, PipelineContext,
-    PipelineDefinition, SchemaInfo,
-};
+use pipeline::{json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
@@ -27,12 +22,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
 
-    let pipeline = Arc::new(pipeline);
-    let schema = pipeline.schemas().unwrap();
-    let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
-
-    let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
-    let pipeline_param = GreptimePipelineParams::default();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
     let pipeline_ctx = PipelineContext::new(
         &pipeline_def,
         &pipeline_param,

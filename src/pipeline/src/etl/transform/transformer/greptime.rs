@@ -421,10 +421,6 @@ pub(crate) fn values_to_row(
 
     row.resize(schema_info.schema.len(), GreptimeValue { value_data: None });
 
-    // for _ in 1..schema_info.schema.len() {
-    //     row.push(GreptimeValue { value_data: None });
-    // }
-
     // skip ts column
     let ts_column_name = custom_ts
         .as_ref()
