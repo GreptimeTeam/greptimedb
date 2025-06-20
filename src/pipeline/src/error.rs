@@ -426,7 +426,7 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform"))]
+    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform. `ignore_missing` can not be set to true."))]
     AutoTransformOneTimestamp {
         #[snafu(implicit)]
         location: Location,

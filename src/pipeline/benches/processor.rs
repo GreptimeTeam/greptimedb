@@ -12,13 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::error::Result;
-use pipeline::{json_to_map, parse, Content, Pipeline};
+use pipeline::{
+    json_to_map, parse, Content, GreptimePipelineParams, Pipeline, PipelineContext,
+    PipelineDefinition, SchemaInfo,
+};
 use serde_json::{Deserializer, Value};
 
 fn processor_mut(
-    pipeline: &Pipeline,
+    pipeline: Arc<Pipeline>,
+    pipeline_ctx: &PipelineContext<'_>,
+    schema_info: &mut SchemaInfo,
     input_values: Vec<Value>,
 ) -> Result<Vec<greptime_proto::v1::Row>> {
     let mut result = Vec::with_capacity(input_values.len());
@@ -26,7 +33,7 @@ fn processor_mut(
     for v in input_values {
         let payload = json_to_map(v).unwrap();
         let r = pipeline
-            .exec_mut(payload)?
+            .exec_mut(payload, pipeline_ctx, schema_info)?
             .into_transformed()
             .expect("expect transformed result ");
         result.push(r.0);
@@ -235,11 +242,29 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     let pipeline = prepare_pipeline();
+    let pipeline = Arc::new(pipeline);
+    let schema = pipeline.schemas().unwrap();
+    let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
+
+    let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
+    let pipeline_param = GreptimePipelineParams::default();
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
     let mut group = c.benchmark_group("pipeline");
     group.sample_size(50);
     group.bench_function("processor mut", |b| {
         b.iter(|| {
-            processor_mut(black_box(&pipeline), black_box(input_value.clone())).unwrap();
+            processor_mut(
+                black_box(pipeline.clone()),
+                black_box(&pipeline_ctx),
+                black_box(&mut schema_info),
+                black_box(input_value.clone()),
+            )
+            .unwrap();
         })
     });
     group.finish();
