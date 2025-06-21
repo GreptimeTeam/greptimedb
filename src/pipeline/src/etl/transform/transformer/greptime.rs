@@ -42,6 +42,7 @@ use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::value::{Timestamp, Value};
+use crate::etl::PipelineDocVersion;
 use crate::{unwrap_or_continue_if_err, Map, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
@@ -160,7 +161,7 @@ impl GreptimeTransformer {
 }
 
 impl GreptimeTransformer {
-    pub fn new(mut transforms: Transforms) -> Result<Self> {
+    pub fn new(mut transforms: Transforms, doc_version: &PipelineDocVersion) -> Result<Self> {
         // empty check is done in the caller
         let mut column_names_set = HashSet::new();
         let mut timestamp_columns = vec![];
@@ -202,34 +203,34 @@ impl GreptimeTransformer {
             }
         }
 
-        match timestamp_columns.len() {
-            0 => {
+        let schema = match timestamp_columns.len() {
+            0 if doc_version == &PipelineDocVersion::V1 => {
+                // compatible with v1, add a default timestamp column
                 GreptimeTransformer::add_greptime_timestamp_column(&mut transforms);
-
-                let schema = GreptimeTransformer::init_schemas(&transforms)?;
-                Ok(GreptimeTransformer { transforms, schema })
+                GreptimeTransformer::init_schemas(&transforms)?
             }
-            1 => {
-                let schema = GreptimeTransformer::init_schemas(&transforms)?;
-                Ok(GreptimeTransformer { transforms, schema })
+            1 => GreptimeTransformer::init_schemas(&transforms)?,
+            count => {
+                let columns = timestamp_columns.iter().join(", ");
+                return TransformTimestampIndexCountSnafu { count, columns }.fail();
             }
-            _ => {
-                let columns: String = timestamp_columns.iter().map(|s| s.to_string()).join(", ");
-                let count = timestamp_columns.len();
-                TransformTimestampIndexCountSnafu { count, columns }.fail()
-            }
-        }
+        };
+        Ok(GreptimeTransformer { transforms, schema })
     }
 
-    pub fn transform_mut(&self, pipeline_map: &mut Value) -> Result<(ContextOpt, Row)> {
-        let opt = ContextOpt::from_pipeline_map_to_opt(pipeline_map)?;
-
+    pub fn transform_mut(
+        &self,
+        pipeline_map: &mut Value,
+        is_v1: bool,
+    ) -> Result<Vec<GreptimeValue>> {
         let mut values = vec![GreptimeValue { value_data: None }; self.schema.len()];
         let mut output_index = 0;
         for transform in self.transforms.iter() {
             for field in transform.fields.iter() {
-                let index = field.input_field();
-                match pipeline_map.get(index) {
+                let column_name = field.input_field();
+
+                // let keep us `get` here to be compatible with v1
+                match pipeline_map.get(column_name) {
                     Some(v) => {
                         let value_data = coerce_value(v, transform)?;
                         // every transform fields has only one output field
@@ -256,9 +257,14 @@ impl GreptimeTransformer {
                     }
                 }
                 output_index += 1;
+                if !is_v1 {
+                    // remove the column from the pipeline_map
+                    // so that the auto-transform can use the rest fields
+                    pipeline_map.remove(column_name);
+                }
             }
         }
-        Ok((opt, Row { values }))
+        Ok(values)
     }
 
     pub fn transforms(&self) -> &Transforms {
@@ -290,6 +296,17 @@ impl SchemaInfo {
         Self {
             schema: Vec::with_capacity(capacity),
             index: HashMap::with_capacity(capacity),
+        }
+    }
+
+    pub fn from_schema_list(schema_list: Vec<ColumnSchema>) -> Self {
+        let mut index = HashMap::new();
+        for (i, schema) in schema_list.iter().enumerate() {
+            index.insert(schema.column_name.clone(), i);
+        }
+        Self {
+            schema: schema_list,
+            index,
         }
     }
 }
@@ -398,12 +415,14 @@ fn calc_ts(p_ctx: &PipelineContext, values: &Value) -> Result<Option<ValueData>>
     }
 }
 
-fn values_to_row(
+pub(crate) fn values_to_row(
     schema_info: &mut SchemaInfo,
     values: Value,
     pipeline_ctx: &PipelineContext<'_>,
+    row: Option<Vec<GreptimeValue>>,
 ) -> Result<Row> {
-    let mut row: Vec<GreptimeValue> = Vec::with_capacity(schema_info.schema.len());
+    let mut row: Vec<GreptimeValue> =
+        row.unwrap_or_else(|| Vec::with_capacity(schema_info.schema.len()));
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
     // calculate timestamp value based on the channel
@@ -411,9 +430,7 @@ fn values_to_row(
 
     row.push(GreptimeValue { value_data: ts });
 
-    for _ in 1..schema_info.schema.len() {
-        row.push(GreptimeValue { value_data: None });
-    }
+    row.resize(schema_info.schema.len(), GreptimeValue { value_data: None });
 
     // skip ts column
     let ts_column_name = custom_ts
@@ -591,7 +608,7 @@ fn identity_pipeline_inner(
             skip_error
         );
         let row = unwrap_or_continue_if_err!(
-            values_to_row(&mut schema_info, pipeline_map, pipeline_ctx),
+            values_to_row(&mut schema_info, pipeline_map, pipeline_ctx, None),
             skip_error
         );
 

@@ -330,6 +330,13 @@ impl Value {
         }
     }
 
+    pub fn as_map(&self) -> Option<&BTreeMap<String, Self>> {
+        match self {
+            Value::Map(map) => Some(map),
+            _ => None,
+        }
+    }
+
     pub fn into_map(self) -> Option<BTreeMap<String, Self>> {
         match self {
             Value::Map(map) => Some(map.values),

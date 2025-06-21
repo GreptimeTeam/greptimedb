@@ -16,7 +16,7 @@ mod common;
 
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
-use pipeline::json_to_map;
+use pipeline::{json_to_map, setup_pipeline, PipelineContext};
 
 fn make_string_column_schema(name: String) -> greptime_proto::v1::ColumnSchema {
     common::make_column_schema(name, ColumnDataType::String, SemanticType::Field)
@@ -274,9 +274,17 @@ transform:
     let yaml_content = pipeline::Content::Yaml(pipeline_yaml);
     let pipeline: pipeline::Pipeline =
         pipeline::parse(&yaml_content).expect("failed to parse pipeline");
+
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
+
     let result = json_to_map(input_value).unwrap();
 
-    let row = pipeline.exec_mut(result);
+    let row = pipeline.exec_mut(result, &pipeline_ctx, &mut schema_info);
 
     assert!(row.is_err());
     assert_eq!(row.err().unwrap().to_string(), "No matching pattern found");

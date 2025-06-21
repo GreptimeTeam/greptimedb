@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{json_to_map, parse, Content, Pipeline};
+use pipeline::{json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
@@ -22,7 +22,12 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
 
-    let schema = pipeline.schemas().unwrap().clone();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let mut rows = Vec::new();
 
@@ -31,7 +36,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
             for value in array {
                 let intermediate_status = json_to_map(value).unwrap();
                 let row = pipeline
-                    .exec_mut(intermediate_status)
+                    .exec_mut(intermediate_status, &pipeline_ctx, &mut schema_info)
                     .expect("failed to exec pipeline")
                     .into_transformed()
                     .expect("expect transformed result ");
@@ -41,7 +46,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
         serde_json::Value::Object(_) => {
             let intermediate_status = json_to_map(input_value).unwrap();
             let row = pipeline
-                .exec_mut(intermediate_status)
+                .exec_mut(intermediate_status, &pipeline_ctx, &mut schema_info)
                 .expect("failed to exec pipeline")
                 .into_transformed()
                 .expect("expect transformed result ");
@@ -52,7 +57,10 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
         }
     }
 
-    Rows { schema, rows }
+    Rows {
+        schema: schema_info.schema.clone(),
+        rows,
+    }
 }
 
 /// test util function to create column schema

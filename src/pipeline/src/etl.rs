@@ -21,26 +21,27 @@ pub mod value;
 
 use std::collections::BTreeMap;
 
-use ahash::{HashMap, HashMapExt};
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
+use itertools::Itertools;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
 use value::Value;
-use yaml_rust::YamlLoader;
+use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu, Result,
-    ValueMustBeMapSnafu, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, Error, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu,
+    InvalidVersionNumberSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
 };
-use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
 use crate::etl::processor::ProcessorKind;
+use crate::etl::transform::transformer::greptime::values_to_row;
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::{ContextOpt, GreptimeTransformer};
+use crate::{ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo};
 
 const DESCRIPTION: &str = "description";
+const DOC_VERSION: &str = "version";
 const PROCESSORS: &str = "processors";
 const TRANSFORM: &str = "transform";
 const TRANSFORMS: &str = "transforms";
@@ -63,6 +64,8 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
 
             let description = doc[DESCRIPTION].as_str().map(|s| s.to_string());
 
+            let doc_version = (&doc[DOC_VERSION]).try_into()?;
+
             let processors = if let Some(v) = doc[PROCESSORS].as_vec() {
                 v.try_into()?
             } else {
@@ -82,16 +85,31 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
                 let cnt = processors
                     .iter()
                     .filter_map(|p| match p {
-                        ProcessorKind::Date(d) => Some(d.target_count()),
-                        ProcessorKind::Timestamp(t) => Some(t.target_count()),
-                        ProcessorKind::Epoch(e) => Some(e.target_count()),
+                        ProcessorKind::Date(d) if !d.ignore_missing() => Some(
+                            d.fields
+                                .iter()
+                                .map(|f| (f.target_or_input_field(), TimeUnit::Nanosecond))
+                                .collect_vec(),
+                        ),
+                        ProcessorKind::Epoch(e) if !e.ignore_missing() => Some(
+                            e.fields
+                                .iter()
+                                .map(|f| (f.target_or_input_field(), (&e.resolution).into()))
+                                .collect_vec(),
+                        ),
                         _ => None,
                     })
-                    .sum::<usize>();
-                ensure!(cnt == 1, AutoTransformOneTimestampSnafu);
-                None
+                    .flatten()
+                    .collect_vec();
+                ensure!(cnt.len() == 1, AutoTransformOneTimestampSnafu);
+
+                let (ts_name, timeunit) = cnt.first().unwrap();
+                TransformerMode::AutoTransform(ts_name.to_string(), *timeunit)
             } else {
-                Some(GreptimeTransformer::new(transformers)?)
+                TransformerMode::GreptimeTransformer(GreptimeTransformer::new(
+                    transformers,
+                    &doc_version,
+                )?)
             };
 
             let dispatcher = if !doc[DISPATCHER].is_badvalue() {
@@ -107,6 +125,7 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
             };
 
             Ok(Pipeline {
+                doc_version,
                 description,
                 processors,
                 transformer,
@@ -118,13 +137,68 @@ pub fn parse(input: &Content) -> Result<Pipeline> {
     }
 }
 
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum PipelineDocVersion {
+    /// 1. All fields meant to be preserved have to explicitly set in the transform section.
+    /// 2. Or no transform is set, then the auto-transform will be used.
+    #[default]
+    V1,
+
+    /// A combination of transform and auto-transform.
+    /// First it goes through the transform section,
+    /// then use auto-transform to set the rest fields.
+    ///
+    /// This is useful if you only want to set the index field,
+    /// and let the normal fields be auto-inferred.
+    V2,
+}
+
+impl TryFrom<&Yaml> for PipelineDocVersion {
+    type Error = Error;
+
+    fn try_from(value: &Yaml) -> Result<Self> {
+        if value.is_badvalue() || value.is_null() {
+            return Ok(PipelineDocVersion::V1);
+        }
+
+        let version = match value {
+            Yaml::String(s) => s
+                .parse::<i64>()
+                .map_err(|_| InvalidVersionNumberSnafu { version: s.clone() }.build())?,
+            Yaml::Integer(i) => *i,
+            _ => {
+                return InvalidVersionNumberSnafu {
+                    version: value.as_str().unwrap_or_default().to_string(),
+                }
+                .fail();
+            }
+        };
+
+        match version {
+            1 => Ok(PipelineDocVersion::V1),
+            2 => Ok(PipelineDocVersion::V2),
+            _ => InvalidVersionNumberSnafu {
+                version: version.to_string(),
+            }
+            .fail(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Pipeline {
+    doc_version: PipelineDocVersion,
     description: Option<String>,
     processors: processor::Processors,
     dispatcher: Option<Dispatcher>,
-    transformer: Option<GreptimeTransformer>,
+    transformer: TransformerMode,
     tablesuffix: Option<TableSuffixTemplate>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TransformerMode {
+    GreptimeTransformer(GreptimeTransformer),
+    AutoTransform(String, TimeUnit),
 }
 
 /// Where the pipeline executed is dispatched to, with context information
@@ -154,7 +228,6 @@ impl DispatchedTo {
 #[derive(Debug)]
 pub enum PipelineExecOutput {
     Transformed(TransformedOutput),
-    AutoTransform(AutoTransformOutput),
     DispatchedTo(DispatchedTo, Value),
 }
 
@@ -163,15 +236,6 @@ pub struct TransformedOutput {
     pub opt: ContextOpt,
     pub row: Row,
     pub table_suffix: Option<String>,
-    pub pipeline_map: Value,
-}
-
-#[derive(Debug)]
-pub struct AutoTransformOutput {
-    pub table_suffix: Option<String>,
-    // ts_column_name -> unit
-    pub ts_unit_map: HashMap<String, TimeUnit>,
-    pub pipeline_map: Value,
 }
 
 impl PipelineExecOutput {
@@ -232,7 +296,16 @@ pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<Val
 }
 
 impl Pipeline {
-    pub fn exec_mut(&self, mut val: Value) -> Result<PipelineExecOutput> {
+    fn is_v1(&self) -> bool {
+        self.doc_version == PipelineDocVersion::V1
+    }
+
+    pub fn exec_mut(
+        &self,
+        mut val: Value,
+        pipeline_ctx: &PipelineContext<'_>,
+        schema_info: &mut SchemaInfo,
+    ) -> Result<PipelineExecOutput> {
         // process
         for processor in self.processors.iter() {
             val = processor.exec_mut(val)?;
@@ -243,51 +316,62 @@ impl Pipeline {
             return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
         }
 
-        // do transform
-        if let Some(transformer) = self.transformer() {
-            let (mut opt, row) = transformer.transform_mut(&mut val)?;
-            let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
+        // extract the options first
+        // this might be a breaking change, for table_suffix is now right after the processors
+        let mut opt = ContextOpt::from_pipeline_map_to_opt(&mut val)?;
+        let table_suffix = opt.resolve_table_suffix(self.tablesuffix.as_ref(), &val);
 
-            Ok(PipelineExecOutput::Transformed(TransformedOutput {
-                opt,
-                row,
-                table_suffix,
-                pipeline_map: val,
-            }))
-        } else {
-            // check table suffix var
-            let table_suffix = val
-                .remove(TABLE_SUFFIX_KEY)
-                .map(|f| f.to_str_value())
-                .or_else(|| self.tablesuffix.as_ref().and_then(|t| t.apply(&val)));
-
-            let mut ts_unit_map = HashMap::with_capacity(4);
-            // get all ts values
-            for (k, v) in val.as_map_mut().context(ValueMustBeMapSnafu)? {
-                if let Value::Timestamp(ts) = v {
-                    if !ts_unit_map.contains_key(k) {
-                        ts_unit_map.insert(k.clone(), ts.get_unit());
-                    }
+        let row = match self.transformer() {
+            TransformerMode::GreptimeTransformer(greptime_transformer) => {
+                let values = greptime_transformer.transform_mut(&mut val, self.is_v1())?;
+                if self.is_v1() {
+                    // v1 dont combine with auto-transform
+                    // so return immediately
+                    return Ok(PipelineExecOutput::Transformed(TransformedOutput {
+                        opt,
+                        row: Row { values },
+                        table_suffix,
+                    }));
                 }
+                // continue v2 process, check ts column and set the rest fields with auto-transform
+                // if transformer presents, then ts has been set
+                values_to_row(schema_info, val, pipeline_ctx, Some(values))?
             }
-            Ok(PipelineExecOutput::AutoTransform(AutoTransformOutput {
-                table_suffix,
-                ts_unit_map,
-                pipeline_map: val,
-            }))
-        }
+            TransformerMode::AutoTransform(ts_name, time_unit) => {
+                // infer ts from the context
+                // we've check that only one timestamp should exist
+
+                // Create pipeline context with the found timestamp
+                let def = crate::PipelineDefinition::GreptimeIdentityPipeline(Some(
+                    IdentityTimeIndex::Epoch(ts_name.to_string(), *time_unit, false),
+                ));
+                let n_ctx =
+                    PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
+                values_to_row(schema_info, val, &n_ctx, None)?
+            }
+        };
+
+        Ok(PipelineExecOutput::Transformed(TransformedOutput {
+            opt,
+            row,
+            table_suffix,
+        }))
     }
 
     pub fn processors(&self) -> &processor::Processors {
         &self.processors
     }
 
-    pub fn transformer(&self) -> Option<&GreptimeTransformer> {
-        self.transformer.as_ref()
+    pub fn transformer(&self) -> &TransformerMode {
+        &self.transformer
     }
 
+    // the method is for test purpose
     pub fn schemas(&self) -> Option<&Vec<greptime_proto::v1::ColumnSchema>> {
-        self.transformer.as_ref().map(|t| t.schemas())
+        match &self.transformer {
+            TransformerMode::GreptimeTransformer(t) => Some(t.schemas()),
+            TransformerMode::AutoTransform(_, _) => None,
+        }
     }
 }
 
@@ -298,8 +382,35 @@ pub(crate) fn find_key_index(intermediate_keys: &[String], key: &str, kind: &str
         .context(IntermediateKeyIndexSnafu { kind, key })
 }
 
+/// This macro is test only, do not use it in production.
+/// The schema_info cannot be used in auto-transform ts-infer mode for lacking the ts schema.
+///
+/// Usage:
+/// ```rust
+/// let (pipeline, schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+/// let pipeline_ctx = PipelineContext::new(&pipeline_def, &pipeline_param, Channel::Unknown);
+/// ```
+#[macro_export]
+macro_rules! setup_pipeline {
+    ($pipeline:expr) => {{
+        use std::sync::Arc;
+
+        use $crate::{GreptimePipelineParams, Pipeline, PipelineDefinition, SchemaInfo};
+
+        let pipeline: Arc<Pipeline> = Arc::new($pipeline);
+        let schema = pipeline.schemas().unwrap();
+        let schema_info = SchemaInfo::from_schema_list(schema.clone());
+
+        let pipeline_def = PipelineDefinition::Resolved(pipeline.clone());
+        let pipeline_param = GreptimePipelineParams::default();
+
+        (pipeline, schema_info, pipeline_def, pipeline_param)
+    }};
+}
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
@@ -311,7 +422,8 @@ mod tests {
         let input_value_str = r#"
                     {
                         "my_field": "1,2",
-                        "foo": "bar"
+                        "foo": "bar",
+                        "ts": "1"
                     }
                 "#;
         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
@@ -321,16 +433,30 @@ processors:
     - csv:
         field: my_field
         target_fields: field1, field2
+    - epoch:
+        field: ts
+        resolution: ns
 transform:
     - field: field1
       type: uint32
     - field: field2
       type: uint32
+    - field: ts
+      type: timestamp, ns
+      index: time
     "#;
+
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
         let payload = json_to_map(input_value).unwrap();
         let result = pipeline
-            .exec_mut(payload)
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
@@ -339,7 +465,7 @@ transform:
         assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
         match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
-                assert_ne!(*v, 0);
+                assert_ne!(v, &0);
             }
             _ => panic!("expect null value"),
         }
@@ -354,7 +480,7 @@ transform:
           - message
         patterns:
           - "%{ip} %{?ignored} %{username} [%{ts}] \"%{method} %{path} %{proto}\" %{status} %{bytes}"
-    - timestamp:
+    - date:
         fields:
           - ts
         formats:
@@ -378,17 +504,31 @@ transform:
       type: timestamp, ns
       index: time"#;
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_str)).unwrap();
+        let pipeline = Arc::new(pipeline);
+        let schema = pipeline.schemas().unwrap();
+        let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
+
+        let pipeline_def = crate::PipelineDefinition::Resolved(pipeline.clone());
+        let pipeline_param = crate::GreptimePipelineParams::default();
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
         let mut payload = BTreeMap::new();
         payload.insert("message".to_string(), Value::String(message));
         let payload = Value::Map(payload.into());
+
         let result = pipeline
-            .exec_mut(payload)
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
-        let sechema = pipeline.schemas().unwrap();
 
-        assert_eq!(sechema.len(), result.0.values.len());
+        // println!("[DEBUG]schema_info: {:?}", schema_info.schema);
+        // println!("[DEBUG]re: {:?}", result.0.values);
+
+        assert_eq!(schema_info.schema.len(), result.0.values.len());
         let test = vec![
             (
                 ColumnDataType::String as i32,
@@ -425,8 +565,10 @@ transform:
                 Some(ValueData::TimestampNanosecondValue(1722493367000000000)),
             ),
         ];
-        for i in 0..sechema.len() {
-            let schema = &sechema[i];
+        // manually set schema
+        let schema = pipeline.schemas().unwrap();
+        for i in 0..schema.len() {
+            let schema = &schema[i];
             let value = &result.0.values[i];
             assert_eq!(schema.datatype, test[i].0);
             assert_eq!(value.value_data, test[i].1);
@@ -438,7 +580,8 @@ transform:
         let input_value_str = r#"
                     {
                         "my_field": "1,2",
-                        "foo": "bar"
+                        "foo": "bar",
+                        "ts": "1"
                     }
                 "#;
         let input_value: serde_json::Value = serde_json::from_str(input_value_str).unwrap();
@@ -449,17 +592,30 @@ transform:
       - csv:
           field: my_field
           target_fields: field1, field2
+      - epoch:
+          field: ts
+          resolution: ns
     transform:
       - field: field1
         type: uint32
       - field: field2
         type: uint32
+      - field: ts
+        type: timestamp, ns
+        index: time
     "#;
 
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
+
         let payload = json_to_map(input_value).unwrap();
         let result = pipeline
-            .exec_mut(payload)
+            .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
@@ -467,7 +623,7 @@ transform:
         assert_eq!(result.0.values[1].value_data, Some(ValueData::U32Value(2)));
         match &result.0.values[2].value_data {
             Some(ValueData::TimestampNanosecondValue(v)) => {
-                assert_ne!(*v, 0);
+                assert_ne!(v, &0);
             }
             _ => panic!("expect null value"),
         }
@@ -488,7 +644,7 @@ transform:
 description: Pipeline for Apache Tomcat
 
 processors:
-    - timestamp:
+    - date:
         field: test_time
 
 transform:
@@ -498,11 +654,22 @@ transform:
     "#;
 
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
+        let pipeline = Arc::new(pipeline);
+        let schema = pipeline.schemas().unwrap();
+        let mut schema_info = SchemaInfo::from_schema_list(schema.clone());
+
+        let pipeline_def = crate::PipelineDefinition::Resolved(pipeline.clone());
+        let pipeline_param = crate::GreptimePipelineParams::default();
+        let pipeline_ctx = PipelineContext::new(
+            &pipeline_def,
+            &pipeline_param,
+            session::context::Channel::Unknown,
+        );
         let schema = pipeline.schemas().unwrap().clone();
         let result = json_to_map(input_value).unwrap();
 
         let row = pipeline
-            .exec_mut(result)
+            .exec_mut(result, &pipeline_ctx, &mut schema_info)
             .unwrap()
             .into_transformed()
             .unwrap();
@@ -536,6 +703,9 @@ transform:
 description: Pipeline for Apache Tomcat
 
 processors:
+  - epoch:
+      field: ts
+      resolution: ns
 
 dispatcher:
   field: typename
@@ -549,7 +719,9 @@ dispatcher:
 transform:
   - field: typename
     type: string
-
+  - field: ts
+    type: timestamp, ns
+    index: time
 "#;
         let pipeline: Pipeline = parse(&Content::Yaml(pipeline_yaml)).unwrap();
         let dispatcher = pipeline.dispatcher.expect("expect dispatcher");
@@ -580,6 +752,9 @@ transform:
 description: Pipeline for Apache Tomcat
 
 processors:
+  - epoch:
+      field: ts
+      resolution: ns
 
 dispatcher:
   _field: typename
@@ -593,14 +768,18 @@ dispatcher:
 transform:
   - field: typename
     type: string
-
+  - field: ts
+    type: timestamp, ns
+    index: time
 "#;
         let bad_yaml2 = r#"
 ---
 description: Pipeline for Apache Tomcat
 
 processors:
-
+  - epoch:
+      field: ts
+      resolution: ns
 dispatcher:
   field: typename
   rules:
@@ -613,14 +792,18 @@ dispatcher:
 transform:
   - field: typename
     type: string
-
+  - field: ts
+    type: timestamp, ns
+    index: time
 "#;
         let bad_yaml3 = r#"
 ---
 description: Pipeline for Apache Tomcat
 
 processors:
-
+  - epoch:
+      field: ts
+      resolution: ns
 dispatcher:
   field: typename
   rules:
@@ -633,7 +816,9 @@ dispatcher:
 transform:
   - field: typename
     type: string
-
+  - field: ts
+    type: timestamp, ns
+    index: time
 "#;
 
         let r: Result<Pipeline> = parse(&Content::Yaml(bad_yaml1));

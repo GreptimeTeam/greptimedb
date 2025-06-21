@@ -20,7 +20,7 @@ use greptime_proto::v1::value::ValueData::{
     U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{json_to_map, parse, Content, Pipeline};
+use pipeline::{json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext};
 
 #[test]
 fn test_complex_data() {
@@ -419,10 +419,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).expect("failed to parse pipeline");
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
     let stats = json_to_map(input_value).unwrap();
 
     let row = pipeline
-        .exec_mut(stats)
+        .exec_mut(stats, &pipeline_ctx, &mut schema_info)
         .expect("failed to exec pipeline")
         .into_transformed()
         .expect("expect transformed result ");
@@ -487,10 +493,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -596,10 +608,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -662,10 +680,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -702,10 +726,16 @@ transform:
 "#;
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -761,10 +791,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -802,10 +838,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -864,10 +906,16 @@ transform:
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value1).unwrap();
     let dispatched_to = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_dispatched()
         .expect("expect dispatched result ");
@@ -876,7 +924,7 @@ transform:
 
     let status = json_to_map(input_value2).unwrap();
     let row = pipeline
-        .exec_mut(status)
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
         .into_transformed()
         .expect("expect transformed result ");
@@ -928,9 +976,17 @@ table_suffix: _${logger}
 
     let yaml_content = Content::Yaml(pipeline_yaml);
     let pipeline: Pipeline = parse(&yaml_content).unwrap();
+    let (pipeline, mut schema_info, pipeline_def, pipeline_param) = setup_pipeline!(pipeline);
+    let pipeline_ctx = PipelineContext::new(
+        &pipeline_def,
+        &pipeline_param,
+        session::context::Channel::Unknown,
+    );
 
     let status = json_to_map(input_value).unwrap();
-    let exec_re = pipeline.exec_mut(status).unwrap();
+    let exec_re = pipeline
+        .exec_mut(status, &pipeline_ctx, &mut schema_info)
+        .unwrap();
 
     let (row, table_name) = exec_re.into_transformed().unwrap();
     let values = row.values;

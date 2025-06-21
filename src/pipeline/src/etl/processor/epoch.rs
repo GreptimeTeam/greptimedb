@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::timestamp::TimeUnit;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -34,7 +35,7 @@ pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
 
 #[derive(Debug, Default)]
-enum Resolution {
+pub(crate) enum Resolution {
     Second,
     #[default]
     Milli,
@@ -56,13 +57,24 @@ impl TryFrom<&str> for Resolution {
     }
 }
 
+impl From<&Resolution> for TimeUnit {
+    fn from(resolution: &Resolution) -> Self {
+        match resolution {
+            Resolution::Second => TimeUnit::Second,
+            Resolution::Milli => TimeUnit::Millisecond,
+            Resolution::Micro => TimeUnit::Microsecond,
+            Resolution::Nano => TimeUnit::Nanosecond,
+        }
+    }
+}
+
 /// support string, integer, float, time, epoch
 /// deprecated it should be removed in the future
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct EpochProcessor {
-    fields: Fields,
-    resolution: Resolution,
+    pub(crate) fields: Fields,
+    pub(crate) resolution: Resolution,
     ignore_missing: bool,
     // description
     // if
@@ -109,10 +121,6 @@ impl EpochProcessor {
             Resolution::Micro => Ok(Timestamp::Microsecond(t)),
             Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
         }
-    }
-
-    pub(crate) fn target_count(&self) -> usize {
-        self.fields.len()
     }
 }
 

@@ -148,7 +148,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for DateProcessor {
 /// Reserved for compatibility only
 #[derive(Debug, Default)]
 pub struct DateProcessor {
-    fields: Fields,
+    pub(crate) fields: Fields,
     formats: Formats,
     timezone: Option<Arc<String>>,
     locale: Option<Arc<String>>, // to support locale
@@ -162,10 +162,6 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    pub(crate) fn target_count(&self) -> usize {
-        self.fields.len()
-    }
-
     fn parse(&self, val: &str) -> Result<Timestamp> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {

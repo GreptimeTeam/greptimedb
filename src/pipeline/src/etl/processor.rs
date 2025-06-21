@@ -27,7 +27,6 @@ pub mod letter;
 pub mod regex;
 pub mod select;
 pub mod simple_extract;
-pub mod timestamp;
 pub mod urlencoding;
 pub mod vrl;
 
@@ -47,7 +46,6 @@ use json_path::JsonPathProcessor;
 use letter::LetterProcessor;
 use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
-use timestamp::TimestampProcessor;
 use urlencoding::UrlEncodingProcessor;
 
 use crate::error::{
@@ -138,7 +136,6 @@ pub enum ProcessorKind {
     Join(JoinProcessor),
     Letter(LetterProcessor),
     Regex(RegexProcessor),
-    Timestamp(TimestampProcessor),
     UrlEncoding(UrlEncodingProcessor),
     Epoch(EpochProcessor),
     Date(DateProcessor),
@@ -211,9 +208,6 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         join::PROCESSOR_JOIN => ProcessorKind::Join(JoinProcessor::try_from(value)?),
         letter::PROCESSOR_LETTER => ProcessorKind::Letter(LetterProcessor::try_from(value)?),
         regex::PROCESSOR_REGEX => ProcessorKind::Regex(RegexProcessor::try_from(value)?),
-        timestamp::PROCESSOR_TIMESTAMP => {
-            ProcessorKind::Timestamp(TimestampProcessor::try_from(value)?)
-        }
         urlencoding::PROCESSOR_URL_ENCODING => {
             ProcessorKind::UrlEncoding(UrlEncodingProcessor::try_from(value)?)
         }
