@@ -150,14 +150,14 @@ pub fn write_tags(
     tags: impl Iterator<Item = (String, String)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
-    let ktv_iter = tags.map(|(k, v)| (k, ColumnDataType::String, ValueData::StringValue(v)));
+    let ktv_iter = tags.map(|(k, v)| (k, ColumnDataType::String, Some(ValueData::StringValue(v))));
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
 
 /// Write data as fields into the table data.
 pub fn write_fields(
     table_data: &mut TableData,
-    fields: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
+    fields: impl Iterator<Item = (String, ColumnDataType, Option<ValueData>)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
@@ -176,7 +176,7 @@ pub fn write_tag(
         std::iter::once((
             name.to_string(),
             ColumnDataType::String,
-            ValueData::StringValue(value.to_string()),
+            Some(ValueData::StringValue(value.to_string())),
         )),
         one_row,
     )
@@ -194,7 +194,7 @@ pub fn write_f64(
         std::iter::once((
             name.to_string(),
             ColumnDataType::Float64,
-            ValueData::F64Value(value),
+            Some(ValueData::F64Value(value)),
         )),
         one_row,
     )
@@ -222,7 +222,7 @@ pub fn write_json(
         table_data,
         std::iter::once((
             build_json_column_schema(name),
-            ValueData::BinaryValue(value.to_vec()),
+            Some(ValueData::BinaryValue(value.to_vec())),
         )),
         one_row,
     )
@@ -230,7 +230,7 @@ pub fn write_json(
 
 fn write_by_schema(
     table_data: &mut TableData,
-    kv_iter: impl Iterator<Item = (ColumnSchema, ValueData)>,
+    kv_iter: impl Iterator<Item = (ColumnSchema, Option<ValueData>)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let TableData {
@@ -247,15 +247,13 @@ fn write_by_schema(
                 column_schema.semantic_type,
                 &schema[*index],
             )?;
-            one_row[*index].value_data = Some(value);
+            one_row[*index].value_data = value;
         } else {
             let index = schema.len();
             let key = column_schema.column_name.clone();
             schema.push(column_schema);
             column_indexes.insert(key, index);
-            one_row.push(Value {
-                value_data: Some(value),
-            });
+            one_row.push(Value { value_data: value });
         }
     }
 
@@ -265,7 +263,7 @@ fn write_by_schema(
 fn write_by_semantic_type(
     table_data: &mut TableData,
     semantic_type: SemanticType,
-    ktv_iter: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
+    ktv_iter: impl Iterator<Item = (String, ColumnDataType, Option<ValueData>)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let TableData {
@@ -278,7 +276,7 @@ fn write_by_semantic_type(
         let index = column_indexes.get(&name);
         if let Some(index) = index {
             check_schema(datatype, semantic_type, &schema[*index])?;
-            one_row[*index].value_data = Some(value);
+            one_row[*index].value_data = value;
         } else {
             let index = schema.len();
             schema.push(ColumnSchema {
@@ -288,9 +286,7 @@ fn write_by_semantic_type(
                 ..Default::default()
             });
             column_indexes.insert(name, index);
-            one_row.push(Value {
-                value_data: Some(value),
-            });
+            one_row.push(Value { value_data: value });
         }
     }
 

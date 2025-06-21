@@ -63,16 +63,20 @@ pub fn key_value_to_jsonb(key_values: Vec<KeyValue>) -> JsonbValue<'static> {
 #[inline]
 pub(crate) fn make_string_column_data(
     name: &str,
-    value: String,
-) -> (String, ColumnDataType, ValueData) {
-    make_column_data(name, ColumnDataType::String, ValueData::StringValue(value))
+    value: Option<String>,
+) -> (String, ColumnDataType, Option<ValueData>) {
+    make_column_data(
+        name,
+        ColumnDataType::String,
+        value.map(ValueData::StringValue),
+    )
 }
 
 #[inline]
 pub(crate) fn make_column_data(
     name: &str,
     data_type: ColumnDataType,
-    value: ValueData,
-) -> (String, ColumnDataType, ValueData) {
+    value: Option<ValueData>,
+) -> (String, ColumnDataType, Option<ValueData>) {
     (name.to_string(), data_type, value)
 }

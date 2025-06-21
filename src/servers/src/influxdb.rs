@@ -73,14 +73,16 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
             // fields
             let fields = fields.iter().map(|(k, v)| {
                 let (datatype, value) = match v {
-                    FieldValue::I64(v) => (ColumnDataType::Int64, ValueData::I64Value(*v)),
-                    FieldValue::U64(v) => (ColumnDataType::Uint64, ValueData::U64Value(*v)),
-                    FieldValue::F64(v) => (ColumnDataType::Float64, ValueData::F64Value(*v)),
+                    FieldValue::I64(v) => (ColumnDataType::Int64, Some(ValueData::I64Value(*v))),
+                    FieldValue::U64(v) => (ColumnDataType::Uint64, Some(ValueData::U64Value(*v))),
+                    FieldValue::F64(v) => (ColumnDataType::Float64, Some(ValueData::F64Value(*v))),
                     FieldValue::String(v) => (
                         ColumnDataType::String,
-                        ValueData::StringValue(v.to_string()),
+                        Some(ValueData::StringValue(v.to_string())),
                     ),
-                    FieldValue::Boolean(v) => (ColumnDataType::Boolean, ValueData::BoolValue(*v)),
+                    FieldValue::Boolean(v) => {
+                        (ColumnDataType::Boolean, Some(ValueData::BoolValue(*v)))
+                    }
                 };
                 (k.to_string(), datatype, value)
             });
