@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["Analyzer","ChineseTokenizer","EnglishTokenizer","JIEBA"],"trait":["Tokenizer"]};

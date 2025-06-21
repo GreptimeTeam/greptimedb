@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_alter_region_request","to_region_add_columns"]};

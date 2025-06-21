@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fill_reqs_with_impure_default","semantic_type"],"mod":["column_to_row","fill_impure_default","row_to_region","stmt_to_region","table_to_region"],"struct":["ColumnToRow","RowToRegion","StatementToRegion","TableToRegion"]};

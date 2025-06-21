@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["remove_region_follower","signature"],"struct":["RemoveRegionFollowerFunction"]};
