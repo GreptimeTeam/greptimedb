@@ -218,7 +218,7 @@ level = "info"
 enable_otlp_tracing = false
 
 ## The OTLP tracing endpoint.
-otlp_endpoint = "http://localhost:4317"
+otlp_endpoint = "http://localhost:4318"
 
 ## Whether to append logs to stdout.
 append_stdout = true
@@ -228,6 +228,9 @@ log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The OTLP tracing export protocol. Can be `grpc`/`http`.
+otlp_export_protocol = "http"
 
 ## The percentage of tracing will be sampled and exported.
 ## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
