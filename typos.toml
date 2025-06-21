@@ -4,6 +4,7 @@ ue = "ue"
 worl = "worl"
 ot = "ot"
 unqualifed = "unqualifed"
+typ = "typ"
 
 [files]
 extend-exclude = [
