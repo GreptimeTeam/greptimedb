@@ -13,7 +13,7 @@ jobs:
   sqlness-test:
     name: Run sqlness test
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,7 +107,6 @@ jobs:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
-          RUSTUP_WINDOWS_PATH_ADD_BIN: 1 # Workaround for https://github.com/nextest-rs/nextest/issues/1493
           GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
           GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
@@ -118,22 +117,22 @@ jobs:
     name: Run clean build on Linux
     runs-on: ubuntu-latest
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: cachix/install-nix-action@v27
-        with:
-          nix_path: nixpkgs=channel:nixos-24.11
-      - run: nix develop --command cargo build
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop --command cargo check --bin greptime
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   check-status:
     name: Check status
     needs: [sqlness-test, sqlness-windows, test-on-windows]
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       check-result: ${{ steps.set-check-result.outputs.check-result }}
     steps:
@@ -146,7 +145,7 @@ jobs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
     name: Send notification to Greptime team
     needs: [check-status]
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:

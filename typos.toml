@@ -4,6 +4,10 @@ ue = "ue"
 worl = "worl"
 ot = "ot"
 unqualifed = "unqualifed"
+typ = "typ"
+varidic = "varidic"
+typs = "typs"
+varadic = "varadic"
 
 [files]
 extend-exclude = [
