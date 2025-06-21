@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod approximate;
+pub mod count_hash;
 #[cfg(feature = "geo")]
 pub mod geo;
 pub mod vector;

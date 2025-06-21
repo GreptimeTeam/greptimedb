@@ -2332,6 +2332,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-functions-aggregate-common",
  "datatypes",
  "derive_more",
  "geo",
