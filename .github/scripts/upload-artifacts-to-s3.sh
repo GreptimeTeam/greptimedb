@@ -41,7 +41,7 @@ function upload_artifacts() {
 # Updates the latest version information in AWS S3 if UPDATE_VERSION_INFO is true.
 function update_version_info() {
   if [ "$UPDATE_VERSION_INFO" == "true" ]; then
-    # If it's the officail release(like v1.0.0, v1.0.1, v1.0.2, etc.), update latest-version.txt.
+    # If it's the official release(like v1.0.0, v1.0.1, v1.0.2, etc.), update latest-version.txt.
     if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       echo "Updating latest-version.txt"
       echo "$VERSION" > latest-version.txt

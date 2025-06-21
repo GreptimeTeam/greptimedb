@@ -41,7 +41,14 @@ runs:
         username: ${{ inputs.dockerhub-image-registry-username }}
         password: ${{ inputs.dockerhub-image-registry-token }}
 
-    - name: Build and push dev-builder-ubuntu image
+    - name: Set up qemu for multi-platform builds
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: linux/amd64,linux/arm64
+        # The latest version will lead to segmentation fault.
+        image: tonistiigi/binfmt:qemu-v7.0.0-28
+
+    - name: Build and push dev-builder-ubuntu image # Build image for amd64 and arm64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
       run: |
@@ -52,7 +59,7 @@ runs:
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}
 
-    - name: Build and push dev-builder-centos image
+    - name: Build and push dev-builder-centos image # Only build image for amd64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-centos == 'true' }}
       run: |
@@ -69,8 +76,7 @@ runs:
       run: |
         make dev-builder \
           BASE_IMAGE=android \
+          BUILDX_MULTI_PLATFORM_BUILD=amd64 \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }} && \
-
-        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}
+          DEV_BUILDER_IMAGE_TAG=${{ inputs.version }}

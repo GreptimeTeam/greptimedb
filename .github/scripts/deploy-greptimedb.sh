@@ -10,7 +10,7 @@ GREPTIMEDB_IMAGE_TAG=${GREPTIMEDB_IMAGE_TAG:-latest}
 ETCD_CHART="oci://registry-1.docker.io/bitnamicharts/etcd"
 GREPTIME_CHART="https://greptimeteam.github.io/helm-charts/"
 
-# Ceate a cluster with 1 control-plane node and 5 workers.
+# Create a cluster with 1 control-plane node and 5 workers.
 function create_kind_cluster() {
   cat <<EOF | kind create cluster --name "${CLUSTER}" --image kindest/node:"$KUBERNETES_VERSION" --config=-
 kind: Cluster
@@ -68,7 +68,7 @@ function deploy_greptimedb_cluster() {
 
   helm install "$cluster_name" greptime/greptimedb-cluster \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set meta.etcdEndpoints="etcd.$install_namespace:2379" \
+    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
     -n "$install_namespace"
 
   # Wait for greptimedb cluster to be ready.
@@ -103,7 +103,7 @@ function deploy_greptimedb_cluster_with_s3_storage() {
 
   helm install "$cluster_name" greptime/greptimedb-cluster -n "$install_namespace" \
     --set image.tag="$GREPTIMEDB_IMAGE_TAG" \
-    --set meta.etcdEndpoints="etcd.$install_namespace:2379" \
+    --set meta.backendStorage.etcd.endpoints="etcd.$install_namespace:2379" \
     --set storage.s3.bucket="$AWS_CI_TEST_BUCKET" \
     --set storage.s3.region="$AWS_REGION" \
     --set storage.s3.root="$DATA_ROOT" \
