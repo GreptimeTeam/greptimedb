@@ -703,6 +703,7 @@ pub trait RegionEngine: Send + Sync {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 

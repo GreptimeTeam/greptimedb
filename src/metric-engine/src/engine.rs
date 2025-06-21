@@ -158,6 +158,7 @@ impl RegionEngine for MetricEngine {
                 Ok(RegionResponse {
                     affected_rows: rows,
                     extensions: extension_return_value,
+                    metadata: Vec::new(),
                 })
             }
             BatchRegionDdlRequest::Alter(requests) => {
@@ -171,6 +172,7 @@ impl RegionEngine for MetricEngine {
                 Ok(RegionResponse {
                     affected_rows: rows,
                     extensions: extension_return_value,
+                    metadata: Vec::new(),
                 })
             }
             BatchRegionDdlRequest::Drop(requests) => {
@@ -243,6 +245,7 @@ impl RegionEngine for MetricEngine {
         result.map_err(BoxedError::new).map(|rows| RegionResponse {
             affected_rows: rows,
             extensions: extension_return_value,
+            metadata: Vec::new(),
         })
     }
 
@@ -439,6 +442,7 @@ impl MetricEngine {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 }

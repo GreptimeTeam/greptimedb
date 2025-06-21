@@ -154,6 +154,10 @@ impl RegionRequest {
                 reason: "Sync request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::ListMetadata(_) => UnexpectedSnafu {
+                reason: "ListMetadata request should be handled separately by RegionServer",
+            }
+            .fail(),
         }
     }
 

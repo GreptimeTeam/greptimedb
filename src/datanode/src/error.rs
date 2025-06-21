@@ -387,6 +387,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to serialize json"))]
+    SerializeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -457,6 +465,7 @@ impl ErrorExt for Error {
                 StatusCode::RegionBusy
             }
             MissingCache { .. } => StatusCode::Internal,
+            SerializeJson { .. } => StatusCode::Internal,
         }
     }
 

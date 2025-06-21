@@ -22,6 +22,7 @@ use greptime_proto::v1::region::RegionResponse as RegionResponseV1;
 pub struct RegionResponse {
     pub affected_rows: AffectedRows,
     pub extensions: HashMap<String, Vec<u8>>,
+    pub metadata: Vec<u8>,
 }
 
 impl RegionResponse {
@@ -29,6 +30,7 @@ impl RegionResponse {
         Self {
             affected_rows: region_response.affected_rows as _,
             extensions: region_response.extensions,
+            metadata: region_response.metadata,
         }
     }
 
@@ -37,6 +39,16 @@ impl RegionResponse {
         Self {
             affected_rows,
             extensions: Default::default(),
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Creates one response with metadata.
+    pub fn from_metadata(metadata: Vec<u8>) -> Self {
+        Self {
+            affected_rows: 0,
+            extensions: Default::default(),
+            metadata,
         }
     }
 }

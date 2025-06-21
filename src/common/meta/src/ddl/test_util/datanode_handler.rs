@@ -32,6 +32,7 @@ impl MockDatanodeHandler for () {
         Ok(RegionResponse {
             affected_rows: 0,
             extensions: Default::default(),
+            metadata: Vec::new(),
         })
     }
 
