@@ -21,11 +21,12 @@ pub mod merge;
 pub mod plain_batch;
 pub mod projection;
 pub(crate) mod prune;
-pub(crate) mod range;
-pub(crate) mod scan_region;
-pub(crate) mod scan_util;
+pub mod range;
+pub mod scan_region;
+pub mod scan_util;
 pub(crate) mod seq_scan;
-pub(crate) mod series_scan;
+pub mod series_scan;
+pub mod stream;
 pub(crate) mod unordered_scan;
 
 use std::collections::{HashMap, HashSet};
@@ -41,12 +42,14 @@ use datatypes::arrow::array::{Array, ArrayRef, UInt64Array};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
 use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
+use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::types::TimestampType;
 use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::{
     BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
-    Vector, VectorRef,
+    TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampSecondVector,
+    UInt32Vector, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector,
+    VectorRef,
 };
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
@@ -159,6 +162,19 @@ impl Batch {
         // All vectors have the same length. We use the length of sequences vector
         // since it has static type.
         self.sequences.len()
+    }
+
+    /// Create an empty [`Batch`].
+    pub(crate) fn empty() -> Self {
+        Self {
+            primary_key: vec![],
+            pk_values: None,
+            timestamps: Arc::new(TimestampMillisecondVectorBuilder::with_capacity(0).finish()),
+            sequences: Arc::new(UInt64VectorBuilder::with_capacity(0).finish()),
+            op_types: Arc::new(UInt8VectorBuilder::with_capacity(0).finish()),
+            fields: vec![],
+            fields_idx: None,
+        }
     }
 
     /// Returns true if the number of rows in the batch is 0.
@@ -1011,8 +1027,6 @@ pub(crate) struct ScannerMetrics {
     build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
-    /// Duration to convert batches.
-    convert_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
     /// Number of batches returned.
@@ -1048,7 +1062,8 @@ mod tests {
 
     #[test]
     fn test_empty_batch() {
-        let batch = new_batch(&[], &[], &[], &[]);
+        let batch = Batch::empty();
+        assert!(batch.is_empty());
         assert_eq!(None, batch.first_timestamp());
         assert_eq!(None, batch.last_timestamp());
         assert_eq!(None, batch.first_sequence());
