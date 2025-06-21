@@ -20,6 +20,7 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::process_manager::ProcessManager;
 use common_base::secrets::ExposeSecret;
 use common_config::Configurable;
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -698,7 +699,7 @@ pub async fn setup_pg_server_with_user_provider(
         0,
         runtime,
         user_provider,
-        None,
+        Arc::new(ProcessManager::new("127.0.0.1".to_string(), None)),
     ));
 
     pg_server
