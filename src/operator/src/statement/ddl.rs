@@ -37,6 +37,8 @@ use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
@@ -840,6 +842,41 @@ impl StatementExecutor {
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_drop_flow(expr),
+        };
+
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn drop_trigger(
+        &self,
+        catalog_name: String,
+        trigger_name: String,
+        drop_if_exists: bool,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        let task = DropTriggerTask {
+            catalog_name,
+            trigger_name,
+            drop_if_exists,
+        };
+        self.drop_trigger_procedure(task, query_context).await?;
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn drop_trigger_procedure(
+        &self,
+        expr: DropTriggerTask,
+        query_context: QueryContextRef,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            query_context,
+            task: DdlTask::new_drop_trigger(expr),
         };
 
         self.procedure_executor

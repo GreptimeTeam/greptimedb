@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::fmt::Display;
 
 use serde::Serialize;
