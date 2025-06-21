@@ -23,7 +23,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
@@ -253,10 +253,12 @@ impl RegionMigrationManager {
     }
 
     /// Throws an error if `leader_peer` is not the `from_peer`.
+    ///
+    /// If `from_peer` is unknown, use the leader peer as the `from_peer`.
     fn verify_region_leader_peer(
         &self,
         region_route: &RegionRoute,
-        task: &RegionMigrationProcedureTask,
+        task: &mut RegionMigrationProcedureTask,
     ) -> Result<()> {
         let leader_peer = region_route
             .leader_peer
@@ -274,6 +276,15 @@ impl RegionMigrationManager {
                 ),
             }
         );
+
+        if task.from_peer.addr.is_empty() {
+            warn!(
+                "The `from_peer` is unknown, use the leader peer({}) as the `from_peer`, region: {}",
+                leader_peer, task.region_id
+            );
+            // The peer id is the same as the leader peer id.
+            task.from_peer = leader_peer.clone();
+        }
 
         Ok(())
     }
@@ -300,7 +311,7 @@ impl RegionMigrationManager {
     /// Submits a new region migration procedure.
     pub async fn submit_procedure(
         &self,
-        task: RegionMigrationProcedureTask,
+        mut task: RegionMigrationProcedureTask,
     ) -> Result<Option<ProcedureId>> {
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
@@ -333,7 +344,7 @@ impl RegionMigrationManager {
             .fail();
         }
 
-        self.verify_region_leader_peer(&region_route, &task)?;
+        self.verify_region_leader_peer(&region_route, &mut task)?;
         self.verify_region_follower_peers(&region_route, &task)?;
         let table_info = self.retrieve_table_info(region_id).await?;
         let TableName {
@@ -341,12 +352,6 @@ impl RegionMigrationManager {
             schema_name,
             ..
         } = table_info.table_name();
-        METRIC_META_REGION_MIGRATION_DATANODES
-            .with_label_values(&["src", &task.from_peer.id.to_string()])
-            .inc();
-        METRIC_META_REGION_MIGRATION_DATANODES
-            .with_label_values(&["desc", &task.to_peer.id.to_string()])
-            .inc();
         let RegionMigrationProcedureTask {
             region_id,
             from_peer,
@@ -377,6 +382,12 @@ impl RegionMigrationManager {
                     return;
                 }
             };
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["src", &task.from_peer.id.to_string()])
+                .inc();
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["desc", &task.to_peer.id.to_string()])
+                .inc();
 
             if let Err(e) = watcher::wait(watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
