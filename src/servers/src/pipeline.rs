@@ -16,16 +16,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
-use api::v1::{RowInsertRequest, Rows};
-use itertools::Itertools;
-use pipeline::error::AutoTransformOneTimestampSnafu;
+use api::greptime_proto;
+use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequest, Rows, SemanticType};
+use common_time::timestamp::TimeUnit;
 use pipeline::{
-    unwrap_or_continue_if_err, AutoTransformOutput, ContextReq, DispatchedTo, IdentityTimeIndex,
-    Pipeline, PipelineContext, PipelineDefinition, PipelineExecOutput, TransformedOutput, Value,
+    unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline, PipelineContext,
+    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode, Value,
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
 use crate::http::event::PipelineIngestRequest;
@@ -118,12 +118,35 @@ async fn run_custom_pipeline(
     let arr_len = pipeline_maps.len();
     let mut transformed_map = HashMap::new();
     let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
-    let mut auto_map = HashMap::new();
-    let mut auto_map_ts_keys = HashMap::new();
+
+    let mut schema_info = match pipeline.transformer() {
+        TransformerMode::GreptimeTransformer(greptime_transformer) => {
+            SchemaInfo::from_schema_list(greptime_transformer.schemas().clone())
+        }
+        TransformerMode::AutoTransform(ts_name, timeunit) => {
+            let timeunit = match timeunit {
+                TimeUnit::Second => ColumnDataType::TimestampSecond,
+                TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
+                TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
+                TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
+            };
+
+            let mut schema_info = SchemaInfo::default();
+            schema_info.schema.push(ColumnSchema {
+                column_name: ts_name.clone(),
+                datatype: timeunit.into(),
+                semantic_type: SemanticType::Timestamp as i32,
+                datatype_extension: None,
+                options: None,
+            });
+
+            schema_info
+        }
+    };
 
     for pipeline_map in pipeline_maps {
         let result = pipeline
-            .exec_mut(pipeline_map)
+            .exec_mut(pipeline_map, pipeline_ctx, &mut schema_info)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -137,22 +160,9 @@ async fn run_custom_pipeline(
                 opt,
                 row,
                 table_suffix,
-                pipeline_map: _val,
             }) => {
                 let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
                 push_to_map!(transformed_map, (opt, act_table_name), row, arr_len);
-            }
-            PipelineExecOutput::AutoTransform(AutoTransformOutput {
-                table_suffix,
-                ts_unit_map,
-                pipeline_map,
-            }) => {
-                let act_table_name = table_suffix_to_table_name(&table_name, table_suffix);
-                push_to_map!(auto_map, act_table_name.clone(), pipeline_map, arr_len);
-                auto_map_ts_keys
-                    .entry(act_table_name)
-                    .or_insert_with(HashMap::new)
-                    .extend(ts_unit_map);
             }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
@@ -162,61 +172,24 @@ async fn run_custom_pipeline(
 
     let mut results = ContextReq::default();
 
-    if let Some(s) = pipeline.schemas() {
-        // transformed
+    let s_len = schema_info.schema.len();
 
-        // if current pipeline generates some transformed results, build it as
-        // `RowInsertRequest` and append to results. If the pipeline doesn't
-        // have dispatch, this will be only output of the pipeline.
-        for ((opt, table_name), rows) in transformed_map {
-            results.add_row(
-                opt,
-                RowInsertRequest {
-                    rows: Some(Rows {
-                        rows,
-                        schema: s.clone(),
-                    }),
-                    table_name,
-                },
-            );
+    // if transformed
+    for ((opt, table_name), mut rows) in transformed_map {
+        for row in rows.iter_mut() {
+            row.values
+                .resize(s_len, greptime_proto::v1::Value::default());
         }
-    } else {
-        // auto map
-        for (table_name, pipeline_maps) in auto_map {
-            if pipeline_maps.is_empty() {
-                continue;
-            }
-
-            let ts_unit_map = auto_map_ts_keys
-                .remove(&table_name)
-                .context(AutoTransformOneTimestampSnafu)
-                .context(PipelineSnafu)?;
-            // only one timestamp key is allowed
-            // which will be converted to ts index
-            let (ts_key, unit) = ts_unit_map
-                .into_iter()
-                .exactly_one()
-                .map_err(|_| AutoTransformOneTimestampSnafu.build())
-                .context(PipelineSnafu)?;
-
-            let ident_ts_index = IdentityTimeIndex::Epoch(ts_key.to_string(), unit, false);
-            let new_def = PipelineDefinition::GreptimeIdentityPipeline(Some(ident_ts_index));
-            let next_pipeline_ctx =
-                PipelineContext::new(&new_def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-
-            let reqs = run_identity_pipeline(
-                handler,
-                &next_pipeline_ctx,
-                PipelineIngestRequest {
-                    table: table_name,
-                    values: pipeline_maps,
-                },
-                query_ctx,
-            )
-            .await?;
-
-            results.merge(reqs);
-        }
+        results.add_row(
+            opt,
+            RowInsertRequest {
+                rows: Some(Rows {
+                    rows,
+                    schema: schema_info.schema.clone(),
+                }),
+                table_name,
+            },
+        );
     }
 
     // if current pipeline contains dispatcher and has several rules, we may
