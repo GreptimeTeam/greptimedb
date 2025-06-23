@@ -24,8 +24,7 @@ use snafu::{OptionExt, ResultExt};
 use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
-    ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews
 };
 use sql::statements::OptionMap;
 use table::metadata::TableType;
@@ -33,8 +32,7 @@ use table::table_name::TableName;
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecuteStatementSnafu, ExternalSnafu, FindViewInfoSnafu, InvalidSqlSnafu,
-    Result, TableMetadataManagerSnafu, ViewInfoNotFoundSnafu, ViewNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu, FindViewInfoSnafu, InvalidSqlSnafu, Result, TableMetadataManagerSnafu, ViewInfoNotFoundSnafu, ViewNotFoundSnafu
 };
 use crate::statement::StatementExecutor;
 
@@ -314,6 +312,17 @@ impl StatementExecutor {
             .await
             .context(error::ExecuteStatementSnafu)
     }
+
+    pub async fn show_processlist(
+        &self,
+        stmt: ShowProcessList,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_processlist( stmt,&self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecLogicalPlanSnafu)
+    }
+
 }
 
 pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {

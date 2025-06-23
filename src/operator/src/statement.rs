@@ -370,6 +370,7 @@ impl StatementExecutor {
             Statement::Use(db) => self.use_database(db, query_ctx).await,
             Statement::Admin(admin) => self.execute_admin_command(admin, query_ctx).await,
             Statement::Kill(kill) => self.execute_kill(query_ctx, kill).await,
+            Statement::ShowProcesslist(show) => self.show_processlist(show, query_ctx).await,
         }
     }
 

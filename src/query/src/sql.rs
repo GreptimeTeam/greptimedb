@@ -57,12 +57,11 @@ use sql::ast::Ident;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowTableStatus,
-    ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews
 };
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
-use sqlparser::ast::ObjectName;
+use sqlparser::ast:: ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
@@ -1231,6 +1230,52 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
             Format::Orc(format) => Box::new(format),
         },
     )
+}
+
+pub async fn show_processlist(
+    stmt: ShowProcessList,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let projects = if stmt.full {
+        vec![
+            ("id", "Id"),
+            ("catalog", "Catalog"),
+            ("schemas", "Schema"),
+            ("client", "Client"),
+            ("frontend", "Frontend"),
+            ("start_timestamp", "Start Time"),
+            ("elapsed_time", "Elapsed Time"),
+            ("query", "Query"),
+        ]
+    } else {
+        vec![
+            ("id", "Id"),
+            ("catalog", "Catalog"),
+            ("schemas", "Schema"),
+            ("client", "Client"),
+            ("frontend", "Frontend"),
+            ("elapsed_time", "Elapsed Time"),
+        ]
+    };
+
+    let filters = vec![];
+    let like_field = None;
+    let sort = vec![col("id").sort(true, true)];
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx.clone(),
+        "process_list",
+        vec![],
+        projects.clone(),
+        filters,
+        like_field,
+        sort,
+        ShowKind::All,
+    )
+    .await
 }
 
 #[cfg(test)]

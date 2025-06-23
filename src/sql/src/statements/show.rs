@@ -321,6 +321,25 @@ impl Display for ShowSearchPath {
     }
 }
 
+/// SQL structure for `SHOW PROCESSLIST`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowProcessList {
+    pub full: bool,
+}
+impl Display for ShowProcessList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.full {
+            write!(f, "SHOW FULL PROCESSLIST")?;
+        }else{
+            write!(f, "SHOW PROCESSLIST")?;
+        }
+
+        Ok(())
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
