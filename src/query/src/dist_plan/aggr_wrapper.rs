@@ -21,6 +21,8 @@
 //! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
 //!
 
+use std::sync::Arc;
+
 use datafusion_common::ScalarValue;
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
@@ -30,6 +32,7 @@ use datatypes::arrow::datatypes::{DataType, Field};
 /// It contains the original aggregate function, the state functions, and the merge function.
 ///
 /// Notice state functions may have multiple output columns, and the merge function is used to merge the states of the state functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateMergeWrapper {
     /// The original aggregate function.
     original: AggregateUDF,
@@ -75,7 +78,7 @@ impl StateMergeWrapper {
     ) -> datafusion_common::Result<Self> {
         let state_functions = (0..original.state_fields(args.into())?.len())
             .map(|i| StateWrapper::new(original.clone(), args, i))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let merge_function = MergeWrapper::new(original.clone(), args)?;
         Ok(Self {
             original,
@@ -98,7 +101,7 @@ impl StateMergeWrapper {
 }
 
 /// Wrappr to make an aggregate function out of a state function.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
@@ -109,19 +112,27 @@ pub struct StateWrapper {
 
     /// Whether the aggregate function is distinct.
     pub is_distinct: bool,
+    /// The final return type of the `inner` function.
+    pub final_return_type: DataType,
 }
 
 impl StateWrapper {
     /// `state_index`: The index of the state in the output of the state function.
-    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>, state_index: usize) -> Self {
+    pub fn new<'a>(
+        inner: AggregateUDF,
+        args: WrapperArgs<'a>,
+        state_index: usize,
+    ) -> datafusion_common::Result<Self> {
         let name = format!("__{}_state_col_{}_udaf", args.name, state_index);
-        Self {
+        let final_return_type = inner.return_type(args.input_types)?;
+        Ok(Self {
             inner,
             name,
             state_index,
             ordering_fields: args.ordering_fields.to_vec(),
             is_distinct: args.is_distinct,
-        }
+            final_return_type,
+        })
     }
 
     pub fn inner(&self) -> &AggregateUDF {
@@ -130,10 +141,12 @@ impl StateWrapper {
 }
 
 impl AggregateUDFImpl for StateWrapper {
-    fn accumulator(
-        &self,
-        acc_args: datafusion_expr::function::AccumulatorArgs,
+    fn accumulator<'a>(
+        &'a self,
+        mut acc_args: datafusion_expr::function::AccumulatorArgs<'a>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        // TODO: fix and recover proper acc args for the original aggregate function.
+        acc_args.return_type = &self.final_return_type;
         let inner = self.inner.accumulator(acc_args)?;
         Ok(Box::new(StateAccumWrapper::new(inner, self.state_index)))
     }
@@ -234,7 +247,7 @@ impl Accumulator for StateAccumWrapper {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeWrapper {
     inner: AggregateUDF,
     name: String,
@@ -242,7 +255,8 @@ pub struct MergeWrapper {
     /// It is the `state_fields` of the original aggregate function.
     merge_signature: datafusion_expr::Signature,
     state_fields: Vec<Field>,
-    final_return_type: DataType,
+    original_input_types: Vec<DataType>,
+    original_return_type: DataType,
 }
 impl MergeWrapper {
     pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
@@ -260,7 +274,8 @@ impl MergeWrapper {
             name,
             merge_signature: signature,
             state_fields,
-            final_return_type: args.return_type.clone(),
+            original_input_types: args.input_types.to_vec(),
+            original_return_type: args.return_type.clone(),
         })
     }
 
@@ -270,10 +285,33 @@ impl MergeWrapper {
 }
 
 impl AggregateUDFImpl for MergeWrapper {
-    fn accumulator(
-        &self,
-        acc_args: datafusion_expr::function::AccumulatorArgs,
+    fn accumulator<'a, 'b>(
+        &'a self,
+        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        let mut acc_args = acc_args;
+        let schema = arrow_schema::Schema::new(
+            self.original_input_types
+                .iter()
+                .enumerate()
+                .map(|(i, dt)| Field::new(&format!("original_input[{}]", i), dt.clone(), true))
+                .collect::<Vec<_>>(),
+        );
+        let exprs = self
+            .original_input_types
+            .iter()
+            .enumerate()
+            .map(|(i, _dt)| {
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    &format!("original_input[{}]", i),
+                    i,
+                )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+            })
+            .collect::<Vec<_>>();
+
+        acc_args.schema = &schema;
+        acc_args.exprs = &exprs;
+
         let inner = self.inner.accumulator(acc_args)?;
         Ok(Box::new(MergeAccum::new(inner)))
     }
@@ -285,11 +323,13 @@ impl AggregateUDFImpl for MergeWrapper {
         self.name.as_str()
     }
 
+    /// Notice here the `arg_types` is actually the `state_fields`'s data types,
+    /// so return fixed return type instead of using `arg_types` to determine the return type.
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         // The return type is the same as the original aggregate function's return type.
         // notice here return type is fixed, instead of using the input types to determine the return type.
         // as the input type now is actually `state_fields`'s data type, and can't be use to determine the output type
-        Ok(self.final_return_type.clone())
+        Ok(self.original_return_type.clone())
     }
     fn signature(&self) -> &datafusion_expr::Signature {
         &self.merge_signature
@@ -339,5 +379,252 @@ impl Accumulator for MergeAccum {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{Float64Array, Int64Array, UInt64Array};
+    use datafusion_expr::function::AccumulatorArgs;
+    use datafusion_expr::Signature;
+    use datafusion_physical_expr::LexOrdering;
+    use pretty_assertions::assert_eq;
+
     use super::*;
+
+    #[test]
+    fn test_sum_udaf() {
+        let sum = datafusion::functions_aggregate::sum::sum_udaf();
+        let sum = (*sum).clone();
+
+        let args = WrapperArgs {
+            name: sum.name(),
+            input_types: &[DataType::Int64],
+            return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
+            ordering_fields: &[],
+            is_distinct: false,
+        };
+
+        let wrapper = StateMergeWrapper::new(sum.clone(), args).unwrap();
+        let expected = StateMergeWrapper {
+            original: sum.clone(),
+            state_functions: vec![StateWrapper {
+                inner: sum.clone(),
+                name: "__sum_state_col_0_udaf".to_string(),
+                state_index: 0,
+                ordering_fields: vec![],
+                is_distinct: false,
+                final_return_type: DataType::Int64,
+            }],
+            merge_function: MergeWrapper {
+                inner: sum.clone(),
+                name: "__sum_merge_udaf".to_string(),
+                merge_signature: Signature::exact(
+                    vec![DataType::Int64],
+                    datafusion_expr::Volatility::Immutable,
+                ),
+                state_fields: vec![Field::new("sum[sum]", DataType::Int64, true)],
+                original_input_types: vec![DataType::Int64],
+                original_return_type: DataType::Int64,
+            },
+        };
+        assert_eq!(wrapper, expected);
+
+        // evaluate the state function
+        let input = Int64Array::from(vec![Some(1), Some(2), None, Some(3)]);
+        let values = vec![Arc::new(input) as arrow::array::ArrayRef];
+
+        let state_func = wrapper.state_functions().first().unwrap();
+        let accum_args = AccumulatorArgs {
+            return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
+            schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Int64, true)]),
+            ignore_nulls: false,
+            ordering_req: LexOrdering::empty(),
+            is_reversed: false,
+            name: state_func.name(),
+            is_distinct: state_func.is_distinct,
+            exprs: &[Arc::new(
+                datafusion::physical_expr::expressions::Column::new("col", 0),
+            )],
+        };
+        let mut state_accum = state_func.accumulator(accum_args).unwrap();
+
+        state_accum.update_batch(&values).unwrap();
+        let state = state_accum.state().unwrap();
+        assert_eq!(state.len(), 1);
+        assert_eq!(state[0], ScalarValue::Int64(Some(6)));
+
+        let eval_res = state_accum.evaluate().unwrap();
+        assert_eq!(eval_res, ScalarValue::Int64(Some(6)));
+
+        let merge_input = vec![
+            Arc::new(Int64Array::from(vec![Some(6), Some(42), None])) as arrow::array::ArrayRef
+        ];
+        let merge_func = wrapper.merge_function();
+        let merge_accum_args = AccumulatorArgs {
+            return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
+            schema: &arrow_schema::Schema::new(vec![Field::new(
+                "original_input",
+                DataType::Int64,
+                true,
+            )]),
+            ignore_nulls: false,
+            ordering_req: LexOrdering::empty(),
+            is_reversed: false,
+            name: state_func.name(),
+            is_distinct: state_func.is_distinct,
+            exprs: &[Arc::new(
+                datafusion::physical_expr::expressions::Column::new("original_input", 0),
+            )],
+        };
+        let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
+        merge_accum.update_batch(&merge_input).unwrap();
+        let merge_state = merge_accum.state().unwrap();
+        assert_eq!(merge_state.len(), 1);
+        assert_eq!(merge_state[0], ScalarValue::Int64(Some(48)));
+
+        let merge_eval_res = merge_accum.evaluate().unwrap();
+        assert_eq!(merge_eval_res, ScalarValue::Int64(Some(48)));
+    }
+
+    #[test]
+    fn test_avg_udaf() {
+        let avg = datafusion::functions_aggregate::average::avg_udaf();
+        let avg = (*avg).clone();
+
+        let args = WrapperArgs {
+            name: avg.name(),
+            input_types: &[DataType::Float64],
+            return_type: &avg.return_type(&[DataType::Float64]).unwrap(),
+            ordering_fields: &[],
+            is_distinct: false,
+        };
+
+        let wrapper = StateMergeWrapper::new(avg.clone(), args).unwrap();
+
+        let expected = StateMergeWrapper {
+            original: avg.clone(),
+            state_functions: vec![
+                StateWrapper {
+                    inner: avg.clone(),
+                    name: "__avg_state_col_0_udaf".to_string(),
+                    state_index: 0,
+                    ordering_fields: vec![],
+                    is_distinct: false,
+                    final_return_type: DataType::Float64,
+                },
+                StateWrapper {
+                    inner: avg.clone(),
+                    name: "__avg_state_col_1_udaf".to_string(),
+                    state_index: 1,
+                    ordering_fields: vec![],
+                    is_distinct: false,
+                    final_return_type: DataType::Float64,
+                },
+            ],
+            merge_function: MergeWrapper {
+                inner: avg.clone(),
+                name: "__avg_merge_udaf".to_string(),
+                merge_signature: Signature::exact(
+                    vec![DataType::UInt64, DataType::Float64],
+                    datafusion_expr::Volatility::Immutable,
+                ),
+                state_fields: vec![
+                    Field::new("avg[count]", DataType::UInt64, true),
+                    Field::new("avg[sum]", DataType::Float64, true),
+                ],
+                original_input_types: vec![DataType::Float64],
+                original_return_type: DataType::Float64,
+            },
+        };
+        assert_eq!(wrapper, expected);
+
+        // evaluate the state function
+        let input = Float64Array::from(vec![Some(1.), Some(2.), None, Some(3.)]);
+        let values = vec![Arc::new(input) as arrow::array::ArrayRef];
+
+        let state_func = wrapper.state_functions()[0].clone();
+        let accum_args = AccumulatorArgs {
+            return_type: &DataType::UInt64,
+            schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
+            ignore_nulls: false,
+            ordering_req: LexOrdering::empty(),
+            is_reversed: false,
+            name: state_func.name(),
+            is_distinct: state_func.is_distinct,
+            exprs: &[Arc::new(
+                datafusion::physical_expr::expressions::Column::new("col", 0),
+            )],
+        };
+        let mut state_accum = state_func.accumulator(accum_args).unwrap();
+
+        state_accum.update_batch(&values).unwrap();
+        let state = state_accum.state().unwrap();
+        assert_eq!(state.len(), 2);
+        assert_eq!(state[0], ScalarValue::UInt64(Some(3)));
+        assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
+
+        let eval_res = state_accum.evaluate().unwrap();
+        // state_index=0, hence we only return the count
+        assert_eq!(eval_res, ScalarValue::UInt64(Some(3)));
+
+        let state_func = wrapper.state_functions()[1].clone();
+        let accum_args = AccumulatorArgs {
+            return_type: &DataType::Float64,
+            schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
+            ignore_nulls: false,
+            ordering_req: LexOrdering::empty(),
+            is_reversed: false,
+            name: state_func.name(),
+            is_distinct: state_func.is_distinct,
+            exprs: &[Arc::new(
+                datafusion::physical_expr::expressions::Column::new("col", 0),
+            )],
+        };
+        let mut state_accum = state_func.accumulator(accum_args).unwrap();
+
+        state_accum.update_batch(&values).unwrap();
+        let state = state_accum.state().unwrap();
+        assert_eq!(state.len(), 2);
+        assert_eq!(state[0], ScalarValue::UInt64(Some(3)));
+        assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
+
+        let eval_res = state_accum.evaluate().unwrap();
+        // state_index=0, hence we only return the count
+        assert_eq!(eval_res, ScalarValue::Float64(Some(6.)));
+
+        let merge_input = vec![
+            Arc::new(UInt64Array::from(vec![Some(3), Some(42), None])) as arrow::array::ArrayRef,
+            Arc::new(Float64Array::from(vec![Some(48.), Some(84.), None])),
+        ];
+        let merge_func = wrapper.merge_function();
+        // this accum args is still the original aggregate function's args
+        let merge_accum_args = AccumulatorArgs {
+            return_type: &avg.return_type(&[DataType::Float64]).unwrap(),
+            schema: &arrow_schema::Schema::new(vec![
+                Field::new("col0", DataType::UInt64, true),
+                Field::new("col1", DataType::Float64, true),
+            ]),
+            ignore_nulls: false,
+            ordering_req: LexOrdering::empty(),
+            is_reversed: false,
+            name: state_func.name(),
+            is_distinct: state_func.is_distinct,
+            exprs: &[
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    "col0", 0,
+                )),
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    "col1", 1,
+                )),
+            ],
+        };
+        let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
+        merge_accum.update_batch(&merge_input).unwrap();
+        let merge_state = merge_accum.state().unwrap();
+        assert_eq!(merge_state.len(), 2);
+        assert_eq!(merge_state[0], ScalarValue::UInt64(Some(45)));
+        assert_eq!(merge_state[1], ScalarValue::Float64(Some(132.)));
+
+        let merge_eval_res = merge_accum.evaluate().unwrap();
+        // the merge function returns the average, which is 132 / 45
+        assert_eq!(merge_eval_res, ScalarValue::Float64(Some(132. / 45_f64)));
+    }
 }
