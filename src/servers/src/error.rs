@@ -624,6 +624,13 @@ pub enum Error {
 
     #[snafu(display("Unknown hint: {}", hint))]
     UnknownHint { hint: String },
+
+    #[snafu(display("Failed to invoke common_meta"))]
+    CommonMeta {
+        source: common_meta::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -747,6 +754,7 @@ impl ErrorExt for Error {
             DurationOverflow { .. } => StatusCode::InvalidArguments,
 
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
+            CommonMeta { source, .. } => source.status_code(),
         }
     }
 

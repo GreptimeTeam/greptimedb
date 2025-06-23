@@ -213,6 +213,14 @@ impl TableMeta {
             .map(|(_, cs)| &cs.name)
     }
 
+    /// Returns names of primary keys.
+    pub fn primary_key_names(&self) -> impl Iterator<Item = &String> {
+        let columns_schemas = self.schema.column_schemas();
+        self.primary_key_indices
+            .iter()
+            .map(|pk_idx| &columns_schemas[*pk_idx].name)
+    }
+
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
     ///
     /// The returned builder would derive the next column id of this meta.

@@ -22,6 +22,7 @@ use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
 
 pub mod addrs;
+mod batch_builder;
 pub mod configurator;
 pub(crate) mod elasticsearch;
 pub mod error;

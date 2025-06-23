@@ -210,6 +210,13 @@ impl TableBuilder {
             rows: Some(Rows { schema, rows }),
         }
     }
+
+    pub(crate) fn tags(&self) -> impl Iterator<Item = &String> {
+        self.schema
+            .iter()
+            .filter(|v| v.semantic_type == SemanticType::Tag as i32)
+            .map(|c| &c.column_name)
+    }
 }
 
 #[cfg(test)]
