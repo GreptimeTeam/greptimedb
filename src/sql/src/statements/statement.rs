@@ -37,8 +37,8 @@ use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowSearchPath, ShowStatus,
-    ShowTableStatus, ShowTables, ShowVariables, ShowViews,ShowProcessList,
+    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowSearchPath,
+    ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;

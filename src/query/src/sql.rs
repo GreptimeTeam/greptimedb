@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, flows, key_column_usage, region_peers, schemata, tables, CHARACTER_SETS, COLLATIONS,
-    COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
+    columns, flows, key_column_usage, process_list, region_peers, schemata, tables, CHARACTER_SETS,
+    COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -57,11 +57,12 @@ use sql::ast::Ident;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews
+    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
-use sqlparser::ast:: ObjectName;
+use sqlparser::ast::ObjectName;
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
@@ -1240,23 +1241,21 @@ pub async fn show_processlist(
 ) -> Result<Output> {
     let projects = if stmt.full {
         vec![
-            ("id", "Id"),
-            ("catalog", "Catalog"),
-            ("schemas", "Schema"),
-            ("client", "Client"),
-            ("frontend", "Frontend"),
-            ("start_timestamp", "Start Time"),
-            ("elapsed_time", "Elapsed Time"),
-            ("query", "Query"),
+            (process_list::ID, "Id"),
+            (process_list::CATALOG, "Catalog"),
+            (process_list::SCHEMAS, "Schema"),
+            (process_list::CLIENT, "Client"),
+            (process_list::FRONTEND, "Frontend"),
+            (process_list::START_TIMESTAMP, "Start Time"),
+            (process_list::ELAPSED_TIME, "Elapsed Time"),
+            (process_list::QUERY, "Query"),
         ]
     } else {
         vec![
-            ("id", "Id"),
-            ("catalog", "Catalog"),
-            ("schemas", "Schema"),
-            ("client", "Client"),
-            ("frontend", "Frontend"),
-            ("elapsed_time", "Elapsed Time"),
+            (process_list::ID, "Id"),
+            (process_list::CATALOG, "Catalog"),
+            (process_list::QUERY, "Query"),
+            (process_list::ELAPSED_TIME, "Elapsed Time"),
         ]
     };
 

@@ -330,15 +330,13 @@ impl Display for ShowProcessList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.full {
             write!(f, "SHOW FULL PROCESSLIST")?;
-        }else{
+        } else {
             write!(f, "SHOW PROCESSLIST")?;
         }
 
         Ok(())
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

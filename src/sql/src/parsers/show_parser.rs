@@ -24,7 +24,9 @@ use crate::error::{
 };
 use crate::parser::ParserContext;
 use crate::statements::show::{
-    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowSearchPath, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateTableVariant,
+    ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
+    ShowSearchPath, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::statement::Statement;
 
@@ -102,7 +104,7 @@ impl ParserContext<'_> {
                 self.parse_show_columns(true)
             } else if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
                 self.parse_show_databases(true)
-            }else if self.consume_token("PROCESSLIST") {
+            } else if self.consume_token("PROCESSLIST") {
                 self.parse_show_processlist(true)
             } else {
                 self.unsupported(self.peek_token_as_string())
@@ -119,7 +121,7 @@ impl ParserContext<'_> {
             Ok(Statement::ShowStatus(ShowStatus {}))
         } else if self.consume_token("SEARCH_PATH") {
             Ok(Statement::ShowSearchPath(ShowSearchPath {}))
-        }else if self.consume_token("PROCESSLIST") {
+        } else if self.consume_token("PROCESSLIST") {
             self.parse_show_processlist(false)
         } else {
             self.unsupported(self.peek_token_as_string())
@@ -574,15 +576,14 @@ impl ParserContext<'_> {
         Ok(Statement::ShowFlows(ShowFlows { kind, database }))
     }
 
-    fn parse_show_processlist(&mut self,full: bool) -> Result<Statement> {
+    fn parse_show_processlist(&mut self, full: bool) -> Result<Statement> {
         match self.parser.next_token().token {
-            Token::EOF | Token::SemiColon => Ok(Statement::ShowProcesslist(ShowProcessList { full})),
+            Token::EOF | Token::SemiColon => {
+                Ok(Statement::ShowProcesslist(ShowProcessList { full }))
+            }
             _ => return self.unsupported(self.peek_token_as_string()),
         }
     }
-
-
-
 }
 
 #[cfg(test)]
@@ -1221,6 +1222,31 @@ mod tests {
                 kind: ShowKind::All,
                 database: Some("d1".to_string()),
             })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+    }
+
+    #[test]
+    pub fn test_show_processlist() {
+        let sql = "SHOW PROCESSLIST";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowProcesslist(ShowProcessList { full: false })
+        );
+        assert_eq!(sql, stmts[0].to_string());
+
+        let sql = "SHOW FULL PROCESSLIST";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+        assert_eq!(
+            stmts[0],
+            Statement::ShowProcesslist(ShowProcessList { full: true })
         );
         assert_eq!(sql, stmts[0].to_string());
     }

@@ -39,14 +39,14 @@ use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::InformationTable;
 
 /// Column names of `information_schema.process_list`
-const ID: &str = "id";
-const CATALOG: &str = "catalog";
-const SCHEMAS: &str = "schemas";
-const QUERY: &str = "query";
-const CLIENT: &str = "client";
-const FRONTEND: &str = "frontend";
-const START_TIMESTAMP: &str = "start_timestamp";
-const ELAPSED_TIME: &str = "elapsed_time";
+pub const ID: &str = "id";
+pub const CATALOG: &str = "catalog";
+pub const SCHEMAS: &str = "schemas";
+pub const QUERY: &str = "query";
+pub const CLIENT: &str = "client";
+pub const FRONTEND: &str = "frontend";
+pub const START_TIMESTAMP: &str = "start_timestamp";
+pub const ELAPSED_TIME: &str = "elapsed_time";
 
 /// `information_schema.process_list` table implementation that tracks running
 /// queries in current cluster.
