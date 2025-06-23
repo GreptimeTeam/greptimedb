@@ -18,7 +18,7 @@ use cmd::options::GreptimeOptions;
 use cmd::standalone::StandaloneOptions;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
-use common_telemetry::logging::{LoggingOptions, DEFAULT_LOGGING_DIR, DEFAULT_OTLP_ENDPOINT};
+use common_telemetry::logging::{LoggingOptions, DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -81,7 +81,7 @@ fn test_load_datanode_example_config() {
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
-                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -124,7 +124,7 @@ fn test_load_frontend_example_config() {
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
-                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -172,7 +172,7 @@ fn test_load_metasrv_example_config() {
             logging: LoggingOptions {
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 level: Some("info".to_string()),
-                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -229,7 +229,7 @@ fn test_load_standalone_example_config() {
             logging: LoggingOptions {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
-                otlp_endpoint: Some(DEFAULT_OTLP_ENDPOINT.to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
