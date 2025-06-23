@@ -207,11 +207,16 @@ pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
 }
 
 pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient> {
+    if config.skip_ssl_validation {
+        common_telemetry::warn!("Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted.");
+    }
+
     let client = reqwest::ClientBuilder::new()
         .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
         .connect_timeout(config.connect_timeout)
         .pool_idle_timeout(config.pool_idle_timeout)
         .timeout(config.timeout)
+        .danger_accept_invalid_certs(config.skip_ssl_validation)
         .build()
         .context(BuildHttpClientSnafu)?;
     Ok(HttpClient::with(client))

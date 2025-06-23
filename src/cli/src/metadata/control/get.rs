@@ -51,7 +51,7 @@ impl GetCommand {
 /// Get key-value pairs from the metadata store.
 #[derive(Debug, Default, Parser)]
 pub struct GetKeyCommand {
-    /// The key to get from the metadata store. If empty, returns all key-value pairs.
+    /// The key to get from the metadata store.
     #[clap(default_value = "")]
     key: String,
 

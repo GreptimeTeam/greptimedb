@@ -189,7 +189,8 @@ We invite you to engage and contribute!
 - [Official Website](https://greptime.com/)
 - [Blog](https://greptime.com/blogs/)
 - [LinkedIn](https://www.linkedin.com/company/greptime/)
-- [Twitter](https://twitter.com/greptime)
+- [X (Twitter)](https://X.com/greptime)
+- [YouTube](https://www.youtube.com/@greptime)
 
 ## License
 

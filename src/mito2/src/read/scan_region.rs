@@ -32,7 +32,7 @@ use datafusion_expr::Expr;
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadata;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
-use store_api::storage::{ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::predicate::{build_time_range_predicate, Predicate};
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
@@ -195,6 +195,9 @@ pub(crate) struct ScanRegion {
     ignore_bloom_filter: bool,
     /// Start time of the scan task.
     start_time: Option<Instant>,
+    /// Whether to filter out the deleted rows.
+    /// Usually true for normal read, and false for scan for compaction.
+    filter_deleted: bool,
 }
 
 impl ScanRegion {
@@ -215,6 +218,7 @@ impl ScanRegion {
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
             start_time: None,
+            filter_deleted: true,
         }
     }
 
@@ -255,53 +259,56 @@ impl ScanRegion {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
+        self.filter_deleted = filter_deleted;
+    }
+
     /// Returns a [Scanner] to scan the region.
-    pub(crate) fn scanner(self) -> Result<Scanner> {
+    pub(crate) async fn scanner(self) -> Result<Scanner> {
         if self.use_series_scan() {
-            self.series_scan().map(Scanner::Series)
+            self.series_scan().await.map(Scanner::Series)
         } else if self.use_unordered_scan() {
             // If table is append only and there is no series row selector, we use unordered scan in query.
             // We still use seq scan in compaction.
-            self.unordered_scan().map(Scanner::Unordered)
+            self.unordered_scan().await.map(Scanner::Unordered)
         } else {
-            self.seq_scan().map(Scanner::Seq)
+            self.seq_scan().await.map(Scanner::Seq)
         }
     }
 
     /// Returns a [RegionScanner] to scan the region.
     #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
-    pub(crate) fn region_scanner(self) -> Result<RegionScannerRef> {
+    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
         if self.use_series_scan() {
-            self.series_scan().map(|scanner| Box::new(scanner) as _)
+            self.series_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
         } else if self.use_unordered_scan() {
-            self.unordered_scan().map(|scanner| Box::new(scanner) as _)
+            self.unordered_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
         } else {
-            self.seq_scan().map(|scanner| Box::new(scanner) as _)
+            self.seq_scan().await.map(|scanner| Box::new(scanner) as _)
         }
     }
 
     /// Scan sequentially.
-    pub(crate) fn seq_scan(self) -> Result<SeqScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
+        let input = self.scan_input().await?;
         Ok(SeqScan::new(input, false))
     }
 
     /// Unordered scan.
-    pub(crate) fn unordered_scan(self) -> Result<UnorderedScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
+        let input = self.scan_input().await?;
         Ok(UnorderedScan::new(input))
     }
 
     /// Scans by series.
-    pub(crate) fn series_scan(self) -> Result<SeriesScan> {
-        let input = self.scan_input(true)?;
+    pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let input = self.scan_input().await?;
         Ok(SeriesScan::new(input))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn scan_without_filter_deleted(self) -> Result<SeqScan> {
-        let input = self.scan_input(false)?;
-        Ok(SeqScan::new(input, false))
     }
 
     /// Returns true if the region can use unordered scan for current request.
@@ -324,7 +331,7 @@ impl ScanRegion {
     }
 
     /// Creates a scan input.
-    fn scan_input(mut self, filter_deleted: bool) -> Result<ScanInput> {
+    async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
 
@@ -368,9 +375,10 @@ impl ScanRegion {
             })
             .collect();
 
+        let region_id = self.region_id();
         debug!(
             "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
-            self.version.metadata.region_id,
+            region_id,
             self.request,
             time_range,
             memtables.len(),
@@ -415,11 +423,15 @@ impl ScanRegion {
             .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
-            .with_filter_deleted(filter_deleted)
+            .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
             .with_distribution(self.request.distribution);
         Ok(input)
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.version.metadata.region_id
     }
 
     /// Build time range predicate from filters.
@@ -538,7 +550,7 @@ impl ScanRegion {
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
-            self.version.metadata.region_id,
+            self.region_id(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
@@ -566,7 +578,7 @@ fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
 }
 
 /// Common input for different scanners.
-pub(crate) struct ScanInput {
+pub struct ScanInput {
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -792,12 +804,11 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
-    pub(crate) async fn prune_file(
+    pub async fn prune_file(
         &self,
-        file_index: usize,
+        file: &FileHandle,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
-        let file = &self.files[file_index];
         let res = self
             .access_layer
             .read_sst(file.clone())
@@ -898,9 +909,9 @@ impl ScanInput {
 
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
-pub(crate) struct StreamContext {
+pub struct StreamContext {
     /// Input memtables and files.
-    pub(crate) input: ScanInput,
+    pub input: ScanInput,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
 

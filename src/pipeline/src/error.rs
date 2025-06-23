@@ -235,14 +235,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Processor {processor}: invalid format {s}"))]
-    DateInvalidFormat {
-        s: String,
-        processor: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid Pattern: '{s}'. {detail}"))]
     DissectInvalidPattern {
         s: String,
@@ -398,10 +390,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Transform {fields:?} type MUST BE set before default {default}"))]
+    #[snafu(display("Transform fields must be set."))]
+    TransformFieldMustBeSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform {fields:?} type MUST BE set."))]
     TransformTypeMustBeSet {
         fields: String,
-        default: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -426,8 +422,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform"))]
+    #[snafu(display("Exactly one time-related processor and one timestamp value is required to use auto transform. `ignore_missing` can not be set to true."))]
     AutoTransformOneTimestamp {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid Pipeline doc version number: {}", version))]
+    InvalidVersionNumber {
+        version: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -857,7 +859,6 @@ impl ErrorExt for Error {
             | DateParse { .. }
             | DateFailedToGetLocalTimezone { .. }
             | DateFailedToGetTimestamp { .. }
-            | DateInvalidFormat { .. }
             | DissectInvalidPattern { .. }
             | DissectEmptyPattern { .. }
             | DissectSplitExceedsInput { .. }
@@ -883,11 +884,13 @@ impl ErrorExt for Error {
             | UrlEncodingDecode { .. }
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
+            | TransformFieldMustBeSet { .. }
             | TransformTypeMustBeSet { .. }
             | TransformColumnNameMustBeUnique { .. }
             | TransformMultipleTimestampIndex { .. }
             | TransformTimestampIndexCount { .. }
             | AutoTransformOneTimestamp { .. }
+            | InvalidVersionNumber { .. }
             | CoerceUnsupportedNullType { .. }
             | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }

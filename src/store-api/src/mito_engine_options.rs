@@ -15,8 +15,8 @@
 //! Option keys for the mito engine.
 //! We define them in this mod so the create parser can use it to validate table options.
 
-use common_wal::options::WAL_OPTIONS_KEY;
-
+/// Option key for all WAL options.
+pub use common_wal::options::WAL_OPTIONS_KEY;
 /// Option key for append mode.
 pub const APPEND_MODE_KEY: &str = "append_mode";
 /// Option key for merge mode.

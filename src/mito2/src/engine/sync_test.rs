@@ -60,7 +60,7 @@ async fn scan_check(
     num_files: usize,
 ) {
     let request = ScanRequest::default();
-    let scanner = engine.scanner(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
     assert_eq!(num_memtable, scanner.num_memtables());
     assert_eq!(num_files, scanner.num_files());
     let stream = scanner.scan().await.unwrap();

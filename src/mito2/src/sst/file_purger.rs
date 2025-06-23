@@ -38,6 +38,16 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
+/// A no-op file purger can be used in combination with reading SST files outside of this region.
+#[derive(Debug)]
+pub struct NoopFilePurger;
+
+impl FilePurger for NoopFilePurger {
+    fn send_request(&self, _: PurgeRequest) {
+        // noop
+    }
+}
+
 /// Purger that purges file for current region.
 pub struct LocalFilePurger {
     scheduler: SchedulerRef,

@@ -382,6 +382,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to decode sql value"))]
+    DecodeSqlValue {
+        #[snafu(source)]
+        error: sqlx::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
@@ -413,6 +421,18 @@ pub enum Error {
 
     #[snafu(display("Metasrv has no leader at this moment"))]
     NoLeader {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Leader lease expired"))]
+    LeaderLeaseExpired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Leader lease changed during election"))]
+    LeaderLeaseChanged {
         #[snafu(implicit)]
         location: Location,
     },
@@ -766,7 +786,7 @@ pub enum Error {
         error: deadpool::managed::PoolError<tokio_postgres::Error>,
     },
 
-    #[cfg(feature = "pg_kvbackend")]
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[snafu(display("Sql execution timeout, sql: {}, duration: {:?}", sql, duration))]
     SqlExecutionTimeout {
         #[snafu(implicit)]
@@ -812,8 +832,8 @@ pub enum Error {
     },
 
     #[cfg(feature = "mysql_kvbackend")]
-    #[snafu(display("Failed to connect to mysql"))]
-    ConnectMySql {
+    #[snafu(display("Failed to acquire mysql client from pool"))]
+    AcquireMySqlClient {
         #[snafu(source)]
         error: sqlx::Error,
         #[snafu(implicit)]
@@ -911,6 +931,8 @@ impl ErrorExt for Error {
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::NoLeader { .. }
+            | Error::LeaderLeaseExpired { .. }
+            | Error::LeaderLeaseChanged { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
             | Error::Range { .. }
@@ -1012,19 +1034,21 @@ impl ErrorExt for Error {
 
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
+            Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
+
             #[cfg(feature = "pg_kvbackend")]
             Error::CreatePostgresPool { .. }
             | Error::GetPostgresClient { .. }
             | Error::GetPostgresConnection { .. }
-            | Error::PostgresExecution { .. }
-            | Error::SqlExecutionTimeout { .. } => StatusCode::Internal,
+            | Error::PostgresExecution { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
             Error::MySqlExecution { .. }
             | Error::CreateMySqlPool { .. }
-            | Error::ConnectMySql { .. }
-            | Error::ParseMySqlUrl { .. } => StatusCode::Internal,
-
-            Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
+            | Error::ParseMySqlUrl { .. }
+            | Error::DecodeSqlValue { .. }
+            | Error::AcquireMySqlClient { .. } => StatusCode::Internal,
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            Error::SqlExecutionTimeout { .. } => StatusCode::Internal,
         }
     }
 

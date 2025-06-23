@@ -33,7 +33,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
@@ -94,7 +94,7 @@ pub enum RegionRoleState {
 /// - Only the region worker thread this region belongs to can modify the metadata.
 /// - Multiple reader threads are allowed to read a specific `version` of a region.
 #[derive(Debug)]
-pub(crate) struct MitoRegion {
+pub struct MitoRegion {
     /// Id of this region.
     ///
     /// Accessing region id from the version control is inconvenient so
@@ -135,7 +135,7 @@ pub(crate) struct MitoRegion {
     stats: ManifestStats,
 }
 
-pub(crate) type MitoRegionRef = Arc<MitoRegion>;
+pub type MitoRegionRef = Arc<MitoRegion>;
 
 impl MitoRegion {
     /// Stop background managers for this region.
@@ -220,8 +220,16 @@ impl MitoRegion {
         )
     }
 
+    pub fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    pub fn find_committed_sequence(&self) -> SequenceNumber {
+        self.version_control.committed_sequence()
+    }
+
     /// Returns whether the region is readonly.
-    pub(crate) fn is_follower(&self) -> bool {
+    pub fn is_follower(&self) -> bool {
         self.manifest_ctx.state.load() == RegionRoleState::Follower
     }
 

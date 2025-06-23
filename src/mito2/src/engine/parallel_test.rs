@@ -56,7 +56,7 @@ async fn scan_in_parallel(
         .unwrap();
 
     let request = ScanRequest::default();
-    let mut scanner = engine.scanner(region_id, request).unwrap();
+    let mut scanner = engine.scanner(region_id, request).await.unwrap();
     scanner.set_target_partitions(parallelism);
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
