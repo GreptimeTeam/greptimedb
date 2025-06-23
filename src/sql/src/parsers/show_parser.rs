@@ -581,7 +581,7 @@ impl ParserContext<'_> {
             Token::EOF | Token::SemiColon => {
                 Ok(Statement::ShowProcesslist(ShowProcessList { full }))
             }
-            _ => return self.unsupported(self.peek_token_as_string()),
+            _ => self.unsupported(self.peek_token_as_string()),
         }
     }
 }
