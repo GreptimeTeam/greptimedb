@@ -204,7 +204,7 @@ impl RegionSupervisorTicker {
                                 info!("EventReceiver is dropped, inspect and register regions loop is stopped");
                                 break;
                             }
-                            if let Ok(_) = rx.await {
+                            if rx.await.is_ok() {
                                 info!("All region failure detectors are initialized.");
                                 break;
                             }
@@ -759,12 +759,20 @@ impl RegionSupervisor {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_meta::ddl::test_util::{
+        test_create_logical_table_task, test_create_physical_table_task,
+    };
     use common_meta::ddl::RegionFailureDetectorController;
-    use common_meta::key::maintenance;
+    use common_meta::key::table_route::{
+        LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
+    };
+    use common_meta::key::{maintenance, TableMetadataManager};
     use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::NoopPeerLookupService;
     use common_telemetry::info;
     use common_time::util::current_time_millis;
@@ -911,7 +919,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn test_initialize_all_regions() {
+    async fn test_initialize_all_regions_event_handling() {
         common_telemetry::init_default_ut_logging();
         let (tx, mut rx) = tokio::sync::mpsc::channel(128);
         let ticker = RegionSupervisorTicker {
@@ -923,14 +931,17 @@ pub(crate) mod tests {
         ticker.start();
         sleep(Duration::from_millis(60)).await;
         let handle = tokio::spawn(async move {
+            let mut counter = 0;
             while let Some(event) = rx.recv().await {
-                match event {
-                    Event::InitializeAllRegions(tx) => {
-                        tx.send(()).unwrap();
-                        info!("Responded initialize all regions event");
-                        break;
+                if let Event::InitializeAllRegions(tx) = event {
+                    if counter == 0 {
+                        // Ignore the first event
+                        counter += 1;
+                        continue;
                     }
-                    _ => {}
+                    tx.send(()).unwrap();
+                    info!("Responded initialize all regions event");
+                    break;
                 }
             }
             rx
@@ -941,6 +952,54 @@ pub(crate) mod tests {
             sleep(Duration::from_millis(100)).await;
             assert!(rx.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_all_regions() {
+        common_telemetry::init_default_ut_logging();
+        let (mut supervisor, sender) = new_test_supervisor();
+        let table_metadata_manager = TableMetadataManager::new(supervisor.kv_backend.clone());
+
+        // Create a physical table metadata
+        let table_id = 1024;
+        let mut create_physical_table_task = test_create_physical_table_task("my_physical_table");
+        create_physical_table_task.set_table_id(table_id);
+        let table_info = create_physical_table_task.table_info;
+        let table_route = PhysicalTableRouteValue::new(vec![RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, 0),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(1)),
+            ..Default::default()
+        }]);
+        let table_route_value = TableRouteValue::Physical(table_route);
+        table_metadata_manager
+            .create_table_metadata(table_info, table_route_value, HashMap::new())
+            .await
+            .unwrap();
+
+        // Create a logical table metadata
+        let logical_table_id = 1025;
+        let mut test_create_logical_table_task = test_create_logical_table_task("my_logical_table");
+        test_create_logical_table_task.set_table_id(logical_table_id);
+        let table_info = test_create_logical_table_task.table_info;
+        let table_route = LogicalTableRouteValue::new(1024, vec![RegionId::new(1025, 0)]);
+        let table_route_value = TableRouteValue::Logical(table_route);
+        table_metadata_manager
+            .create_table_metadata(table_info, table_route_value, HashMap::new())
+            .await
+            .unwrap();
+        tokio::spawn(async move { supervisor.run().await });
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::InitializeAllRegions(tx)).await.unwrap();
+        assert!(rx.await.is_ok());
+
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        assert_eq!(detector.len(), 1);
+        assert!(detector.contains(&(1, RegionId::new(1024, 0))));
     }
 
     #[tokio::test]
@@ -959,6 +1018,7 @@ pub(crate) mod tests {
         // The sender is dropped, so the receiver will receive an error.
         assert!(rx.await.is_err());
     }
+
     #[tokio::test]
     async fn test_region_failure_detector_controller() {
         let (mut supervisor, sender) = new_test_supervisor();
