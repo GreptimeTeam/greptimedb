@@ -93,43 +93,33 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         Precision::Nanosecond,
         &mut row,
     )?;
-    // write ts fields
+
+    // write fields
     let fields = vec![
         make_column_data(
             "timestamp_end",
             ColumnDataType::TimestampNanosecond,
-            ValueData::TimestampNanosecondValue(span.end_in_nanosecond as i64),
+            Some(ValueData::TimestampNanosecondValue(
+                span.end_in_nanosecond as i64,
+            )),
         ),
         make_column_data(
             DURATION_NANO_COLUMN,
             ColumnDataType::Uint64,
-            ValueData::U64Value(span.end_in_nanosecond - span.start_in_nanosecond),
-        ),
-    ];
-    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
-
-    // write fields
-    if let Some(parent_span_id) = span.parent_span_id {
-        row_writer::write_fields(
-            writer,
-            std::iter::once(make_string_column_data(
-                PARENT_SPAN_ID_COLUMN,
-                parent_span_id,
+            Some(ValueData::U64Value(
+                span.end_in_nanosecond - span.start_in_nanosecond,
             )),
-            &mut row,
-        )?;
-    }
-
-    let fields = vec![
-        make_string_column_data(TRACE_ID_COLUMN, span.trace_id),
-        make_string_column_data(SPAN_ID_COLUMN, span.span_id),
-        make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
-        make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
-        make_string_column_data("span_status_code", span.span_status_code),
-        make_string_column_data("span_status_message", span.span_status_message),
-        make_string_column_data("trace_state", span.trace_state),
-        make_string_column_data("scope_name", span.scope_name),
-        make_string_column_data("scope_version", span.scope_version),
+        ),
+        make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
+        make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id)),
+        make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id)),
+        make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind)),
+        make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name)),
+        make_string_column_data("span_status_code", Some(span.span_status_code)),
+        make_string_column_data("span_status_message", Some(span.span_status_message)),
+        make_string_column_data("trace_state", Some(span.trace_state)),
+        make_string_column_data("scope_name", Some(span.scope_name)),
+        make_string_column_data("scope_version", Some(span.scope_version)),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
@@ -206,7 +196,7 @@ fn write_attributes(
             Some(OtlpValue::StringValue(v)) => {
                 row_writer::write_fields(
                     writer,
-                    std::iter::once(make_string_column_data(&key, v)),
+                    std::iter::once(make_string_column_data(&key, Some(v))),
                     row,
                 )?;
             }
@@ -216,7 +206,7 @@ fn write_attributes(
                     std::iter::once(make_column_data(
                         &key,
                         ColumnDataType::Boolean,
-                        ValueData::BoolValue(v),
+                        Some(ValueData::BoolValue(v)),
                     )),
                     row,
                 )?;
@@ -227,7 +217,7 @@ fn write_attributes(
                     std::iter::once(make_column_data(
                         &key,
                         ColumnDataType::Int64,
-                        ValueData::I64Value(v),
+                        Some(ValueData::I64Value(v)),
                     )),
                     row,
                 )?;
@@ -238,7 +228,7 @@ fn write_attributes(
                     std::iter::once(make_column_data(
                         &key,
                         ColumnDataType::Float64,
-                        ValueData::F64Value(v),
+                        Some(ValueData::F64Value(v)),
                     )),
                     row,
                 )?;
@@ -261,7 +251,7 @@ fn write_attributes(
                     std::iter::once(make_column_data(
                         &key,
                         ColumnDataType::Binary,
-                        ValueData::BinaryValue(v),
+                        Some(ValueData::BinaryValue(v)),
                     )),
                     row,
                 )?;

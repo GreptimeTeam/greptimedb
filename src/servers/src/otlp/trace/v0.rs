@@ -82,40 +82,37 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
         Precision::Nanosecond,
         &mut row,
     )?;
-    // write ts fields
+
+    // write fields
     let fields = vec![
         make_column_data(
             "timestamp_end",
             ColumnDataType::TimestampNanosecond,
-            ValueData::TimestampNanosecondValue(span.end_in_nanosecond as i64),
+            Some(ValueData::TimestampNanosecondValue(
+                span.end_in_nanosecond as i64,
+            )),
         ),
         make_column_data(
             DURATION_NANO_COLUMN,
             ColumnDataType::Uint64,
-            ValueData::U64Value(span.end_in_nanosecond - span.start_in_nanosecond),
+            Some(ValueData::U64Value(
+                span.end_in_nanosecond - span.start_in_nanosecond,
+            )),
         ),
+        make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id)),
+        make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id)),
+        make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
+        make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind)),
+        make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name)),
+        make_string_column_data("span_status_code", Some(span.span_status_code)),
+        make_string_column_data("span_status_message", Some(span.span_status_message)),
+        make_string_column_data("trace_state", Some(span.trace_state)),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     if let Some(service_name) = span.service_name {
         row_writer::write_tag(writer, SERVICE_NAME_COLUMN, service_name, &mut row)?;
     }
-
-    // write fields
-    let fields = vec![
-        make_string_column_data(TRACE_ID_COLUMN, span.trace_id),
-        make_string_column_data(SPAN_ID_COLUMN, span.span_id),
-        make_string_column_data(
-            PARENT_SPAN_ID_COLUMN,
-            span.parent_span_id.unwrap_or_default(),
-        ),
-        make_string_column_data(SPAN_KIND_COLUMN, span.span_kind),
-        make_string_column_data(SPAN_NAME_COLUMN, span.span_name),
-        make_string_column_data("span_status_code", span.span_status_code),
-        make_string_column_data("span_status_message", span.span_status_message),
-        make_string_column_data("trace_state", span.trace_state),
-    ];
-    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     row_writer::write_json(
         writer,
@@ -133,8 +130,8 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
 
     // write fields
     let fields = vec![
-        make_string_column_data("scope_name", span.scope_name),
-        make_string_column_data("scope_version", span.scope_version),
+        make_string_column_data("scope_name", Some(span.scope_name)),
+        make_string_column_data("scope_version", Some(span.scope_version)),
     ];
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
@@ -172,7 +169,10 @@ fn write_trace_services_to_row(writer: &mut TableData, services: HashSet<String>
         // Write the `service_name` column.
         row_writer::write_fields(
             writer,
-            std::iter::once(make_string_column_data(SERVICE_NAME_COLUMN, service_name)),
+            std::iter::once(make_string_column_data(
+                SERVICE_NAME_COLUMN,
+                Some(service_name),
+            )),
             &mut row,
         )?;
         writer.add_row(row);
