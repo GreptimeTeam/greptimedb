@@ -149,7 +149,7 @@ impl SeqScan {
                 part_metrics,
                 range_builder_list.clone(),
                 &mut sources,
-            )?;
+            );
         }
 
         common_telemetry::debug!(
@@ -270,7 +270,7 @@ impl SeqScan {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
-                )?;
+                );
 
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
@@ -433,7 +433,7 @@ pub(crate) fn build_sources(
     part_metrics: &PartitionMetrics,
     range_builder_list: Arc<RangeBuilderList>,
     sources: &mut Vec<Source>,
-) -> Result<()> {
+) {
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -477,7 +477,6 @@ pub(crate) fn build_sources(
         };
         sources.push(Source::Stream(stream));
     }
-    Ok(())
 }
 
 #[cfg(test)]

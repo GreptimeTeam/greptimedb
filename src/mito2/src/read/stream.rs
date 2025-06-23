@@ -15,11 +15,11 @@
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::error::{ArrowComputeSnafu, ExternalSnafu};
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::compute;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
@@ -46,7 +46,7 @@ pub(crate) struct ConvertBatchStream {
     projection_mapper: Arc<ProjectionMapper>,
     cache_strategy: CacheStrategy,
     partition_metrics: PartitionMetrics,
-    convert_cost: Duration,
+    buffer: Vec<DfRecordBatch>,
 }
 
 impl ConvertBatchStream {
@@ -61,11 +61,11 @@ impl ConvertBatchStream {
             projection_mapper,
             cache_strategy,
             partition_metrics,
-            convert_cost: Duration::from_secs(0),
+            buffer: Vec::new(),
         }
     }
 
-    fn convert(&self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
+    fn convert(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
         match batch {
             ScanBatch::Normal(batch) => {
                 if batch.is_empty() {
@@ -75,17 +75,19 @@ impl ConvertBatchStream {
                 }
             }
             ScanBatch::Series(series) => {
-                let mut record_batches = Vec::with_capacity(series.batches.len());
+                self.buffer.clear();
+                self.buffer.reserve(series.batches.len());
+
                 for batch in series.batches {
                     let record_batch = self
                         .projection_mapper
                         .convert(&batch, &self.cache_strategy)?;
-                    record_batches.push(record_batch.into_df_record_batch());
+                    self.buffer.push(record_batch.into_df_record_batch());
                 }
 
                 let output_schema = self.projection_mapper.output_schema();
                 let record_batch =
-                    compute::concat_batches(output_schema.arrow_schema(), &record_batches)
+                    compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
                         .context(ArrowComputeSnafu)?;
 
                 RecordBatch::try_from_df_record_batch(output_schema, record_batch)
@@ -100,10 +102,6 @@ impl Stream for ConvertBatchStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let batch = futures::ready!(self.inner.poll_next_unpin(cx));
         let Some(batch) = batch else {
-            self.partition_metrics
-                .inc_convert_batch_cost(self.convert_cost);
-            self.convert_cost = Duration::from_secs(0);
-
             return Poll::Ready(None);
         };
 
@@ -111,7 +109,8 @@ impl Stream for ConvertBatchStream {
             Ok(batch) => {
                 let start = Instant::now();
                 let record_batch = self.convert(batch);
-                self.convert_cost += start.elapsed();
+                self.partition_metrics
+                    .inc_convert_batch_cost(start.elapsed());
                 record_batch
             }
             Err(e) => Err(BoxedError::new(e)).context(ExternalSnafu),

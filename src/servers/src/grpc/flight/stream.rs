@@ -78,11 +78,7 @@ impl FlightRecordBatchStream {
         }
 
         while let Some(batch_or_err) = recordbatches.next().in_current_span().await {
-            match batch_or_err.inspect_err(|e| {
-                if e.status_code().should_log_error() {
-                    error!("{e:?}");
-                }
-            }) {
+            match batch_or_err {
                 Ok(recordbatch) => {
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -95,6 +91,10 @@ impl FlightRecordBatchStream {
                     }
                 }
                 Err(e) => {
+                    if e.status_code().should_log_error() {
+                        error!("{e:?}");
+                    }
+
                     let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
                         warn!(e; "stop sending Flight data");

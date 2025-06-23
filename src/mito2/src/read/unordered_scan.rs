@@ -30,14 +30,13 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::range::{RangeBuilderList, RowGroupIndex};
+use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
-use crate::sst::file::FileTimeRange;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -94,46 +93,35 @@ impl UnorderedScan {
         part_range_id: usize,
         part_metrics: PartitionMetrics,
         range_builder_list: Arc<RangeBuilderList>,
-    ) -> Result<impl Stream<Item = Result<Batch>>> {
-        fn build_scan_stream(
-            context: Arc<StreamContext>,
-            index: RowGroupIndex,
-            time_range: FileTimeRange,
-            metrics: PartitionMetrics,
-            range_builder_list: Arc<RangeBuilderList>,
-        ) -> Result<impl Stream<Item = Result<Batch>>> {
-            let stream = if context.is_mem_range_index(index) {
-                scan_mem_ranges(context, metrics, index, time_range).boxed()
-            } else {
-                scan_file_ranges(
-                    context,
-                    metrics,
-                    index,
-                    "unordered_scan_files",
-                    range_builder_list,
-                )
-                .boxed()
-            };
-            Ok(stream)
-        }
-
-        let stream = stream! {
+    ) -> impl Stream<Item = Result<Batch>> {
+        stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
-                let stream = build_scan_stream(
-                    stream_ctx.clone(),
-                    *index,
-                    range_meta.time_range,
-                    part_metrics.clone(),
-                    range_builder_list.clone(),
-                )?;
-                for await batch in stream {
-                    yield batch;
+                if stream_ctx.is_mem_range_index(*index) {
+                    let stream = scan_mem_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        range_meta.time_range,
+                    );
+                    for await batch in stream {
+                        yield batch;
+                    }
+                } else {
+                    let stream = scan_file_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        "unordered_scan_files",
+                        range_builder_list.clone(),
+                    );
+                    for await batch in stream {
+                        yield batch;
+                    }
                 }
             }
-        };
-        Ok(stream)
+        }
     }
 
     /// Scan [`Batch`] in all partitions one by one.
@@ -227,7 +215,7 @@ impl UnorderedScan {
                     part_range.identifier,
                     part_metrics.clone(),
                     range_builder_list.clone(),
-                )?;
+                );
                 for await batch in stream {
                     let batch = batch?;
                     metrics.scan_cost += fetch_start.elapsed();
