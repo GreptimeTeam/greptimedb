@@ -140,8 +140,11 @@ pub struct RegionSupervisorTicker {
     /// The interval of tick.
     tick_interval: Duration,
 
-    /// The interval of inspect and register regions.
-    inspect_interval: Duration,
+    /// The delay before initializing all region failure detectors.
+    initialization_delay: Duration,
+
+    /// The interval of initializing all region failure detectors attempts.
+    initialization_interval: Duration,
 
     /// Sends [Event]s.
     sender: Sender<Event>,
@@ -167,17 +170,19 @@ impl LeadershipChangeListener for RegionSupervisorTicker {
 impl RegionSupervisorTicker {
     pub(crate) fn new(
         tick_interval: Duration,
-        inspect_interval: Duration,
+        initialization_delay: Duration,
+        initialization_interval: Duration,
         sender: Sender<Event>,
     ) -> Self {
         info!(
-            "RegionSupervisorTicker is created, tick_interval: {:?}, inspect_interval: {:?}",
-            tick_interval, inspect_interval
+            "RegionSupervisorTicker is created, tick_interval: {:?}, initialization_delay: {:?}, initialization_interval: {:?}",
+            tick_interval, initialization_delay, initialization_interval
         );
         Self {
             tick_handle: Mutex::new(None),
             tick_interval,
-            inspect_interval,
+            initialization_delay,
+            initialization_interval,
             sender,
         }
     }
@@ -188,20 +193,20 @@ impl RegionSupervisorTicker {
         if handle.is_none() {
             let sender = self.sender.clone();
             let tick_interval = self.tick_interval;
-            let inspect_interval = self.inspect_interval;
+            let initialization_delay = self.initialization_delay;
 
-            let mut inspect_interval = interval_at(
-                tokio::time::Instant::now() + inspect_interval,
-                inspect_interval,
+            let mut initialization_interval = interval_at(
+                tokio::time::Instant::now() + initialization_delay,
+                self.initialization_interval,
             );
-            inspect_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            initialization_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             common_runtime::spawn_global(async move {
                 loop {
                     select! {
-                        _ = inspect_interval.tick() => {
+                        _ = initialization_interval.tick() => {
                             let (tx, rx) = oneshot::channel();
                             if sender.send(Event::InitializeAllRegions(tx)).await.is_err() {
-                                info!("EventReceiver is dropped, inspect and register regions loop is stopped");
+                                info!("EventReceiver is dropped, region failure detectors initialization loop is stopped");
                                 break;
                             }
                             if rx.await.is_ok() {
@@ -257,8 +262,8 @@ pub type RegionSupervisorRef = Arc<RegionSupervisor>;
 
 /// The default tick interval.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
-/// The default inspect interval.
-pub const DEFAULT_INSPECT_INTERVAL: Duration = Duration::from_secs(60);
+/// The default initialization interval.
+pub const DEFAULT_INITIALIZATION_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Selector for region supervisor.
 pub enum RegionSupervisorSelector {
@@ -900,7 +905,8 @@ pub(crate) mod tests {
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(10),
-            inspect_interval: Duration::from_millis(100),
+            initialization_delay: Duration::from_millis(100),
+            initialization_interval: Duration::from_millis(100),
             sender: tx,
         };
         // It's ok if we start the ticker again.
@@ -925,7 +931,8 @@ pub(crate) mod tests {
         let ticker = RegionSupervisorTicker {
             tick_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(1000),
-            inspect_interval: Duration::from_millis(50),
+            initialization_delay: Duration::from_millis(50),
+            initialization_interval: Duration::from_millis(50),
             sender: tx,
         };
         ticker.start();
