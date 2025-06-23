@@ -360,8 +360,8 @@ impl Drop for PartitionMetricsInner {
         self.in_progress_scan.dec();
 
         debug!(
-            "{} finished, region_id: {}, partition: {}, metrics: {:?}",
-            self.scanner_type, self.region_id, self.partition, metrics
+            "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+            self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
         );
     }
 }
