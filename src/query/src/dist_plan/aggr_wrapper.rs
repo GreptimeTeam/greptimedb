@@ -26,20 +26,22 @@ use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
 use datatypes::arrow::datatypes::{DataType, Field};
 
-/// Wrappr to make an aggregate function out of a state function.
-#[derive(Debug)]
-pub struct AggregateStateFunctionWrapper {
-    inner: AggregateUDF,
-    name: String,
-    /// The index of the state in the output of the state function.
-    state_index: usize,
-    /// The ordering fields of the aggregate function.
-    pub ordering_fields: Vec<Field>,
-
-    /// Whether the aggregate function is distinct.
-    pub is_distinct: bool,
+/// A wrapper to make an aggregate function out of the state and merge functions of the original aggregate function.
+/// It contains the original aggregate function, the state functions, and the merge function.
+///
+/// Notice state functions may have multiple output columns, and the merge function is used to merge the states of the state functions.
+pub struct StateMergeWrapper {
+    /// The original aggregate function.
+    original: AggregateUDF,
+    /// The state functions of the aggregate function.
+    /// Each state function corresponds to a state in the state field of the original aggregate function.
+    state_functions: Vec<StateWrapper>,
+    /// The merge function of the aggregate function.
+    /// It is used to merge the states of the state functions.
+    merge_function: MergeWrapper,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct WrapperArgs<'a> {
     /// The name of the aggregate function.
     pub name: &'a str,
@@ -52,17 +54,71 @@ pub struct WrapperArgs<'a> {
 
     /// Whether the aggregate function is distinct.
     pub is_distinct: bool,
-    /// The index of the state in the output of the state function.
-    state_index: usize,
 }
 
-impl AggregateStateFunctionWrapper {
-    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> Self {
-        let name = format!("__{}_state_udaf_{}", args.name, args.state_index);
+impl<'a> From<WrapperArgs<'a>> for StateFieldsArgs<'a> {
+    fn from(args: WrapperArgs<'a>) -> Self {
+        Self {
+            name: args.name,
+            input_types: args.input_types,
+            return_type: args.return_type,
+            ordering_fields: args.ordering_fields,
+            is_distinct: args.is_distinct,
+        }
+    }
+}
+
+impl StateMergeWrapper {
+    pub fn new<'a>(
+        original: AggregateUDF,
+        args: WrapperArgs<'a>,
+    ) -> datafusion_common::Result<Self> {
+        let state_functions = (0..original.state_fields(args.into())?.len())
+            .map(|i| StateWrapper::new(original.clone(), args, i))
+            .collect::<Vec<_>>();
+        let merge_function = MergeWrapper::new(original.clone(), args)?;
+        Ok(Self {
+            original,
+            state_functions,
+            merge_function,
+        })
+    }
+
+    pub fn original(&self) -> &AggregateUDF {
+        &self.original
+    }
+
+    pub fn state_functions(&self) -> &[StateWrapper] {
+        &self.state_functions
+    }
+
+    pub fn merge_function(&self) -> &MergeWrapper {
+        &self.merge_function
+    }
+}
+
+/// Wrappr to make an aggregate function out of a state function.
+#[derive(Debug)]
+pub struct StateWrapper {
+    inner: AggregateUDF,
+    name: String,
+    /// The index of the state in the output of the state function.
+    state_index: usize,
+    /// The ordering fields of the aggregate function.
+    pub ordering_fields: Vec<Field>,
+
+    /// Whether the aggregate function is distinct.
+    pub is_distinct: bool,
+}
+
+impl StateWrapper {
+    /// `state_index`: The index of the state in the output of the state function.
+    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>, state_index: usize) -> Self {
+        let name = format!("__{}_state_col_{}_udaf", args.name, state_index);
         Self {
             inner,
             name,
-            state_index: args.state_index,
+            state_index,
             ordering_fields: args.ordering_fields.to_vec(),
             is_distinct: args.is_distinct,
         }
@@ -73,7 +129,7 @@ impl AggregateStateFunctionWrapper {
     }
 }
 
-impl AggregateUDFImpl for AggregateStateFunctionWrapper {
+impl AggregateUDFImpl for StateWrapper {
     fn accumulator(
         &self,
         acc_args: datafusion_expr::function::AccumulatorArgs,
@@ -191,13 +247,7 @@ pub struct MergeWrapper {
 impl MergeWrapper {
     pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
         let name = format!("__{}_merge_udaf", inner.name());
-        let state_fields_args = StateFieldsArgs {
-            name: inner.name(),
-            input_types: args.input_types,
-            return_type: args.return_type,
-            ordering_fields: args.ordering_fields,
-            is_distinct: args.is_distinct,
-        };
+        let state_fields_args = args.into();
         let state_fields = inner.state_fields(state_fields_args)?;
         let tys = state_fields
             .iter()
@@ -285,4 +335,9 @@ impl Accumulator for MergeAccum {
     fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
         self.inner.state()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 }
