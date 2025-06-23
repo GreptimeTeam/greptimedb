@@ -108,11 +108,15 @@ pub type MockRequestHandler =
 pub type MockSetReadonlyGracefullyHandler =
     Box<dyn Fn(RegionId) -> Result<SetRegionRoleStateResponse, Error> + Send + Sync>;
 
+pub type MockGetMetadataHandler =
+    Box<dyn Fn(RegionId) -> Result<RegionMetadataRef, Error> + Send + Sync>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
     pub(crate) handle_request_delay: Option<Duration>,
     pub(crate) handle_request_mock_fn: Option<MockRequestHandler>,
     pub(crate) handle_set_readonly_gracefully_mock_fn: Option<MockSetReadonlyGracefullyHandler>,
+    pub(crate) handle_get_metadata_mock_fn: Option<MockGetMetadataHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
     engine: String,
 }
@@ -127,6 +131,7 @@ impl MockRegionEngine {
                 sender: tx,
                 handle_request_mock_fn: None,
                 handle_set_readonly_gracefully_mock_fn: None,
+                handle_get_metadata_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -146,6 +151,27 @@ impl MockRegionEngine {
                 sender: tx,
                 handle_request_mock_fn: Some(mock_fn),
                 handle_set_readonly_gracefully_mock_fn: None,
+                handle_get_metadata_mock_fn: None,
+                mock_role: None,
+                engine: engine.to_string(),
+            }),
+            rx,
+        )
+    }
+
+    pub fn with_metadata_mock_fn(
+        engine: &str,
+        mock_fn: MockGetMetadataHandler,
+    ) -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+        (
+            Arc::new(Self {
+                handle_request_delay: None,
+                sender: tx,
+                handle_request_mock_fn: None,
+                handle_set_readonly_gracefully_mock_fn: None,
+                handle_get_metadata_mock_fn: Some(mock_fn),
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -166,6 +192,7 @@ impl MockRegionEngine {
             sender: tx,
             handle_request_mock_fn: None,
             handle_set_readonly_gracefully_mock_fn: None,
+            handle_get_metadata_mock_fn: None,
             mock_role: None,
             engine: engine.to_string(),
         };
@@ -208,7 +235,11 @@ impl RegionEngine for MockRegionEngine {
         unimplemented!()
     }
 
-    async fn get_metadata(&self, _region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
+        if let Some(mock_fn) = &self.handle_get_metadata_mock_fn {
+            return mock_fn(region_id).map_err(BoxedError::new);
+        };
+
         unimplemented!()
     }
 
