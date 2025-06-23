@@ -173,11 +173,7 @@ impl PromValidationMode {
             PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
                 Ok(s) => s,
                 Err(e) => {
-                    debug!(
-                        "Invalid UTF-8 string value: {:?}, error: {:?}",
-                        &bytes[..],
-                        e
-                    );
+                    debug!("Invalid UTF-8 string value: {:?}, error: {:?}", bytes, e);
                     return Err(DecodeError::new("invalid utf-8"));
                 }
             },
