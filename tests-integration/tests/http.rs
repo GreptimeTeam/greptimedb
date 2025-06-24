@@ -462,7 +462,6 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = &res.text().await;
-    // Must be escaped correctly: 66.6,0,"host, ""name"
     assert_eq!(body, "cpu,ts,host\r\n66.6,0,\"host, \"\"name\"\r\n");
 
     // csv with names and types
@@ -472,7 +471,6 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = &res.text().await;
-    // Must be escaped correctly: 66.6,0,"host, ""name"
     assert_eq!(
         body,
         "cpu,ts,host\r\nFloat64,TimestampMillisecond,String\r\n66.6,0,\"host, \"\"name\"\r\n"
