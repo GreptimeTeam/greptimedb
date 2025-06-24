@@ -31,6 +31,7 @@ use common_telemetry::{error, warn};
 use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
+use loki_proto::logproto::LabelPairAdapter;
 use loki_proto::prost_types::Timestamp;
 use pipeline::SchemaInfo;
 use prost::Message;
@@ -165,23 +166,34 @@ pub async fn loki_ingest(
     Ok(response)
 }
 
-pub struct LokiRow {
+pub struct LokiMiddleItem<T> {
+    pub ts: i64,
+    pub line: String,
+    pub structured_metadata: Option<T>,
+    pub labels: Option<BTreeMap<String, String>>,
+}
+
+pub struct LokiRawItem {
     pub ts: i64,
     pub line: String,
     pub structured_metadata: Vec<u8>,
     pub labels: Option<BTreeMap<String, String>>,
 }
 
+pub struct LokiPipeline {
+    pub map: pipeline::Value,
+}
+
 fn extract_by_content(
     content_type: ContentType,
     bytes: Bytes,
-) -> Result<Box<dyn Iterator<Item = LokiRow>>> {
+) -> Result<Box<dyn Iterator<Item = LokiRawItem>>> {
     match content_type {
         x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
-            LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter()),
+            LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
         )),
         x if x == *PB_CONTENT_TYPE => Ok(Box::new(
-            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter()),
+            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
         )),
         _ => UnsupportedContentTypeSnafu { content_type }.fail(),
     }
@@ -268,7 +280,7 @@ struct JsonStreamItem {
 }
 
 impl Iterator for JsonStreamItem {
-    type Item = LokiRow;
+    type Item = LokiMiddleItem<serde_json::Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let line = self.lines.pop_front()?;
@@ -305,8 +317,27 @@ impl Iterator for JsonStreamItem {
             return self.next();
         };
 
-        let structured_metadata = line
-            .pop_front()
+        let structured_metadata = line.pop_front();
+
+        Some(LokiMiddleItem {
+            ts,
+            line: line_text,
+            structured_metadata,
+            labels: self.labels.clone(),
+        })
+    }
+}
+
+impl From<LokiMiddleItem<serde_json::Value>> for LokiRawItem {
+    fn from(val: LokiMiddleItem<serde_json::Value>) -> Self {
+        let LokiMiddleItem {
+            ts,
+            line,
+            structured_metadata,
+            labels,
+        } = val;
+
+        let structured_metadata = structured_metadata
             .and_then(|m| match m {
                 serde_json::Value::Object(m) => Some(m),
                 _ => None,
@@ -322,12 +353,12 @@ impl Iterator for JsonStreamItem {
             .unwrap_or_default();
         let structured_metadata = Value::Object(structured_metadata).to_vec();
 
-        Some(LokiRow {
+        LokiRawItem {
             ts,
-            line: line_text,
+            line,
             structured_metadata,
-            labels: self.labels.clone(),
-        })
+            labels,
+        }
     }
 }
 
@@ -372,7 +403,7 @@ pub struct PbStreamItem {
 }
 
 impl Iterator for PbStreamItem {
-    type Item = LokiRow;
+    type Item = LokiMiddleItem<Vec<LabelPairAdapter>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.entries.pop_front()?;
@@ -384,19 +415,39 @@ impl Iterator for PbStreamItem {
         };
         let line = entry.line;
 
-        let structured_metadata = entry
-            .structured_metadata
+        let structured_metadata = entry.structured_metadata;
+
+        Some(LokiMiddleItem {
+            ts: prost_ts_to_nano(&ts),
+            line,
+            structured_metadata: Some(structured_metadata),
+            labels: self.labels.clone(),
+        })
+    }
+}
+
+impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiRawItem {
+    fn from(val: LokiMiddleItem<Vec<LabelPairAdapter>>) -> Self {
+        let LokiMiddleItem {
+            ts,
+            line,
+            structured_metadata,
+            labels,
+        } = val;
+
+        let structured_metadata = structured_metadata
+            .unwrap_or_default()
             .into_iter()
             .map(|d| (d.name, Value::String(d.value.into())))
             .collect::<BTreeMap<String, Value>>();
         let structured_metadata = Value::Object(structured_metadata).to_vec();
 
-        Some(LokiRow {
-            ts: prost_ts_to_nano(&ts),
+        LokiRawItem {
+            ts,
             line,
             structured_metadata,
-            labels: self.labels.clone(),
-        })
+            labels,
+        }
     }
 }
 
