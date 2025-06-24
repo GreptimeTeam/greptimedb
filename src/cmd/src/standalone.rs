@@ -261,14 +261,33 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+
+    // The components of standalone, which make it easier to expand based
+    // on the components.
+    #[cfg(feature = "enterprise")]
+    components: Components,
+
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+#[cfg(feature = "enterprise")]
+pub struct Components {
+    pub plugins: Plugins,
+    pub kv_backend: KvBackendRef,
+    pub frontend_client: Arc<FrontendClient>,
+    pub catalog_manager: catalog::CatalogManagerRef,
 }
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn components(&self) -> &Components {
+        &self.components
     }
 }
 
@@ -550,13 +569,14 @@ impl StartCommand {
         // actually make a connection
         let (frontend_client, frontend_instance_handler) =
             FrontendClient::from_empty_grpc_handler();
+        let frontend_client = Arc::new(frontend_client);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
-            Arc::new(frontend_client.clone()),
+            frontend_client.clone(),
         );
         let flownode = flow_builder
             .build()
@@ -658,7 +678,7 @@ impl StartCommand {
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
 
-        let servers = Services::new(opts, fe_instance.clone(), plugins)
+        let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
 
@@ -669,12 +689,22 @@ impl StartCommand {
             export_metrics_task,
         };
 
+        #[cfg(feature = "enterprise")]
+        let components = Components {
+            plugins,
+            kv_backend,
+            frontend_client,
+            catalog_manager,
+        };
+
         Ok(Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_options_allocator,
+            #[cfg(feature = "enterprise")]
+            components,
             _guard: guard,
         })
     }
