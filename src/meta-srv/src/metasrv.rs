@@ -112,6 +112,14 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// Delay before initializing region failure detectors.
+    ///
+    /// This delay helps prevent premature initialization of region failure detectors in cases where
+    /// cluster maintenance mode is enabled right after metasrv starts, especially when the cluster
+    /// is not deployed via the recommended GreptimeDB Operator. Without this delay, early detector registration
+    /// may trigger unnecessary region failovers during datanode startup.
+    #[serde(with = "humantime_serde")]
+    pub region_failure_detector_initialization_delay: Duration,
     /// Whether to allow region failover on local WAL.
     ///
     /// If it's true, the region failover will be allowed even if the local WAL is used.
@@ -221,6 +229,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),
             allow_region_failover_on_local_wal: false,
             grpc: GrpcOptions {
                 bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),

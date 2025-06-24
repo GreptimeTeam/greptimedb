@@ -65,7 +65,7 @@ use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
-    RegionSupervisorTicker, DEFAULT_TICK_INTERVAL,
+    RegionSupervisorTicker, DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -303,6 +303,8 @@ impl MetasrvBuilder {
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
                     DEFAULT_TICK_INTERVAL,
+                    options.region_failure_detector_initialization_delay,
+                    DEFAULT_INITIALIZATION_RETRY_PERIOD,
                     tx.clone(),
                 ))),
             )
@@ -345,6 +347,7 @@ impl MetasrvBuilder {
                 region_migration_manager.clone(),
                 runtime_switch_manager.clone(),
                 peer_lookup_service.clone(),
+                leader_cached_kv_backend.clone(),
             )
             .with_state(state.clone());
 

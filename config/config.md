@@ -324,6 +324,7 @@
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
 | `use_memory_store` | Bool | `false` | Store data in memory. |
 | `enable_region_failover` | Bool | `false` | Whether to enable region failover.<br/>This feature is only available on GreptimeDB running on cluster mode and<br/>- Using Remote WAL<br/>- Using shared storage (e.g., s3). |
+| `region_failure_detector_initialization_delay` | String | `10m` | Delay before initializing region failure detectors.<br/>This delay helps prevent premature initialization of region failure detectors in cases where<br/>cluster maintenance mode is enabled right after metasrv starts, especially when the cluster<br/>is not deployed via the recommended GreptimeDB Operator. Without this delay, early detector registration<br/>may trigger unnecessary region failovers during datanode startup. |
 | `allow_region_failover_on_local_wal` | Bool | `false` | Whether to allow region failover on local WAL.<br/>**This option is not recommended to be set to true, because it may lead to data loss during failover.** |
 | `node_max_idle_time` | String | `24hours` | Max allowed idle time before removing node info from metasrv memory. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |

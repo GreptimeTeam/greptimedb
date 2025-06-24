@@ -48,6 +48,11 @@ impl TableRouteKey {
     pub fn new(table_id: TableId) -> Self {
         Self { table_id }
     }
+
+    /// Returns the range prefix of the table route key.
+    pub fn range_prefix() -> Vec<u8> {
+        format!("{}/", TABLE_ROUTE_PREFIX).into_bytes()
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
