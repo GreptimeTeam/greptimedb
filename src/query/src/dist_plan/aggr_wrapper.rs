@@ -100,7 +100,7 @@ impl StateMergeWrapper {
     }
 }
 
-/// Wrappr to make an aggregate function out of a state function.
+/// Wrapper to make an aggregate function out of a state function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateWrapper {
     inner: AggregateUDF,
