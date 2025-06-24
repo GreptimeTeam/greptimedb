@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ahash::{HashMap, HashMapExt};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -33,7 +32,7 @@ use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::prost_types::Timestamp;
-use pipeline::unwrap_or_warn_continue;
+use pipeline::{unwrap_or_warn_continue, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -107,13 +106,15 @@ pub async fn loki_ingest(
     let exec_timer = Instant::now();
 
     // init schemas
-    let mut schemas = LOKI_INIT_SCHEMAS.clone();
+    let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
 
     let mut rows = match content_type {
-        x if x == *JSON_CONTENT_TYPE => handle_json_req(bytes, &mut schemas).await,
-        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, &mut schemas).await,
+        x if x == *JSON_CONTENT_TYPE => handle_json_req(bytes, &mut schema_info).await,
+        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, &mut schema_info).await,
         _ => UnsupportedContentTypeSnafu { content_type }.fail(),
     }?;
+
+    let schemas = schema_info.schema;
 
     // fill Null for missing values
     for row in rows.iter_mut() {
@@ -160,12 +161,8 @@ pub async fn loki_ingest(
 
 async fn handle_json_req(
     bytes: Bytes,
-    schemas: &mut Vec<ColumnSchema>,
+    schema_info: &mut SchemaInfo,
 ) -> Result<Vec<Vec<GreptimeValue>>> {
-    let mut column_indexer: HashMap<String, u16> = HashMap::new();
-    column_indexer.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-    column_indexer.insert(LOKI_LINE_COLUMN.to_string(), 1);
-
     let payload: serde_json::Value =
         serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
 
@@ -250,9 +247,9 @@ async fn handle_json_req(
             };
             let structured_metadata = Value::Object(structured_metadata);
 
-            let mut row = init_row(schemas.len(), ts, line_text, structured_metadata);
+            let mut row = init_row(schema_info.schema.len(), ts, line_text, structured_metadata);
 
-            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
+            process_labels(schema_info, &mut row, labels.as_ref());
 
             rows.push(row);
         }
@@ -263,15 +260,11 @@ async fn handle_json_req(
 
 async fn handle_pb_req(
     bytes: Bytes,
-    schemas: &mut Vec<ColumnSchema>,
+    schema_info: &mut SchemaInfo,
 ) -> Result<Vec<Vec<GreptimeValue>>> {
     let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
     let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
         .context(DecodeOtlpRequestSnafu)?;
-
-    let mut column_indexer: HashMap<String, u16> = HashMap::new();
-    column_indexer.insert(GREPTIME_TIMESTAMP.to_string(), 0);
-    column_indexer.insert(LOKI_LINE_COLUMN.to_string(), 1);
 
     let cnt = req.streams.iter().map(|s| s.entries.len()).sum::<usize>();
     let mut rows = Vec::with_capacity(cnt);
@@ -300,13 +293,13 @@ async fn handle_pb_req(
             let structured_metadata = Value::Object(structured_metadata);
 
             let mut row = init_row(
-                schemas.len(),
+                schema_info.schema.len(),
                 prost_ts_to_nano(&ts),
                 line,
                 structured_metadata,
             );
 
-            process_labels(&mut column_indexer, schemas, &mut row, labels.as_ref());
+            process_labels(schema_info, &mut row, labels.as_ref());
 
             rows.push(row);
         }
@@ -420,8 +413,7 @@ fn init_row(
 }
 
 fn process_labels(
-    column_indexer: &mut HashMap<String, u16>,
-    schemas: &mut Vec<ColumnSchema>,
+    schema_info: &mut SchemaInfo,
     row: &mut Vec<GreptimeValue>,
     labels: Option<&BTreeMap<String, String>>,
 ) {
@@ -429,12 +421,15 @@ fn process_labels(
         return;
     };
 
+    let column_indexer = &mut schema_info.index;
+    let schemas = &mut schema_info.schema;
+
     // insert labels
     for (k, v) in labels {
         if let Some(index) = column_indexer.get(k) {
             // exist in schema
             // insert value using index
-            row[*index as usize] = GreptimeValue {
+            row[*index] = GreptimeValue {
                 value_data: Some(ValueData::StringValue(v.clone())),
             };
         } else {
@@ -447,7 +442,7 @@ fn process_labels(
                 datatype_extension: None,
                 options: None,
             });
-            column_indexer.insert(k.clone(), (schemas.len() - 1) as u16);
+            column_indexer.insert(k.clone(), schemas.len() - 1);
 
             row.push(GreptimeValue {
                 value_data: Some(ValueData::StringValue(v.clone())),
