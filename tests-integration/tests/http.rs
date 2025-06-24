@@ -34,7 +34,9 @@ use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
-use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
+use servers::http::header::constants::{
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+};
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
@@ -116,7 +118,9 @@ macro_rules! http_tests {
                 test_otlp_traces_v1,
                 test_otlp_logs,
                 test_loki_pb_logs,
+                test_loki_pb_logs_with_pipeline,
                 test_loki_json_logs,
+                test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
                 test_log_query,
@@ -3955,6 +3959,140 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_loki_pb_logs_with_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_pb_logs_with_pipeline").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - epoch:
+      field: loki_timestamp
+      resolution: ms
+    "#;
+
+    let res = client
+        .post("/v1/pipelines/loki_pipe")
+        .header("content-type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // init loki request
+    let req: PushRequest = PushRequest {
+        streams: vec![StreamAdapter {
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
+            entries: vec![
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                    structured_metadata: vec![
+                        LabelPairAdapter {
+                            name: "key1".to_string(),
+                            value: "value1".to_string(),
+                        },
+                        LabelPairAdapter {
+                            name: "key2".to_string(),
+                            value: "value2".to_string(),
+                        },
+                    ],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:51").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![LabelPairAdapter {
+                        name: "key3".to_string(),
+                        value: "value3".to_string(),
+                    }],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:52").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
+                },
+            ],
+            hash: rand::random(),
+        }],
+    };
+    let encode = req.encode_to_vec();
+    let body = prom_store::snappy_compress(&encode).unwrap();
+
+    // write to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("snappy"),
+            ),
+            (
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("identity"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_PIPELINE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_pipe"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    // CREATE TABLE IF NOT EXISTS "loki_table_name" (
+    //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "key1" STRING NULL,
+    //     "key2" STRING NULL,
+    //     "loki_line" STRING NULL,
+    //     "service" STRING NULL,
+    //     "source" STRING NULL,
+    //     "wadaxi" STRING NULL,
+    //     "key3" STRING NULL,
+    //     TIME INDEX ("loki_timestamp")
+    //     )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //   )
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"key1\\\" STRING NULL,\\n  \\\"key2\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  \\\"key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_pb_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = "[[1730976830000,\"value1\",\"value2\",\"this is a log message\",\"test\",\"integration\",\"do anything\",null],[1730976831000,null,null,\"this is a log message 2\",\"test\",\"integration\",\"do anything\",\"value3\"],[1730976832000,null,null,\"this is a log message 2\",\"test\",\"integration\",\"do anything\",null]]";
+    validate_data(
+        "loki_pb_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_loki_json_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -4014,6 +4152,109 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
 
     // test content
     let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
+    validate_data(
+        "loki_json_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_loki_json_logs_with_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_json_logs_with_pipeline").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - epoch:
+      field: loki_timestamp
+      resolution: ms
+    "#;
+
+    let res = client
+        .post("/v1/pipelines/loki_pipe")
+        .header("content-type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let body = r#"
+{
+  "streams": [
+    {
+      "stream": {
+        "source": "test",
+        "sender": "integration"
+      },
+      "values": [
+          [ "1735901380059465984", "this is line one", {"key1":"value1","key2":"value2"}],
+          [ "1735901398478897920", "this is line two", {"key3":"value3"}],
+          [ "1735901398478897921", "this is line two updated"]
+      ]
+    }
+  ]
+}
+    "#;
+
+    let body = body.as_bytes().to_vec();
+
+    // write plain to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_PIPELINE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_pipe"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // CREATE TABLE IF NOT EXISTS "loki_table_name" (
+    //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "key1" STRING NULL,
+    //     "key2" STRING NULL,
+    //     "loki_line" STRING NULL,
+    //     "sender" STRING NULL,
+    //     "source" STRING NULL,
+    //     "key3" STRING NULL,
+    //     TIME INDEX ("loki_timestamp")
+    //     )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //   )
+    // test schema
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"key1\\\" STRING NULL,\\n  \\\"key2\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_json_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = "[[1735901380059,\"value1\",\"value2\",\"this is line one\",\"integration\",\"test\",null],[1735901398478,null,null,\"this is line two updated\",\"integration\",\"test\",null],[1735901398478,null,null,\"this is line two\",\"integration\",\"test\",\"value3\"]]";
     validate_data(
         "loki_json_content",
         &client,

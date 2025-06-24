@@ -411,26 +411,23 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
             labels,
         } = value;
 
-        let mut map = if let Some(serde_json::Value::Object(m)) = structured_metadata {
-            let mut map = BTreeMap::new();
-            for (k, v) in m {
-                map.insert(k, pipeline::Value::try_from(v).unwrap());
-            }
-            map
-        } else {
-            Default::default()
-        };
-        if let Some(v) = labels {
-            v.into_iter().for_each(|(k, v)| {
-                map.insert(k, pipeline::Value::String(v));
-            });
-        }
-
+        let mut map = BTreeMap::new();
         map.insert(
             "loki_timestamp".to_string(),
             pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
         );
         map.insert("loki_line".to_string(), pipeline::Value::String(line));
+
+        if let Some(serde_json::Value::Object(m)) = structured_metadata {
+            for (k, v) in m {
+                map.insert(k, pipeline::Value::try_from(v).unwrap());
+            }
+        }
+        if let Some(v) = labels {
+            v.into_iter().for_each(|(k, v)| {
+                map.insert(k, pipeline::Value::String(v));
+            });
+        }
 
         LokiPipeline {
             map: pipeline::Value::Map(pipeline::Map::from(map)),
@@ -536,23 +533,25 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
             labels,
         } = value;
 
-        let mut map = structured_metadata
+        let mut map = BTreeMap::new();
+        map.insert(
+            "loki_timestamp".to_string(),
+            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+        );
+        map.insert("loki_line".to_string(), pipeline::Value::String(line));
+
+        structured_metadata
             .unwrap_or_default()
             .into_iter()
-            .map(|d| (d.name, pipeline::Value::String(d.value)))
-            .collect::<BTreeMap<String, pipeline::Value>>();
+            .for_each(|d| {
+                map.insert(d.name, pipeline::Value::String(d.value));
+            });
 
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
                 map.insert(k, pipeline::Value::String(v));
             });
         }
-
-        map.insert(
-            "loki_timestamp".to_string(),
-            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
-        );
-        map.insert("loki_line".to_string(), pipeline::Value::String(line));
 
         LokiPipeline {
             map: pipeline::Value::Map(pipeline::Map::from(map)),
