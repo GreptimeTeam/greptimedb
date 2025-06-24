@@ -59,6 +59,9 @@ const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
 const LOKI_STRUCTURED_METADATA_COLUMN: &str = "structured_metadata";
 
+const LOKI_TIMESTAMP_COLUMN_NAME: &str = "loki_timestamp";
+const LOKI_LINE_COLUMN_NAME: &str = "loki_line";
+
 const STREAMS_KEY: &str = "streams";
 const LABEL_KEY: &str = "stream";
 const LINES_KEY: &str = "values";
@@ -413,14 +416,24 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            "loki_timestamp".to_string(),
+            LOKI_TIMESTAMP_COLUMN_NAME.to_string(),
             pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
         );
-        map.insert("loki_line".to_string(), pipeline::Value::String(line));
+        map.insert(
+            LOKI_LINE_COLUMN_NAME.to_string(),
+            pipeline::Value::String(line),
+        );
 
         if let Some(serde_json::Value::Object(m)) = structured_metadata {
             for (k, v) in m {
-                map.insert(k, pipeline::Value::try_from(v).unwrap());
+                match pipeline::Value::try_from(v) {
+                    Ok(v) => {
+                        map.insert(k, v);
+                    }
+                    Err(e) => {
+                        warn!("not a valid value, {:?}", e);
+                    }
+                }
             }
         }
         if let Some(v) = labels {
@@ -535,10 +548,13 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            "loki_timestamp".to_string(),
+            LOKI_TIMESTAMP_COLUMN_NAME.to_string(),
             pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
         );
-        map.insert("loki_line".to_string(), pipeline::Value::String(line));
+        map.insert(
+            LOKI_LINE_COLUMN_NAME.to_string(),
+            pipeline::Value::String(line),
+        );
 
         structured_metadata
             .unwrap_or_default()
