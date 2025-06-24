@@ -20,7 +20,6 @@
 pub mod codec;
 pub mod data_source;
 pub mod logstore;
-pub mod manifest;
 pub mod metadata;
 pub mod metric_engine_consts;
 mod metrics;
@@ -29,3 +28,7 @@ pub mod path_utils;
 pub mod region_engine;
 pub mod region_request;
 pub mod storage;
+
+pub type ManifestVersion = u64;
+pub const MIN_VERSION: u64 = 0;
+pub const MAX_VERSION: u64 = u64::MAX;

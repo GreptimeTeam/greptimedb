@@ -20,8 +20,8 @@ use common_telemetry::{debug, info};
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
+use store_api::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 
 use crate::error::{
     self, InstallManifestToSnafu, NoCheckpointSnafu, NoManifestsSnafu, RegionStoppedSnafu, Result,

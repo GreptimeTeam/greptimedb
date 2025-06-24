@@ -28,8 +28,8 @@ use object_store::{util, Entry, ErrorKind, Lister, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
-use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
+use store_api::ManifestVersion;
 use tokio::sync::Semaphore;
 
 use crate::error::{
