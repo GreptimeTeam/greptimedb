@@ -71,7 +71,7 @@ pub struct LoggingOptions {
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
 
-    /// The endpoint of OTLP. Default is "http://localhost:4317".
+    /// The endpoint of OTLP. Default is "http://localhost:4318".
     pub otlp_endpoint: Option<String>,
 
     /// The tracing sample ratio.
