@@ -44,7 +44,6 @@ use_memory_store = false
 enable_region_failover = false
 
 ## Delay before initializing region failure detectors.
-##
 ## This delay helps prevent premature initialization of region failure detectors in cases where
 ## cluster maintenance mode is enabled right after metasrv starts, especially when the cluster
 ## is not deployed via the recommended GreptimeDB Operator. Without this delay, early detector registration
