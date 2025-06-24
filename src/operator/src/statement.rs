@@ -244,6 +244,16 @@ impl StatementExecutor {
                 )
                 .await
             }
+            #[cfg(feature = "enterprise")]
+            Statement::DropTrigger(stmt) => {
+                self.drop_trigger(
+                    query_ctx.current_catalog().to_string(),
+                    format_raw_object_name(stmt.trigger_name()),
+                    stmt.drop_if_exists(),
+                    query_ctx,
+                )
+                .await
+            }
             Statement::CreateView(stmt) => {
                 let _ = self.create_view(stmt, query_ctx).await?;
                 Ok(Output::new_with_affected_rows(0))

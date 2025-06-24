@@ -72,6 +72,9 @@ pub enum Statement {
     DropDatabase(DropDatabase),
     // DROP FLOW
     DropFlow(DropFlow),
+    // DROP Trigger
+    #[cfg(feature = "enterprise")]
+    DropTrigger(crate::statements::drop::trigger::DropTrigger),
     // DROP View
     DropView(DropView),
     // CREATE DATABASE
@@ -158,6 +161,8 @@ impl Display for Statement {
             #[cfg(feature = "enterprise")]
             Statement::CreateTrigger(s) => s.fmt(f),
             Statement::DropFlow(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::DropTrigger(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
             Statement::DropView(s) => s.fmt(f),
