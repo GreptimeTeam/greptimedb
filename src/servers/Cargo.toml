@@ -78,6 +78,7 @@ mime_guess = "2.0"
 notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
+operator.workspace = true
 openmetrics-parser = "0.4"
 simd-json.workspace = true
 socket2 = "0.5"

@@ -11280,6 +11280,7 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "opentelemetry-proto 0.27.0",
+ "operator",
  "otel-arrow-rust",
  "parking_lot 0.12.3",
  "permutation",

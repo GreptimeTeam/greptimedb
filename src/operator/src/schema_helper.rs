@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use api::v1::alter_table_expr::Kind;
 use api::v1::region::region_request::Body;
-use api::v1::region::{ListMetadataRequest, RegionRequest, RegionRequestHeader};
+use api::v1::region::{ListMetadataRequest, RegionRequestHeader};
 use api::v1::{AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, SemanticType};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -611,22 +611,22 @@ impl SchemaHelper {
 }
 
 /// Schema of a logical table.
-struct LogicalSchema {
+pub struct LogicalSchema {
     /// Name of the logical table.
-    name: String,
+    pub name: String,
     /// Schema of columns in the logical table.
-    columns: Vec<ColumnSchema>,
+    pub columns: Vec<ColumnSchema>,
 }
 
 /// Logical table schemas.
-struct LogicalSchemas {
+pub struct LogicalSchemas {
     /// Logical table schemas group by physical table name.
-    schemas: HashMap<String, Vec<LogicalSchema>>,
+    pub schemas: HashMap<String, Vec<LogicalSchema>>,
 }
 
 /// Creates or alters logical tables to match the provided schemas
 /// for prometheus metrics.
-async fn ensure_logical_tables_for_metrics(
+pub async fn ensure_logical_tables_for_metrics(
     helper: &SchemaHelper,
     schemas: &LogicalSchemas,
     query_ctx: &QueryContextRef,
