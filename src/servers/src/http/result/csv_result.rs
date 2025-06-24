@@ -127,7 +127,7 @@ impl IntoResponse for CsvResponse {
             }
             Some(GreptimeQueryOutput::Records(records)) => {
                 let mut wtr = csv::WriterBuilder::new()
-                    .terminator(csv::Terminator::CRLF)
+                    .terminator(csv::Terminator::CRLF) // RFC 4180
                     .from_writer(Vec::new());
 
                 if self.with_names {
@@ -196,5 +196,80 @@ impl IntoResponse for CsvResponse {
             HeaderValue::from(execution_time),
         );
         resp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_query::Output;
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float32Vector, StringVector, UInt32Vector, VectorRef};
+
+    use super::*;
+    #[tokio::test]
+    async fn test_csv_response_with_names_and_types() {
+        let (schema, columns) = create_test_data();
+
+        // Test with_names=true, with_types=true
+        {
+            let body = get_csv_body(&schema, &columns, true, true).await;
+            assert!(body.starts_with("col1,col2,col3\r\nUInt32,String,Float32\r\n"));
+            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+        }
+
+        // Test with_names=true, with_types=false
+        {
+            let body = get_csv_body(&schema, &columns, true, false).await;
+            assert!(body.starts_with("col1,col2,col3\r\n"));
+            assert!(!body.contains("UInt32,String,Float3"));
+            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+        }
+
+        // Test with_names=false, with_types=false
+        {
+            let body = get_csv_body(&schema, &columns, false, false).await;
+            assert!(!body.starts_with("col1,col2,col3"));
+            assert!(!body.contains("UInt32,String,Float3"));
+            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+        }
+    }
+
+    fn create_test_data() -> (Arc<Schema>, Vec<VectorRef>) {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("col3", ConcreteDataType::float32_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2])),
+            Arc::new(StringVector::from(vec![None, Some("hello")])),
+            Arc::new(Float32Vector::from_slice(vec![-1000.14, 1.99])),
+        ];
+
+        (schema, columns)
+    }
+
+    async fn get_csv_body(
+        schema: &Arc<Schema>,
+        columns: &[VectorRef],
+        with_names: bool,
+        with_types: bool,
+    ) -> String {
+        let recordbatch = RecordBatch::new(schema.clone(), columns.to_vec()).unwrap();
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
+        let output = Output::new_with_record_batches(recordbatches);
+        let outputs = vec![Ok(output)];
+
+        let resp = CsvResponse::from_output(outputs, with_names, with_types)
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 }
