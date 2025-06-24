@@ -19,7 +19,7 @@ use std::time::Instant;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value as GreptimeValue,
+    RowInsertRequest, Rows, SemanticType, Value as GreptimeValue,
 };
 use axum::extract::State;
 use axum::Extension;
@@ -32,8 +32,9 @@ use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::logproto::LabelPairAdapter;
-use loki_proto::prost_types::Timestamp;
-use pipeline::SchemaInfo;
+use loki_proto::prost_types::Timestamp as LokiTimestamp;
+use pipeline::util::to_pipeline_version;
+use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -41,16 +42,17 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
-    Result, UnsupportedContentTypeSnafu,
+    PipelineSnafu, Result, UnsupportedContentTypeSnafu,
 };
-use crate::http::event::{LogState, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
-use crate::http::extractor::LogTableName;
+use crate::http::event::{LogState, PipelineIngestRequest, JSON_CONTENT_TYPE, PB_CONTENT_TYPE};
+use crate::http::extractor::{LogTableName, PipelineInfo};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::HttpResponse;
 use crate::metrics::{
     METRIC_FAILURE_VALUE, METRIC_LOKI_LOGS_INGESTION_COUNTER, METRIC_LOKI_LOGS_INGESTION_ELAPSED,
     METRIC_SUCCESS_VALUE,
 };
+use crate::pipeline::run_pipeline;
 use crate::prom_store;
 
 const LOKI_TABLE_NAME: &str = "loki_logs";
@@ -97,6 +99,7 @@ pub async fn loki_ingest(
     Extension(mut ctx): Extension<QueryContext>,
     TypedHeader(content_type): TypedHeader<ContentType>,
     LogTableName(table_name): LogTableName,
+    pipeline_info: PipelineInfo,
     bytes: Bytes,
 ) -> Result<HttpResponse> {
     ctx.set_channel(Channel::Loki);
@@ -106,61 +109,83 @@ pub async fn loki_ingest(
     let db_str = db.as_str();
     let exec_timer = Instant::now();
 
-    // init schemas
-    let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
-
-    let mut rows = Vec::with_capacity(256);
-    for loki_row in extract_by_content(content_type, bytes)? {
-        let mut row = init_row(
-            schema_info.schema.len(),
-            loki_row.ts,
-            loki_row.line,
-            loki_row.structured_metadata,
-        );
-        process_labels(&mut schema_info, &mut row, loki_row.labels);
-        rows.push(row);
-    }
-
-    let schemas = schema_info.schema;
-
-    // fill Null for missing values
-    for row in rows.iter_mut() {
-        row.resize(schemas.len(), GreptimeValue::default());
-    }
-
-    let rows = Rows {
-        rows: rows.into_iter().map(|values| Row { values }).collect(),
-        schema: schemas,
-    };
-    let ins_req = RowInsertRequest {
-        table_name,
-        rows: Some(rows),
-    };
-    let ins_reqs = RowInsertRequests {
-        inserts: vec![ins_req],
-    };
-
     let handler = log_state.log_handler;
-    let output = handler.insert(ins_reqs, ctx).await;
 
-    if let Ok(Output {
-        data: OutputData::AffectedRows(rows),
-        meta: _,
-    }) = &output
-    {
-        METRIC_LOKI_LOGS_INGESTION_COUNTER
-            .with_label_values(&[db_str])
-            .inc_by(*rows as u64);
-        METRIC_LOKI_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db_str, METRIC_SUCCESS_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
+    let c = if let Some(pipeline_name) = pipeline_info.pipeline_name {
+        // go pipeline
+        let version = to_pipeline_version(pipeline_info.pipeline_version.as_deref())
+            .context(PipelineSnafu)?;
+        let def =
+            PipelineDefinition::from_name(&pipeline_name, version, None).context(PipelineSnafu)?;
+        let pipeline_ctx =
+            PipelineContext::new(&def, &pipeline_info.pipeline_params, Channel::Loki);
+
+        let v = extract_pipeline_item(content_type, bytes)?
+            .map(|i| i.map)
+            .collect::<Vec<_>>();
+
+        let req = PipelineIngestRequest {
+            table: table_name,
+            values: v,
+        };
+
+        run_pipeline(&handler, &pipeline_ctx, req, &ctx, true).await?
     } else {
-        METRIC_LOKI_LOGS_INGESTION_ELAPSED
-            .with_label_values(&[db_str, METRIC_FAILURE_VALUE])
-            .observe(exec_timer.elapsed().as_secs_f64());
+        // init schemas
+        let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
+        let mut rows = Vec::with_capacity(256);
+        for loki_row in extract_raw_item(content_type, bytes)? {
+            let mut row = init_row(
+                schema_info.schema.len(),
+                loki_row.ts,
+                loki_row.line,
+                loki_row.structured_metadata,
+            );
+            process_labels(&mut schema_info, &mut row, loki_row.labels);
+            rows.push(row);
+        }
+
+        let schemas = schema_info.schema;
+        // fill Null for missing values
+        for row in rows.iter_mut() {
+            row.resize(schemas.len(), GreptimeValue::default());
+        }
+        let rows = Rows {
+            rows: rows.into_iter().map(|values| Row { values }).collect(),
+            schema: schemas,
+        };
+        let ins_req = RowInsertRequest {
+            table_name,
+            rows: Some(rows),
+        };
+
+        ContextReq::default_opt_with_reqs(vec![ins_req])
+    };
+
+    let mut outputs = Vec::new();
+    for (temp_ctx, req) in c.as_req_iter(ctx) {
+        let output = handler.insert(req, temp_ctx).await;
+
+        if let Ok(Output {
+            data: OutputData::AffectedRows(rows),
+            meta: _,
+        }) = &output
+        {
+            METRIC_LOKI_LOGS_INGESTION_COUNTER
+                .with_label_values(&[db_str])
+                .inc_by(*rows as u64);
+            METRIC_LOKI_LOGS_INGESTION_ELAPSED
+                .with_label_values(&[db_str, METRIC_SUCCESS_VALUE])
+                .observe(exec_timer.elapsed().as_secs_f64());
+        } else {
+            METRIC_LOKI_LOGS_INGESTION_ELAPSED
+                .with_label_values(&[db_str, METRIC_FAILURE_VALUE])
+                .observe(exec_timer.elapsed().as_secs_f64());
+        }
+        outputs.push(output);
     }
 
-    let response = GreptimedbV1Response::from_output(vec![output])
+    let response = GreptimedbV1Response::from_output(outputs)
         .await
         .with_execution_time(exec_timer.elapsed().as_millis() as u64);
     Ok(response)
@@ -184,10 +209,25 @@ pub struct LokiPipeline {
     pub map: pipeline::Value,
 }
 
-fn extract_by_content(
+fn extract_raw_item(
     content_type: ContentType,
     bytes: Bytes,
 ) -> Result<Box<dyn Iterator<Item = LokiRawItem>>> {
+    match content_type {
+        x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
+            LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
+        )),
+        x if x == *PB_CONTENT_TYPE => Ok(Box::new(
+            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
+        )),
+        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
+    }
+}
+
+fn extract_pipeline_item(
+    content_type: ContentType,
+    bytes: Bytes,
+) -> Result<Box<dyn Iterator<Item = LokiPipeline>>> {
     match content_type {
         x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
             LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
@@ -362,6 +402,42 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiRawItem {
     }
 }
 
+impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
+    fn from(value: LokiMiddleItem<serde_json::Value>) -> Self {
+        let LokiMiddleItem {
+            ts,
+            line,
+            structured_metadata,
+            labels,
+        } = value;
+
+        let mut map = if let Some(serde_json::Value::Object(m)) = structured_metadata {
+            let mut map = BTreeMap::new();
+            for (k, v) in m {
+                map.insert(k, pipeline::Value::try_from(v).unwrap());
+            }
+            map
+        } else {
+            Default::default()
+        };
+        if let Some(v) = labels {
+            v.into_iter().for_each(|(k, v)| {
+                map.insert(k, pipeline::Value::String(v));
+            });
+        }
+
+        map.insert(
+            "loki_timestamp".to_string(),
+            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+        );
+        map.insert("loki_line".to_string(), pipeline::Value::String(line));
+
+        LokiPipeline {
+            map: pipeline::Value::Map(pipeline::Map::from(map)),
+        }
+    }
+}
+
 pub struct LokiPbParser {
     pub streams: VecDeque<loki_proto::logproto::StreamAdapter>,
 }
@@ -451,6 +527,39 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiRawItem {
     }
 }
 
+impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
+    fn from(value: LokiMiddleItem<Vec<LabelPairAdapter>>) -> Self {
+        let LokiMiddleItem {
+            ts,
+            line,
+            structured_metadata,
+            labels,
+        } = value;
+
+        let mut map = structured_metadata
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| (d.name, pipeline::Value::String(d.value)))
+            .collect::<BTreeMap<String, pipeline::Value>>();
+
+        if let Some(v) = labels {
+            v.into_iter().for_each(|(k, v)| {
+                map.insert(k, pipeline::Value::String(v));
+            });
+        }
+
+        map.insert(
+            "loki_timestamp".to_string(),
+            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+        );
+        map.insert("loki_line".to_string(), pipeline::Value::String(line));
+
+        LokiPipeline {
+            map: pipeline::Value::Map(pipeline::Map::from(map)),
+        }
+    }
+}
+
 /// since we're hand-parsing the labels, if any error is encountered, we'll just skip the label
 /// note: pub here for bench usage
 /// ref:
@@ -527,7 +636,7 @@ pub fn parse_loki_labels(labels: &str) -> Result<BTreeMap<String, String>> {
 }
 
 #[inline]
-fn prost_ts_to_nano(ts: &Timestamp) -> i64 {
+fn prost_ts_to_nano(ts: &LokiTimestamp) -> i64 {
     ts.seconds * 1_000_000_000 + ts.nanos as i64
 }
 

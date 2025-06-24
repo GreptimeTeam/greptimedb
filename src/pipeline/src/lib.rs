@@ -24,7 +24,7 @@ pub use etl::processor::Processor;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
 pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::GreptimeTransformer;
-pub use etl::value::{Array, Map, Value};
+pub use etl::value::{Array, Map, Timestamp, Value};
 pub use etl::{
     json_array_to_map, json_to_map, parse, simd_json_array_to_map, simd_json_to_map, Content,
     DispatchedTo, Pipeline, PipelineExecOutput, TransformedOutput, TransformerMode,
