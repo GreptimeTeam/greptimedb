@@ -31,7 +31,6 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::{infer_primary_key_encoding_from_hint, PrimaryKeyEncoding};
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{SetRegionRoleStateResponse, SettableRegionRoleState};
 use store_api::region_request::{
@@ -40,6 +39,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
+use store_api::ManifestVersion;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{

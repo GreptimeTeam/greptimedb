@@ -28,12 +28,12 @@ use crossbeam_utils::atomic::AtomicCell;
 use snafu::{ensure, OptionExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     RegionManifestInfo, RegionRole, RegionStatistic, SettableRegionRoleState,
 };
 use store_api::storage::{RegionId, SequenceNumber};
+use store_api::ManifestVersion;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{

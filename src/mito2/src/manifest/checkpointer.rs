@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
-use store_api::manifest::{ManifestVersion, MIN_VERSION};
 use store_api::storage::RegionId;
+use store_api::{ManifestVersion, MIN_VERSION};
 
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
 use crate::manifest::manager::RegionManifestOptions;
