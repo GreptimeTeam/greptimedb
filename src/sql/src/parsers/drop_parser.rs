@@ -18,6 +18,8 @@ use sqlparser::tokenizer::Token;
 
 use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::{ParserContext, FLOW};
+#[cfg(feature = "enterprise")]
+use crate::statements::drop::trigger::DropTrigger;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::statement::Statement;
 
@@ -29,6 +31,8 @@ impl ParserContext<'_> {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_drop_table(),
                 Keyword::VIEW => self.parse_drop_view(),
+                #[cfg(feature = "enterprise")]
+                Keyword::TRIGGER => self.parse_drop_trigger(),
                 Keyword::SCHEMA | Keyword::DATABASE => self.parse_drop_database(),
                 Keyword::NoKeyword => {
                     let uppercase = w.value.to_uppercase();
@@ -41,6 +45,31 @@ impl ParserContext<'_> {
             },
             unexpected => self.unsupported(unexpected.to_string()),
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn parse_drop_trigger(&mut self) -> Result<Statement> {
+        let _ = self.parser.next_token();
+
+        let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
+        let raw_trigger_ident =
+            self.parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a trigger name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        let trigger_ident = Self::canonicalize_object_name(raw_trigger_ident);
+        ensure!(
+            !trigger_ident.0.is_empty(),
+            error::InvalidTriggerNameSnafu {
+                name: trigger_ident.to_string()
+            }
+        );
+
+        Ok(Statement::DropTrigger(DropTrigger::new(
+            trigger_ident,
+            if_exists,
+        )))
     }
 
     fn parse_drop_view(&mut self) -> Result<Statement> {
