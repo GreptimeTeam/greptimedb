@@ -20,13 +20,12 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::util::ChainedRecordBatchStream;
-use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
-use datatypes::compute::concat_batches;
 use datatypes::schema::SchemaRef;
+use futures::StreamExt;
 use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -36,13 +35,14 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Semaphore;
 
 use crate::error::{
-    ComputeArrowSnafu, Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result,
-    ScanMultiTimesSnafu, ScanSeriesSnafu,
+    Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
+    ScanSeriesSnafu,
 };
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics};
 use crate::read::seq_scan::{build_sources, SeqScan};
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 
 /// Timeout to send a batch to a sender.
@@ -89,71 +89,65 @@ impl SeriesScan {
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        if partition >= self.properties.num_partitions() {
-            return Err(BoxedError::new(
-                PartitionOutOfRangeSnafu {
-                    given: partition,
-                    all: self.properties.num_partitions(),
-                }
-                .build(),
-            ));
-        }
+    ) -> Result<SendableRecordBatchStream> {
+        let metrics =
+            new_partition_metrics(&self.stream_ctx, metrics_set, partition, &self.metrics_list);
+
+        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone(), metrics_set)?;
+
+        let input = &self.stream_ctx.input;
+        let record_batch_stream = ConvertBatchStream::new(
+            batch_stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+
+        Ok(Box::pin(RecordBatchStreamWrapper::new(
+            input.mapper.output_schema(),
+            Box::pin(record_batch_stream),
+        )))
+    }
+
+    fn scan_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+        metrics_set: &ExecutionPlanMetricsSet,
+    ) -> Result<ScanBatchStream> {
+        ensure!(
+            partition < self.properties.num_partitions(),
+            PartitionOutOfRangeSnafu {
+                given: partition,
+                all: self.properties.num_partitions(),
+            }
+        );
 
         self.maybe_start_distributor(metrics_set, &self.metrics_list);
 
-        let part_metrics =
-            new_partition_metrics(&self.stream_ctx, metrics_set, partition, &self.metrics_list);
-        let mut receiver = self.take_receiver(partition).map_err(BoxedError::new)?;
-        let stream_ctx = self.stream_ctx.clone();
-
+        let mut receiver = self.take_receiver(partition)?;
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
-            let cache = &stream_ctx.input.cache_strategy;
-            let mut df_record_batches = Vec::new();
             let mut fetch_start = Instant::now();
-            while let Some(result) = receiver.recv().await {
+            while let Some(series) = receiver.recv().await {
+                let series = series?;
+
                 let mut metrics = ScannerMetrics::default();
-                let series = result.map_err(BoxedError::new).context(ExternalSnafu)?;
                 metrics.scan_cost += fetch_start.elapsed();
                 fetch_start = Instant::now();
 
-                let convert_start = Instant::now();
-                df_record_batches.reserve(series.batches.len());
-                for batch in series.batches {
-                    metrics.num_batches += 1;
-                    metrics.num_rows += batch.num_rows();
-
-                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
-                    df_record_batches.push(record_batch.into_df_record_batch());
-                }
-
-                let output_schema = stream_ctx.input.mapper.output_schema();
-                let df_record_batch =
-                    concat_batches(output_schema.arrow_schema(), &df_record_batches)
-                        .context(ComputeArrowSnafu)
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?;
-                df_record_batches.clear();
-                let record_batch =
-                    RecordBatch::try_from_df_record_batch(output_schema, df_record_batch)?;
-                metrics.convert_cost += convert_start.elapsed();
+                metrics.num_batches += series.batches.len();
+                metrics.num_rows += series.batches.iter().map(|x| x.num_rows()).sum::<usize>();
 
                 let yield_start = Instant::now();
-                yield record_batch;
+                yield ScanBatch::Series(series);
                 metrics.yield_cost += yield_start.elapsed();
 
                 part_metrics.merge_metrics(&metrics);
             }
         };
-
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.stream_ctx.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 
     /// Takes the receiver for the partition.
@@ -201,6 +195,26 @@ impl SeriesScan {
         let chained_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(chained_stream))
     }
+
+    /// Scan [`Batch`] in all partitions one by one.
+    pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+
+        let streams = (0..self.properties.partitions.len())
+            .map(|partition| {
+                let metrics = new_partition_metrics(
+                    &self.stream_ctx,
+                    &metrics_set,
+                    partition,
+                    &self.metrics_list,
+                );
+
+                self.scan_batch_in_partition(partition, metrics, &metrics_set)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Box::pin(futures::stream::iter(streams).flatten()))
+    }
 }
 
 fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
@@ -232,6 +246,7 @@ impl RegionScanner for SeriesScan {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(metrics_set, partition)
+            .map_err(BoxedError::new)
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
@@ -393,8 +408,8 @@ impl SeriesDistributor {
 
 /// Batches of the same series.
 #[derive(Default)]
-struct SeriesBatch {
-    batches: SmallVec<[Batch; 4]>,
+pub struct SeriesBatch {
+    pub batches: SmallVec<[Batch; 4]>,
 }
 
 impl SeriesBatch {
