@@ -1,0 +1,23 @@
+-- SQLNESS REPLACE \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/\d+ PROCESS_ID
+-- SQLNESS REPLACE PT\d+\.\d+S ELAPSED_TIME
+-- SQLNESS REPLACE [\u0020\-]+
+SHOW PROCESSLIST;
+
++++++
+|Id|Catalog|Query|ElapsedTime|
++++++
+|PROCESS_ID|greptime|SHOWPROCESSLIST|ELAPSED_TIME|
++++++
+
+-- SQLNESS REPLACE \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+/\d+ PROCESS_ID
+-- SQLNESS REPLACE PT\d+\.\d+S ELAPSED_TIME
+-- SQLNESS REPLACE (\s[\-0-9T:\.]{15,}) DATETIME
+-- SQLNESS REPLACE [\u0020\-]+
+SHOW FULL PROCESSLIST;
+
++++++++++
+|Id|Catalog|Schema|Client|Frontend|StartTime|ElapsedTime|Query|
++++++++++
+|PROCESS_ID|greptime|public|unknown[unknownclientaddr]|DATETIME|DATETIME|ELAPSED_TIME|SHOWFULLPROCESSLIST|
++++++++++
+

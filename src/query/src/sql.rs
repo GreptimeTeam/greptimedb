@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::information_schema::{
-    columns, flows, key_column_usage, region_peers, schemata, tables, CHARACTER_SETS, COLLATIONS,
-    COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
+    columns, flows, key_column_usage, process_list, region_peers, schemata, tables, CHARACTER_SETS,
+    COLLATIONS, COLUMNS, FLOWS, KEY_COLUMN_USAGE, REGION_PEERS, SCHEMATA, TABLES, VIEWS,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
@@ -57,8 +57,8 @@ use sql::ast::Ident;
 use sql::parser::ParserContext;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowTableStatus,
-    ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
+    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
@@ -1231,6 +1231,50 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
             Format::Orc(format) => Box::new(format),
         },
     )
+}
+
+pub async fn show_processlist(
+    stmt: ShowProcessList,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let projects = if stmt.full {
+        vec![
+            (process_list::ID, "Id"),
+            (process_list::CATALOG, "Catalog"),
+            (process_list::SCHEMAS, "Schema"),
+            (process_list::CLIENT, "Client"),
+            (process_list::FRONTEND, "Frontend"),
+            (process_list::START_TIMESTAMP, "Start Time"),
+            (process_list::ELAPSED_TIME, "Elapsed Time"),
+            (process_list::QUERY, "Query"),
+        ]
+    } else {
+        vec![
+            (process_list::ID, "Id"),
+            (process_list::CATALOG, "Catalog"),
+            (process_list::QUERY, "Query"),
+            (process_list::ELAPSED_TIME, "Elapsed Time"),
+        ]
+    };
+
+    let filters = vec![];
+    let like_field = None;
+    let sort = vec![col("id").sort(true, true)];
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx.clone(),
+        "process_list",
+        vec![],
+        projects.clone(),
+        filters,
+        like_field,
+        sort,
+        ShowKind::All,
+    )
+    .await
 }
 
 #[cfg(test)]

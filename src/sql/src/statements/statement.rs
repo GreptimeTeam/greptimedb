@@ -37,8 +37,8 @@ use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowRegion, ShowSearchPath, ShowStatus,
-    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowSearchPath,
+    ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -141,6 +141,8 @@ pub enum Statement {
     CloseCursor(CloseCursor),
     // KILL <process>
     Kill(Kill),
+    // SHOW PROCESSLIST
+    ShowProcesslist(ShowProcessList),
 }
 
 impl Display for Statement {
@@ -198,6 +200,7 @@ impl Display for Statement {
             Statement::FetchCursor(s) => s.fmt(f),
             Statement::CloseCursor(s) => s.fmt(f),
             Statement::Kill(k) => k.fmt(f),
+            Statement::ShowProcesslist(s) => s.fmt(f),
         }
     }
 }

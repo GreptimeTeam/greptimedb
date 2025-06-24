@@ -616,6 +616,8 @@ pub fn check_permission(
         Statement::FetchCursor(_) | Statement::CloseCursor(_) => {}
         // User can only kill process in their own catalog.
         Statement::Kill(_) => {}
+        // SHOW PROCESSLIST
+        Statement::ShowProcesslist(_) => {}
     }
     Ok(())
 }
