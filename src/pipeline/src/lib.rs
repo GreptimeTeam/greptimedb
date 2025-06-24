@@ -50,24 +50,3 @@ macro_rules! unwrap_or_continue_if_err {
         }
     }};
 }
-
-#[macro_export]
-macro_rules! unwrap_or_warn_continue {
-    ($expr:expr, $msg:expr) => {
-        if let Some(value) = $expr {
-            value
-        } else {
-            warn!($msg);
-            continue;
-        }
-    };
-
-    ($expr:expr, $fmt:expr, $($arg:tt)*) => {
-        if let Some(value) = $expr {
-            value
-        } else {
-            warn!($fmt, $($arg)*);
-            continue;
-        }
-    };
-}

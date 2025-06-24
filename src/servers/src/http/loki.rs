@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,7 +32,7 @@ use headers::ContentType;
 use jsonb::Value;
 use lazy_static::lazy_static;
 use loki_proto::prost_types::Timestamp;
-use pipeline::{unwrap_or_warn_continue, SchemaInfo};
+use pipeline::SchemaInfo;
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -108,11 +108,17 @@ pub async fn loki_ingest(
     // init schemas
     let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
 
-    let mut rows = match content_type {
-        x if x == *JSON_CONTENT_TYPE => handle_json_req(bytes, &mut schema_info).await,
-        x if x == *PB_CONTENT_TYPE => handle_pb_req(bytes, &mut schema_info).await,
-        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
-    }?;
+    let mut rows = Vec::with_capacity(256);
+    for loki_row in extract_by_content(content_type, bytes)? {
+        let mut row = init_row(
+            schema_info.schema.len(),
+            loki_row.ts,
+            loki_row.line,
+            loki_row.structured_metadata,
+        );
+        process_labels(&mut schema_info, &mut row, loki_row.labels);
+        rows.push(row);
+    }
 
     let schemas = schema_info.schema;
 
@@ -159,153 +165,239 @@ pub async fn loki_ingest(
     Ok(response)
 }
 
-async fn handle_json_req(
-    bytes: Bytes,
-    schema_info: &mut SchemaInfo,
-) -> Result<Vec<Vec<GreptimeValue>>> {
-    let payload: serde_json::Value =
-        serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
+pub struct LokiRow {
+    pub ts: i64,
+    pub line: String,
+    pub structured_metadata: Vec<u8>,
+    pub labels: Option<BTreeMap<String, String>>,
+}
 
-    let streams = payload
-        .get(STREAMS_KEY)
-        .context(InvalidLokiPayloadSnafu {
+fn extract_by_content(
+    content_type: ContentType,
+    bytes: Bytes,
+) -> Result<Box<dyn Iterator<Item = LokiRow>>> {
+    match content_type {
+        x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
+            LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter()),
+        )),
+        x if x == *PB_CONTENT_TYPE => Ok(Box::new(
+            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter()),
+        )),
+        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
+    }
+}
+
+struct LokiJsonParser {
+    pub streams: VecDeque<serde_json::Value>,
+}
+
+impl LokiJsonParser {
+    pub fn from_bytes(bytes: Bytes) -> Result<Self> {
+        let payload: serde_json::Value =
+            serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
+
+        let serde_json::Value::Object(mut map) = payload else {
+            return InvalidLokiPayloadSnafu {
+                msg: "payload is not an object",
+            }
+            .fail();
+        };
+
+        let streams = map.remove(STREAMS_KEY).context(InvalidLokiPayloadSnafu {
             msg: "missing streams",
-        })?
-        .as_array()
-        .context(InvalidLokiPayloadSnafu {
-            msg: "streams is not an array",
         })?;
 
-    let mut rows = Vec::with_capacity(1000);
+        let serde_json::Value::Array(streams) = streams else {
+            return InvalidLokiPayloadSnafu {
+                msg: "streams is not an array",
+            }
+            .fail();
+        };
 
-    for (stream_index, stream) in streams.iter().enumerate() {
-        // parse lines first
-        // do not use `?` in case there are multiple streams
-        let lines = unwrap_or_warn_continue!(
-            stream.get(LINES_KEY),
-            "missing values on stream {}",
-            stream_index
-        );
-        let lines = unwrap_or_warn_continue!(
-            lines.as_array(),
-            "values is not an array on stream {}",
-            stream_index
-        );
+        Ok(Self {
+            streams: streams.into(),
+        })
+    }
+}
+
+impl Iterator for LokiJsonParser {
+    type Item = JsonStreamItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let stream = self.streams.pop_front()?;
+        // get lines from the map
+        let serde_json::Value::Object(mut map) = stream else {
+            warn!("stream is not an object, {:?}", stream);
+            return self.next();
+        };
+        let Some(lines) = map.remove(LINES_KEY) else {
+            warn!("missing lines on stream, {:?}", map);
+            return self.next();
+        };
+        let serde_json::Value::Array(lines) = lines else {
+            warn!("lines is not an array, {:?}", lines);
+            return self.next();
+        };
 
         // get labels
-        let labels = stream
-            .get(LABEL_KEY)
-            .and_then(|label| label.as_object())
-            .map(|l| {
-                l.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+        let labels = map
+            .remove(LABEL_KEY)
+            .and_then(|m| match m {
+                serde_json::Value::Object(labels) => Some(labels),
+                _ => None,
+            })
+            .map(|m| {
+                m.into_iter()
+                    .filter_map(|(k, v)| match v {
+                        serde_json::Value::String(v) => Some((k, v)),
+                        _ => None,
+                    })
                     .collect::<BTreeMap<String, String>>()
             });
 
-        // process each line
-        for (line_index, line) in lines.iter().enumerate() {
-            let line = unwrap_or_warn_continue!(
-                line.as_array(),
-                "missing line on stream {} index {}",
-                stream_index,
-                line_index
-            );
-            if line.len() < 2 {
-                warn!(
-                    "line on stream {} index {} is too short",
-                    stream_index, line_index
-                );
-                continue;
-            }
-            // get ts
-            let ts = unwrap_or_warn_continue!(
-                line.first()
-                    .and_then(|ts| ts.as_str())
-                    .and_then(|ts| ts.parse::<i64>().ok()),
-                "missing or invalid timestamp on stream {} index {}",
-                stream_index,
-                line_index
-            );
-            // get line
-            let line_text = unwrap_or_warn_continue!(
-                line.get(1)
-                    .and_then(|line| line.as_str())
-                    .map(|line| line.to_string()),
-                "missing or invalid line on stream {} index {}",
-                stream_index,
-                line_index
-            );
-
-            let structured_metadata = match line.get(2) {
-                Some(sdata) if sdata.is_object() => sdata
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), Value::String(s.into()))))
-                    .collect(),
-                _ => BTreeMap::new(),
-            };
-            let structured_metadata = Value::Object(structured_metadata);
-
-            let mut row = init_row(schema_info.schema.len(), ts, line_text, structured_metadata);
-
-            process_labels(schema_info, &mut row, labels.as_ref());
-
-            rows.push(row);
-        }
+        Some(JsonStreamItem {
+            lines: lines.into(),
+            labels,
+        })
     }
-
-    Ok(rows)
 }
 
-async fn handle_pb_req(
-    bytes: Bytes,
-    schema_info: &mut SchemaInfo,
-) -> Result<Vec<Vec<GreptimeValue>>> {
-    let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
-    let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
-        .context(DecodeOtlpRequestSnafu)?;
+struct JsonStreamItem {
+    pub lines: VecDeque<serde_json::Value>,
+    pub labels: Option<BTreeMap<String, String>>,
+}
 
-    let cnt = req.streams.iter().map(|s| s.entries.len()).sum::<usize>();
-    let mut rows = Vec::with_capacity(cnt);
+impl Iterator for JsonStreamItem {
+    type Item = LokiRow;
 
-    for stream in req.streams {
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.lines.pop_front()?;
+        let serde_json::Value::Array(line) = line else {
+            warn!("line is not an array, {:?}", line);
+            return self.next();
+        };
+        if line.len() < 2 {
+            warn!("line is too short, {:?}", line);
+            return self.next();
+        }
+        let mut line: VecDeque<serde_json::Value> = line.into();
+
+        // get ts
+        let ts = line.pop_front().and_then(|ts| match ts {
+            serde_json::Value::String(ts) => ts.parse::<i64>().ok(),
+            _ => {
+                warn!("missing or invalid timestamp, {:?}", ts);
+                None
+            }
+        });
+        let Some(ts) = ts else {
+            return self.next();
+        };
+
+        let line_text = line.pop_front().and_then(|l| match l {
+            serde_json::Value::String(l) => Some(l),
+            _ => {
+                warn!("missing or invalid line, {:?}", l);
+                None
+            }
+        });
+        let Some(line_text) = line_text else {
+            return self.next();
+        };
+
+        let structured_metadata = line
+            .pop_front()
+            .and_then(|m| match m {
+                serde_json::Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .map(|m| {
+                m.into_iter()
+                    .filter_map(|(k, v)| match v {
+                        serde_json::Value::String(v) => Some((k, Value::String(v.into()))),
+                        _ => None,
+                    })
+                    .collect::<BTreeMap<String, Value>>()
+            })
+            .unwrap_or_default();
+        let structured_metadata = Value::Object(structured_metadata).to_vec();
+
+        Some(LokiRow {
+            ts,
+            line: line_text,
+            structured_metadata,
+            labels: self.labels.clone(),
+        })
+    }
+}
+
+pub struct LokiPbParser {
+    pub streams: VecDeque<loki_proto::logproto::StreamAdapter>,
+}
+
+impl LokiPbParser {
+    pub fn from_bytes(bytes: Bytes) -> Result<Self> {
+        let decompressed = prom_store::snappy_decompress(&bytes).unwrap();
+        let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
+            .context(DecodeOtlpRequestSnafu)?;
+
+        Ok(Self {
+            streams: req.streams.into(),
+        })
+    }
+}
+
+impl Iterator for LokiPbParser {
+    type Item = PbStreamItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let stream = self.streams.pop_front()?;
+
         let labels = parse_loki_labels(&stream.labels)
             .inspect_err(|e| {
-                error!(e; "failed to parse loki labels");
+                error!(e; "failed to parse loki labels, {:?}", stream.labels);
             })
             .ok();
 
-        // process entries
-        for entry in stream.entries {
-            let ts = if let Some(ts) = entry.timestamp {
-                ts
-            } else {
-                continue;
-            };
-            let line = entry.line;
-
-            let structured_metadata = entry
-                .structured_metadata
-                .into_iter()
-                .map(|d| (d.name, Value::String(d.value.into())))
-                .collect::<BTreeMap<String, Value>>();
-            let structured_metadata = Value::Object(structured_metadata);
-
-            let mut row = init_row(
-                schema_info.schema.len(),
-                prost_ts_to_nano(&ts),
-                line,
-                structured_metadata,
-            );
-
-            process_labels(schema_info, &mut row, labels.as_ref());
-
-            rows.push(row);
-        }
+        Some(PbStreamItem {
+            entries: stream.entries.into(),
+            labels,
+        })
     }
+}
 
-    Ok(rows)
+pub struct PbStreamItem {
+    pub entries: VecDeque<loki_proto::logproto::EntryAdapter>,
+    pub labels: Option<BTreeMap<String, String>>,
+}
+
+impl Iterator for PbStreamItem {
+    type Item = LokiRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.entries.pop_front()?;
+
+        let ts = if let Some(ts) = entry.timestamp {
+            ts
+        } else {
+            return self.next();
+        };
+        let line = entry.line;
+
+        let structured_metadata = entry
+            .structured_metadata
+            .into_iter()
+            .map(|d| (d.name, Value::String(d.value.into())))
+            .collect::<BTreeMap<String, Value>>();
+        let structured_metadata = Value::Object(structured_metadata).to_vec();
+
+        Some(LokiRow {
+            ts: prost_ts_to_nano(&ts),
+            line,
+            structured_metadata,
+            labels: self.labels.clone(),
+        })
+    }
 }
 
 /// since we're hand-parsing the labels, if any error is encountered, we'll just skip the label
@@ -392,7 +484,7 @@ fn init_row(
     schema_len: usize,
     ts: i64,
     line: String,
-    structured_metadata: Value,
+    structured_metadata: Vec<u8>,
 ) -> Vec<GreptimeValue> {
     // create and init row
     let mut row = Vec::with_capacity(schema_len);
@@ -404,7 +496,7 @@ fn init_row(
         value_data: Some(ValueData::StringValue(line)),
     });
     row.push(GreptimeValue {
-        value_data: Some(ValueData::BinaryValue(structured_metadata.to_vec())),
+        value_data: Some(ValueData::BinaryValue(structured_metadata)),
     });
     for _ in 0..(schema_len - 3) {
         row.push(GreptimeValue { value_data: None });
@@ -415,7 +507,7 @@ fn init_row(
 fn process_labels(
     schema_info: &mut SchemaInfo,
     row: &mut Vec<GreptimeValue>,
-    labels: Option<&BTreeMap<String, String>>,
+    labels: Option<BTreeMap<String, String>>,
 ) {
     let Some(labels) = labels else {
         return;
@@ -426,11 +518,11 @@ fn process_labels(
 
     // insert labels
     for (k, v) in labels {
-        if let Some(index) = column_indexer.get(k) {
+        if let Some(index) = column_indexer.get(&k) {
             // exist in schema
             // insert value using index
             row[*index] = GreptimeValue {
-                value_data: Some(ValueData::StringValue(v.clone())),
+                value_data: Some(ValueData::StringValue(v)),
             };
         } else {
             // not exist
@@ -442,10 +534,10 @@ fn process_labels(
                 datatype_extension: None,
                 options: None,
             });
-            column_indexer.insert(k.clone(), schemas.len() - 1);
+            column_indexer.insert(k, schemas.len() - 1);
 
             row.push(GreptimeValue {
-                value_data: Some(ValueData::StringValue(v.clone())),
+                value_data: Some(ValueData::StringValue(v)),
             });
         }
     }
