@@ -289,12 +289,13 @@ impl AggregateUDFImpl for MergeWrapper {
         &'a self,
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        // rewrite the accumulator args to match the original aggregate function's input types.
         let mut acc_args = acc_args;
         let schema = arrow_schema::Schema::new(
             self.original_input_types
                 .iter()
                 .enumerate()
-                .map(|(i, dt)| Field::new(&format!("original_input[{}]", i), dt.clone(), true))
+                .map(|(i, dt)| Field::new(format!("original_input[{}]", i), dt.clone(), true))
                 .collect::<Vec<_>>(),
         );
         let exprs = self
