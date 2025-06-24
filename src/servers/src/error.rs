@@ -631,6 +631,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to invoke operator"))]
+    Operator {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -755,6 +762,7 @@ impl ErrorExt for Error {
 
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
             CommonMeta { source, .. } => source.status_code(),
+            Operator { source, .. } => source.status_code(),
         }
     }
 

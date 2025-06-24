@@ -19,7 +19,10 @@ use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use operator::schema_helper::{LogicalSchema, LogicalSchemas};
+use operator::schema_helper::{
+    ensure_logical_tables_for_metrics, LogicalSchema, LogicalSchemas, SchemaHelper,
+};
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use table::table_name::TableName;
 use table::TableRef;
@@ -29,8 +32,7 @@ use crate::prom_row_builder::{PromCtx, TableBuilder};
 
 #[allow(dead_code)]
 pub struct MetricsBatchBuilder {
-    table_route_manager: TableRouteManagerRef,
-    catalog_manager: CatalogManagerRef,
+    schema_helper: SchemaHelper,
 }
 
 impl MetricsBatchBuilder {
@@ -38,29 +40,21 @@ impl MetricsBatchBuilder {
     pub async fn create_or_alter_physical_tables(
         &self,
         tables: &HashMap<PromCtx, HashMap<String, TableBuilder>>,
-        current_catalog: Option<String>,
-        current_schema: Option<String>,
+        query_ctx: &QueryContextRef,
     ) -> error::Result<()> {
         // Physical table name -> logical tables -> tags in logical table
         let mut tags: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
 
         for (ctx, tables) in tables {
             for (logical_table_name, table_builder) in tables {
-                // use session catalog.
-                let catalog = current_catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-                // schema in PromCtx precedes session schema.
-                let schema = ctx
-                    .schema
-                    .as_deref()
-                    .or(current_schema.as_deref())
-                    .unwrap_or(DEFAULT_SCHEMA_NAME);
-
                 let physical_table_name = self
                     .determine_physical_table_name(
                         logical_table_name,
                         &ctx.physical_table,
                         catalog,
-                        schema,
+                        &schema,
                     )
                     .await?;
                 tags.entry(physical_table_name)
@@ -70,10 +64,12 @@ impl MetricsBatchBuilder {
                     .extend(table_builder.tags().cloned());
             }
         }
-        let _logical_schemas = tags_to_logical_schemas(tags);
+        let logical_schemas = tags_to_logical_schemas(tags);
+        ensure_logical_tables_for_metrics(&self.schema_helper, &logical_schemas, query_ctx)
+            .await
+            .context(error::OperatorSnafu)?;
 
-        todo!()
-        // Call [ensure_logical_tables_for_metrics]
+        Ok(())
     }
 
     /// Finds physical table id for logical table.
@@ -85,20 +81,22 @@ impl MetricsBatchBuilder {
         schema: &str,
     ) -> error::Result<String> {
         let logical_table = self
-            .catalog_manager
-            .table(catalog, schema, logical_table_name, None)
+            .schema_helper
+            .get_table(catalog, schema, logical_table_name)
             .await
-            .context(error::CatalogSnafu)?;
+            .context(error::OperatorSnafu)?;
         if let Some(logical_table) = logical_table {
             // logical table already exist, just return the physical table
             let logical_table_id = logical_table.table_info().table_id();
             let physical_table_id = self
-                .table_route_manager
+                .schema_helper
+                .table_route_manager()
                 .get_physical_table_id(logical_table_id)
                 .await
                 .context(error::CommonMetaSnafu)?;
             let physical_table = self
-                .catalog_manager
+                .schema_helper
+                .catalog_manager()
                 .tables_by_ids(catalog, schema, &[physical_table_id])
                 .await
                 .context(error::CatalogSnafu)?

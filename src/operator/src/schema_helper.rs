@@ -31,6 +31,7 @@ use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::ddl::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::SchemaNameKey;
+use common_meta::key::table_route::TableRouteManager;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
@@ -550,8 +551,13 @@ impl SchemaHelper {
     }
 
     /// Returns the catalog manager.
-    pub(crate) fn catalog_manager(&self) -> &CatalogManagerRef {
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    /// Returns the table route manager.
+    pub fn table_route_manager(&self) -> &TableRouteManager {
+        self.table_metadata_manager.table_route_manager()
     }
 
     /// Submits a procedure to create a non-logical table.
