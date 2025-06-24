@@ -36,7 +36,6 @@ use error::Error::{LeaderPeerChanged, MigrationRunning, RegionMigrated, TableRou
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
-use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{interval, interval_at, MissedTickBehavior};
@@ -143,8 +142,8 @@ pub struct RegionSupervisorTicker {
     /// The delay before initializing all region failure detectors.
     initialization_delay: Duration,
 
-    /// The interval of initializing all region failure detectors attempts.
-    initialization_interval: Duration,
+    /// The retry period for initializing all region failure detectors.
+    initialization_retry_period: Duration,
 
     /// Sends [Event]s.
     sender: Sender<Event>,
@@ -171,18 +170,18 @@ impl RegionSupervisorTicker {
     pub(crate) fn new(
         tick_interval: Duration,
         initialization_delay: Duration,
-        initialization_interval: Duration,
+        initialization_retry_period: Duration,
         sender: Sender<Event>,
     ) -> Self {
         info!(
-            "RegionSupervisorTicker is created, tick_interval: {:?}, initialization_delay: {:?}, initialization_interval: {:?}",
-            tick_interval, initialization_delay, initialization_interval
+            "RegionSupervisorTicker is created, tick_interval: {:?}, initialization_delay: {:?}, initialization_retry_period: {:?}",
+            tick_interval, initialization_delay, initialization_retry_period
         );
         Self {
             tick_handle: Mutex::new(None),
             tick_interval,
             initialization_delay,
-            initialization_interval,
+            initialization_retry_period,
             sender,
         }
     }
@@ -197,23 +196,20 @@ impl RegionSupervisorTicker {
 
             let mut initialization_interval = interval_at(
                 tokio::time::Instant::now() + initialization_delay,
-                self.initialization_interval,
+                self.initialization_retry_period,
             );
             initialization_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             common_runtime::spawn_global(async move {
                 loop {
-                    select! {
-                        _ = initialization_interval.tick() => {
-                            let (tx, rx) = oneshot::channel();
-                            if sender.send(Event::InitializeAllRegions(tx)).await.is_err() {
-                                info!("EventReceiver is dropped, region failure detectors initialization loop is stopped");
-                                break;
-                            }
-                            if rx.await.is_ok() {
-                                info!("All region failure detectors are initialized.");
-                                break;
-                            }
-                        }
+                    initialization_interval.tick().await;
+                    let (tx, rx) = oneshot::channel();
+                    if sender.send(Event::InitializeAllRegions(tx)).await.is_err() {
+                        info!("EventReceiver is dropped, region failure detectors initialization loop is stopped");
+                        break;
+                    }
+                    if rx.await.is_ok() {
+                        info!("All region failure detectors are initialized.");
+                        break;
                     }
                 }
             });
@@ -228,13 +224,10 @@ impl RegionSupervisorTicker {
                     return;
                 }
                 loop {
-                    select! {
-                        _ = tick_interval.tick() => {
-                            if sender.send(Event::Tick).await.is_err() {
-                                info!("EventReceiver is dropped, tick loop is stopped");
-                                break;
-                            }
-                        }
+                    tick_interval.tick().await;
+                    if sender.send(Event::Tick).await.is_err() {
+                        info!("EventReceiver is dropped, tick loop is stopped");
+                        break;
                     }
                 }
             });
@@ -262,8 +255,8 @@ pub type RegionSupervisorRef = Arc<RegionSupervisor>;
 
 /// The default tick interval.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
-/// The default initialization interval.
-pub const DEFAULT_INITIALIZATION_INTERVAL: Duration = Duration::from_secs(60);
+/// The default initialization retry period.
+pub const DEFAULT_INITIALIZATION_RETRY_PERIOD: Duration = Duration::from_secs(60);
 
 /// Selector for region supervisor.
 pub enum RegionSupervisorSelector {
@@ -906,7 +899,7 @@ pub(crate) mod tests {
             tick_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(10),
             initialization_delay: Duration::from_millis(100),
-            initialization_interval: Duration::from_millis(100),
+            initialization_retry_period: Duration::from_millis(100),
             sender: tx,
         };
         // It's ok if we start the ticker again.
@@ -932,7 +925,7 @@ pub(crate) mod tests {
             tick_handle: Mutex::new(None),
             tick_interval: Duration::from_millis(1000),
             initialization_delay: Duration::from_millis(50),
-            initialization_interval: Duration::from_millis(50),
+            initialization_retry_period: Duration::from_millis(50),
             sender: tx,
         };
         ticker.start();
