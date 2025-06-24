@@ -17,7 +17,7 @@
 use api::region::RegionResponse;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -94,6 +94,16 @@ impl MetricEngineInner {
         Ok(responses)
     }
 
+    // If the metadata region is opened with a stale manifest,
+    // the metric engine may fail to recover logical tables from the metadata region,
+    // as the manifest could reference files that have already been deleted
+    // due to compaction operations performed by the region leader.
+    async fn close_physical_region_on_recovery_failure(&self, physical_region_id: RegionId) {
+        if let Err(err) = self.close_physical_region(physical_region_id).await {
+            error!(err; "Failed to close physical region {}", physical_region_id);
+        }
+    }
+
     async fn open_physical_region_with_results(
         &self,
         metadata_region_result: Option<std::result::Result<RegionResponse, BoxedError>>,
@@ -119,8 +129,14 @@ impl MetricEngineInner {
                 region_type: "data",
             })?;
 
-        self.recover_states(physical_region_id, physical_region_options)
-            .await?;
+        if let Err(err) = self
+            .recover_states(physical_region_id, physical_region_options)
+            .await
+        {
+            self.close_physical_region_on_recovery_failure(physical_region_id)
+                .await;
+            return Err(err);
+        }
         Ok(data_region_response)
     }
 
@@ -142,8 +158,14 @@ impl MetricEngineInner {
             // open physical region and recover states
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
             self.open_physical_region(region_id, request).await?;
-            self.recover_states(region_id, physical_region_options)
-                .await?;
+            if let Err(err) = self
+                .recover_states(region_id, physical_region_options)
+                .await
+            {
+                self.close_physical_region_on_recovery_failure(region_id)
+                    .await;
+                return Err(err);
+            }
 
             Ok(0)
         } else {
