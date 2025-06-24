@@ -18,6 +18,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use mime_guess::mime;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
 // use super::process_with_limit;
@@ -28,10 +29,16 @@ use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse
 pub struct CsvResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,
+    with_names: bool,
+    with_types: bool,
 }
 
 impl CsvResponse {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
+    pub async fn from_output(
+        outputs: Vec<crate::error::Result<Output>>,
+        with_names: bool,
+        with_types: bool,
+    ) -> HttpResponse {
         match handler::from_output(outputs).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
@@ -41,10 +48,14 @@ impl CsvResponse {
                         "cannot output multi-statements result in csv format".to_string(),
                     ))
                 } else {
-                    HttpResponse::Csv(CsvResponse {
+                    let csv_resp = CsvResponse {
                         output,
                         execution_time_ms: 0,
-                    })
+                        with_names: false,
+                        with_types: false,
+                    };
+
+                    HttpResponse::Csv(csv_resp.with_names(with_names).with_types(with_types))
                 }
             }
         }
@@ -65,6 +76,21 @@ impl CsvResponse {
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.output = process_with_limit(self.output, limit);
+        self
+    }
+
+    pub fn with_names(mut self, with_names: bool) -> Self {
+        self.with_names = with_names;
+        self
+    }
+
+    pub fn with_types(mut self, with_types: bool) -> Self {
+        self.with_types = with_types;
+
+        // If `with_type` is true, than always set `with_names` to be true.
+        if with_types {
+            self.with_names = true;
+        }
         self
     }
 }
@@ -100,11 +126,50 @@ impl IntoResponse for CsvResponse {
                 format!("{n}\n")
             }
             Some(GreptimeQueryOutput::Records(records)) => {
-                let mut wtr = csv::Writer::from_writer(Vec::new());
+                let mut wtr = csv::WriterBuilder::new()
+                    .terminator(csv::Terminator::CRLF)
+                    .from_writer(Vec::new());
+
+                if self.with_names {
+                    let names = records
+                        .schema
+                        .column_schemas
+                        .iter()
+                        .map(|c| &c.name)
+                        .collect::<Vec<_>>();
+                    http_try!(wtr.serialize(names));
+                }
+
+                if self.with_types {
+                    let types = records
+                        .schema
+                        .column_schemas
+                        .iter()
+                        .map(|c| &c.data_type)
+                        .collect::<Vec<_>>();
+                    http_try!(wtr.serialize(types));
+                }
 
                 for row in records.rows {
+                    let row = row
+                        .into_iter()
+                        .map(|value| {
+                            match value {
+                                // Cast array and object to string
+                                JsonValue::Array(a) => {
+                                    JsonValue::String(serde_json::to_string(&a).unwrap_or_default())
+                                }
+                                JsonValue::Object(o) => {
+                                    JsonValue::String(serde_json::to_string(&o).unwrap_or_default())
+                                }
+                                v => v,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
                     http_try!(wtr.serialize(row));
                 }
+
                 http_try!(wtr.flush());
 
                 let bytes = http_try!(wtr.into_inner());
@@ -122,7 +187,9 @@ impl IntoResponse for CsvResponse {
             .into_response();
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static(ResponseFormat::Csv.as_str()),
+            HeaderValue::from_static(
+                ResponseFormat::Csv(self.with_names, self.with_types).as_str(),
+            ),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,

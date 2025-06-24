@@ -306,7 +306,8 @@ pub enum GreptimeQueryOutput {
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     Arrow,
-    Csv,
+    // (with_names, with_types)
+    Csv(bool, bool),
     Table,
     #[default]
     GreptimedbV1,
@@ -318,7 +319,9 @@ impl ResponseFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "arrow" => Some(ResponseFormat::Arrow),
-            "csv" => Some(ResponseFormat::Csv),
+            "csv" => Some(ResponseFormat::Csv(false, false)),
+            "csvwithnames" => Some(ResponseFormat::Csv(true, false)),
+            "csvwithnamesandtypes" => Some(ResponseFormat::Csv(true, true)),
             "table" => Some(ResponseFormat::Table),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
@@ -330,7 +333,7 @@ impl ResponseFormat {
     pub fn as_str(&self) -> &'static str {
         match self {
             ResponseFormat::Arrow => "arrow",
-            ResponseFormat::Csv => "csv",
+            ResponseFormat::Csv(_, _) => "csv",
             ResponseFormat::Table => "table",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
@@ -1480,7 +1483,7 @@ mod test {
         for format in [
             ResponseFormat::GreptimedbV1,
             ResponseFormat::InfluxdbV1,
-            ResponseFormat::Csv,
+            ResponseFormat::Csv(true, true),
             ResponseFormat::Table,
             ResponseFormat::Arrow,
             ResponseFormat::Json,
@@ -1490,7 +1493,9 @@ mod test {
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
                 ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
-                ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+                ResponseFormat::Csv(with_names, with_types) => {
+                    CsvResponse::from_output(outputs, with_names, with_types).await
+                }
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
