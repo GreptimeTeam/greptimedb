@@ -97,21 +97,33 @@ impl TablesBuilder {
 
     /// Converts [TablesBuilder] to record batch and clears inner states.
     pub(crate) async fn as_record_batch(&mut self, bulk_ctx: &PromBulkContext) -> Result<()> {
-        let batch_builder = MetricsBatchBuilder::new(
+        let mut batch_builder = MetricsBatchBuilder::new(
             bulk_ctx.schema_helper.clone(),
             bulk_ctx.partition_manager.clone(),
             bulk_ctx.node_manager.clone(),
         );
-        let tables = std::mem::take(&mut self.tables);
+        let mut tables = std::mem::take(&mut self.tables);
 
         batch_builder
             .create_or_alter_physical_tables(&tables, &bulk_ctx.query_ctx)
             .await?;
 
+        // Extract logical table names from tables for metadata collection
+        let current_schema = bulk_ctx.query_ctx.current_schema();
+        let logical_tables: Vec<(String, String)> = tables
+            .iter()
+            .flat_map(|(ctx, table_map)| {
+                let schema = ctx.schema.as_deref().unwrap_or(&current_schema);
+                table_map
+                    .keys()
+                    .map(|table_name| (schema.to_string(), table_name.clone()))
+            })
+            .collect();
+
         // Gather all region metadata for region 0 of physical tables.
         let physical_region_metadata = batch_builder
-            .collect_physical_region_metadata(&[], &bulk_ctx.query_ctx)
-            .await;
+            .collect_physical_region_metadata(&logical_tables, &bulk_ctx.query_ctx)
+            .await?;
 
         batch_builder
             .append_rows_to_batch(None, None, &mut tables, &physical_region_metadata)
