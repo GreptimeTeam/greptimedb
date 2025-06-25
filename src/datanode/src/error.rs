@@ -142,14 +142,6 @@ pub enum Error {
         source: Box<log_store::error::Error>,
     },
 
-    #[snafu(display("Failed to init backend"))]
-    InitBackend {
-        #[snafu(source)]
-        error: object_store::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -395,6 +387,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed object store operation"))]
+    ObjectStore {
+        source: object_store::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build cache store"))]
+    BuildCacheStore {
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -447,8 +454,6 @@ impl ErrorExt for Error {
 
             StartServer { source, .. } | ShutdownServer { source, .. } => source.status_code(),
 
-            InitBackend { .. } => StatusCode::StorageUnavailable,
-
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
             UnsupportedOutput { .. } => StatusCode::Unsupported,
@@ -466,6 +471,9 @@ impl ErrorExt for Error {
             }
             MissingCache { .. } => StatusCode::Internal,
             SerializeJson { .. } => StatusCode::Internal,
+
+            ObjectStore { source, .. } => source.status_code(),
+            BuildCacheStore { .. } => StatusCode::StorageUnavailable,
         }
     }
 

@@ -848,7 +848,7 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
-    use datanode::config::{FileConfig, GcsConfig};
+    use object_store::config::{FileConfig, GcsConfig};
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -967,15 +967,15 @@ mod tests {
 
         assert!(matches!(
             &dn_opts.storage.store,
-            datanode::config::ObjectStoreConfig::File(FileConfig { .. })
+            object_store::config::ObjectStoreConfig::File(FileConfig { .. })
         ));
         assert_eq!(dn_opts.storage.providers.len(), 2);
         assert!(matches!(
             dn_opts.storage.providers[0],
-            datanode::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
+            object_store::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
         ));
         match &dn_opts.storage.providers[1] {
-            datanode::config::ObjectStoreConfig::S3(s3_config) => {
+            object_store::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", s3_config.access_key_id)

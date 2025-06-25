@@ -280,7 +280,7 @@ mod tests {
 
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
+    use object_store::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
 
     use super::*;

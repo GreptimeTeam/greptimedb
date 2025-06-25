@@ -14,45 +14,22 @@
 
 //! object storage utilities
 
-mod azblob;
-pub mod fs;
-mod gcs;
-mod oss;
-mod s3;
-use std::path;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::{info, warn};
-use mito2::access_layer::{ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
+use object_store::factory::new_raw_object_store;
 use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
 use object_store::services::Fs;
-use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
-use object_store::{Access, Error, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers};
+use object_store::{
+    Access, Error, ObjectStore, ObjectStoreBuilder, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR,
+};
 use snafu::prelude::*;
 
-use crate::config::{HttpClientConfig, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
-use crate::error::{self, BuildHttpClientSnafu, CreateDirSnafu, Result};
-
-pub(crate) async fn new_raw_object_store(
-    store: &ObjectStoreConfig,
-    data_home: &str,
-) -> Result<ObjectStore> {
-    let data_home = normalize_dir(data_home);
-    let object_store = match store {
-        ObjectStoreConfig::File(file_config) => {
-            fs::new_fs_object_store(&data_home, file_config).await
-        }
-        ObjectStoreConfig::S3(s3_config) => s3::new_s3_object_store(s3_config).await,
-        ObjectStoreConfig::Oss(oss_config) => oss::new_oss_object_store(oss_config).await,
-        ObjectStoreConfig::Azblob(azblob_config) => {
-            azblob::new_azblob_object_store(azblob_config).await
-        }
-        ObjectStoreConfig::Gcs(gcs_config) => gcs::new_gcs_object_store(gcs_config).await,
-    }?;
-    Ok(object_store)
-}
+use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::error::{self, CreateDirSnafu, Result};
 
 fn with_retry_layers(object_store: ObjectStore) -> ObjectStore {
     object_store.layer(
@@ -66,7 +43,9 @@ pub(crate) async fn new_object_store_without_cache(
     store: &ObjectStoreConfig,
     data_home: &str,
 ) -> Result<ObjectStore> {
-    let object_store = new_raw_object_store(store, data_home).await?;
+    let object_store = new_raw_object_store(store, data_home)
+        .await
+        .context(error::ObjectStoreSnafu)?;
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if store.is_object_storage() {
         // Adds retry layer
@@ -83,7 +62,9 @@ pub(crate) async fn new_object_store(
     store: ObjectStoreConfig,
     data_home: &str,
 ) -> Result<ObjectStore> {
-    let object_store = new_raw_object_store(&store, data_home).await?;
+    let object_store = new_raw_object_store(&store, data_home)
+        .await
+        .context(error::ObjectStoreSnafu)?;
     // Enable retry layer and cache layer for non-fs object storages
     let object_store = if store.is_object_storage() {
         let object_store = if let Some(cache_layer) = build_cache_layer(&store, data_home).await? {
@@ -170,20 +151,20 @@ async fn build_cache_layer(
         && !path.trim().is_empty()
     {
         let atomic_temp_dir = join_dir(path, ATOMIC_WRITE_DIR);
-        clean_temp_dir(&atomic_temp_dir)?;
+        clean_temp_dir(&atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
         // Compatible code. Remove this after a major release.
         let old_atomic_temp_dir = join_dir(path, OLD_ATOMIC_WRITE_DIR);
-        clean_temp_dir(&old_atomic_temp_dir)?;
+        clean_temp_dir(&old_atomic_temp_dir).context(error::ObjectStoreSnafu)?;
 
         let cache_store = Fs::default()
             .root(path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
-            .context(error::InitBackendSnafu)?;
+            .context(error::BuildCacheStoreSnafu)?;
 
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
-            .context(error::InitBackendSnafu)?;
+            .context(error::BuildCacheStoreSnafu)?;
         cache_layer.recover_cache(false).await;
         info!(
             "Enabled local object storage cache, path: {}, capacity: {}.",
@@ -196,31 +177,6 @@ async fn build_cache_layer(
     }
 }
 
-pub(crate) fn clean_temp_dir(dir: &str) -> Result<()> {
-    if path::Path::new(&dir).exists() {
-        info!("Begin to clean temp storage directory: {}", dir);
-        std::fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
-        info!("Cleaned temp storage directory: {}", dir);
-    }
-
-    Ok(())
-}
-
-pub(crate) fn build_http_client(config: &HttpClientConfig) -> Result<HttpClient> {
-    if config.skip_ssl_validation {
-        common_telemetry::warn!("Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted.");
-    }
-
-    let client = reqwest::ClientBuilder::new()
-        .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
-        .connect_timeout(config.connect_timeout)
-        .pool_idle_timeout(config.pool_idle_timeout)
-        .timeout(config.timeout)
-        .danger_accept_invalid_certs(config.skip_ssl_validation)
-        .build()
-        .context(BuildHttpClientSnafu)?;
-    Ok(HttpClient::with(client))
-}
 struct PrintDetailedError;
 
 // PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.

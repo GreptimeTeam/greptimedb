@@ -13,13 +13,16 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::path;
 
-use common_telemetry::{debug, error, trace};
+use common_telemetry::{debug, error, info, trace};
 use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
-use opendal::raw::{AccessorInfo, Operation};
+use opendal::raw::{AccessorInfo, HttpClient, Operation};
 use opendal::ErrorKind;
+use snafu::ResultExt;
 
-use crate::ObjectStore;
+use crate::config::HttpClientConfig;
+use crate::{error, ObjectStore};
 
 /// Join two paths and normalize the output dir.
 ///
@@ -198,6 +201,32 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             );
         };
     }
+}
+
+pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<HttpClient> {
+    if config.skip_ssl_validation {
+        common_telemetry::warn!("Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted.");
+    }
+
+    let client = reqwest::ClientBuilder::new()
+        .pool_max_idle_per_host(config.pool_max_idle_per_host as usize)
+        .connect_timeout(config.connect_timeout)
+        .pool_idle_timeout(config.pool_idle_timeout)
+        .timeout(config.timeout)
+        .danger_accept_invalid_certs(config.skip_ssl_validation)
+        .build()
+        .context(error::BuildHttpClientSnafu)?;
+    Ok(HttpClient::with(client))
+}
+
+pub fn clean_temp_dir(dir: &str) -> error::Result<()> {
+    if path::Path::new(&dir).exists() {
+        info!("Begin to clean temp storage directory: {}", dir);
+        std::fs::remove_dir_all(dir).context(error::RemoveDirSnafu { dir })?;
+        info!("Cleaned temp storage directory: {}", dir);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
