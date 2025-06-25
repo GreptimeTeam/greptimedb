@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ use datafusion_expr::Expr;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
 use datatypes::arrow;
 use datatypes::value::{
-    duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value, Value,
+    duration_to_scalar_value, time_to_scalar_value, timestamp_to_scalar_value, OrderedF64,
+    OrderedFloat, Value,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -29,6 +31,10 @@ use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
 use crate::error;
+use crate::error::Result;
+
+const ZERO: OrderedF64 = OrderedFloat(0.0f64);
+const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
 /// by [`Self::to_parser_expr`].
@@ -260,6 +266,99 @@ impl PartitionExpr {
 impl Display for PartitionExpr {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} {} {}", self.lhs, self.op, self.rhs)
+    }
+}
+
+pub(crate) struct AtomicExpr {
+    /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
+    nucleons: Vec<NucleonExpr>,
+    /// Index to reference the [`PartitionExpr`] that this [`AtomicExpr`] is derived from.
+    /// This index is used with `exprs` field in [`MultiDimPartitionRule`](crate::multi_dim::MultiDimPartitionRule).
+    source_expr_index: usize,
+}
+
+/// A simplified expression representation.
+///
+/// This struct is used to compose [`AtomicExpr`], hence "nucleon".
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NucleonExpr {
+    column: String,
+    op: GluonOp,
+    /// Normalized [`Value`].
+    value: OrderedF64,
+}
+
+/// Further restricted operation set.
+///
+/// Conjunction operations are removed from [`RestrictedOp`].
+/// This enumeration is used to bind elements in [`NucleonExpr`], hence "gluon".
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GluonOp {
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+}
+
+pub struct Collider<'a> {
+    source_exprs: &'a [PartitionExpr],
+
+    atomic_exprs: Vec<AtomicExpr>,
+    normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
+}
+
+impl<'a> Collider<'a> {
+    pub fn new(source_exprs: &'a [PartitionExpr]) -> Result<Self> {
+        // first walk to collect all values
+        let mut values: HashMap<String, Vec<Value>> = HashMap::new();
+        for expr in source_exprs {
+            // todo
+        }
+
+        // normalize values, assumes all values on a column are the same type
+        let mut normalized_values: HashMap<String, HashMap<Value, OrderedF64>> =
+            HashMap::with_capacity(values.len());
+        for (_, values) in values.iter_mut() {
+            values.sort_unstable();
+            let mut ordered_values = Vec::with_capacity(values.len());
+            let mut start_value = ZERO;
+            for value in values {
+                ordered_values.push((value.clone(), start_value));
+                start_value += NORMALIZE_STEP;
+            }
+        }
+
+        // second walk to get atomic exprs
+        let mut atomic_exprs = Vec::with_capacity(source_exprs.len());
+        for (index, expr) in source_exprs.iter().enumerate() {
+            let exprs = Self::collide_expr(expr, index, &normalized_values);
+            atomic_exprs.extend(exprs);
+        }
+
+        // convert normalized values to a map
+        let normalized_values = normalized_values
+            .into_iter()
+            .map(|(col, values)| (col, values.into_iter().collect()))
+            .collect();
+
+        Ok(Self {
+            source_exprs,
+            atomic_exprs,
+            normalized_values,
+        })
+    }
+
+    /// Collide a [`PartitionExpr`] into multiple [`AtomicExpr`]s.
+    ///
+    /// Split the [`PartitionExpr`] on every [`RestrictedOp::Or`] (disjunction), each branch is an [`AtomicExpr`].
+    fn collide_expr(
+        expr: &PartitionExpr,
+        index: usize,
+        normalized_values: &HashMap<String, HashMap<Value, OrderedF64>>,
+    ) -> Vec<AtomicExpr> {
+        todo!()
     }
 }
 
