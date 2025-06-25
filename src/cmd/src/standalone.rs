@@ -30,20 +30,16 @@ use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
-use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cluster::{NodeInfo, NodeStatus};
 use common_meta::datanode::RegionStat;
-use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
-use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
+use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
-#[cfg(feature = "enterprise")]
-use common_meta::ddl_manager::TriggerDdlManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
@@ -594,28 +590,36 @@ impl StartCommand {
             .await
             .context(error::BuildWalOptionsAllocatorSnafu)?;
         let wal_options_allocator = Arc::new(wal_options_allocator);
-        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
             flow_id_sequence,
         ));
 
+        let ddl_context = DdlContext {
+            node_manager: node_manager.clone(),
+            cache_invalidator: layered_cache_registry.clone(),
+            memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+            leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_allocator: table_metadata_allocator.clone(),
+            flow_metadata_manager: flow_metadata_manager.clone(),
+            flow_metadata_allocator: flow_metadata_allocator.clone(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+        };
+        let procedure_manager_c = procedure_manager.clone();
+
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+            .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let trigger_ddl_manager: Option<TriggerDdlManagerRef> = plugins.get();
-        let ddl_task_executor = Self::create_ddl_task_executor(
-            procedure_manager.clone(),
-            node_manager.clone(),
-            layered_cache_registry.clone(),
-            table_metadata_manager,
-            table_meta_allocator,
-            flow_metadata_manager,
-            flow_meta_allocator,
-            #[cfg(feature = "enterprise")]
-            trigger_ddl_manager,
-        )
-        .await?;
+        let ddl_manager = {
+            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
+                plugins.get();
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        };
+        let ddl_task_executor: ProcedureExecutorRef = Arc::new(ddl_manager);
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -677,41 +681,6 @@ impl StartCommand {
             wal_options_allocator,
             _guard: guard,
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_ddl_task_executor(
-        procedure_manager: ProcedureManagerRef,
-        node_manager: NodeManagerRef,
-        cache_invalidator: CacheInvalidatorRef,
-        table_metadata_manager: TableMetadataManagerRef,
-        table_metadata_allocator: TableMetadataAllocatorRef,
-        flow_metadata_manager: FlowMetadataManagerRef,
-        flow_metadata_allocator: FlowMetadataAllocatorRef,
-        #[cfg(feature = "enterprise")] trigger_ddl_manager: Option<TriggerDdlManagerRef>,
-    ) -> Result<ProcedureExecutorRef> {
-        let procedure_executor: ProcedureExecutorRef = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager,
-                    cache_invalidator,
-                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
-                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
-                    table_metadata_manager,
-                    table_metadata_allocator,
-                    flow_metadata_manager,
-                    flow_metadata_allocator,
-                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
-                },
-                procedure_manager,
-                true,
-                #[cfg(feature = "enterprise")]
-                trigger_ddl_manager,
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
-
-        Ok(procedure_executor)
     }
 
     pub async fn create_table_metadata_manager(

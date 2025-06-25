@@ -356,30 +356,28 @@ impl MetasrvBuilder {
 
         let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
 
+        let ddl_context = DdlContext {
+            node_manager,
+            cache_invalidator: cache_invalidator.clone(),
+            memory_region_keeper: memory_region_keeper.clone(),
+            leader_region_registry: leader_region_registry.clone(),
+            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_allocator: table_metadata_allocator.clone(),
+            flow_metadata_manager: flow_metadata_manager.clone(),
+            flow_metadata_allocator: flow_metadata_allocator.clone(),
+            region_failure_detector_controller,
+        };
+        let procedure_manager_c = procedure_manager.clone();
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+            .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let trigger_ddl_manager = plugins
-            .as_ref()
-            .and_then(|plugins| plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>());
-        let ddl_manager = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager,
-                    cache_invalidator: cache_invalidator.clone(),
-                    memory_region_keeper: memory_region_keeper.clone(),
-                    leader_region_registry: leader_region_registry.clone(),
-                    table_metadata_manager: table_metadata_manager.clone(),
-                    table_metadata_allocator: table_metadata_allocator.clone(),
-                    flow_metadata_manager: flow_metadata_manager.clone(),
-                    flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    region_failure_detector_controller,
-                },
-                procedure_manager.clone(),
-                true,
-                #[cfg(feature = "enterprise")]
-                trigger_ddl_manager,
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
+        let ddl_manager = {
+            let trigger_ddl_manager = plugins.as_ref().and_then(|plugins| {
+                plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>()
+            });
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        };
+        let ddl_manager = Arc::new(ddl_manager);
 
         // remote WAL prune ticker and manager
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
