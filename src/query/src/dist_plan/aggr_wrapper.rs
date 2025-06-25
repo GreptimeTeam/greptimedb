@@ -163,7 +163,7 @@ impl AggregateUDFImpl for StateWrapper {
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         let old_return_type = self.inner.return_type(arg_types)?;
         let state_fields_args = StateFieldsArgs {
-            name: &self.name,
+            name: &self.inner().name(),
             input_types: arg_types,
             return_type: &old_return_type,
             ordering_fields: &self.ordering_fields,
@@ -372,7 +372,7 @@ impl Accumulator for MergeAccum {
     }
 
     fn update_batch(&mut self, values: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
-        // input is also states
+        // The input values are states from other accumulators, so we merge them.
         self.inner.merge_batch(values)
     }
 
@@ -550,12 +550,12 @@ mod tests {
                 original_return_type: DataType::Float64,
 
                 original_schema: arrow_schema::Schema::new(vec![Field::new(
-                    "original_input",
-                    DataType::Int64,
+                    "original_input[0]",
+                    DataType::Float64,
                     true,
                 )]),
                 original_exprs: vec![Arc::new(
-                    datafusion::physical_expr::expressions::Column::new("original_input", 0),
+                    datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
                 )],
             },
         };
