@@ -24,19 +24,23 @@ use arrow::array::{
 use arrow::compute;
 use arrow_schema::Field;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use itertools::Itertools;
 use metric_engine::row_modifier::{RowModifier, RowsIter};
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use operator::schema_helper::{
-    ensure_logical_tables_for_metrics, LogicalSchema, LogicalSchemas, SchemaHelper,
+    ensure_logical_tables_for_metrics, metadatas_for_region_ids, LogicalSchema, LogicalSchemas,
+    SchemaHelper,
 };
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::{
     ReservedColumnId, OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, RegionId};
 use table::metadata::TableId;
 use table::table_name::TableName;
 
@@ -46,13 +50,21 @@ use crate::prom_row_builder::{PromCtx, TableBuilder};
 pub struct MetricsBatchBuilder {
     schema_helper: SchemaHelper,
     builders: HashMap<TableId, BatchEncoder>,
+    partition_manager: PartitionRuleManagerRef,
+    node_manager: NodeManagerRef,
 }
 
 impl MetricsBatchBuilder {
-    pub fn new(schema_helper: SchemaHelper) -> Self {
+    pub fn new(
+        schema_helper: SchemaHelper,
+        partition_manager: PartitionRuleManagerRef,
+        node_manager: NodeManagerRef,
+    ) -> Self {
         MetricsBatchBuilder {
             schema_helper,
             builders: Default::default(),
+            partition_manager,
+            node_manager,
         }
     }
 
@@ -132,14 +144,89 @@ impl MetricsBatchBuilder {
     }
 
     /// Retrieves physical region metadata of given logical table names.
-    pub async fn collect_physical_region_metadata(
+    ///
+    /// The `logical_tables` is a list of table names, each entry contains the schema name and the table name.
+    /// Returns the following mapping: `schema => logical table => (logical table id, region 0 metadata of the physical table)`.
+    pub(crate) async fn collect_physical_region_metadata(
         &self,
-        logical_table_names: &[String],
-    ) -> HashMap<
-        TableName,         /*logical table name*/
-        RegionMetadataRef, /*Region metadata for physical re*/
-    > {
-        todo!()
+        logical_tables: &[(String, String)],
+        query_ctx: &QueryContextRef,
+    ) -> error::Result<HashMap<String, HashMap<String, (TableId, RegionMetadataRef)>>> {
+        let catalog = query_ctx.current_catalog();
+        // Logical and physical table ids.
+        let mut table_ids = Vec::with_capacity(logical_tables.len());
+        let mut physical_region_ids = HashSet::new();
+        for (schema, table_name) in logical_tables {
+            let logical_table = self
+                .schema_helper
+                .get_table(catalog, schema, table_name)
+                .await
+                .context(error::OperatorSnafu)?
+                .context(error::TableNotFoundSnafu {
+                    catalog,
+                    schema: schema,
+                    table: table_name,
+                })?;
+            let logical_table_id = logical_table.table_info().table_id();
+            let physical_table_id = self
+                .schema_helper
+                .table_route_manager()
+                .get_physical_table_id(logical_table_id)
+                .await
+                .context(error::CommonMetaSnafu)?;
+            table_ids.push((logical_table_id, physical_table_id));
+            // We only get metadata from region 0.
+            physical_region_ids.insert(RegionId::new(physical_table_id, 0));
+        }
+
+        // Batch get physical metadata.
+        let physical_region_ids = physical_region_ids.into_iter().collect_vec();
+        let region_metadatas = metadatas_for_region_ids(
+            &self.partition_manager,
+            &self.node_manager,
+            &physical_region_ids,
+            query_ctx,
+        )
+        .await
+        .context(error::OperatorSnafu)?;
+        let mut result_map: HashMap<_, HashMap<_, _>> = HashMap::new();
+        let region_metadatas: HashMap<_, _> = region_metadatas
+            .into_iter()
+            .flatten()
+            .map(|meta| (meta.region_id, Arc::new(meta)))
+            .collect();
+        for (i, (schema, table_name)) in logical_tables.iter().enumerate() {
+            let physical_table_id = table_ids[i].1;
+            let physical_region_id = RegionId::new(physical_table_id, 0);
+            let physical_metadata =
+                region_metadatas.get(&physical_region_id).with_context(|| {
+                    error::UnexpectedResultSnafu {
+                        reason: format!(
+                            "Physical region metadata {} for table {} not found",
+                            physical_region_id, table_name
+                        ),
+                    }
+                })?;
+
+            match result_map.get_mut(schema) {
+                Some(table_map) => {
+                    table_map.insert(
+                        table_name.clone(),
+                        (table_ids[i].0, physical_metadata.clone()),
+                    );
+                }
+                None => {
+                    let mut table_map = HashMap::new();
+                    table_map.insert(
+                        table_name.clone(),
+                        (table_ids[i].0, physical_metadata.clone()),
+                    );
+                    result_map.insert(schema.to_string(), table_map);
+                }
+            }
+        }
+
+        Ok(result_map)
     }
 
     /// Builds [RecordBatch] from rows with primary key encoded.

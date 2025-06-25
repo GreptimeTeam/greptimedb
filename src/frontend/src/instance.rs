@@ -39,6 +39,7 @@ use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
@@ -51,6 +52,7 @@ use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::schema_helper::SchemaHelper;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
+use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
@@ -170,6 +172,14 @@ impl Instance {
             self.statement_executor.procedure_executor().clone(),
             self.statement_executor.cache_invalidator().clone(),
         )
+    }
+
+    pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
+        self.inserter.partition_manager()
+    }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        self.inserter.node_manager()
     }
 }
 

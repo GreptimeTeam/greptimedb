@@ -730,8 +730,7 @@ pub async fn ensure_logical_tables_for_metrics(
 
 /// Gets the list of metadatas for a list of region ids.
 // TODO(yingwen): Should we return RegionMetadataRef?
-#[allow(dead_code)]
-async fn metadatas_for_region_ids(
+pub async fn metadatas_for_region_ids(
     partition_manager: &PartitionRuleManagerRef,
     node_manager: &NodeManagerRef,
     region_ids: &[RegionId],

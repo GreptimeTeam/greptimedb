@@ -99,6 +99,8 @@ where
             let bulk_state = if opts.prom_store.bulk_mode {
                 Some(PromBulkState {
                     schema_helper: self.instance.create_schema_helper(),
+                    partition_manager: self.instance.partition_manager().clone(),
+                    node_manager: self.instance.node_manager().clone(),
                 })
             } else {
                 None

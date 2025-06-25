@@ -82,6 +82,7 @@ object-pool = "0.5"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
 operator.workspace = true
+partition.workspace = true
 simd-json.workspace = true
 socket2 = "0.5"
 # use crates.io version once the following PRs is merged into the nextest release

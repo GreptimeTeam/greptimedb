@@ -136,6 +136,14 @@ impl Inserter {
         }
     }
 
+    pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
+        &self.partition_manager
+    }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        &self.node_manager
+    }
+
     pub async fn handle_column_inserts(
         &self,
         requests: InsertRequests,

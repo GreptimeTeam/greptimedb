@@ -11286,6 +11286,7 @@ dependencies = [
  "operator",
  "otel-arrow-rust",
  "parking_lot 0.12.3",
+ "partition",
  "permutation",
  "pgwire",
  "pin-project",

@@ -20,13 +20,12 @@ use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use operator::schema_helper::SchemaHelper;
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
-use session::context::QueryContextRef;
 
 use crate::batch_builder::MetricsBatchBuilder;
 use crate::error::Result;
+use crate::http::prom_store::PromBulkContext;
 use crate::http::PromValidationMode;
 use crate::proto::{decode_string, PromLabel};
 use crate::repeated_field::Clear;
@@ -97,20 +96,22 @@ impl TablesBuilder {
     }
 
     /// Converts [TablesBuilder] to record batch and clears inner states.
-    pub(crate) async fn as_record_batch(
-        &mut self,
-        schema_helper: SchemaHelper,
-        query_ctx: &QueryContextRef,
-    ) -> Result<()> {
-        let mut batch_builder = MetricsBatchBuilder::new(schema_helper);
-        let mut tables = std::mem::take(&mut self.tables);
+    pub(crate) async fn as_record_batch(&mut self, bulk_ctx: &PromBulkContext) -> Result<()> {
+        let batch_builder = MetricsBatchBuilder::new(
+            bulk_ctx.schema_helper.clone(),
+            bulk_ctx.partition_manager.clone(),
+            bulk_ctx.node_manager.clone(),
+        );
+        let tables = std::mem::take(&mut self.tables);
 
         batch_builder
-            .create_or_alter_physical_tables(&tables, query_ctx)
+            .create_or_alter_physical_tables(&tables, &bulk_ctx.query_ctx)
             .await?;
 
         // Gather all region metadata for region 0 of physical tables.
-        let physical_region_metadata = batch_builder.collect_physical_region_metadata(&[]).await;
+        let physical_region_metadata = batch_builder
+            .collect_physical_region_metadata(&[], &bulk_ctx.query_ctx)
+            .await;
 
         batch_builder
             .append_rows_to_batch(None, None, &mut tables, &physical_region_metadata)

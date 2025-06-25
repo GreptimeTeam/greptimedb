@@ -22,12 +22,14 @@ use axum::response::IntoResponse;
 use axum::Extension;
 use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use operator::schema_helper::SchemaHelper;
+use partition::manager::PartitionRuleManagerRef;
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, PipelineDefinition};
 use prost::Message;
@@ -57,6 +59,8 @@ pub const VM_PROTO_VERSION: &str = "1";
 #[derive(Clone)]
 pub struct PromBulkState {
     pub schema_helper: SchemaHelper,
+    pub partition_manager: PartitionRuleManagerRef,
+    pub node_manager: NodeManagerRef,
 }
 
 #[derive(Clone)]
@@ -212,9 +216,11 @@ fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
 }
 
 /// Context for processing remote write requests in bulk mode.
-struct PromBulkContext {
-    schema_helper: SchemaHelper,
-    query_ctx: QueryContextRef,
+pub struct PromBulkContext {
+    pub(crate) schema_helper: SchemaHelper,
+    pub(crate) query_ctx: QueryContextRef,
+    pub(crate) partition_manager: PartitionRuleManagerRef,
+    pub(crate) node_manager: NodeManagerRef,
 }
 
 async fn decode_remote_write_request(
@@ -280,9 +286,7 @@ async fn decode_remote_write_request_to_batch(
         .merge(buf, prom_validation_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
 
-    request
-        .as_record_batch(bulk.schema_helper, &bulk.query_ctx)
-        .await
+    request.as_record_batch(&bulk).await
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
