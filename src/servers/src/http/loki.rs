@@ -315,48 +315,50 @@ impl Iterator for JsonStreamItem {
     type Item = LokiMiddleItem<serde_json::Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let line = self.lines.pop_front()?;
-        let serde_json::Value::Array(line) = line else {
-            warn!("line is not an array, {:?}", line);
-            return self.next();
-        };
-        if line.len() < 2 {
-            warn!("line is too short, {:?}", line);
-            return self.next();
+        while let Some(line) = self.lines.pop_front() {
+            let serde_json::Value::Array(line) = line else {
+                warn!("line is not an array, {:?}", line);
+                continue;
+            };
+            if line.len() < 2 {
+                warn!("line is too short, {:?}", line);
+                continue;
+            }
+            let mut line: VecDeque<serde_json::Value> = line.into();
+
+            // get ts
+            let ts = line.pop_front().and_then(|ts| match ts {
+                serde_json::Value::String(ts) => ts.parse::<i64>().ok(),
+                _ => {
+                    warn!("missing or invalid timestamp, {:?}", ts);
+                    None
+                }
+            });
+            let Some(ts) = ts else {
+                continue;
+            };
+
+            let line_text = line.pop_front().and_then(|l| match l {
+                serde_json::Value::String(l) => Some(l),
+                _ => {
+                    warn!("missing or invalid line, {:?}", l);
+                    None
+                }
+            });
+            let Some(line_text) = line_text else {
+                continue;
+            };
+
+            let structured_metadata = line.pop_front();
+
+            return Some(LokiMiddleItem {
+                ts,
+                line: line_text,
+                structured_metadata,
+                labels: self.labels.clone(),
+            });
         }
-        let mut line: VecDeque<serde_json::Value> = line.into();
-
-        // get ts
-        let ts = line.pop_front().and_then(|ts| match ts {
-            serde_json::Value::String(ts) => ts.parse::<i64>().ok(),
-            _ => {
-                warn!("missing or invalid timestamp, {:?}", ts);
-                None
-            }
-        });
-        let Some(ts) = ts else {
-            return self.next();
-        };
-
-        let line_text = line.pop_front().and_then(|l| match l {
-            serde_json::Value::String(l) => Some(l),
-            _ => {
-                warn!("missing or invalid line, {:?}", l);
-                None
-            }
-        });
-        let Some(line_text) = line_text else {
-            return self.next();
-        };
-
-        let structured_metadata = line.pop_front();
-
-        Some(LokiMiddleItem {
-            ts,
-            line: line_text,
-            structured_metadata,
-            labels: self.labels.clone(),
-        })
+        None
     }
 }
 
