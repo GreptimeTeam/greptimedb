@@ -117,7 +117,7 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
+pub static PUBLIC_APIS: [&str; 3] = ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -724,6 +724,10 @@ impl HttpServer {
                 routing::get(handler::health).post(handler::health),
             )
             .route(
+                &format!("/{HTTP_API_VERSION}/health"),
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
                 "/ready",
                 routing::get(handler::health).post(handler::health),
             );
@@ -1290,6 +1294,16 @@ mod test {
         let client = TestClient::new(app).await;
 
         let res = client.get("/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+
+        let res = client.get("/v1/health").send().await;
 
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
