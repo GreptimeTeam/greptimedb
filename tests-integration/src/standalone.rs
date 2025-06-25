@@ -228,8 +228,6 @@ impl GreptimeDbStandaloneBuilder {
                 },
                 procedure_manager.clone(),
                 register_procedure_loaders,
-                #[cfg(feature = "enterprise")]
-                None,
             )
             .unwrap(),
         );
