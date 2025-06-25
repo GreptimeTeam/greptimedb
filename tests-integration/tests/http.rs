@@ -4058,20 +4058,20 @@ processors:
     // test schema
     // CREATE TABLE IF NOT EXISTS "loki_table_name" (
     //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
-    //     "key1" STRING NULL,
-    //     "key2" STRING NULL,
+    //     "loki_label_service" STRING NULL,
+    //     "loki_label_source" STRING NULL,
+    //     "loki_label_wadaxi" STRING NULL,
     //     "loki_line" STRING NULL,
-    //     "service" STRING NULL,
-    //     "source" STRING NULL,
-    //     "wadaxi" STRING NULL,
-    //     "key3" STRING NULL,
+    //     "loki_metadata_key1" STRING NULL,
+    //     "loki_metadata_key2" STRING NULL,
+    //     "loki_metadata_key3" STRING NULL,
     //     TIME INDEX ("loki_timestamp")
     //     )
     //   ENGINE=mito
     //   WITH(
     //     append_mode = 'true'
     //   )
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"key1\\\" STRING NULL,\\n  \\\"key2\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  \\\"key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -4081,7 +4081,7 @@ processors:
     .await;
 
     // test content
-    let expected = "[[1730976830000,\"value1\",\"value2\",\"this is a log message\",\"test\",\"integration\",\"do anything\",null],[1730976831000,null,null,\"this is a log message 2\",\"test\",\"integration\",\"do anything\",\"value3\"],[1730976832000,null,null,\"this is a log message 2\",\"test\",\"integration\",\"do anything\",null]]";
+    let expected =      "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
     validate_data(
         "loki_pb_content",
         &client,
@@ -4229,22 +4229,22 @@ processors:
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    // test schema
     // CREATE TABLE IF NOT EXISTS "loki_table_name" (
     //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
-    //     "key1" STRING NULL,
-    //     "key2" STRING NULL,
+    //     "loki_label_sender" STRING NULL,
+    //     "loki_label_source" STRING NULL,
     //     "loki_line" STRING NULL,
-    //     "sender" STRING NULL,
-    //     "source" STRING NULL,
-    //     "key3" STRING NULL,
+    //     "loki_metadata_key1" STRING NULL,
+    //     "loki_metadata_key2" STRING NULL,
+    //     "loki_metadata_key3" STRING NULL,
     //     TIME INDEX ("loki_timestamp")
     //     )
     //   ENGINE=mito
     //   WITH(
     //     append_mode = 'true'
     //   )
-    // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"key1\\\" STRING NULL,\\n  \\\"key2\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -4254,7 +4254,7 @@ processors:
     .await;
 
     // test content
-    let expected = "[[1735901380059,\"value1\",\"value2\",\"this is line one\",\"integration\",\"test\",null],[1735901398478,null,null,\"this is line two updated\",\"integration\",\"test\",null],[1735901398478,null,null,\"this is line two\",\"integration\",\"test\",\"value3\"]]";
+    let expected = "[[1735901380059,\"integration\",\"test\",\"this is line one\",\"value1\",\"value2\",null],[1735901398478,\"integration\",\"test\",\"this is line two updated\",null,null,null],[1735901398478,\"integration\",\"test\",\"this is line two\",null,null,\"value3\"]]";
     validate_data(
         "loki_json_content",
         &client,

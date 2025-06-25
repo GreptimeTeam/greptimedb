@@ -62,6 +62,9 @@ const LOKI_STRUCTURED_METADATA_COLUMN: &str = "structured_metadata";
 const LOKI_TIMESTAMP_COLUMN_NAME: &str = "loki_timestamp";
 const LOKI_LINE_COLUMN_NAME: &str = "loki_line";
 
+const LOKI_PIPELINE_METADATA_PREFIX: &str = "loki_metadata_";
+const LOKI_PIPELINE_LABEL_PREFIX: &str = "loki_label_";
+
 const STREAMS_KEY: &str = "streams";
 const LABEL_KEY: &str = "stream";
 const LINES_KEY: &str = "values";
@@ -414,7 +417,7 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
             for (k, v) in m {
                 match pipeline::Value::try_from(v) {
                     Ok(v) => {
-                        map.insert(k, v);
+                        map.insert(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k), v);
                     }
                     Err(e) => {
                         warn!("not a valid value, {:?}", e);
@@ -424,7 +427,10 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
         }
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
-                map.insert(k, pipeline::Value::String(v));
+                map.insert(
+                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
+                    pipeline::Value::String(v),
+                );
             });
         }
 
@@ -546,12 +552,18 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
             .unwrap_or_default()
             .into_iter()
             .for_each(|d| {
-                map.insert(d.name, pipeline::Value::String(d.value));
+                map.insert(
+                    format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, d.name),
+                    pipeline::Value::String(d.value),
+                );
             });
 
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
-                map.insert(k, pipeline::Value::String(v));
+                map.insert(
+                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
+                    pipeline::Value::String(v),
+                );
             });
         }
 
