@@ -150,23 +150,13 @@ impl DdlManager {
         Ok(manager)
     }
 
-    /// Returns a new [DdlManager] with [TableMetadataManagerRef].
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_ddl_manager(
-        ddl_context: DdlContext,
-        procedure_manager: ProcedureManagerRef,
-        register_loaders: bool,
+        mut self,
         trigger_ddl_manager: Option<TriggerDdlManagerRef>,
-    ) -> Result<Self> {
-        let manager = Self {
-            ddl_context,
-            procedure_manager,
-            trigger_ddl_manager,
-        };
-        if register_loaders {
-            manager.register_loaders()?;
-        }
-        Ok(manager)
+    ) -> Self {
+        self.trigger_ddl_manager = trigger_ddl_manager;
+        self
     }
 
     /// Returns the [TableMetadataManagerRef].

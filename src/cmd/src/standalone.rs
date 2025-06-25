@@ -610,24 +610,14 @@ impl StartCommand {
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         };
         let procedure_manager_c = procedure_manager.clone();
+
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+            .context(error::InitDdlManagerSnafu)?;
+        #[cfg(feature = "enterprise")]
         let ddl_manager = {
-            #[cfg(feature = "enterprise")]
-            {
-                let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
-                    plugins.get();
-                DdlManager::with_trigger_ddl_manager(
-                    ddl_context,
-                    procedure_manager_c,
-                    true,
-                    trigger_ddl_manager,
-                )
-                .context(error::InitDdlManagerSnafu)?
-            }
-            #[cfg(not(feature = "enterprise"))]
-            {
-                DdlManager::try_new(ddl_context, procedure_manager_c, true)
-                    .context(error::InitDdlManagerSnafu)?
-            }
+            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
+                plugins.get();
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
         };
         let ddl_task_executor: ProcedureExecutorRef = Arc::new(ddl_manager);
 
