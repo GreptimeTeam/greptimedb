@@ -40,7 +40,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
-use mito2::engine::MitoEngine;
+use mito2::engine::{MitoEngine, MitoEngineBuilder};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::dummy_catalog::TableProviderFactoryRef;
@@ -389,15 +389,13 @@ impl DatanodeBuilder {
         );
 
         let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
-        let engines = Self::build_store_engines(
-            opts,
-            object_store_manager,
-            schema_metadata_manager,
-            self.plugins.clone(),
-            #[cfg(feature = "enterprise")]
-            self.extension_range_provider_factory.take(),
-        )
-        .await?;
+        let engines = self
+            .build_store_engines(
+                object_store_manager,
+                schema_metadata_manager,
+                self.plugins.clone(),
+            )
+            .await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -409,19 +407,16 @@ impl DatanodeBuilder {
 
     /// Builds [RegionEngineRef] from `store_engine` section in `opts`
     async fn build_store_engines(
-        opts: &DatanodeOptions,
+        &mut self,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
-        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
-            mito2::extension::BoxedExtensionRangeProviderFactory,
-        >,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
         let mut mito_engine_config = MitoConfig::default();
         let mut file_engine_config = file_engine::config::EngineConfig::default();
 
-        for engine in &opts.region_engine {
+        for engine in &self.opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
                     mito_engine_config = config.clone();
@@ -435,16 +430,14 @@ impl DatanodeBuilder {
             }
         }
 
-        let mito_engine = Self::build_mito_engine(
-            opts,
-            object_store_manager.clone(),
-            mito_engine_config,
-            schema_metadata_manager.clone(),
-            plugins.clone(),
-            #[cfg(feature = "enterprise")]
-            extension_range_provider_factory,
-        )
-        .await?;
+        let mito_engine = self
+            .build_mito_engine(
+                object_store_manager.clone(),
+                mito_engine_config,
+                schema_metadata_manager.clone(),
+                plugins.clone(),
+            )
+            .await?;
 
         let metric_engine = MetricEngine::try_new(mito_engine.clone(), metric_engine_config)
             .context(BuildMetricEngineSnafu)?;
@@ -463,15 +456,13 @@ impl DatanodeBuilder {
 
     /// Builds [MitoEngine] according to options.
     async fn build_mito_engine(
-        opts: &DatanodeOptions,
+        &mut self,
         object_store_manager: ObjectStoreManagerRef,
         mut config: MitoConfig,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
-        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
-            mito2::extension::BoxedExtensionRangeProviderFactory,
-        >,
     ) -> Result<MitoEngine> {
+        let opts = &self.opts;
         if opts.storage.is_object_storage() {
             // Enable the write cache when setting object storage
             config.enable_write_cache = true;
@@ -479,19 +470,27 @@ impl DatanodeBuilder {
         }
 
         let mito_engine = match &opts.wal {
-            DatanodeWalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
-                &opts.storage.data_home,
-                config,
-                Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
-                    .await?,
-                object_store_manager,
-                schema_metadata_manager,
-                plugins,
+            DatanodeWalConfig::RaftEngine(raft_engine_config) => {
+                let log_store =
+                    Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
+                        .await?;
+
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    plugins,
+                );
+
                 #[cfg(feature = "enterprise")]
-                extension_range_provider_factory,
-            )
-            .await
-            .context(BuildMitoEngineSnafu)?,
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
             DatanodeWalConfig::Kafka(kafka_config) => {
                 if kafka_config.create_index && opts.node_id.is_none() {
                     warn!("The WAL index creation only available in distributed mode.")
@@ -513,18 +512,21 @@ impl DatanodeBuilder {
                     None
                 };
 
-                MitoEngine::new(
+                let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
                     config,
                     Self::build_kafka_log_store(kafka_config, global_index_collector).await?,
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
-                    #[cfg(feature = "enterprise")]
-                    extension_range_provider_factory,
-                )
-                .await
-                .context(BuildMitoEngineSnafu)?
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
         };
         Ok(mito_engine)

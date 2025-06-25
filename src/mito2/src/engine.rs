@@ -115,6 +115,81 @@ use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
 
+pub struct MitoEngineBuilder<'a, S: LogStore> {
+    data_home: &'a str,
+    config: MitoConfig,
+    log_store: Arc<S>,
+    object_store_manager: ObjectStoreManagerRef,
+    schema_metadata_manager: SchemaMetadataManagerRef,
+    plugins: Plugins,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+}
+
+impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
+    pub fn new(
+        data_home: &'a str,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+        plugins: Plugins,
+    ) -> Self {
+        Self {
+            data_home,
+            config,
+            log_store,
+            object_store_manager,
+            schema_metadata_manager,
+            plugins,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory: None,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    pub fn with_extension_range_provider_factory(
+        self,
+        extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+    ) -> Self {
+        Self {
+            extension_range_provider_factory,
+            ..self
+        }
+    }
+
+    pub async fn try_build(mut self) -> Result<MitoEngine> {
+        self.config.sanitize(self.data_home)?;
+
+        let config = Arc::new(self.config);
+        let workers = WorkerGroup::start(
+            config.clone(),
+            self.log_store.clone(),
+            self.object_store_manager,
+            self.schema_metadata_manager,
+            self.plugins,
+        )
+        .await?;
+        let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let inner = EngineInner {
+            workers,
+            config,
+            wal_raw_entry_reader,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory: None,
+        };
+
+        #[cfg(feature = "enterprise")]
+        let inner =
+            inner.with_extension_range_provider_factory(self.extension_range_provider_factory);
+
+        Ok(MitoEngine {
+            inner: Arc::new(inner),
+        })
+    }
+}
+
 /// Region engine implementation for timeseries data.
 #[derive(Clone)]
 pub struct MitoEngine {
@@ -125,31 +200,21 @@ impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
     pub async fn new<S: LogStore>(
         data_home: &str,
-        mut config: MitoConfig,
+        config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
-        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
-            BoxedExtensionRangeProviderFactory,
-        >,
     ) -> Result<MitoEngine> {
-        config.sanitize(data_home)?;
-
-        Ok(MitoEngine {
-            inner: Arc::new(
-                EngineInner::new(
-                    config,
-                    log_store,
-                    object_store_manager,
-                    schema_metadata_manager,
-                    plugins,
-                    #[cfg(feature = "enterprise")]
-                    extension_range_provider_factory,
-                )
-                .await?,
-            ),
-        })
+        let builder = MitoEngineBuilder::new(
+            data_home,
+            config,
+            log_store,
+            object_store_manager,
+            schema_metadata_manager,
+            plugins,
+        );
+        builder.try_build().await
     }
 
     /// Returns true if the specific region exists.
@@ -361,33 +426,16 @@ fn prepare_batch_open_requests(
 }
 
 impl EngineInner {
-    /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    async fn new<S: LogStore>(
-        config: MitoConfig,
-        log_store: Arc<S>,
-        object_store_manager: ObjectStoreManagerRef,
-        schema_metadata_manager: SchemaMetadataManagerRef,
-        plugins: Plugins,
-        #[cfg(feature = "enterprise")] extension_range_provider_factory: Option<
-            BoxedExtensionRangeProviderFactory,
-        >,
-    ) -> Result<EngineInner> {
-        let config = Arc::new(config);
-        let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
-        Ok(EngineInner {
-            workers: WorkerGroup::start(
-                config.clone(),
-                log_store,
-                object_store_manager,
-                schema_metadata_manager,
-                plugins,
-            )
-            .await?,
-            config,
-            wal_raw_entry_reader,
-            #[cfg(feature = "enterprise")]
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    fn with_extension_range_provider_factory(
+        self,
+        extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+    ) -> Self {
+        Self {
             extension_range_provider_factory,
-        })
+            ..self
+        }
     }
 
     /// Stop the inner engine.
