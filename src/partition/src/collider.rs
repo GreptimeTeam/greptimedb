@@ -212,15 +212,15 @@ impl<'a> Collider<'a> {
         match expr.op {
             RestrictedOp::And => {
                 // For AND operations, collect nucleons from both sides
-                Self::collect_nucleons_from_operand(&*expr.lhs, nucleons, normalized_values)?;
-                Self::collect_nucleons_from_operand(&*expr.rhs, nucleons, normalized_values)?;
+                Self::collect_nucleons_from_operand(&expr.lhs, nucleons, normalized_values)?;
+                Self::collect_nucleons_from_operand(&expr.rhs, nucleons, normalized_values)?;
             }
             _ => {
                 // For non-AND operations, try to create a nucleon directly
                 nucleons.push(Self::try_create_nucleon(
-                    &*expr.lhs,
+                    &expr.lhs,
                     &expr.op,
-                    &*expr.rhs,
+                    &expr.rhs,
                     normalized_values,
                 )?);
             }
