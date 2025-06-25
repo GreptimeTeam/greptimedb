@@ -645,6 +645,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Invalid timestamp value type in row data, expected TimestampMillisecondValue"
+    ))]
+    InvalidTimestampValueType {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid field value type in row data, expected F64Value"))]
+    InvalidFieldValueType {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -771,6 +785,9 @@ impl ErrorExt for Error {
             CommonMeta { source, .. } => source.status_code(),
             Operator { source, .. } => source.status_code(),
             EncodePrimaryKey { source, .. } => source.status_code(),
+            InvalidTimestampValueType { .. } | InvalidFieldValueType { .. } => {
+                StatusCode::Unexpected
+            }
         }
     }
 

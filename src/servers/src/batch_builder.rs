@@ -296,14 +296,16 @@ impl BatchEncoder {
 
             // process timestamp and field. We already know the position of timestamps and values in [TableBuilder].
             let ValueData::TimestampMillisecondValue(ts) =
+                // safety: timestamp values cannot be null
                 row.value_at(0).value_data.as_ref().unwrap()
             else {
-                todo!("return an error")
+                return error::InvalidTimestampValueTypeSnafu.fail();
             };
             self.timestamps.push(*ts);
 
+            // safety: field values cannot be null in prom remote write
             let ValueData::F64Value(val) = row.value_at(1).value_data.as_ref().unwrap() else {
-                todo!("return an error")
+                return error::InvalidFieldValueTypeSnafu.fail();
             };
             self.value.push(*val);
         }
