@@ -22,7 +22,6 @@ use datatypes::schema::{ColumnSchema, SchemaRef};
 use partition::manager::PartitionRuleManager;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
 use table::metadata::TableInfoRef;
@@ -227,7 +226,7 @@ fn sql_value_to_grpc_value(
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(
+        common_sql::convert::sql_value_to_value(
             column,
             &column_schema.data_type,
             sql_val,
@@ -235,7 +234,7 @@ fn sql_value_to_grpc_value(
             None,
             auto_string_to_numeric,
         )
-        .context(ParseSqlSnafu)?
+        .context(crate::error::SqlCommonSnafu)?
     };
 
     let grpc_value = value_to_grpc_value(value);

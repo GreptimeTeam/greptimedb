@@ -45,6 +45,7 @@ use common_meta::rpc::ddl::{
 };
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_query::Output;
+use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
 use common_time::Timezone;
 use datafusion_common::tree_node::TreeNodeVisitor;
@@ -71,7 +72,6 @@ use sql::statements::create::trigger::CreateTrigger;
 use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
-use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
@@ -87,10 +87,10 @@ use crate::error::{
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     DeserializePartitionSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, ParseSqlValueSnafu, Result,
-    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, Result, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
@@ -1858,7 +1858,7 @@ fn convert_value(
         unary_op,
         false,
     )
-    .context(ParseSqlValueSnafu)
+    .context(error::SqlCommonSnafu)
 }
 
 #[cfg(test)]

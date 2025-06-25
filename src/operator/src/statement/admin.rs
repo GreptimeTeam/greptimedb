@@ -19,6 +19,7 @@ use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::prelude::TypeSignature;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_sql::convert::sql_value_to_value;
 use common_telemetry::tracing;
 use common_time::Timezone;
 use datatypes::data_type::DataType;
@@ -30,7 +31,6 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
-use sql::statements::sql_value_to_value;
 
 use crate::error::{self, Result};
 use crate::statement::StatementExecutor;
@@ -186,7 +186,7 @@ fn values_to_vectors_by_exact_types(
         .zip(exact_types.iter())
         .map(|(value, data_type)| {
             let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
-                .context(error::ParseSqlValueSnafu)?;
+                .context(error::SqlCommonSnafu)?;
 
             Ok(value_to_vector(value))
         })
