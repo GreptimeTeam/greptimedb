@@ -16,6 +16,7 @@
 #![feature(let_chains)]
 //! Structs and traits for partitioning rule.   
 
+pub mod collider;
 pub mod error;
 pub mod expr;
 pub mod manager;
