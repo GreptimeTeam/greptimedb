@@ -8484,6 +8484,7 @@ dependencies = [
  "session",
  "snafu 0.8.5",
  "sql",
+ "sql-common",
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "substrait 0.15.0",
@@ -11308,6 +11309,7 @@ dependencies = [
  "snap",
  "socket2",
  "sql",
+ "sql-common",
  "store-api",
  "strum 0.27.1",
  "table",
@@ -11697,11 +11699,30 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
+ "sql-common",
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "sqlparser_derive 0.1.1",
  "store-api",
  "table",
  "uuid",
+]
+
+[[package]]
+name = "sql-common"
+version = "0.15.0"
+dependencies = [
+ "common-base",
+ "common-datasource",
+ "common-decimal",
+ "common-error",
+ "common-macro",
+ "common-time",
+ "datafusion-sql",
+ "datatypes",
+ "hex",
+ "jsonb",
+ "snafu 0.8.5",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
 ]
 
 [[package]]

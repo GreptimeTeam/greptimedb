@@ -27,8 +27,8 @@ use itertools::Itertools;
 use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
-use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
+use sql_common::convert::sql_value_to_value;
 
 use crate::error::{self, DataFusionSnafu, Result};
 
