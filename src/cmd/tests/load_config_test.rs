@@ -23,7 +23,7 @@ use common_wal::config::raft_engine::RaftEngineConfig;
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
-use flow::adapter::FlownodeOptions;
+use flow::FlownodeOptions;
 use frontend::frontend::FrontendOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;

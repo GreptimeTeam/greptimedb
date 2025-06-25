@@ -25,7 +25,7 @@
 // #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
 
 // allow unused for now because it should be use later
-pub mod adapter;
+mod adapter;
 pub(crate) mod batching_mode;
 mod compute;
 mod df_optimizer;
@@ -43,7 +43,8 @@ mod utils;
 #[cfg(test)]
 mod test_utils;
 
-pub use adapter::{FlowConfig, FlowStreamingEngineRef, FlownodeOptions, StreamingEngine};
+pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
+pub use crate::adapter::FlownodeOptions;
 pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
 pub use engine::FlowAuthHeader;
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
