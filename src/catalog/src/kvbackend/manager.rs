@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
@@ -167,7 +167,7 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
             // Gather all column names from the logical table
-            let logical_column_names: std::collections::HashSet<_> = new_table_info
+            let logical_column_names: HashSet<_> = new_table_info
                 .meta
                 .schema
                 .column_schemas()
@@ -182,17 +182,14 @@ impl KvBackendCatalogManager {
                 .partition_key_indices
                 .iter()
                 .filter(|&&index| {
-                    if let Some(physical_column) = physical_table_info_value
+                    physical_table_info_value
                         .table_info
                         .meta
                         .schema
                         .column_schemas
                         .get(index)
-                    {
-                        logical_column_names.contains(&physical_column.name)
-                    } else {
-                        false
-                    }
+                        .map(|physical_column| logical_column_names.contains(&physical_column.name))
+                        .unwrap_or(false)
                 })
                 .cloned()
                 .collect();
