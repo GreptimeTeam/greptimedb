@@ -147,7 +147,7 @@ impl MetricEngineInner {
     fn modify_rows(
         &self,
         physical_region_id: RegionId,
-        table_id: TableId,
+        logical_table_id: TableId,
         rows: &mut Rows,
         encoding: PrimaryKeyEncoding,
     ) -> Result<()> {
@@ -163,7 +163,9 @@ impl MetricEngineInner {
                 .physical_columns();
             RowsIter::new(input, name_to_id)
         };
-        let output = self.row_modifier.modify_rows(iter, table_id, encoding)?;
+        let output = self
+            .row_modifier
+            .modify_rows(iter, logical_table_id, encoding)?;
         *rows = output;
         Ok(())
     }

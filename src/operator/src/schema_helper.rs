@@ -639,16 +639,12 @@ pub async fn ensure_logical_tables_for_metrics(
 ) -> Result<()> {
     let catalog_name = query_ctx.current_catalog();
     let schema_name = query_ctx.current_schema();
-    
+
     // 1. For each physical table, creates it if it doesn't exist.
     for physical_table_name in schemas.schemas.keys() {
         // Check if the physical table exists and create it if it doesn't
         let physical_table_opt = helper
-            .get_table(
-                catalog_name,
-                &schema_name,
-                physical_table_name,
-            )
+            .get_table(catalog_name, &schema_name, physical_table_name)
             .await?;
 
         if physical_table_opt.is_none() {

@@ -13,16 +13,30 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use ahash::HashMap;
-use api::v1::{ColumnDataType, ColumnSchema, SemanticType};
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, ColumnSchema, OpType, SemanticType};
+use arrow::array::{
+    ArrayBuilder, ArrayRef, BinaryBuilder, Float64Array, TimestampMillisecondArray, UInt64Array,
+    UInt8Array,
+};
+use arrow_schema::Field;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use metric_engine::row_modifier::{RowModifier, RowsIter};
+use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use operator::schema_helper::{
     ensure_logical_tables_for_metrics, LogicalSchema, LogicalSchemas, SchemaHelper,
 };
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::storage::consts::{
+    ReservedColumnId, OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+};
+use table::metadata::TableId;
 use table::table_name::TableName;
 use table::TableRef;
 
@@ -113,21 +127,31 @@ impl MetricsBatchBuilder {
         Ok(physical_table_name.to_string())
     }
 
+    /// Retrieves physical region metadata of given logical table names.
+    async fn collect_physical_region_metadata(
+        logical_table_names: &[String],
+    ) -> HashMap<
+        String,         /*logical table name*/
+        RegionMetadata, /*Region metadata for physical re*/
+    > {
+        todo!()
+    }
+
     /// Builds [RecordBatch] from rows with primary key encoded.
     /// Potentially we also need to modify the column name of timestamp and value field to
     /// match the schema of physical tables.
     /// Note:
     /// Make sure all logical table and physical table are created when reach here and the mapping
     /// from logical table name to physical table ref is stored in [physical_tables].
-    fn rows_to_batch(
+    async fn rows_to_batch(
         &self,
         current_catalog: Option<String>,
         current_schema: Option<String>,
-        table_data: &HashMap<PromCtx, HashMap<String, TableBuilder>>,
-        physical_tables: &HashMap<TableName, TableRef>,
+        table_data: &mut HashMap<PromCtx, HashMap<String, TableBuilder>>,
+        physical_table_metadata: &HashMap<TableName, RegionMetadataRef>,
     ) -> error::Result<()> {
         for (ctx, tables_in_schema) in table_data {
-            for (logical_table_name, _table) in tables_in_schema {
+            for (logical_table_name, table) in tables_in_schema {
                 // use session catalog.
                 let catalog = current_catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
                 // schema in PromCtx precedes session schema.
@@ -136,8 +160,19 @@ impl MetricsBatchBuilder {
                     .as_deref()
                     .or(current_schema.as_deref())
                     .unwrap_or(DEFAULT_SCHEMA_NAME);
-                let logical_table = TableName::new(catalog, schema, logical_table_name);
-                let Some(_physical_table) = physical_tables.get(&logical_table) else {
+                let logical_table_ref = self
+                    .schema_helper
+                    .catalog_manager()
+                    .table(&catalog, &schema, &logical_table_name, None)
+                    .await
+                    .context(error::CatalogSnafu)?
+                    .context(error::TableNotFoundSnafu {
+                        catalog,
+                        schema,
+                        table: logical_table_name,
+                    })?;
+                let logical_table = TableName::new(catalog, schema, logical_table_name.clone());
+                let Some(physical_table) = physical_table_metadata.get(&logical_table) else {
                     // all physical tables must be created when reach here.
                     return error::TableNotFoundSnafu {
                         catalog,
@@ -146,10 +181,156 @@ impl MetricsBatchBuilder {
                     }
                     .fail();
                 };
+
+                let batch_encoder = Self::create_sparse_encoder(
+                    logical_table_ref.table_info().table_id(),
+                    logical_table_name.clone(),
+                    physical_table.clone(),
+                    std::mem::take(table),
+                );
+                let _batch = batch_encoder.to_batch()?;
+                //todo(hl): Ingest batch.
             }
         }
 
         todo!()
+    }
+
+    /// Creates Encoder that converts Rows into RecordBatch with primary key encoded.
+    fn create_sparse_encoder(
+        logical_table_id: TableId,
+        logical_table_name: String,
+        physical_region_meta: RegionMetadataRef,
+        mut table_builder: TableBuilder,
+    ) -> BatchEncoder {
+        let name_to_id: std::collections::HashMap<_, _> = physical_region_meta
+            .column_metadatas
+            .iter()
+            .map(|c| (c.column_schema.name.clone(), c.column_id))
+            .collect();
+
+        // todo(hl): we can simplified the row iter because schema in TableBuilder is known (ts, val, tags...)
+        let row_insert_request = table_builder.as_row_insert_request(logical_table_name);
+        let rows = row_insert_request.rows.unwrap();
+        let rows_iter = RowsIter::new(rows, &name_to_id);
+        BatchEncoder::new(logical_table_id, rows_iter)
+    }
+}
+
+struct BatchEncoder {
+    logical_table_id: TableId,
+    iter: RowsIter,
+    encoded_primary_key_array_builder: BinaryBuilder,
+    timestamps: Vec<i64>,
+    value: Vec<f64>,
+    pk_codec: SparsePrimaryKeyCodec,
+}
+
+impl BatchEncoder {
+    fn new(logical_table_id: TableId, iter: RowsIter) -> BatchEncoder {
+        let num_rows = iter.num_rows();
+        Self {
+            logical_table_id,
+            iter,
+            encoded_primary_key_array_builder: BinaryBuilder::with_capacity(num_rows, 0),
+            timestamps: Vec::with_capacity(num_rows),
+            value: Vec::with_capacity(num_rows),
+            pk_codec: SparsePrimaryKeyCodec::schemaless(),
+        }
+    }
+
+    /// Creates the schema of output record batch.
+    fn schema() -> arrow::datatypes::SchemaRef {
+        Arc::new(arrow::datatypes::Schema::new(vec![
+            Field::new(GREPTIME_VALUE, arrow::datatypes::DataType::Float64, false),
+            Field::new(
+                GREPTIME_TIMESTAMP,
+                arrow::datatypes::DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Millisecond,
+                    None,
+                ),
+                false,
+            ),
+            Field::new(
+                PRIMARY_KEY_COLUMN_NAME,
+                arrow::datatypes::DataType::Binary,
+                false,
+            ),
+            Field::new(
+                SEQUENCE_COLUMN_NAME,
+                arrow::datatypes::DataType::UInt64,
+                false,
+            ),
+            Field::new(
+                OP_TYPE_COLUMN_NAME,
+                arrow::datatypes::DataType::UInt8,
+                false,
+            ),
+        ]))
+    }
+
+    fn to_batch(mut self) -> error::Result<arrow::record_batch::RecordBatch> {
+        let mut encode_buf = vec![];
+        for row in self.iter.iter_mut() {
+            let (table_id, ts_id) = RowModifier::fill_internal_columns(self.logical_table_id, &row);
+            let internal_columns = [
+                (
+                    ReservedColumnId::table_id(),
+                    api::helper::pb_value_to_value_ref(&table_id, &None),
+                ),
+                (
+                    ReservedColumnId::tsid(),
+                    api::helper::pb_value_to_value_ref(&ts_id, &None),
+                ),
+            ];
+            self.pk_codec
+                .encode_to_vec(internal_columns.into_iter(), &mut encode_buf)
+                .context(error::EncodePrimaryKeySnafu)?;
+            self.pk_codec
+                .encode_to_vec(row.primary_keys(), &mut encode_buf)
+                .context(error::EncodePrimaryKeySnafu)?;
+            self.encoded_primary_key_array_builder
+                .append_value(&encode_buf);
+
+            // process timestamp and field. We already know the position of timestamps and values in [TableBuilder].
+            let ValueData::TimestampMillisecondValue(ts) =
+                row.value_at(0).value_data.as_ref().unwrap()
+            else {
+                todo!("return an error")
+            };
+            self.timestamps.push(*ts);
+
+            let ValueData::F64Value(val) = row.value_at(1).value_data.as_ref().unwrap() else {
+                todo!("return an error")
+            };
+            self.value.push(*val);
+        }
+
+        let num_rows = self.iter.num_rows();
+        debug_assert_eq!(self.value.len(), num_rows);
+        debug_assert_eq!(self.value.len(), self.timestamps.len());
+        debug_assert_eq!(
+            self.value.len(),
+            self.encoded_primary_key_array_builder.len()
+        );
+        let value = Float64Array::from(self.value);
+        let timestamp = TimestampMillisecondArray::from(self.timestamps);
+
+        let op_type = UInt8Array::from_value(OpType::Put as u8, num_rows);
+        // todo: now we set sequence all to 0.
+        let sequence = UInt64Array::from_value(0, num_rows);
+        // todo(hl): sort batch by primary key.
+        arrow::array::RecordBatch::try_new(
+            Self::schema(),
+            vec![
+                Arc::new(value) as ArrayRef,
+                Arc::new(timestamp) as ArrayRef,
+                Arc::new(self.encoded_primary_key_array_builder.finish()) as ArrayRef,
+                Arc::new(sequence) as ArrayRef,
+                Arc::new(op_type) as ArrayRef,
+            ],
+        )
+        .context(error::ArrowSnafu)
     }
 }
 

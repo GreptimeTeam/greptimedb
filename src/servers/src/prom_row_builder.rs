@@ -114,7 +114,7 @@ impl TablesBuilder {
 }
 
 /// Builder for one table.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TableBuilder {
     /// Column schemas.
     schema: Vec<ColumnSchema>,

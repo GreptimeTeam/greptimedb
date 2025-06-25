@@ -638,6 +638,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to encode primary key"))]
+    EncodePrimaryKey {
+        source: mito_codec::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -763,6 +770,7 @@ impl ErrorExt for Error {
             HandleOtelArrowRequest { .. } => StatusCode::Internal,
             CommonMeta { source, .. } => source.status_code(),
             Operator { source, .. } => source.status_code(),
+            EncodePrimaryKey { source, .. } => source.status_code(),
         }
     }
 
