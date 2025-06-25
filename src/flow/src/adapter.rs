@@ -251,6 +251,10 @@ impl DiffRequest {
             Self::Delete(v) => v.len(),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 pub fn batches_to_rows_req(batches: Vec<Batch>) -> Result<Vec<DiffRequest>, Error> {
@@ -927,6 +931,12 @@ pub struct FlowTickManager {
     start: Instant,
     /// The timestamp when the flow started
     start_timestamp: repr::Timestamp,
+}
+
+impl Default for FlowTickManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlowTickManager {
