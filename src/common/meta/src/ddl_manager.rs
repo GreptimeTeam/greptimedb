@@ -137,12 +137,30 @@ impl DdlManager {
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
         register_loaders: bool,
-        #[cfg(feature = "enterprise")] trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     ) -> Result<Self> {
         let manager = Self {
             ddl_context,
             procedure_manager,
             #[cfg(feature = "enterprise")]
+            trigger_ddl_manager: None,
+        };
+        if register_loaders {
+            manager.register_loaders()?;
+        }
+        Ok(manager)
+    }
+
+    /// Returns a new [DdlManager] with [TableMetadataManagerRef].
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_ddl_manager(
+        ddl_context: DdlContext,
+        procedure_manager: ProcedureManagerRef,
+        register_loaders: bool,
+        trigger_ddl_manager: Option<TriggerDdlManagerRef>,
+    ) -> Result<Self> {
+        let manager = Self {
+            ddl_context,
+            procedure_manager,
             trigger_ddl_manager,
         };
         if register_loaders {
@@ -1003,8 +1021,6 @@ mod tests {
             },
             procedure_manager.clone(),
             true,
-            #[cfg(feature = "enterprise")]
-            None,
         );
 
         let expected_loaders = vec![
