@@ -18,9 +18,9 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use mime_guess::mime;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::http::header::{GREPTIME_DB_HEADER_EXECUTION_TIME, GREPTIME_DB_HEADER_FORMAT};
-// use super::process_with_limit;
 use crate::http::result::error_result::ErrorResponse;
 use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse, ResponseFormat};
 
@@ -28,10 +28,16 @@ use crate::http::{handler, process_with_limit, GreptimeQueryOutput, HttpResponse
 pub struct CsvResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,
+    with_names: bool,
+    with_types: bool,
 }
 
 impl CsvResponse {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
+    pub async fn from_output(
+        outputs: Vec<crate::error::Result<Output>>,
+        with_names: bool,
+        with_types: bool,
+    ) -> HttpResponse {
         match handler::from_output(outputs).await {
             Err(err) => HttpResponse::Error(err),
             Ok((output, _)) => {
@@ -41,10 +47,14 @@ impl CsvResponse {
                         "cannot output multi-statements result in csv format".to_string(),
                     ))
                 } else {
-                    HttpResponse::Csv(CsvResponse {
+                    let csv_resp = CsvResponse {
                         output,
                         execution_time_ms: 0,
-                    })
+                        with_names: false,
+                        with_types: false,
+                    };
+
+                    HttpResponse::Csv(csv_resp.with_names(with_names).with_types(with_types))
                 }
             }
         }
@@ -65,6 +75,21 @@ impl CsvResponse {
 
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.output = process_with_limit(self.output, limit);
+        self
+    }
+
+    pub fn with_names(mut self, with_names: bool) -> Self {
+        self.with_names = with_names;
+        self
+    }
+
+    pub fn with_types(mut self, with_types: bool) -> Self {
+        self.with_types = with_types;
+
+        // If `with_type` is true, than always set `with_names` to be true.
+        if with_types {
+            self.with_names = true;
+        }
         self
     }
 }
@@ -100,11 +125,50 @@ impl IntoResponse for CsvResponse {
                 format!("{n}\n")
             }
             Some(GreptimeQueryOutput::Records(records)) => {
-                let mut wtr = csv::Writer::from_writer(Vec::new());
+                let mut wtr = csv::WriterBuilder::new()
+                    .terminator(csv::Terminator::CRLF) // RFC 4180
+                    .from_writer(Vec::new());
+
+                if self.with_names {
+                    let names = records
+                        .schema
+                        .column_schemas
+                        .iter()
+                        .map(|c| &c.name)
+                        .collect::<Vec<_>>();
+                    http_try!(wtr.serialize(names));
+                }
+
+                if self.with_types {
+                    let types = records
+                        .schema
+                        .column_schemas
+                        .iter()
+                        .map(|c| &c.data_type)
+                        .collect::<Vec<_>>();
+                    http_try!(wtr.serialize(types));
+                }
 
                 for row in records.rows {
+                    let row = row
+                        .into_iter()
+                        .map(|value| {
+                            match value {
+                                // Cast array and object to string
+                                JsonValue::Array(a) => {
+                                    JsonValue::String(serde_json::to_string(&a).unwrap_or_default())
+                                }
+                                JsonValue::Object(o) => {
+                                    JsonValue::String(serde_json::to_string(&o).unwrap_or_default())
+                                }
+                                v => v,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
                     http_try!(wtr.serialize(row));
                 }
+
                 http_try!(wtr.flush());
 
                 let bytes = http_try!(wtr.into_inner());
@@ -122,12 +186,108 @@ impl IntoResponse for CsvResponse {
             .into_response();
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_FORMAT,
-            HeaderValue::from_static(ResponseFormat::Csv.as_str()),
+            HeaderValue::from_static(
+                ResponseFormat::Csv(self.with_names, self.with_types).as_str(),
+            ),
         );
         resp.headers_mut().insert(
             &GREPTIME_DB_HEADER_EXECUTION_TIME,
             HeaderValue::from(execution_time),
         );
         resp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_query::Output;
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::{ConcreteDataType, ScalarVector};
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{BinaryVector, Float32Vector, StringVector, UInt32Vector, VectorRef};
+
+    use super::*;
+    #[tokio::test]
+    async fn test_csv_response_with_names_and_types() {
+        let (schema, columns) = create_test_data();
+
+        let data = r#"1,,-1000.1400146484375,"{""a"":{""b"":2},""b"":2,""c"":3}"
+2,hello,1.9900000095367432,"{""a"":4,""b"":{""c"":6},""c"":6}""#
+            .replace("\n", "\r\n");
+
+        // Test with_names=true, with_types=true
+        {
+            let body = get_csv_body(&schema, &columns, true, true).await;
+            assert!(body.starts_with("col1,col2,col3,col4\r\nUInt32,String,Float32,Json\r\n"));
+            assert!(body.contains(&data));
+        }
+
+        // Test with_names=true, with_types=false
+        {
+            let body = get_csv_body(&schema, &columns, true, false).await;
+            assert!(body.starts_with("col1,col2,col3,col4\r\n"));
+            assert!(!body.contains("UInt32,String,Float32,Json"));
+            assert!(body.contains(&data));
+        }
+
+        // Test with_names=false, with_types=false
+        {
+            let body = get_csv_body(&schema, &columns, false, false).await;
+            assert!(!body.starts_with("col1,col2,col3,col4"));
+            assert!(!body.contains("UInt32,String,Float32,Json"));
+            assert!(body.contains(&data));
+        }
+    }
+
+    fn create_test_data() -> (Arc<Schema>, Vec<VectorRef>) {
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("col3", ConcreteDataType::float32_datatype(), true),
+            ColumnSchema::new("col4", ConcreteDataType::json_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+
+        let json_strings = [
+            r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
+            r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
+        ];
+
+        let jsonbs = json_strings
+            .iter()
+            .map(|s| {
+                let value = jsonb::parse_value(s.as_bytes()).unwrap();
+                value.to_vec()
+            })
+            .collect::<Vec<_>>();
+
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2])),
+            Arc::new(StringVector::from(vec![None, Some("hello")])),
+            Arc::new(Float32Vector::from_slice(vec![-1000.14, 1.99])),
+            Arc::new(BinaryVector::from_vec(jsonbs)),
+        ];
+
+        (schema, columns)
+    }
+
+    async fn get_csv_body(
+        schema: &Arc<Schema>,
+        columns: &[VectorRef],
+        with_names: bool,
+        with_types: bool,
+    ) -> String {
+        let recordbatch = RecordBatch::new(schema.clone(), columns.to_vec()).unwrap();
+        let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
+        let output = Output::new_with_record_batches(recordbatches);
+        let outputs = vec![Ok(output)];
+
+        let resp = CsvResponse::from_output(outputs, with_names, with_types)
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 }

@@ -142,7 +142,7 @@ async fn test_sql_output_rows() {
                     axum::body::to_bytes(resp.into_body(), usize::MAX)
                         .await
                         .unwrap(),
-                    Bytes::from_static(b"4950\n"),
+                    Bytes::from_static(b"4950\r\n"),
                 );
             }
             HttpResponse::Table(resp) => {
@@ -289,7 +289,7 @@ async fn test_sql_form() {
                     axum::body::to_bytes(resp.into_body(), usize::MAX)
                         .await
                         .unwrap(),
-                    Bytes::from_static(b"4950\n"),
+                    Bytes::from_static(b"4950\r\n"),
                 );
             }
             HttpResponse::Table(resp) => {
