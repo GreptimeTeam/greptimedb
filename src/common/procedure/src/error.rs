@@ -28,6 +28,19 @@ use crate::PoisonKey;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to procedure manager status"))]
+    CheckStatus {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Manager is pasued"))]
+    ManagerPasued {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Failed to execute procedure due to external error, clean poisons: {}",
         clean_poisons
@@ -246,7 +259,8 @@ impl ErrorExt for Error {
             | Error::ListState { source, .. }
             | Error::PutPoison { source, .. }
             | Error::DeletePoison { source, .. }
-            | Error::GetPoison { source, .. } => source.status_code(),
+            | Error::GetPoison { source, .. }
+            | Error::CheckStatus { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
@@ -259,7 +273,8 @@ impl ErrorExt for Error {
 
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }
-            | Error::ManagerNotStart { .. } => StatusCode::IllegalState,
+            | Error::ManagerNotStart { .. }
+            | Error::ManagerPasued { .. } => StatusCode::IllegalState,
 
             Error::RollbackNotSupported { .. } => StatusCode::Unsupported,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {

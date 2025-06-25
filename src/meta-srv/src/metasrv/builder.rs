@@ -29,7 +29,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::maintenance::MaintenanceModeManager;
+use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -193,7 +193,9 @@ impl MetasrvBuilder {
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
-        let procedure_manager = build_procedure_manager(&options, &kv_backend);
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+        let procedure_manager =
+            build_procedure_manager(&options, &kv_backend, &runtime_switch_manager);
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
@@ -201,7 +203,7 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(kv_backend.clone()));
+
         let selector_ctx = SelectorContext {
             server_addr: options.grpc.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
@@ -341,7 +343,7 @@ impl MetasrvBuilder {
                 selector_ctx.clone(),
                 supervisor_selector,
                 region_migration_manager.clone(),
-                maintenance_mode_manager.clone(),
+                runtime_switch_manager.clone(),
                 peer_lookup_service.clone(),
                 leader_cached_kv_backend.clone(),
             );
@@ -466,7 +468,7 @@ impl MetasrvBuilder {
             procedure_executor: ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
-            maintenance_mode_manager,
+            runtime_switch_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
                 meta_peer_client,
@@ -509,6 +511,7 @@ fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
 fn build_procedure_manager(
     options: &MetasrvOptions,
     kv_backend: &KvBackendRef,
+    runtime_switch_manager: &RuntimeSwitchManagerRef,
 ) -> ProcedureManagerRef {
     let manager_config = ManagerConfig {
         max_retry_times: options.procedure.max_retry_times,
@@ -529,6 +532,7 @@ fn build_procedure_manager(
         manager_config,
         kv_state_store.clone(),
         kv_state_store,
+        Some(runtime_switch_manager.clone()),
     ))
 }
 

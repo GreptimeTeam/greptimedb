@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
-use common_meta::key::maintenance::MaintenanceModeManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::kv_backend::KvBackendRef;
@@ -280,7 +280,7 @@ pub struct RegionSupervisor {
     /// Region migration manager.
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
-    maintenance_mode_manager: MaintenanceModeManagerRef,
+    runtime_switch_manager: RuntimeSwitchManagerRef,
     /// Peer lookup service
     peer_lookup: PeerLookupServiceRef,
     /// The kv backend.
@@ -354,7 +354,7 @@ impl RegionSupervisor {
         selector_context: SelectorContext,
         selector: RegionSupervisorSelector,
         region_migration_manager: RegionMigrationManagerRef,
-        maintenance_mode_manager: MaintenanceModeManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         peer_lookup: PeerLookupServiceRef,
         kv_backend: KvBackendRef,
     ) -> Self {
@@ -365,7 +365,7 @@ impl RegionSupervisor {
             selector_context,
             selector,
             region_migration_manager,
-            maintenance_mode_manager,
+            runtime_switch_manager,
             peer_lookup,
             kv_backend,
         }
@@ -559,10 +559,10 @@ impl RegionSupervisor {
     }
 
     pub(crate) async fn is_maintenance_mode_enabled(&self) -> Result<bool> {
-        self.maintenance_mode_manager
+        self.runtime_switch_manager
             .maintenance_mode()
             .await
-            .context(error::MaintenanceModeManagerSnafu)
+            .context(error::RuntimeSwitchManagerSnafu)
     }
 
     async fn select_peers(
@@ -768,7 +768,7 @@ pub(crate) mod tests {
     use common_meta::key::table_route::{
         LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
     };
-    use common_meta::key::{maintenance, TableMetadataManager};
+    use common_meta::key::{runtime_switch, TableMetadataManager};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::NoopPeerLookupService;
@@ -798,8 +798,8 @@ pub(crate) mod tests {
             env.procedure_manager().clone(),
             context_factory,
         ));
-        let maintenance_mode_manager =
-            Arc::new(maintenance::MaintenanceModeManager::new(env.kv_backend()));
+        let runtime_switch_manager =
+            Arc::new(runtime_switch::RuntimeSwitchManager::new(env.kv_backend()));
         let peer_lookup = Arc::new(NoopPeerLookupService);
         let (tx, rx) = RegionSupervisor::channel();
         let kv_backend = env.kv_backend();
@@ -811,7 +811,7 @@ pub(crate) mod tests {
                 selector_context,
                 RegionSupervisorSelector::NaiveSelector(selector),
                 region_migration_manager,
-                maintenance_mode_manager,
+                runtime_switch_manager,
                 peer_lookup,
                 kv_backend,
             ),
@@ -1008,7 +1008,7 @@ pub(crate) mod tests {
         let (mut supervisor, sender) = new_test_supervisor();
 
         supervisor
-            .maintenance_mode_manager
+            .runtime_switch_manager
             .set_maintenance_mode()
             .await
             .unwrap();
