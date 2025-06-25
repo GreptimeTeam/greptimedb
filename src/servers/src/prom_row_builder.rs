@@ -20,9 +20,13 @@ use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use operator::schema_helper::SchemaHelper;
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
+use session::context::QueryContextRef;
 
+use crate::batch_builder::MetricsBatchBuilder;
+use crate::error::Result;
 use crate::http::PromValidationMode;
 use crate::proto::{decode_string, PromLabel};
 use crate::repeated_field::Clear;
@@ -90,6 +94,22 @@ impl TablesBuilder {
                 req.merge(reqs);
                 req
             })
+    }
+
+    /// Converts [TablesBuilder] to record batch and clears inner states.
+    pub(crate) async fn as_record_batch(
+        &mut self,
+        schema_helper: SchemaHelper,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        let batch_builder = MetricsBatchBuilder::new(schema_helper);
+        let tables = std::mem::take(&mut self.tables);
+
+        batch_builder
+            .create_or_alter_physical_tables(&tables, query_ctx)
+            .await?;
+
+        todo!()
     }
 }
 

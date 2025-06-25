@@ -28,6 +28,7 @@ use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
 use servers::error::{Error, Result};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF};
+use servers::http::prom_store::PromStoreState;
 use servers::http::test_helpers::TestClient;
 use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::prom_store;
@@ -121,9 +122,16 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     };
 
     let instance = Arc::new(DummyInstance { tx });
+    let state = PromStoreState {
+        prom_store_handler: instance.clone(),
+        pipeline_handler: None,
+        prom_store_with_metric_engine: true,
+        prom_validation_mode: PromValidationMode::Unchecked,
+        bulk_state: None,
+    };
     let server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(instance.clone())
-        .with_prom_handler(instance, None, true, PromValidationMode::Unchecked)
+        .with_prom_handler(state)
         .build();
     server.build(server.make_app()).unwrap()
 }

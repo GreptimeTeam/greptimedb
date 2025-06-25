@@ -627,7 +627,7 @@ pub struct LogicalSchema {
 /// Logical table schemas.
 pub struct LogicalSchemas {
     /// Logical table schemas group by physical table name.
-    pub schemas: HashMap<String, Vec<LogicalSchema>>,
+    pub schemas: ahash::HashMap<String, Vec<LogicalSchema>>,
 }
 
 /// Creates or alters logical tables to match the provided schemas
@@ -637,13 +637,16 @@ pub async fn ensure_logical_tables_for_metrics(
     schemas: &LogicalSchemas,
     query_ctx: &QueryContextRef,
 ) -> Result<()> {
+    let catalog_name = query_ctx.current_catalog();
+    let schema_name = query_ctx.current_schema();
+    
     // 1. For each physical table, creates it if it doesn't exist.
-    for (physical_table_name, _) in &schemas.schemas {
+    for physical_table_name in schemas.schemas.keys() {
         // Check if the physical table exists and create it if it doesn't
         let physical_table_opt = helper
             .get_table(
-                &query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
+                catalog_name,
+                &schema_name,
                 physical_table_name,
             )
             .await?;
@@ -662,8 +665,6 @@ pub async fn ensure_logical_tables_for_metrics(
     // 3. Collects alterations (columns to add) for each logical table. (AlterTableExpr)
     let mut tables_to_alter: Vec<AlterTableExpr> = Vec::new();
 
-    let catalog_name = query_ctx.current_catalog();
-    let schema_name = query_ctx.current_schema();
     // Process each logical table to determine if it needs to be created or altered
     for (physical_table_name, logical_schemas) in &schemas.schemas {
         for logical_schema in logical_schemas {
@@ -733,6 +734,7 @@ pub async fn ensure_logical_tables_for_metrics(
 
 /// Gets the list of metadatas for a list of region ids.
 // TODO(yingwen): Should we return RegionMetadataRef?
+#[allow(dead_code)]
 async fn metadatas_for_region_ids(
     partition_manager: &PartitionRuleManagerRef,
     node_manager: &NodeManagerRef,

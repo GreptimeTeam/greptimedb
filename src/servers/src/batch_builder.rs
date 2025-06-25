@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
+use ahash::HashMap;
 use api::v1::{ColumnDataType, ColumnSchema, SemanticType};
-use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_meta::key::table_route::TableRouteManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use operator::schema_helper::{
     ensure_logical_tables_for_metrics, LogicalSchema, LogicalSchemas, SchemaHelper,
@@ -30,12 +29,15 @@ use table::TableRef;
 use crate::error;
 use crate::prom_row_builder::{PromCtx, TableBuilder};
 
-#[allow(dead_code)]
 pub struct MetricsBatchBuilder {
     schema_helper: SchemaHelper,
 }
 
 impl MetricsBatchBuilder {
+    pub fn new(schema_helper: SchemaHelper) -> Self {
+        MetricsBatchBuilder { schema_helper }
+    }
+
     /// Detected the DDL requirements according to the staged table rows.
     pub async fn create_or_alter_physical_tables(
         &self,
@@ -43,7 +45,7 @@ impl MetricsBatchBuilder {
         query_ctx: &QueryContextRef,
     ) -> error::Result<()> {
         // Physical table name -> logical tables -> tags in logical table
-        let mut tags: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        let mut tags: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::default();
         let catalog = query_ctx.current_catalog();
         let schema = query_ctx.current_schema();
 

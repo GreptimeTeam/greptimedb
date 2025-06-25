@@ -102,6 +102,14 @@ pub struct StatementExecutor {
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
 impl StatementExecutor {
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
+    }
+
+    pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
+        &self.cache_invalidator
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog_manager: CatalogManagerRef,

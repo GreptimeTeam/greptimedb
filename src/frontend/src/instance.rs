@@ -49,6 +49,7 @@ use datafusion_expr::LogicalPlan;
 use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
+use operator::schema_helper::SchemaHelper;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
@@ -160,6 +161,15 @@ impl Instance {
 
     pub fn process_manager(&self) -> &ProcessManagerRef {
         &self.process_manager
+    }
+
+    pub fn create_schema_helper(&self) -> SchemaHelper {
+        SchemaHelper::new(
+            self.catalog_manager.clone(),
+            self.table_metadata_manager.clone(),
+            self.statement_executor.procedure_executor().clone(),
+            self.statement_executor.cache_invalidator().clone(),
+        )
     }
 }
 

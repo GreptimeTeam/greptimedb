@@ -76,7 +76,6 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, JaegerQueryHandlerRef, LogQueryHandlerRef,
     OpenTelemetryProtocolHandlerRef, OpentsdbProtocolHandlerRef, PipelineHandlerRef,
-    PromStoreProtocolHandlerRef,
 };
 use crate::server::Server;
 
@@ -566,20 +565,7 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_prom_handler(
-        self,
-        handler: PromStoreProtocolHandlerRef,
-        pipeline_handler: Option<PipelineHandlerRef>,
-        prom_store_with_metric_engine: bool,
-        prom_validation_mode: PromValidationMode,
-    ) -> Self {
-        let state = PromStoreState {
-            prom_store_handler: handler,
-            pipeline_handler,
-            prom_store_with_metric_engine,
-            prom_validation_mode,
-        };
-
+    pub fn with_prom_handler(self, state: PromStoreState) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/prometheus"),

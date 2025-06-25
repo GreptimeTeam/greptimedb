@@ -27,11 +27,12 @@ use common_telemetry::tracing;
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
+use operator::schema_helper::SchemaHelper;
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, PipelineDefinition};
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use session::context::{Channel, QueryContext};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::prelude::*;
 
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
@@ -52,12 +53,19 @@ pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
 
+/// Additional states for bulk write requests.
+#[derive(Clone)]
+pub struct PromBulkState {
+    pub schema_helper: SchemaHelper,
+}
+
 #[derive(Clone)]
 pub struct PromStoreState {
     pub prom_store_handler: PromStoreProtocolHandlerRef,
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
+    pub bulk_state: Option<PromBulkState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +106,7 @@ pub async fn remote_write(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
+        bulk_state: _,
     } = state;
 
     if let Some(_vm_handshake) = params.get_vm_proto_version {
@@ -202,6 +211,12 @@ fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
     }))
 }
 
+/// Context for processing remote write requests in bulk mode.
+struct PromBulkContext {
+    schema_helper: SchemaHelper,
+    query_ctx: QueryContextRef,
+}
+
 async fn decode_remote_write_request(
     is_zstd: bool,
     body: Bytes,
@@ -234,6 +249,40 @@ async fn decode_remote_write_request(
     } else {
         Ok(request.as_row_insert_requests())
     }
+}
+
+async fn decode_remote_write_request_to_batch(
+    is_zstd: bool,
+    body: Bytes,
+    prom_validation_mode: PromValidationMode,
+    processor: &mut PromSeriesProcessor,
+    bulk: PromBulkContext,
+) -> Result<()> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
+
+    // due to vmagent's limitation, there is a chance that vmagent is
+    // sending content type wrong so we have to apply a fallback with decoding
+    // the content in another method.
+    //
+    // see https://github.com/VictoriaMetrics/VictoriaMetrics/issues/5301
+    // see https://github.com/GreptimeTeam/greptimedb/issues/3929
+    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
+        buf
+    } else {
+        // fallback to the other compression method
+        try_decompress(!is_zstd, &body[..])?
+    };
+
+    let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
+
+    processor.use_pipeline = false;
+    request
+        .merge(buf, prom_validation_mode, processor)
+        .context(error::DecodePromRemoteRequestSnafu)?;
+
+    request
+        .as_record_batch(bulk.schema_helper, &bulk.query_ctx)
+        .await
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {

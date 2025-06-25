@@ -43,6 +43,7 @@ use object_store::ObjectStore;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
+use servers::http::prom_store::PromStoreState;
 use servers::http::{HttpOptions, HttpServerBuilder, PromValidationMode};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -534,15 +535,17 @@ pub async fn setup_test_prom_app_with_frontend(
         ..Default::default()
     };
     let frontend_ref = instance.fe_instance().clone();
+    let state = PromStoreState {
+        prom_store_handler: frontend_ref.clone(),
+        pipeline_handler: Some(frontend_ref.clone()),
+        prom_store_with_metric_engine: true,
+        prom_validation_mode: PromValidationMode::Strict,
+        bulk_state: None,
+    };
     let http_server = HttpServerBuilder::new(http_opts)
         .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
         .with_logs_handler(instance.fe_instance().clone())
-        .with_prom_handler(
-            frontend_ref.clone(),
-            Some(frontend_ref.clone()),
-            true,
-            PromValidationMode::Strict,
-        )
+        .with_prom_handler(state)
         .with_prometheus_handler(frontend_ref)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();

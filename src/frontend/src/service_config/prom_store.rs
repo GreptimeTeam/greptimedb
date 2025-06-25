@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct PromStoreOptions {
     pub enable: bool,
     pub with_metric_engine: bool,
+    pub bulk_mode: bool,
 }
 
 impl Default for PromStoreOptions {
@@ -25,6 +26,7 @@ impl Default for PromStoreOptions {
         Self {
             enable: true,
             with_metric_engine: true,
+            bulk_mode: false,
         }
     }
 }
@@ -37,6 +39,7 @@ mod tests {
     fn test_prom_store_options() {
         let default = PromStoreOptions::default();
         assert!(default.enable);
-        assert!(default.with_metric_engine)
+        assert!(default.with_metric_engine);
+        assert!(!default.bulk_mode);
     }
 }

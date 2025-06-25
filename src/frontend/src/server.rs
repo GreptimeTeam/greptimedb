@@ -24,6 +24,7 @@ use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
+use servers::http::prom_store::{PromBulkState, PromStoreState};
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
@@ -95,13 +96,24 @@ where
         }
 
         if opts.prom_store.enable {
+            let bulk_state = if opts.prom_store.bulk_mode {
+                Some(PromBulkState {
+                    schema_helper: self.instance.create_schema_helper(),
+                })
+            } else {
+                None
+            };
+
+            let state = PromStoreState {
+                prom_store_handler: self.instance.clone(),
+                pipeline_handler: Some(self.instance.clone()),
+                prom_store_with_metric_engine: opts.prom_store.with_metric_engine,
+                prom_validation_mode: opts.http.prom_validation_mode,
+                bulk_state,
+            };
+
             builder = builder
-                .with_prom_handler(
-                    self.instance.clone(),
-                    Some(self.instance.clone()),
-                    opts.prom_store.with_metric_engine,
-                    opts.http.prom_validation_mode,
-                )
+                .with_prom_handler(state)
                 .with_prometheus_handler(self.instance.clone());
         }
 

@@ -21,6 +21,7 @@ use api::prom_store::remote::Sample;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use common_telemetry::debug;
+use operator::schema_helper::SchemaHelper;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
@@ -28,7 +29,7 @@ use prost::DecodeError;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 
-use crate::error::InternalSnafu;
+use crate::error::{InternalSnafu, Result};
 use crate::http::event::PipelineIngestRequest;
 use crate::http::PromValidationMode;
 use crate::pipeline::run_pipeline;
@@ -351,6 +352,17 @@ impl PromWriteRequest {
         }
 
         Ok(())
+    }
+
+    /// Converts the write request into a record batch and reset the table data.
+    pub async fn as_record_batch(
+        &mut self,
+        schema_helper: SchemaHelper,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        self.table_data
+            .as_record_batch(schema_helper, query_ctx)
+            .await
     }
 }
 
