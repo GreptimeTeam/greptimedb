@@ -2671,6 +2671,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-sql"
+version = "0.16.0"
+dependencies = [
+ "common-base",
+ "common-datasource",
+ "common-decimal",
+ "common-error",
+ "common-macro",
+ "common-time",
+ "datafusion-sql",
+ "datatypes",
+ "hex",
+ "jsonb",
+ "snafu 0.8.5",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
+]
+
+[[package]]
 name = "common-telemetry"
 version = "0.16.0"
 dependencies = [
@@ -8457,6 +8475,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-sql",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -11243,6 +11262,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-session",
+ "common-sql",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -11681,6 +11701,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-query",
+ "common-sql",
  "common-time",
  "datafusion",
  "datafusion-common",
