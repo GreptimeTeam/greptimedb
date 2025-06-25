@@ -67,10 +67,8 @@ impl RuntimeSwitchManager {
     }
 
     async fn delete_keys(&self, keys: &[&str]) -> Result<()> {
-        let mut req = BatchDeleteRequest::default();
-        for key in keys {
-            req = req.add_key(key.as_bytes());
-        }
+        let req = BatchDeleteRequest::new()
+            .with_keys(keys.iter().map(|x| x.as_bytes().to_vec()).collect());
         self.kv_backend.batch_delete(req).await?;
         for key in keys {
             self.cache.invalidate(key.as_bytes()).await;

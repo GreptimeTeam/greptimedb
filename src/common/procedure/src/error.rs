@@ -28,7 +28,7 @@ use crate::PoisonKey;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to procedure manager status"))]
+    #[snafu(display("Failed to check procedure manager status"))]
     CheckStatus {
         source: BoxedError,
         #[snafu(implicit)]

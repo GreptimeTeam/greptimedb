@@ -106,6 +106,8 @@ const STATUS_SUFFIX: &str = "status";
 
 #[async_trait::async_trait]
 impl HttpHandler for MaintenanceHandler {
+    // TODO(weny): Remove the legacy version of the maintenance API.
+    // However, we need to keep the legacy version for a while to avoid breaking the existing operators.
     async fn handle(
         &self,
         path: &str,
