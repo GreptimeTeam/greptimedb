@@ -627,7 +627,7 @@ pub struct LogicalSchema {
 /// Logical table schemas.
 pub struct LogicalSchemas {
     /// Logical table schemas group by physical table name.
-    pub schemas: ahash::HashMap<String, Vec<LogicalSchema>>,
+    pub schemas: HashMap<String, Vec<LogicalSchema>>,
 }
 
 /// Creates or alters logical tables to match the provided schemas

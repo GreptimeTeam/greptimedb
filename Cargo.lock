@@ -7234,6 +7234,7 @@ dependencies = [
 name = "metric-engine"
 version = "0.15.0"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "aquamarine",
  "async-stream",

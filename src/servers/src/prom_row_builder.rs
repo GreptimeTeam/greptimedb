@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::string::ToString;
 
-use ahash::HashMap;
 use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};

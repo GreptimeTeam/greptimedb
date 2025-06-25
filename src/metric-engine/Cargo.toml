@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 api.workspace = true
 aquamarine.workspace = true
 async-stream.workspace = true
