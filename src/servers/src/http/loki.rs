@@ -123,7 +123,7 @@ pub async fn loki_ingest(
         let pipeline_ctx =
             PipelineContext::new(&def, &pipeline_info.pipeline_params, Channel::Loki);
 
-        let v = extract_pipeline_item(content_type, bytes)?
+        let v = extract_item::<LokiPipeline>(content_type, bytes)?
             .map(|i| i.map)
             .collect::<Vec<_>>();
 
@@ -137,7 +137,7 @@ pub async fn loki_ingest(
         // init schemas
         let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
         let mut rows = Vec::with_capacity(256);
-        for loki_row in extract_raw_item(content_type, bytes)? {
+        for loki_row in extract_item::<LokiRawItem>(content_type, bytes)? {
             let mut row = init_row(
                 schema_info.schema.len(),
                 loki_row.ts,
@@ -212,25 +212,11 @@ pub struct LokiPipeline {
     pub map: pipeline::Value,
 }
 
-fn extract_raw_item(
-    content_type: ContentType,
-    bytes: Bytes,
-) -> Result<Box<dyn Iterator<Item = LokiRawItem>>> {
-    match content_type {
-        x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
-            LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
-        )),
-        x if x == *PB_CONTENT_TYPE => Ok(Box::new(
-            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
-        )),
-        _ => UnsupportedContentTypeSnafu { content_type }.fail(),
-    }
-}
-
-fn extract_pipeline_item(
-    content_type: ContentType,
-    bytes: Bytes,
-) -> Result<Box<dyn Iterator<Item = LokiPipeline>>> {
+fn extract_item<T>(content_type: ContentType, bytes: Bytes) -> Result<Box<dyn Iterator<Item = T>>>
+where
+    LokiMiddleItem<serde_json::Value>: Into<T>,
+    LokiMiddleItem<Vec<LabelPairAdapter>>: Into<T>,
+{
     match content_type {
         x if x == *JSON_CONTENT_TYPE => Ok(Box::new(
             LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
