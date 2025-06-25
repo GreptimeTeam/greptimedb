@@ -18,8 +18,8 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, SemanticType};
 use arrow::array::{
-    ArrayBuilder, ArrayRef, BinaryBuilder, Float64Array, TimestampMillisecondArray, UInt64Array,
-    UInt8Array,
+    ArrayBuilder, ArrayRef, BinaryBuilder, Float64Array, RecordBatch, TimestampMillisecondArray,
+    UInt64Array, UInt8Array,
 };
 use arrow::compute;
 use arrow_schema::Field;
@@ -132,11 +132,12 @@ impl MetricsBatchBuilder {
     }
 
     /// Retrieves physical region metadata of given logical table names.
-    async fn collect_physical_region_metadata(
-        _logical_table_names: &[String],
+    pub async fn collect_physical_region_metadata(
+        &self,
+        logical_table_names: &[String],
     ) -> HashMap<
-        String,         /*logical table name*/
-        RegionMetadata, /*Region metadata for physical re*/
+        TableName,         /*logical table name*/
+        RegionMetadataRef, /*Region metadata for physical re*/
     > {
         todo!()
     }
@@ -147,7 +148,7 @@ impl MetricsBatchBuilder {
     /// Note:
     /// Make sure all logical table and physical table are created when reach here and the mapping
     /// from logical table name to physical table ref is stored in [physical_tables].
-    async fn append_rows_to_batch(
+    pub(crate) async fn append_rows_to_batch(
         &mut self,
         current_catalog: Option<String>,
         current_schema: Option<String>,
@@ -194,12 +195,20 @@ impl MetricsBatchBuilder {
                     logical_table_ref.table_info().table_id(),
                     std::mem::take(table),
                 )?;
-
-                //todo(hl): finish and ingest batch.
             }
         }
+        Ok(())
+    }
 
-        todo!()
+    /// Finishes current record batch builder and returns record batches grouped by physical table id.
+    pub(crate) fn finish(self) -> error::Result<HashMap<TableId, RecordBatch>> {
+        self.builders
+            .into_iter()
+            .map(|(physical_table_id, encoder)| {
+                let rb = encoder.finish()?;
+                Ok((physical_table_id, rb))
+            })
+            .collect::<error::Result<HashMap<_, _>>>()
     }
 
     /// Creates Encoder that converts Rows into RecordBatch with primary key encoded.

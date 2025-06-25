@@ -102,13 +102,21 @@ impl TablesBuilder {
         schema_helper: SchemaHelper,
         query_ctx: &QueryContextRef,
     ) -> Result<()> {
-        let batch_builder = MetricsBatchBuilder::new(schema_helper);
-        let tables = std::mem::take(&mut self.tables);
+        let mut batch_builder = MetricsBatchBuilder::new(schema_helper);
+        let mut tables = std::mem::take(&mut self.tables);
 
         batch_builder
             .create_or_alter_physical_tables(&tables, query_ctx)
             .await?;
 
+        // Gather all region metadata for region 0 of physical tables.
+        let physical_region_metadata = batch_builder.collect_physical_region_metadata(&[]).await;
+
+        batch_builder
+            .append_rows_to_batch(None, None, &mut tables, &physical_region_metadata)
+            .await?;
+
+        let record_batches = batch_builder.finish()?;
         todo!()
     }
 }
