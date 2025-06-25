@@ -17,7 +17,7 @@
 use api::region::RegionResponse;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
@@ -99,6 +99,11 @@ impl MetricEngineInner {
     // as the manifest could reference files that have already been deleted
     // due to compaction operations performed by the region leader.
     async fn close_physical_region_on_recovery_failure(&self, physical_region_id: RegionId) {
+        info!(
+            "Closing metadata region {} and data region {} on metadata recovery failure",
+            utils::to_metadata_region_id(physical_region_id),
+            utils::to_data_region_id(physical_region_id)
+        );
         if let Err(err) = self.close_physical_region(physical_region_id).await {
             error!(err; "Failed to close physical region {}", physical_region_id);
         }
@@ -155,6 +160,20 @@ impl MetricEngineInner {
         request: RegionOpenRequest,
     ) -> Result<AffectedRows> {
         if request.is_physical_table() {
+            if self
+                .state
+                .read()
+                .unwrap()
+                .physical_region_states()
+                .get(&region_id)
+                .is_some()
+            {
+                warn!(
+                    "The physical region {} is already open, ignore the open request",
+                    region_id
+                );
+                return Ok(0);
+            }
             // open physical region and recover states
             let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
             self.open_physical_region(region_id, request).await?;
