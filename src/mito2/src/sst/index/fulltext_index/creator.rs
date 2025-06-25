@@ -625,6 +625,7 @@ mod tests {
                             .unwrap();
                         resp.map(|r| {
                             r.into_iter()
+                                .filter(|(_, ranges)| !ranges.is_empty())
                                 .map(|(row_group_id, _)| row_group_id as RowId)
                                 .collect()
                         })

@@ -384,7 +384,7 @@ impl ParquetReaderBuilder {
             return output;
         }
 
-        self.prune_row_groups_by_inverted_index(row_group_size, &mut output, metrics)
+        self.prune_row_groups_by_inverted_index(row_group_size, parquet_meta, &mut output, metrics)
             .await;
         if output.is_empty() {
             return output;
@@ -425,14 +425,15 @@ impl ParquetReaderBuilder {
 
         let predicate_key = index_applier.predicate_key();
         // Fast path: return early if the result is in the cache.
-        if self.index_result_cache_get(
-            predicate_key,
-            self.file_handle.file_id(),
-            output,
-            metrics,
-            INDEX_TYPE_FULLTEXT,
-        ) {
-            return true;
+        let cached = self
+            .cache_strategy
+            .index_result_cache()
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+        if let Some(result) = cached.as_ref() {
+            if all_required_row_groups_searched(output, result) {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                return true;
+            }
         }
 
         // Slow path: apply the index from the file.
@@ -470,6 +471,7 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_inverted_index(
         &self,
         row_group_size: usize,
+        parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
@@ -482,14 +484,15 @@ impl ParquetReaderBuilder {
 
         let predicate_key = index_applier.predicate_key();
         // Fast path: return early if the result is in the cache.
-        if self.index_result_cache_get(
-            predicate_key,
-            self.file_handle.file_id(),
-            output,
-            metrics,
-            INDEX_TYPE_INVERTED,
-        ) {
-            return true;
+        let cached = self
+            .cache_strategy
+            .index_result_cache()
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+        if let Some(result) = cached.as_ref() {
+            if all_required_row_groups_searched(output, result) {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
+                return true;
+            }
         }
 
         // Slow path: apply the index from the file.
@@ -498,9 +501,11 @@ impl ParquetReaderBuilder {
             .apply(self.file_handle.file_id(), Some(file_size_hint))
             .await;
         let selection = match apply_res {
-            Ok(output) => {
-                RowGroupSelection::from_inverted_index_apply_output(row_group_size, output)
-            }
+            Ok(output) => RowGroupSelection::from_inverted_index_apply_output(
+                row_group_size,
+                parquet_meta.num_row_groups(),
+                output,
+            ),
             Err(err) => {
                 handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
                 return false;
@@ -534,33 +539,45 @@ impl ParquetReaderBuilder {
 
         let predicate_key = index_applier.predicate_key();
         // Fast path: return early if the result is in the cache.
-        if self.index_result_cache_get(
-            predicate_key,
-            self.file_handle.file_id(),
-            output,
-            metrics,
-            INDEX_TYPE_BLOOM,
-        ) {
-            return true;
+        let cached = self
+            .cache_strategy
+            .index_result_cache()
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+        if let Some(result) = cached.as_ref() {
+            if all_required_row_groups_searched(output, result) {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
+                return true;
+            }
         }
 
         // Slow path: apply the index from the file.
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let rgs = parquet_meta
-            .row_groups()
-            .iter()
-            .enumerate()
-            .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i)));
+        let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
+            (
+                rg.num_rows() as usize,
+                // Optimize: only search the row group that required by `output` and not stored in `cached`.
+                output.contains_non_empty_row_group(i)
+                    && cached
+                        .as_ref()
+                        .map(|c| !c.contains_row_group(i))
+                        .unwrap_or(true),
+            )
+        });
         let apply_res = index_applier
             .apply(self.file_handle.file_id(), Some(file_size_hint), rgs)
             .await;
-        let selection = match apply_res {
+        let mut selection = match apply_res {
             Ok(apply_output) => RowGroupSelection::from_row_ranges(apply_output, row_group_size),
             Err(err) => {
                 handle_index_error!(err, self.file_handle, INDEX_TYPE_BLOOM);
                 return false;
             }
         };
+
+        // New searched row groups are added to `selection`, concat them with `cached`.
+        if let Some(cached) = cached.as_ref() {
+            selection.concat(cached);
+        }
 
         self.apply_index_result_and_update_cache(
             predicate_key,
@@ -589,27 +606,34 @@ impl ParquetReaderBuilder {
 
         let predicate_key = index_applier.predicate_key();
         // Fast path: return early if the result is in the cache.
-        if self.index_result_cache_get(
-            predicate_key,
-            self.file_handle.file_id(),
-            output,
-            metrics,
-            INDEX_TYPE_FULLTEXT,
-        ) {
-            return true;
+        let cached = self
+            .cache_strategy
+            .index_result_cache()
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+        if let Some(result) = cached.as_ref() {
+            if all_required_row_groups_searched(output, result) {
+                apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
+                return true;
+            }
         }
 
         // Slow path: apply the index from the file.
         let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let rgs = parquet_meta
-            .row_groups()
-            .iter()
-            .enumerate()
-            .map(|(i, rg)| (rg.num_rows() as usize, output.contains_row_group(i)));
+        let rgs = parquet_meta.row_groups().iter().enumerate().map(|(i, rg)| {
+            (
+                rg.num_rows() as usize,
+                // Optimize: only search the row group that required by `output` and not stored in `cached`.
+                output.contains_non_empty_row_group(i)
+                    && cached
+                        .as_ref()
+                        .map(|c| !c.contains_row_group(i))
+                        .unwrap_or(true),
+            )
+        });
         let apply_res = index_applier
             .apply_coarse(self.file_handle.file_id(), Some(file_size_hint), rgs)
             .await;
-        let selection = match apply_res {
+        let mut selection = match apply_res {
             Ok(Some(apply_output)) => {
                 RowGroupSelection::from_row_ranges(apply_output, row_group_size)
             }
@@ -619,6 +643,11 @@ impl ParquetReaderBuilder {
                 return false;
             }
         };
+
+        // New searched row groups are added to `selection`, concat them with `cached`.
+        if let Some(cached) = cached.as_ref() {
+            selection.concat(cached);
+        }
 
         self.apply_index_result_and_update_cache(
             predicate_key,
@@ -674,24 +703,6 @@ impl ParquetReaderBuilder {
         true
     }
 
-    fn index_result_cache_get(
-        &self,
-        predicate_key: &PredicateKey,
-        file_id: FileId,
-        output: &mut RowGroupSelection,
-        metrics: &mut ReaderFilterMetrics,
-        index_type: &str,
-    ) -> bool {
-        if let Some(index_result_cache) = &self.cache_strategy.index_result_cache() {
-            let result = index_result_cache.get(predicate_key, file_id);
-            if let Some(result) = result {
-                apply_selection_and_update_metrics(output, &result, metrics, index_type);
-                return true;
-            }
-        }
-        false
-    }
-
     fn apply_index_result_and_update_cache(
         &self,
         predicate_key: &PredicateKey,
@@ -723,6 +734,20 @@ fn apply_selection_and_update_metrics(
     metrics.update_index_metrics(index_type, row_group_count, row_count);
 
     *output = intersection;
+}
+
+fn all_required_row_groups_searched(
+    required_row_groups: &RowGroupSelection,
+    cached_row_groups: &RowGroupSelection,
+) -> bool {
+    for (rg_id, _) in required_row_groups.iter() {
+        if required_row_groups.contains_non_empty_row_group(*rg_id)
+            && !cached_row_groups.contains_row_group(*rg_id)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Metrics of filtering rows groups and rows.
