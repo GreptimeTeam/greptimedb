@@ -43,7 +43,7 @@ use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -477,20 +477,7 @@ pub(crate) async fn build_sources(
             .await?;
             Box::pin(stream) as _
         } else {
-            #[cfg(feature = "enterprise")]
-            {
-                crate::read::scan_util::scan_extension_range(
-                    stream_ctx.clone(),
-                    *index,
-                    part_metrics.clone(),
-                )
-                .await?
-            }
-            #[cfg(not(feature = "enterprise"))]
-            return crate::error::UnexpectedSnafu {
-                reason: "unknown scan range type",
-            }
-            .fail();
+            scan_util::maybe_scan_other_ranges(stream_ctx, *index, part_metrics).await?
         };
         sources.push(Source::Stream(stream));
     }

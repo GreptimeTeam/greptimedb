@@ -30,14 +30,13 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
-use crate::read::range::{RangeBuilderList, RowGroupIndex};
+use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{Batch, BoxedBatchStream, ScannerMetrics};
-use crate::sst::file::FileTimeRange;
+use crate::read::{scan_util, Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -95,66 +94,43 @@ impl UnorderedScan {
         part_metrics: PartitionMetrics,
         range_builder_list: Arc<RangeBuilderList>,
     ) -> impl Stream<Item = Result<Batch>> {
-        async fn build_scan_stream(
-            stream_ctx: Arc<StreamContext>,
-            index: RowGroupIndex,
-            time_range: FileTimeRange,
-            part_metrics: PartitionMetrics,
-            range_builder_list: Arc<RangeBuilderList>,
-        ) -> Result<BoxedBatchStream> {
-            let stream = if stream_ctx.is_mem_range_index(index) {
-                scan_mem_ranges(stream_ctx, part_metrics, index, time_range).boxed()
-            } else if stream_ctx.is_file_range_index(index) {
-                scan_file_ranges(
-                    stream_ctx,
-                    part_metrics,
-                    index,
-                    "unordered_scan_files",
-                    range_builder_list,
-                )
-                .await?
-                .boxed()
-            } else {
-                #[cfg(feature = "enterprise")]
-                {
-                    crate::read::scan_util::scan_extension_range(
-                        stream_ctx.clone(),
-                        index,
-                        part_metrics.clone(),
-                    )
-                    .await?
-                }
-                #[cfg(not(feature = "enterprise"))]
-                return crate::error::UnexpectedSnafu {
-                    reason: "unknown scan range type",
-                }
-                .fail();
-            };
-            Ok(stream)
-        }
-
-        let stream = stream! {
+        try_stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
-                let maybe_stream = build_scan_stream(
-                    stream_ctx.clone(),
-                    *index,
-                    range_meta.time_range,
-                    part_metrics.clone(),
-                    range_builder_list.clone(),
-                ).await;
-                match maybe_stream {
-                    Ok(stream) => {
-                        for await batch in stream {
-                            yield batch;
-                        }
+                if stream_ctx.is_mem_range_index(*index) {
+                    let stream = scan_mem_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        range_meta.time_range,
+                    );
+                    for await batch in stream {
+                        yield batch?;
                     }
-                    Err(e) => yield Err(e),
+                } else if stream_ctx.is_file_range_index(*index) {
+                    let stream = scan_file_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        "unordered_scan_files",
+                        range_builder_list.clone(),
+                    ).await?;
+                    for await batch in stream {
+                        yield batch?;
+                    }
+                } else {
+                    let stream = scan_util::maybe_scan_other_ranges(
+                        &stream_ctx,
+                        *index,
+                        &part_metrics,
+                    ).await?;
+                    for await batch in stream {
+                        yield batch?;
+                    }
                 }
             }
-        };
-        stream
+        }
     }
 
     /// Scan [`Batch`] in all partitions one by one.

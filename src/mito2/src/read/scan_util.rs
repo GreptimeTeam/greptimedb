@@ -33,7 +33,7 @@ use crate::metrics::{
 };
 use crate::read::range::{RangeBuilderList, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
-use crate::read::{Batch, ScannerMetrics, Source};
+use crate::read::{Batch, BoxedBatchStream, ScannerMetrics, Source};
 use crate::sst::file::FileTimeRange;
 use crate::sst::parquet::file_range::FileRange;
 use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
@@ -599,7 +599,7 @@ pub(crate) async fn scan_extension_range(
     context: Arc<StreamContext>,
     index: RowGroupIndex,
     metrics: PartitionMetrics,
-) -> Result<crate::read::BoxedBatchStream> {
+) -> Result<BoxedBatchStream> {
     use snafu::ResultExt;
 
     let range = context.input.extension_range(index.index);
@@ -608,4 +608,27 @@ pub(crate) async fn scan_extension_range(
         .read(context, metrics, index)
         .await
         .context(crate::error::ScanExternalRangeSnafu)
+}
+
+pub(crate) async fn maybe_scan_other_ranges(
+    context: &Arc<StreamContext>,
+    index: RowGroupIndex,
+    metrics: &PartitionMetrics,
+) -> Result<BoxedBatchStream> {
+    #[cfg(feature = "enterprise")]
+    {
+        scan_extension_range(context.clone(), index, metrics.clone()).await
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    {
+        let _ = context;
+        let _ = index;
+        let _ = metrics;
+
+        crate::error::UnexpectedSnafu {
+            reason: "no other ranges scannable",
+        }
+        .fail()
+    }
 }

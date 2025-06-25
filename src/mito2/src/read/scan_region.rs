@@ -807,15 +807,6 @@ impl ScanInput {
         self
     }
 
-    #[cfg(feature = "enterprise")]
-    #[must_use]
-    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
-        Self {
-            extension_ranges,
-            ..self
-        }
-    }
-
     /// Scans sources in parallel.
     ///
     /// # Panics if the input doesn't allow parallel scan.
@@ -965,6 +956,17 @@ impl ScanInput {
 
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
+    }
+}
+
+#[cfg(feature = "enterprise")]
+impl ScanInput {
+    #[must_use]
+    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
+        Self {
+            extension_ranges,
+            ..self
+        }
     }
 }
 
