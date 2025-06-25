@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[allow(unused)]
-mod aggr_wrapper;
 mod analyzer;
 mod commutativity;
 mod merge_scan;

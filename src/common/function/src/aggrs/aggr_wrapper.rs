@@ -23,10 +23,24 @@
 
 use std::sync::Arc;
 
-use datafusion_common::ScalarValue;
+use datafusion_common::{format, ScalarValue};
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
 use datatypes::arrow::datatypes::{DataType, Field};
+
+/// Returns the name of the state function for the given aggregate function name.
+/// The state function is used to compute the state of the aggregate function.
+/// The state function's name is in the format `__<aggr_name>_state
+pub fn aggr_state_func_name(aggr_name: &str) -> String {
+    format!("__{}_state", aggr_name)
+}
+
+/// Returns the name of the merge function for the given aggregate function name.
+/// The merge function is used to merge the states of the state functions.
+/// The merge function's name is in the format `__<aggr_name>_merge
+pub fn aggr_merge_func_name(aggr_name: &str) -> String {
+    format!("__{}_merge", aggr_name)
+}
 
 /// A wrapper to make an aggregate function out of the state and merge functions of the original aggregate function.
 /// It contains the original aggregate function, the state functions, and the merge function.
