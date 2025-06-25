@@ -63,6 +63,7 @@ impl MaintenanceHandler {
             .set_maintenance_mode()
             .await
             .context(RuntimeSwitchManagerSnafu)?;
+        // TODO(weny): Add a record to the system events.
         info!("Enable the maintenance mode.");
         Ok(MaintenanceResponse { enabled: true })
     }
@@ -72,6 +73,7 @@ impl MaintenanceHandler {
             .unset_maintenance_mode()
             .await
             .context(RuntimeSwitchManagerSnafu)?;
+        // TODO(weny): Add a record to the system events.
         info!("Disable the maintenance mode.");
         Ok(MaintenanceResponse { enabled: false })
     }

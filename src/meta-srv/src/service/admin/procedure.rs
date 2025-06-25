@@ -48,6 +48,7 @@ impl ProcedureManagerHandler {
             .pasue_procedure()
             .await
             .context(RuntimeSwitchManagerSnafu)?;
+        // TODO(weny): Add a record to the system events.
         info!("Pause the procedure manager.");
         Ok(ProcedureManagerStatusResponse {
             status: ProcedureManagerStatus::Paused,
@@ -59,6 +60,7 @@ impl ProcedureManagerHandler {
             .resume_procedure()
             .await
             .context(RuntimeSwitchManagerSnafu)?;
+        // TODO(weny): Add a record to the system events.
         info!("Resume the procedure manager.");
         Ok(ProcedureManagerStatusResponse {
             status: ProcedureManagerStatus::Running,
