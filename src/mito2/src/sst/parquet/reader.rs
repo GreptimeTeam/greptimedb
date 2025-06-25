@@ -740,14 +740,12 @@ fn all_required_row_groups_searched(
     required_row_groups: &RowGroupSelection,
     cached_row_groups: &RowGroupSelection,
 ) -> bool {
-    for (rg_id, _) in required_row_groups.iter() {
-        if required_row_groups.contains_non_empty_row_group(*rg_id)
-            && !cached_row_groups.contains_row_group(*rg_id)
-        {
-            return false;
-        }
-    }
-    true
+    required_row_groups.iter().all(|(rg_id, _)| {
+        // Row group with no rows is not required to be searched.
+        !required_row_groups.contains_non_empty_row_group(*rg_id)
+            // The row group is already searched.
+            || cached_row_groups.contains_row_group(*rg_id)
+    })
 }
 
 /// Metrics of filtering rows groups and rows.
