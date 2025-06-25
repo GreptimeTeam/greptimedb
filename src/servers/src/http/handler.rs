@@ -138,7 +138,9 @@ pub async fn sql(
         ResponseFormat::Arrow => {
             ArrowResponse::from_output(outputs, query_params.compression).await
         }
-        ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+        ResponseFormat::Csv(with_names, with_types) => {
+            CsvResponse::from_output(outputs, with_names, with_types).await
+        }
         ResponseFormat::Table => TableResponse::from_output(outputs).await,
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
@@ -327,7 +329,9 @@ pub async fn promql(
 
         match format {
             ResponseFormat::Arrow => ArrowResponse::from_output(outputs, compression).await,
-            ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+            ResponseFormat::Csv(with_names, with_types) => {
+                CsvResponse::from_output(outputs, with_names, with_types).await
+            }
             ResponseFormat::Table => TableResponse::from_output(outputs).await,
             ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
             ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
