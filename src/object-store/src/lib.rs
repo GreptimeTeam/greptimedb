@@ -19,10 +19,18 @@ pub use opendal::{
     Writer,
 };
 
+pub mod config;
+pub mod error;
+pub mod factory;
 pub mod layers;
 pub mod manager;
 mod metrics;
 pub mod test_util;
 pub mod util;
+
 /// The default object cache directory name.
 pub const OBJECT_CACHE_DIR: &str = "object_cache";
+
+pub const ATOMIC_WRITE_DIR: &str = "tmp/";
+/// For compatibility. Remove this after a major version release.
+pub const OLD_ATOMIC_WRITE_DIR: &str = ".tmp/";

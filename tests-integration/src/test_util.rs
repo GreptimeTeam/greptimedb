@@ -30,13 +30,13 @@ use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::config::DatanodeWalConfig;
-use datanode::config::{
-    AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
-    StorageConfig,
-};
+use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
 use futures::future::BoxFuture;
+use object_store::config::{
+    AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
+};
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;

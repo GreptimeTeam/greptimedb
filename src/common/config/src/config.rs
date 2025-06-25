@@ -106,7 +106,7 @@ mod tests {
     use common_telemetry::logging::LoggingOptions;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
-    use datanode::config::{ObjectStoreConfig, StorageConfig};
+    use datanode::config::StorageConfig;
     use meta_client::MetaClientOptions;
     use serde::{Deserialize, Serialize};
 
@@ -212,7 +212,7 @@ mod tests {
 
                 // Check the configs from environment variables.
                 match &opts.storage.store {
-                    ObjectStoreConfig::S3(s3_config) => {
+                    object_store::config::ObjectStoreConfig::S3(s3_config) => {
                         assert_eq!(s3_config.bucket, "mybucket".to_string());
                     }
                     _ => panic!("unexpected store type"),
