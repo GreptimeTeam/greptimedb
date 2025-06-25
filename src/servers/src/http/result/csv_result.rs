@@ -205,36 +205,40 @@ mod tests {
 
     use common_query::Output;
     use common_recordbatch::{RecordBatch, RecordBatches};
-    use datatypes::prelude::ConcreteDataType;
+    use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Float32Vector, StringVector, UInt32Vector, VectorRef};
+    use datatypes::vectors::{BinaryVector, Float32Vector, StringVector, UInt32Vector, VectorRef};
 
     use super::*;
     #[tokio::test]
     async fn test_csv_response_with_names_and_types() {
         let (schema, columns) = create_test_data();
 
+        let data = r#"1,,-1000.1400146484375,"{""a"":{""b"":2},""b"":2,""c"":3}"
+2,hello,1.9900000095367432,"{""a"":4,""b"":{""c"":6},""c"":6}""#
+            .replace("\n", "\r\n");
+
         // Test with_names=true, with_types=true
         {
             let body = get_csv_body(&schema, &columns, true, true).await;
-            assert!(body.starts_with("col1,col2,col3\r\nUInt32,String,Float32\r\n"));
-            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+            assert!(body.starts_with("col1,col2,col3,col4\r\nUInt32,String,Float32,Json\r\n"));
+            assert!(body.contains(&data));
         }
 
         // Test with_names=true, with_types=false
         {
             let body = get_csv_body(&schema, &columns, true, false).await;
-            assert!(body.starts_with("col1,col2,col3\r\n"));
-            assert!(!body.contains("UInt32,String,Float3"));
-            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+            assert!(body.starts_with("col1,col2,col3,col4\r\n"));
+            assert!(!body.contains("UInt32,String,Float32,Json"));
+            assert!(body.contains(&data));
         }
 
         // Test with_names=false, with_types=false
         {
             let body = get_csv_body(&schema, &columns, false, false).await;
-            assert!(!body.starts_with("col1,col2,col3"));
-            assert!(!body.contains("UInt32,String,Float3"));
-            assert!(body.contains("1,,-1000.1400146484375\r\n2,hello,1.9900000095367432"));
+            assert!(!body.starts_with("col1,col2,col3,col4"));
+            assert!(!body.contains("UInt32,String,Float32,Json"));
+            assert!(body.contains(&data));
         }
     }
 
@@ -243,13 +247,28 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("col3", ConcreteDataType::float32_datatype(), true),
+            ColumnSchema::new("col4", ConcreteDataType::json_datatype(), true),
         ];
         let schema = Arc::new(Schema::new(column_schemas));
+
+        let json_strings = [
+            r#"{"a": {"b": 2}, "b": 2, "c": 3}"#,
+            r#"{"a": 4, "b": {"c": 6}, "c": 6}"#,
+        ];
+
+        let jsonbs = json_strings
+            .iter()
+            .map(|s| {
+                let value = jsonb::parse_value(s.as_bytes()).unwrap();
+                value.to_vec()
+            })
+            .collect::<Vec<_>>();
 
         let columns: Vec<VectorRef> = vec![
             Arc::new(UInt32Vector::from_slice(vec![1, 2])),
             Arc::new(StringVector::from(vec![None, Some("hello")])),
             Arc::new(Float32Vector::from_slice(vec![-1000.14, 1.99])),
+            Arc::new(BinaryVector::from_vec(jsonbs)),
         ];
 
         (schema, columns)

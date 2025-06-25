@@ -1588,4 +1588,46 @@ mod test {
             }
         }
     }
+
+    #[test]
+    fn test_response_format_misc() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::GreptimedbV1);
+        assert_eq!(ResponseFormat::parse("arrow"), Some(ResponseFormat::Arrow));
+        assert_eq!(
+            ResponseFormat::parse("csv"),
+            Some(ResponseFormat::Csv(false, false))
+        );
+        assert_eq!(
+            ResponseFormat::parse("csvwithnames"),
+            Some(ResponseFormat::Csv(true, false))
+        );
+        assert_eq!(
+            ResponseFormat::parse("csvwithnamesandtypes"),
+            Some(ResponseFormat::Csv(true, true))
+        );
+        assert_eq!(ResponseFormat::parse("table"), Some(ResponseFormat::Table));
+        assert_eq!(
+            ResponseFormat::parse("greptimedb_v1"),
+            Some(ResponseFormat::GreptimedbV1)
+        );
+        assert_eq!(
+            ResponseFormat::parse("influxdb_v1"),
+            Some(ResponseFormat::InfluxdbV1)
+        );
+        assert_eq!(ResponseFormat::parse("json"), Some(ResponseFormat::Json));
+
+        // invalid formats
+        assert_eq!(ResponseFormat::parse("invalid"), None);
+        assert_eq!(ResponseFormat::parse(""), None);
+        assert_eq!(ResponseFormat::parse("CSV"), None); // Case sensitive
+
+        // as str
+        assert_eq!(ResponseFormat::Arrow.as_str(), "arrow");
+        assert_eq!(ResponseFormat::Csv(false, false).as_str(), "csv");
+        assert_eq!(ResponseFormat::Csv(true, true).as_str(), "csv");
+        assert_eq!(ResponseFormat::Table.as_str(), "table");
+        assert_eq!(ResponseFormat::GreptimedbV1.as_str(), "greptimedb_v1");
+        assert_eq!(ResponseFormat::InfluxdbV1.as_str(), "influxdb_v1");
+        assert_eq!(ResponseFormat::Json.as_str(), "json");
+    }
 }
