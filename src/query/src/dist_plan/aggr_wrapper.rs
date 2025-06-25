@@ -257,6 +257,8 @@ pub struct MergeWrapper {
     state_fields: Vec<Field>,
     original_input_types: Vec<DataType>,
     original_return_type: DataType,
+    original_schema: arrow_schema::Schema,
+    original_exprs: Vec<Arc<dyn datafusion_physical_expr::PhysicalExpr>>,
 }
 impl MergeWrapper {
     pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
@@ -269,6 +271,27 @@ impl MergeWrapper {
             .collect::<Vec<_>>();
         let signature =
             datafusion_expr::Signature::exact(tys, datafusion_expr::Volatility::Immutable);
+
+        let schema = arrow_schema::Schema::new(
+            args.input_types
+                .to_vec()
+                .iter()
+                .enumerate()
+                .map(|(i, dt)| Field::new(format!("original_input[{}]", i), dt.clone(), true))
+                .collect::<Vec<_>>(),
+        );
+        let exprs = args
+            .input_types
+            .iter()
+            .enumerate()
+            .map(|(i, _dt)| {
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    &format!("original_input[{}]", i),
+                    i,
+                )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+            })
+            .collect::<Vec<_>>();
+
         Ok(Self {
             inner,
             name,
@@ -276,6 +299,8 @@ impl MergeWrapper {
             state_fields,
             original_input_types: args.input_types.to_vec(),
             original_return_type: args.return_type.clone(),
+            original_schema: schema,
+            original_exprs: exprs,
         })
     }
 
@@ -291,27 +316,9 @@ impl AggregateUDFImpl for MergeWrapper {
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         // rewrite the accumulator args to match the original aggregate function's input types.
         let mut acc_args = acc_args;
-        let schema = arrow_schema::Schema::new(
-            self.original_input_types
-                .iter()
-                .enumerate()
-                .map(|(i, dt)| Field::new(format!("original_input[{}]", i), dt.clone(), true))
-                .collect::<Vec<_>>(),
-        );
-        let exprs = self
-            .original_input_types
-            .iter()
-            .enumerate()
-            .map(|(i, _dt)| {
-                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                    &format!("original_input[{}]", i),
-                    i,
-                )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>
-            })
-            .collect::<Vec<_>>();
 
-        acc_args.schema = &schema;
-        acc_args.exprs = &exprs;
+        acc_args.schema = &self.original_schema;
+        acc_args.exprs = &self.original_exprs;
 
         let inner = self.inner.accumulator(acc_args)?;
         Ok(Box::new(MergeAccum::new(inner)))
@@ -424,6 +431,14 @@ mod tests {
                 state_fields: vec![Field::new("sum[sum]", DataType::Int64, true)],
                 original_input_types: vec![DataType::Int64],
                 original_return_type: DataType::Int64,
+                original_schema: arrow_schema::Schema::new(vec![Field::new(
+                    "original_input[0]",
+                    DataType::Int64,
+                    true,
+                )]),
+                original_exprs: vec![Arc::new(
+                    datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
+                )],
             },
         };
         assert_eq!(wrapper, expected);
@@ -462,7 +477,7 @@ mod tests {
         let merge_accum_args = AccumulatorArgs {
             return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
             schema: &arrow_schema::Schema::new(vec![Field::new(
-                "original_input",
+                "original_input[0]",
                 DataType::Int64,
                 true,
             )]),
@@ -472,7 +487,7 @@ mod tests {
             name: state_func.name(),
             is_distinct: state_func.is_distinct,
             exprs: &[Arc::new(
-                datafusion::physical_expr::expressions::Column::new("original_input", 0),
+                datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
             )],
         };
         let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
@@ -533,6 +548,15 @@ mod tests {
                 ],
                 original_input_types: vec![DataType::Float64],
                 original_return_type: DataType::Float64,
+
+                original_schema: arrow_schema::Schema::new(vec![Field::new(
+                    "original_input",
+                    DataType::Int64,
+                    true,
+                )]),
+                original_exprs: vec![Arc::new(
+                    datafusion::physical_expr::expressions::Column::new("original_input", 0),
+                )],
             },
         };
         assert_eq!(wrapper, expected);
