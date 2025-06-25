@@ -25,7 +25,7 @@
 // #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
 
 // allow unused for now because it should be use later
-mod adapter;
+pub mod adapter;
 pub(crate) mod batching_mode;
 mod compute;
 mod df_optimizer;

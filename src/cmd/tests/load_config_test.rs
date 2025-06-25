@@ -27,6 +27,7 @@ use frontend::frontend::FrontendOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
+use flow::adapter::FlownodeOptions;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 use servers::export_metrics::ExportMetricsOption;
@@ -189,6 +190,54 @@ fn test_load_metasrv_example_config() {
                 ..Default::default()
             },
             ..Default::default()
+        },
+        ..Default::default()
+    };
+    similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_flownode_example_config() {
+    let example_config = common_test_util::find_workspace_path("config/flownode.example.toml");
+    let options =
+        GreptimeOptions::<FlownodeOptions>::load_layered_options(example_config.to_str(), "")
+            .unwrap();
+    let expected = GreptimeOptions::<FlownodeOptions> {
+        component: FlownodeOptions {
+            node_id: Some(14),
+            flow: Default::default(),
+            grpc: GrpcOptions {
+                bind_addr: "127.0.0.1:6800".to_string(),
+                server_addr: "127.0.0.1:6800".to_string(),
+                runtime_size: 2,
+                ..Default::default()
+            },
+            logging: LoggingOptions {
+                dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
+                level: Some("info".to_string()),
+                otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                tracing_sample_ratio: Some(Default::default()),
+                ..Default::default()
+            },
+            tracing: Default::default(),
+            heartbeat: Default::default(),
+            query: Default::default(),
+            meta_client: Some(MetaClientOptions {
+                metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
+                timeout: Duration::from_secs(3),
+                heartbeat_timeout: Duration::from_millis(500),
+                ddl_timeout: Duration::from_secs(10),
+                connect_timeout: Duration::from_secs(1),
+                tcp_nodelay: true,
+                metadata_cache_max_capacity: 100000,
+                metadata_cache_ttl: Duration::from_secs(600),
+                metadata_cache_tti: Duration::from_secs(300),
+            }),
+            http: HttpOptions {
+                addr: "127.0.0.1:4000".to_string(),
+                ..Default::default()
+            },
+            user_provider: None,
         },
         ..Default::default()
     };
