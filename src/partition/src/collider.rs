@@ -58,7 +58,7 @@ enum GluonOp {
     GtEq,
 }
 
-/// Collider is used to colide a list of [`PartitionExpr`] into a list of [`AtomicExpr`]
+/// Collider is used to collide a list of [`PartitionExpr`] into a list of [`AtomicExpr`]
 ///
 /// It also normalizes the values of the columns in the expressions.
 #[allow(unused)]
