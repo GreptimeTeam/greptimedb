@@ -31,7 +31,7 @@ pub struct RowGroupSelection {
 }
 
 /// A row selection with its count.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct RowSelectionWithCount {
     /// Row selection.
     selection: RowSelection,
@@ -144,17 +144,7 @@ impl RowGroupSelection {
             })
             .collect::<BTreeMap<_, _>>();
 
-        // Fill the missing row groups with empty selections.
-        // This is to indicate that the row groups are searched even if no rows are found.
-        for rg_id in 0..num_row_groups {
-            selection_in_rg
-                .entry(rg_id)
-                .or_insert(RowSelectionWithCount {
-                    selection: RowSelection::from(vec![]),
-                    row_count: 0,
-                    selector_len: 0,
-                });
-        }
+        Self::fill_missing_row_groups(&mut selection_in_rg, num_row_groups);
 
         Self {
             selection_in_rg,
@@ -206,17 +196,7 @@ impl RowGroupSelection {
             })
             .collect::<BTreeMap<_, _>>();
 
-        // Fill the missing row groups with empty selections.
-        // This is to indicate that the row groups are searched even if no rows are found.
-        for rg_id in 0..num_row_groups {
-            selection_in_rg
-                .entry(rg_id)
-                .or_insert(RowSelectionWithCount {
-                    selection: RowSelection::from(vec![]),
-                    row_count: 0,
-                    selector_len: 0,
-                });
-        }
+        Self::fill_missing_row_groups(&mut selection_in_rg, num_row_groups);
 
         Self {
             selection_in_rg,
@@ -428,6 +408,17 @@ impl RowGroupSelection {
             self.selection_in_rg.insert(*rg_id, other_rs.clone());
             self.row_count += other_rs.row_count;
             self.selector_len += other_rs.selector_len;
+        }
+    }
+
+    /// Fills the missing row groups with empty selections.
+    /// This is to indicate that the row groups are searched even if no rows are found.
+    fn fill_missing_row_groups(
+        selection_in_rg: &mut BTreeMap<usize, RowSelectionWithCount>,
+        num_row_groups: usize,
+    ) {
+        for rg_id in 0..num_row_groups {
+            selection_in_rg.entry(rg_id).or_default();
         }
     }
 }

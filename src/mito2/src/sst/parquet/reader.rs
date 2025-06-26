@@ -378,14 +378,24 @@ impl ParquetReaderBuilder {
         }
 
         let fulltext_filtered = self
-            .prune_row_groups_by_fulltext_index(row_group_size, parquet_meta, &mut output, metrics)
+            .prune_row_groups_by_fulltext_index(
+                row_group_size,
+                num_row_groups,
+                &mut output,
+                metrics,
+            )
             .await;
         if output.is_empty() {
             return output;
         }
 
-        self.prune_row_groups_by_inverted_index(row_group_size, parquet_meta, &mut output, metrics)
-            .await;
+        self.prune_row_groups_by_inverted_index(
+            row_group_size,
+            num_row_groups,
+            &mut output,
+            metrics,
+        )
+        .await;
         if output.is_empty() {
             return output;
         }
@@ -412,7 +422,7 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_fulltext_index(
         &self,
         row_group_size: usize,
-        parquet_meta: &ParquetMetaData,
+        num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
@@ -442,9 +452,7 @@ impl ParquetReaderBuilder {
             .apply_fine(self.file_handle.file_id(), Some(file_size_hint))
             .await;
         let selection = match apply_res {
-            Ok(Some(res)) => {
-                RowGroupSelection::from_row_ids(res, row_group_size, parquet_meta.num_row_groups())
-            }
+            Ok(Some(res)) => RowGroupSelection::from_row_ids(res, row_group_size, num_row_groups),
             Ok(None) => return false,
             Err(err) => {
                 handle_index_error!(err, self.file_handle, INDEX_TYPE_FULLTEXT);
@@ -471,7 +479,7 @@ impl ParquetReaderBuilder {
     async fn prune_row_groups_by_inverted_index(
         &self,
         row_group_size: usize,
-        parquet_meta: &ParquetMetaData,
+        num_row_groups: usize,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
     ) -> bool {
@@ -503,7 +511,7 @@ impl ParquetReaderBuilder {
         let selection = match apply_res {
             Ok(output) => RowGroupSelection::from_inverted_index_apply_output(
                 row_group_size,
-                parquet_meta.num_row_groups(),
+                num_row_groups,
                 output,
             ),
             Err(err) => {
@@ -741,7 +749,7 @@ fn all_required_row_groups_searched(
     cached_row_groups: &RowGroupSelection,
 ) -> bool {
     required_row_groups.iter().all(|(rg_id, _)| {
-        // Row group with no rows is not required to be searched.
+        // Row group with no rows is not required to search.
         !required_row_groups.contains_non_empty_row_group(*rg_id)
             // The row group is already searched.
             || cached_row_groups.contains_row_group(*rg_id)
