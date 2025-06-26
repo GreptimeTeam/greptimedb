@@ -14,6 +14,7 @@
 
 pub(crate) mod close_downgraded_region;
 pub(crate) mod downgrade_leader_region;
+pub(crate) mod event_recorder;
 pub(crate) mod flush_leader_region;
 pub(crate) mod manager;
 pub(crate) mod migration_abort;
@@ -62,7 +63,6 @@ use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
 };
-use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
 use crate::service::mailbox::MailboxRef;
 
 /// The default timeout for region migration.
