@@ -78,6 +78,10 @@ pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
     /// SST files.
+    #[serde(
+        serialize_with = "serialize_files_map",
+        deserialize_with = "deserialize_files_map"
+    )]
     pub files: HashMap<FileId, FileMeta>,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
@@ -90,6 +94,56 @@ pub struct RegionManifest {
     /// Inferred compaction time window.
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
+}
+
+fn serialize_files_map<S>(
+    files: &HashMap<FileId, FileMeta>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(files.len()))?;
+    for (file_id, file_meta) in files {
+        map.serialize_entry(&file_id.to_string(), file_meta)?;
+    }
+    map.end()
+}
+
+fn deserialize_files_map<'de, D>(deserializer: D) -> Result<HashMap<FileId, FileMeta>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use std::fmt;
+
+    use serde::de::{self, MapAccess, Visitor};
+
+    struct FilesMapVisitor;
+
+    impl<'de> Visitor<'de> for FilesMapVisitor {
+        type Value = HashMap<FileId, FileMeta>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a map of file_id strings to FileMeta objects")
+        }
+
+        fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+        where
+            V: MapAccess<'de>,
+        {
+            let mut files = HashMap::new();
+            while let Some((key, value)) = map.next_entry::<String, FileMeta>()? {
+                let file_id = FileId::parse_str(&key, value.region_id).map_err(|_| {
+                    de::Error::invalid_value(de::Unexpected::Str(&key), &"a valid FileId string")
+                })?;
+                files.insert(file_id, value);
+            }
+            Ok(files)
+        }
+    }
+
+    deserializer.deserialize_map(FilesMapVisitor)
 }
 
 #[derive(Debug, Default)]
@@ -238,16 +292,11 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_encode_decode_action_list() {
-        // TODO(ruihang): port this test case
-    }
-
     // These tests are used to ensure backward compatibility of manifest files.
     // DO NOT modify the serialized string when they fail, check if your
     // modification to manifest-related structs is compatible with older manifests.
     #[test]
-    fn test_region_manifest_compatibility() {
+    fn test_region_action_compatibility() {
         let region_edit = r#"{
             "flushed_entry_id":null,
             "compaction_time_window":null,
@@ -297,5 +346,108 @@ mod tests {
     #[test]
     fn test_encode_decode_region_checkpoint() {
         // TODO(ruihang): port this test case
+    }
+
+    #[test]
+    fn test_region_manifest_compatibility() {
+        // Test deserializing RegionManifest from old schema where FileId is a UUID string
+        let region_manifest_json = r#"{
+            "metadata": {
+                "column_metadatas": [
+                    {
+                        "column_schema": {
+                            "name": "a",
+                            "data_type": {"Int64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Tag",
+                        "column_id": 1
+                    },
+                    {
+                        "column_schema": {
+                            "name": "b", 
+                            "data_type": {"Float64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Field",
+                        "column_id": 2
+                    },
+                    {
+                        "column_schema": {
+                            "name": "c",
+                            "data_type": {"Timestamp": {"Millisecond": null}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Timestamp",
+                        "column_id": 3
+                    }
+                ],
+                "primary_key": [1],
+                "region_id": 4402341478400,
+                "schema_version": 0
+            },
+            "files": {
+                "4b220a70-2b03-4641-9687-b65d94641208": {
+                    "region_id": 4402341478400,
+                    "file_id": "4b220a70-2b03-4641-9687-b65d94641208",
+                    "time_range": [
+                        {"value": 1451609210000, "unit": "Millisecond"},
+                        {"value": 1451609520000, "unit": "Millisecond"}
+                    ],
+                    "level": 1,
+                    "file_size": 100
+                },
+                "34b6ebb9-b8a5-4a4b-b744-56f67defad02": {
+                    "region_id": 4402341478400,
+                    "file_id": "34b6ebb9-b8a5-4a4b-b744-56f67defad02",
+                    "time_range": [
+                        {"value": 1451609210000, "unit": "Millisecond"},
+                        {"value": 1451609520000, "unit": "Millisecond"}
+                    ],
+                    "level": 0,
+                    "file_size": 100
+                }
+            },
+            "flushed_entry_id": 10,
+            "flushed_sequence": 20,
+            "manifest_version": 1,
+            "truncated_entry_id": null,
+            "compaction_time_window": null
+        }"#;
+
+        let manifest = serde_json::from_str::<RegionManifest>(region_manifest_json).unwrap();
+
+        // Verify that the files were correctly deserialized
+        assert_eq!(manifest.files.len(), 2);
+        assert_eq!(manifest.flushed_entry_id, 10);
+        assert_eq!(manifest.flushed_sequence, 20);
+        assert_eq!(manifest.manifest_version, 1);
+
+        // Verify that FileIds were correctly parsed from UUID strings
+        let mut file_ids: Vec<String> = manifest.files.keys().map(|id| id.to_string()).collect();
+        file_ids.sort_unstable();
+        assert_eq!(
+            file_ids,
+            vec![
+                "1025_0000000000/34b6ebb9-b8a5-4a4b-b744-56f67defad02",
+                "1025_0000000000/4b220a70-2b03-4641-9687-b65d94641208",
+            ]
+        );
+
+        // Roundtrip test with current FileId format
+        let serialized_manifest = serde_json::to_string(&manifest).unwrap();
+        let deserialized_manifest: RegionManifest =
+            serde_json::from_str(&serialized_manifest).unwrap();
+        assert_eq!(manifest, deserialized_manifest);
+        assert_ne!(serialized_manifest, region_manifest_json);
     }
 }

@@ -92,10 +92,31 @@ impl FileId {
         input: &str,
         region_id: RegionId,
     ) -> std::result::Result<FileId, ParseIdError> {
-        let uuid = Uuid::parse_str(input).map_err(|_| ParseIdError {
-            s: input.to_string(),
-        })?;
-        Ok(FileId { region_id, uuid })
+        let mut parts = input.splitn(2, '/');
+        // Try to parse the new format: {table_id}_{region_number:010}/{uuid}
+        if let (Some(region_part), Some(uuid_str)) = (parts.next(), parts.next())
+            && let Some((table_id_str, region_number_str)) = region_part.split_once('_')
+        {
+            let table_id = table_id_str.parse::<u32>().map_err(|_| ParseIdError {
+                s: input.to_string(),
+            })?;
+            let region_number = region_number_str.parse::<u32>().map_err(|_| ParseIdError {
+                s: input.to_string(),
+            })?;
+            let uuid = Uuid::parse_str(uuid_str).map_err(|_| ParseIdError {
+                s: input.to_string(),
+            })?;
+            Ok(FileId {
+                region_id: RegionId::new(table_id, region_number),
+                uuid,
+            })
+        } else {
+            // For backward compatibility - parse just UUID
+            let uuid = Uuid::parse_str(input).map_err(|_| ParseIdError {
+                s: input.to_string(),
+            })?;
+            Ok(FileId { region_id, uuid })
+        }
     }
 
     /// Append `.parquet` to file id to make a complete file name
@@ -132,30 +153,7 @@ impl FromStr for FileId {
     type Err = ParseIdError;
 
     fn from_str(s: &str) -> std::result::Result<FileId, ParseIdError> {
-        let mut parts = s.splitn(2, '/');
-        // Try to parse the new format: {table_id}_{region_number:010}/{uuid}
-        if let (Some(region_part), Some(uuid_str)) = (parts.next(), parts.next())
-            && let Some((table_id_str, region_number_str)) = region_part.split_once('_')
-        {
-            let table_id = table_id_str
-                .parse::<u32>()
-                .map_err(|_| ParseIdError { s: s.to_string() })?;
-            let region_number = region_number_str
-                .parse::<u32>()
-                .map_err(|_| ParseIdError { s: s.to_string() })?;
-            let uuid = Uuid::parse_str(uuid_str).map_err(|_| ParseIdError { s: s.to_string() })?;
-            Ok(FileId {
-                region_id: RegionId::new(table_id, region_number),
-                uuid,
-            })
-        } else {
-            // For backward compatibility - parse just UUID
-            let uuid = Uuid::parse_str(s).map_err(|_| ParseIdError { s: s.to_string() })?;
-            Ok(FileId {
-                region_id: 0.into(),
-                uuid,
-            })
-        }
+        FileId::parse_str(s, RegionId::new(0, 0))
     }
 }
 

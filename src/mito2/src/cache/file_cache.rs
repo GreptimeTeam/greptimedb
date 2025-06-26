@@ -346,7 +346,7 @@ impl fmt::Display for IndexKey {
             f,
             "{}.{}.{}",
             self.region_id.as_u64(),
-            self.file_id,
+            self.file_id.uuid_str(),
             self.file_type.as_str()
         )
     }
@@ -403,7 +403,9 @@ fn parse_index_key(name: &str) -> Option<IndexKey> {
         let id = s.parse::<u64>().ok()?;
         Some(RegionId::from_u64(id))
     })?;
-    let file_id = split.next().and_then(|s| s.parse::<FileId>().ok())?;
+    let file_id = split
+        .next()
+        .and_then(|s| FileId::parse_str(s, region_id).ok())?;
     let file_type = split.next().and_then(FileType::parse)?;
 
     Some(IndexKey::new(region_id, file_id, file_type))
@@ -551,7 +553,7 @@ mod tests {
         let region_id = RegionId::new(2000, 0);
         let file_type = FileType::Parquet;
         // Write N files.
-        let file_ids: Vec<_> = (0..10).map(|_| FileId::random()).collect();
+        let file_ids: Vec<_> = (0..10).map(|_| FileId::new(region_id)).collect();
         let mut total_size = 0;
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = IndexKey::new(region_id, *file_id, file_type);
