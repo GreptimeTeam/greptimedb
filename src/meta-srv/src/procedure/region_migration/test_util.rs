@@ -92,6 +92,7 @@ impl TestingEnv {
             ManagerConfig::default(),
             state_store,
             poison_manager,
+            None,
         ));
 
         Self {

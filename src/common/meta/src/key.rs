@@ -100,8 +100,8 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow;
-pub mod maintenance;
 pub mod node_address;
+pub mod runtime_switch;
 mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
@@ -164,7 +164,9 @@ use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
-pub const MAINTENANCE_KEY: &str = "__maintenance";
+pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
+pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
+pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
 
 pub const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
