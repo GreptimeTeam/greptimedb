@@ -135,10 +135,6 @@ impl<'a> Collider<'a> {
                 Self::collect_column_values_from_expr(left_expr, values)?;
                 Self::collect_column_values_from_expr(right_expr, values)
             }
-            (Operand::Column(_), Operand::Expr(expr))
-            | (Operand::Expr(expr), Operand::Column(_)) => {
-                Self::collect_column_values_from_expr(expr, values)
-            }
             // Other combinations don't directly contribute column-value pairs
             _ => error::InvalidExprSnafu { expr: expr.clone() }.fail(),
         }
@@ -243,8 +239,11 @@ impl<'a> Collider<'a> {
                 Self::collect_nucleons_from_expr(expr, nucleons, normalized_values)
             }
             _ => {
-                // Single operands don't form nucleons by themselves
-                Ok(())
+                // Only `Operand::Expr` can be conjuncted by AND.
+                error::NoExprOperandSnafu {
+                    operand: operand.clone(),
+                }
+                .fail()
             }
         }
     }
