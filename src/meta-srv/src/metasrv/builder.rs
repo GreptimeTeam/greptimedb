@@ -47,6 +47,7 @@ use snafu::{ensure, ResultExt};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::event_recorder::EventRecorderImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -182,6 +183,9 @@ impl MetasrvBuilder {
             None => State::leader(options.grpc.server_addr.to_string(), true),
             Some(_) => State::follower(options.grpc.server_addr.to_string()),
         }));
+
+        // Builds the event recorder to record important events and persist them as the system table.
+        let event_recorder = Arc::new(EventRecorderImpl::new(in_memory.clone()));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
             state.clone(),
@@ -322,6 +326,7 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
+            event_recorder.clone(),
         ));
         region_migration_manager.try_start()?;
         let region_supervisor_selector = plugins

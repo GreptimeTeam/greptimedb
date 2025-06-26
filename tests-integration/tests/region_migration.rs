@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
@@ -34,6 +35,11 @@ use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
+use meta_srv::event_recorder::{
+    REGION_MIGRATION_EVENTS_TABLE_NAME, REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+};
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
@@ -233,6 +239,34 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .await
         .unwrap_err();
     assert!(matches!(err, error::Error::RegionMigrated { .. }));
+
+    // Check the `region_migration_events` table.
+    let query_ctx = QueryContext::arc();
+    let query = format!(
+        "SELECT {} FROM {}.{} WHERE {} = '{}' ORDER BY {} ASC",
+        REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        REGION_MIGRATION_EVENTS_TABLE_NAME,
+        REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+        REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+        procedure.unwrap()
+    );
+    let result = cluster
+        .frontend
+        .instance
+        .do_query(&query, query_ctx)
+        .await
+        .remove(0);
+
+    let expected = "\
++----------+
+| status   |
++----------+
+| Starting |
+| Running  |
+| Finished |
++----------+";
+    check_output_stream(result.unwrap().data, expected).await;
 }
 
 /// A naive metric table region migration test by SQL function

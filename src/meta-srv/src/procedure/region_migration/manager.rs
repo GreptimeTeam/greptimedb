@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::event_recorder::{EventRecorderRef, RegionMigrationEvent, RegionMigrationStatus};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
@@ -42,6 +43,7 @@ pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     context_factory: DefaultContextFactory,
     tracker: RegionMigrationProcedureTracker,
+    event_recorder: EventRecorderRef,
 }
 
 #[derive(Default, Clone)]
@@ -156,11 +158,13 @@ impl RegionMigrationManager {
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
         context_factory: DefaultContextFactory,
+        event_recorder: EventRecorderRef,
     ) -> Self {
         Self {
             procedure_manager,
             context_factory,
             tracker: RegionMigrationProcedureTracker::default(),
+            event_recorder,
         }
     }
 
@@ -399,15 +403,32 @@ impl RegionMigrationManager {
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
         let procedure_id = procedure_with_id.id;
         info!("Starting region migration procedure {procedure_id} for {task}");
+        self.event_recorder
+            .record(Box::new(RegionMigrationEvent::new(
+                task.clone(),
+                procedure_id,
+                RegionMigrationStatus::Starting,
+            )));
         let procedure_manager = self.procedure_manager.clone();
+        let event_recorder = self.event_recorder.clone();
         common_runtime::spawn_global(async move {
             let watcher = &mut match procedure_manager.submit(procedure_with_id).await {
                 Ok(watcher) => watcher,
                 Err(e) => {
                     error!(e; "Failed to submit region migration procedure {procedure_id} for {task}");
+                    event_recorder.record(Box::new(RegionMigrationEvent::new(
+                        task.clone(),
+                        procedure_id,
+                        RegionMigrationStatus::Failed(e),
+                    )));
                     return;
                 }
             };
+            event_recorder.record(Box::new(RegionMigrationEvent::new(
+                task.clone(),
+                procedure_id,
+                RegionMigrationStatus::Running,
+            )));
             METRIC_META_REGION_MIGRATION_DATANODES
                 .with_label_values(&["src", &task.from_peer.id.to_string()])
                 .inc();
@@ -418,10 +439,20 @@ impl RegionMigrationManager {
             if let Err(e) = watcher::wait(watcher).await {
                 error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
                 METRIC_META_REGION_MIGRATION_FAIL.inc();
+                event_recorder.record(Box::new(RegionMigrationEvent::new(
+                    task.clone(),
+                    procedure_id,
+                    RegionMigrationStatus::Failed(e),
+                )));
                 return;
             }
 
             info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
+            event_recorder.record(Box::new(RegionMigrationEvent::new(
+                task.clone(),
+                procedure_id,
+                RegionMigrationStatus::Finished,
+            )));
         });
 
         Ok(Some(procedure_id))
@@ -443,7 +474,11 @@ mod test {
     async fn test_insert_running_procedure() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -468,7 +503,11 @@ mod test {
     async fn test_submit_procedure_invalid_task() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -486,7 +525,11 @@ mod test {
     async fn test_submit_procedure_table_not_found() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -504,7 +547,11 @@ mod test {
     async fn test_submit_procedure_region_route_not_found() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -532,7 +579,11 @@ mod test {
     async fn test_submit_procedure_incorrect_from_peer() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -561,7 +612,11 @@ mod test {
     async fn test_submit_procedure_region_follower_on_to_peer() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -595,7 +650,11 @@ mod test {
         common_telemetry::init_default_ut_logging();
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,
@@ -623,7 +682,11 @@ mod test {
     async fn test_verify_table_route_error() {
         let env = TestingEnv::new();
         let context_factory = env.context_factory();
-        let manager = RegionMigrationManager::new(env.procedure_manager().clone(), context_factory);
+        let manager = RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            context_factory,
+            env.event_recorder(),
+        );
         let region_id = RegionId::new(1024, 1);
         let task = RegionMigrationProcedureTask {
             region_id,

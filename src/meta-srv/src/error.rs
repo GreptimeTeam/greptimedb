@@ -900,6 +900,14 @@ pub enum Error {
         #[snafu(source)]
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to insert events"))]
+    InsertEvents {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: client::error::Error,
+    },
 }
 
 impl Error {
@@ -953,6 +961,7 @@ impl ErrorExt for Error {
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
+            | Error::InsertEvents { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,

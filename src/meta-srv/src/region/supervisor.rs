@@ -800,6 +800,7 @@ pub(crate) mod tests {
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             env.procedure_manager().clone(),
             context_factory,
+            env.event_recorder(),
         ));
         let runtime_switch_manager =
             Arc::new(runtime_switch::RuntimeSwitchManager::new(env.kv_backend()));

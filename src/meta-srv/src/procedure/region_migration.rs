@@ -62,7 +62,6 @@ use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
 };
-use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
 use crate::service::mailbox::MailboxRef;
 
 /// The default timeout for region migration.
@@ -771,8 +770,8 @@ mod tests {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
-    #[test]
-    fn test_lock_key() {
+    #[tokio::test]
+    async fn test_lock_key() {
         let persistent_context = new_persistent_context();
         let expected_keys = persistent_context.lock_key();
 
@@ -789,8 +788,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_data_serialization() {
+    #[tokio::test]
+    async fn test_data_serialization() {
         let persistent_context = new_persistent_context();
 
         let env = TestingEnv::new();
@@ -807,7 +806,7 @@ mod tests {
     fn test_backward_compatibility() {
         let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
         // NOTES: Changes it will break backward compatibility.
-        let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"trigger_reason":"Manual"}"#;
+        let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);

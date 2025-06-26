@@ -23,7 +23,7 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
-    InsertRequests, QueryRequest, RequestHeader,
+    InsertRequests, QueryRequest, RequestHeader, RowInsertRequests,
 };
 use arrow_flight::{FlightData, Ticket};
 use async_stream::stream;
@@ -163,6 +163,26 @@ impl Database {
     ) -> Result<u32> {
         let mut client = make_database_client(&self.client)?.inner;
         let request = self.to_rpc_request(Request::Inserts(requests));
+
+        let mut request = tonic::Request::new(request);
+        let metadata = request.metadata_mut();
+        Self::put_hints(metadata, hints)?;
+
+        let response = client.handle(request).await?.into_inner();
+        from_grpc_response(response)
+    }
+
+    pub async fn row_inserts(&self, requests: RowInsertRequests) -> Result<u32> {
+        self.handle(Request::RowInserts(requests)).await
+    }
+
+    pub async fn row_inserts_with_hints(
+        &self,
+        requests: RowInsertRequests,
+        hints: &[(&str, &str)],
+    ) -> Result<u32> {
+        let mut client = make_database_client(&self.client)?.inner;
+        let request = self.to_rpc_request(Request::RowInserts(requests));
 
         let mut request = tonic::Request::new(request);
         let metadata = request.metadata_mut();
