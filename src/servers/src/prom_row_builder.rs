@@ -24,7 +24,7 @@ use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
 use crate::http::PromValidationMode;
-use crate::proto::{decode_string, PromLabel};
+use crate::proto::PromLabel;
 use crate::repeated_field::Clear;
 
 // Prometheus remote write context
@@ -150,8 +150,8 @@ impl TableBuilder {
         let mut row = vec![Value { value_data: None }; self.col_indexes.len()];
 
         for PromLabel { name, value } in labels {
-            let tag_name = decode_string(name, prom_validation_mode)?;
-            let tag_value = decode_string(value, prom_validation_mode)?;
+            let tag_name = prom_validation_mode.decode_string(name)?;
+            let tag_value = prom_validation_mode.decode_string(value)?;
             let tag_value = Some(ValueData::StringValue(tag_value));
             let tag_num = self.col_indexes.len();
 

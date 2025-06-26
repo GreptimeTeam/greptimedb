@@ -28,7 +28,7 @@ use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_recordbatch::RecordBatch;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -37,6 +37,7 @@ use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
+use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
@@ -163,6 +164,24 @@ pub enum PromValidationMode {
     Lossy,
     /// Do not validate UTF8 strings.
     Unchecked,
+}
+
+impl PromValidationMode {
+    /// Decodes provided bytes to [String] with optional UTF-8 validation.
+    pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
+        let result = match self {
+            PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Invalid UTF-8 string value: {:?}, error: {:?}", bytes, e);
+                    return Err(DecodeError::new("invalid utf-8"));
+                }
+            },
+            PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
+            PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
+        };
+        Ok(result)
+    }
 }
 
 impl Default for HttpOptions {
