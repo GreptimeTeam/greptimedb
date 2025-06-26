@@ -27,7 +27,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::distributed_time_constants;
-use common_meta::key::maintenance::MaintenanceModeManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
@@ -437,7 +437,7 @@ pub struct Metasrv {
     procedure_executor: ProcedureExecutorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    maintenance_mode_manager: MaintenanceModeManagerRef,
+    runtime_switch_manager: RuntimeSwitchManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -696,8 +696,8 @@ impl Metasrv {
         &self.table_metadata_manager
     }
 
-    pub fn maintenance_mode_manager(&self) -> &MaintenanceModeManagerRef {
-        &self.maintenance_mode_manager
+    pub fn runtime_switch_manager(&self) -> &RuntimeSwitchManagerRef {
+        &self.runtime_switch_manager
     }
 
     pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {

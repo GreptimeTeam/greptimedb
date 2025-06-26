@@ -995,6 +995,7 @@ mod tests {
             Default::default(),
             state_store,
             poison_manager,
+            None,
         ));
 
         let _ = DdlManager::try_new(

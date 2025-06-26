@@ -17,6 +17,7 @@ mod heartbeat;
 mod leader;
 mod maintenance;
 mod node_lease;
+mod procedure;
 mod util;
 
 use std::collections::HashMap;
@@ -56,10 +57,25 @@ pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
         },
     );
 
-    let router = router.route(
-        "/maintenance",
+    let router = router.routes(
+        &[
+            "/maintenance",
+            "/maintenance/status",
+            "/maintenance/enable",
+            "/maintenance/disable",
+        ],
         maintenance::MaintenanceHandler {
-            manager: metasrv.maintenance_mode_manager().clone(),
+            manager: metasrv.runtime_switch_manager().clone(),
+        },
+    );
+    let router = router.routes(
+        &[
+            "/procedure-manager/pause",
+            "/procedure-manager/resume",
+            "/procedure-manager/status",
+        ],
+        procedure::ProcedureManagerHandler {
+            manager: metasrv.runtime_switch_manager().clone(),
         },
     );
     let router = Router::nest("/admin", router);
@@ -97,10 +113,7 @@ impl NamedService for Admin {
     const NAME: &'static str = "admin";
 }
 
-impl<T> Service<http::Request<T>> for Admin
-where
-    T: Send,
-{
+impl Service<http::Request<BoxBody>> for Admin {
     type Response = http::Response<BoxBody>;
     type Error = Infallible;
     type Future = BoxFuture<Self::Response, Self::Error>;
@@ -109,7 +122,7 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: http::Request<T>) -> Self::Future {
+    fn call(&mut self, req: http::Request<BoxBody>) -> Self::Future {
         let router = self.router.clone();
         let query_params = req
             .uri()
@@ -128,7 +141,7 @@ where
 
 #[derive(Default)]
 pub struct Router {
-    handlers: HashMap<String, Box<dyn HttpHandler>>,
+    handlers: HashMap<String, Arc<dyn HttpHandler>>,
 }
 
 impl Router {
@@ -153,7 +166,17 @@ impl Router {
     pub fn route(mut self, path: &str, handler: impl HttpHandler + 'static) -> Self {
         check_path(path);
 
-        let _ = self.handlers.insert(path.to_owned(), Box::new(handler));
+        let _ = self.handlers.insert(path.to_owned(), Arc::new(handler));
+
+        self
+    }
+
+    pub fn routes(mut self, paths: &[&str], handler: impl HttpHandler + 'static) -> Self {
+        let handler = Arc::new(handler);
+        for path in paths {
+            check_path(path);
+            let _ = self.handlers.insert(path.to_string(), handler.clone());
+        }
 
         self
     }
@@ -204,7 +227,7 @@ fn boxed(body: String) -> BoxBody {
 mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     use super::*;
     use crate::metasrv::builder::MetasrvBuilder;
@@ -325,6 +348,13 @@ mod tests {
         metasrv
     }
 
+    async fn send_request(client: &mut DuplexStream, request: &[u8]) -> String {
+        client.write_all(request).await.unwrap();
+        let mut buf = vec![0; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_metasrv_maintenance_mode() {
         common_telemetry::init_default_ut_logging();
@@ -343,73 +373,188 @@ mod tests {
         });
 
         // Get maintenance mode
-        let http_request = b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        client.write_all(http_request).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":false}"#));
         assert!(response.contains("200 OK"));
 
         // Set maintenance mode to true
-        let http_post = b"POST /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-        client.write_all(http_post).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"POST /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":true}"#));
         assert!(response.contains("200 OK"));
 
         let enabled = metasrv
-            .maintenance_mode_manager()
+            .runtime_switch_manager()
             .maintenance_mode()
             .await
             .unwrap();
         assert!(enabled);
 
         // Get maintenance mode again
-        let http_request = b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        client.write_all(http_request).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":true}"#));
         assert!(response.contains("200 OK"));
 
         // Set maintenance mode to false
-        let http_post = b"POST /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
-        client.write_all(http_post).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"POST /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":false}"#));
         assert!(response.contains("200 OK"));
 
         let enabled = metasrv
-            .maintenance_mode_manager()
+            .runtime_switch_manager()
             .maintenance_mode()
             .await
             .unwrap();
         assert!(!enabled);
 
         // Set maintenance mode to true via GET request
-        let http_request =
-            b"GET /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        client.write_all(http_request).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance?enable=true HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":true}"#));
         assert!(response.contains("200 OK"));
 
         // Set maintenance mode to false via GET request
-        let http_request =
-            b"PUT /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        client.write_all(http_request).await.unwrap();
-        let mut buf = vec![0; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let response = String::from_utf8_lossy(&buf[..n]);
+        let response = send_request(
+            &mut client,
+            b"PUT /admin/maintenance?enable=false HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
         assert!(response.contains(r#"{"enabled":false}"#));
         assert!(response.contains("200 OK"));
+
+        // Get maintenance mode via status path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains(r#"{"enabled":false}"#));
+
+        // Set maintenance mode via enable path
+        let response = send_request(
+            &mut client,
+            b"POST /admin/maintenance/enable HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains(r#"{"enabled":true}"#));
+
+        // Unset maintenance mode via disable path
+        let response = send_request(
+            &mut client,
+            b"POST /admin/maintenance/disable HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains(r#"{"enabled":false}"#));
+
+        // send POST request to status path
+        let response = send_request(
+            &mut client,
+            b"POST /admin/maintenance/status HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("404 Not Found"));
+
+        // send GET request to enable path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance/enable HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("404 Not Found"));
+
+        // send GET request to disable path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/maintenance/disable HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("404 Not Found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_metasrv_procedure_manager_handler() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let metasrv = test_metasrv(kv_backend).await;
+        metasrv.try_start().await.unwrap();
+
+        let (mut client, server) = tokio::io::duplex(1024);
+        let metasrv = Arc::new(metasrv);
+        let service = metasrv.clone();
+        let _handle = tokio::spawn(async move {
+            let router = bootstrap::router(service);
+            router
+                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        // send GET request to procedure-manager/status path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/procedure-manager/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("200 OK"));
+        assert!(
+            response.contains(r#"{"status":"running"}"#),
+            "response: {}",
+            response
+        );
+
+        // send POST request to procedure-manager/pause path
+        let response = send_request(
+            &mut client,
+            b"POST /admin/procedure-manager/pause HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("200 OK"));
+        assert!(response.contains(r#"{"status":"paused"}"#));
+
+        // send POST request to procedure-manager/resume path
+        let response = send_request(
+            &mut client,
+            b"POST /admin/procedure-manager/resume HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("200 OK"));
+        assert!(
+            response.contains(r#"{"status":"running"}"#),
+            "response: {}",
+            response
+        );
+
+        // send GET request to procedure-manager/resume path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/procedure-manager/resume HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("404 Not Found"));
+
+        // send GET request to procedure-manager/pause path
+        let response = send_request(
+            &mut client,
+            b"GET /admin/procedure-manager/pause HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        assert!(response.contains("404 Not Found"));
     }
 }

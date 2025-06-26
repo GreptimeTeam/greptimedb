@@ -37,6 +37,7 @@ use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
@@ -125,10 +126,12 @@ impl Instance {
             max_running_procedures: procedure_config.max_running_procedures,
             ..Default::default()
         };
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(
             manager_config,
             kv_state_store.clone(),
             kv_state_store,
+            Some(runtime_switch_manager),
         ));
 
         Ok((kv_backend, procedure_manager))

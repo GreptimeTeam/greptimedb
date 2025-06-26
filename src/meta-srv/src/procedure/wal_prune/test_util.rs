@@ -52,6 +52,7 @@ impl TestEnv {
             ManagerConfig::default(),
             state_store,
             poison_manager,
+            None,
         ));
 
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
