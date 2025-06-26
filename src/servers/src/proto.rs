@@ -356,7 +356,7 @@ impl PromWriteRequest {
 
     /// Converts the write request into a record batch and reset the table data.
     pub async fn as_record_batch(&mut self, bulk_ctx: &PromBulkContext) -> Result<()> {
-        self.table_data.as_record_batch(bulk_ctx).await
+        self.table_data.as_record_batches(bulk_ctx).await
     }
 }
 

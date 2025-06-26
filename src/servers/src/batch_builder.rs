@@ -48,7 +48,7 @@ use crate::prom_row_builder::{PromCtx, TableBuilder};
 
 pub struct MetricsBatchBuilder {
     schema_helper: SchemaHelper,
-    builders: HashMap<TableId, BatchEncoder>,
+    builders: HashMap<String /*schema*/, HashMap<String /*logical table name*/, BatchEncoder>>,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
 }
@@ -270,7 +270,9 @@ impl MetricsBatchBuilder {
 
                 let encoder = self
                     .builders
-                    .entry(physical_table.region_id.table_id())
+                    .entry(schema.to_string())
+                    .or_default()
+                    .entry(logical_table_name.clone())
                     .or_insert_with(|| Self::create_sparse_encoder(&physical_table));
                 encoder.append_rows(*logical_table_id, std::mem::take(table))?;
             }
@@ -279,12 +281,24 @@ impl MetricsBatchBuilder {
     }
 
     /// Finishes current record batch builder and returns record batches grouped by physical table id.
-    pub(crate) fn finish(self) -> error::Result<HashMap<TableId, (RecordBatch, (i64, i64))>> {
-        let mut table_batches = HashMap::with_capacity(self.builders.len());
-        for (physical_table_id, encoder) in self.builders {
-            let rb = encoder.finish()?;
-            if let Some(v) = rb {
-                table_batches.insert(physical_table_id, v);
+    pub(crate) fn finish(
+        self,
+    ) -> error::Result<
+        HashMap<
+            String, /*schema name*/
+            HashMap<String /*logical table name*/, (RecordBatch, (i64, i64))>,
+        >,
+    > {
+        let mut table_batches: HashMap<String, HashMap<String, (RecordBatch, (i64, i64))>> =
+            HashMap::with_capacity(self.builders.len());
+
+        for (schema_name, schema_tables) in self.builders {
+            let schema_batches = table_batches.entry(schema_name).or_default();
+            for (logical_table_name, table_data) in schema_tables {
+                let rb = table_data.finish()?;
+                if let Some(v) = rb {
+                    schema_batches.entry(logical_table_name).insert_entry(v);
+                }
             }
         }
         Ok(table_batches)

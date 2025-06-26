@@ -96,7 +96,7 @@ impl TablesBuilder {
     }
 
     /// Converts [TablesBuilder] to record batch and clears inner states.
-    pub(crate) async fn as_record_batch(&mut self, bulk_ctx: &PromBulkContext) -> Result<()> {
+    pub(crate) async fn as_record_batches(&mut self, bulk_ctx: &PromBulkContext) -> Result<()> {
         let mut batch_builder = MetricsBatchBuilder::new(
             bulk_ctx.schema_helper.clone(),
             bulk_ctx.partition_manager.clone(),
@@ -130,7 +130,29 @@ impl TablesBuilder {
             .await?;
 
         let record_batches = batch_builder.finish()?;
-        todo!()
+
+        for (schema_name, schema_batches) in record_batches {
+            let schema_regions = physical_region_metadata
+                .get(&schema_name)
+                .expect("physical region metadata not found");
+            for (logical_table_name, (rb, time_range)) in schema_batches {
+                let (_table_id, physical_region_metadata) = schema_regions
+                    .get(&logical_table_name)
+                    .expect("physical region metadata not found");
+                let mut writer = bulk_ctx
+                    .access_layer_factory
+                    .create_sst_writer(
+                        "greptime", //todo(hl): use the catalog name in query context.
+                        &schema_name,
+                        physical_region_metadata.clone(),
+                    )
+                    .await?;
+
+                writer.write_record_batch(&rb, Some(time_range)).await?;
+                let _file_meta = writer.finish().await?;
+            }
+        }
+        Ok(())
     }
 }
 

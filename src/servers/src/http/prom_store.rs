@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::prelude::*;
 
+use crate::access_layer::AccessLayerFactory;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
@@ -221,6 +222,7 @@ pub struct PromBulkContext {
     pub(crate) query_ctx: QueryContextRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
+    pub(crate) access_layer_factory: AccessLayerFactory,
 }
 
 async fn decode_remote_write_request(

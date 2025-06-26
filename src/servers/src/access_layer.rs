@@ -49,7 +49,7 @@ impl AccessLayerFactory {
         Ok(Self { object_store })
     }
 
-    async fn create_sst_writer(
+    pub(crate) async fn create_sst_writer(
         &self,
         catalog: &str,
         schema: &str,
