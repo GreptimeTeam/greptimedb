@@ -202,6 +202,8 @@ pub(crate) enum LogStoreImpl {
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
+    intermediate_manager: IntermediateManager,
+    puffin_manager: PuffinManagerFactory,
     log_store: Option<LogStoreImpl>,
     log_store_factory: LogStoreFactory,
     object_store_manager: Option<ObjectStoreManagerRef>,
@@ -218,35 +220,28 @@ impl Default for TestEnv {
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
-        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
-        TestEnv {
-            data_home: create_temp_dir(""),
-            log_store: None,
-            log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
-            object_store_manager: None,
-            schema_metadata_manager,
-            kv_backend,
-        }
+        Self::with_prefix("")
     }
 
     /// Returns a new env with specific `prefix` for test.
     pub fn with_prefix(prefix: &str) -> TestEnv {
-        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
-        TestEnv {
-            data_home: create_temp_dir(prefix),
-            log_store: None,
-            log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
-            object_store_manager: None,
-            schema_metadata_manager,
-            kv_backend,
-        }
+        Self::with_data_home(create_temp_dir(prefix))
     }
 
     /// Returns a new env with specific `data_home` for test.
     pub fn with_data_home(data_home: TempDir) -> TestEnv {
         let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+
+        let index_aux_path = data_home.path().join("index_aux");
+        let f = PuffinManagerFactory::new(&index_aux_path, 4096, None, None);
+        let puffin_manager = futures::executor::block_on(f).unwrap();
+        let f = IntermediateManager::init_fs(index_aux_path.to_str().unwrap());
+        let intermediate_manager = futures::executor::block_on(f).unwrap();
+
         TestEnv {
             data_home,
+            intermediate_manager,
+            puffin_manager,
             log_store: None,
             log_store_factory: LogStoreFactory::RaftEngine(RaftEngineLogStoreFactory),
             object_store_manager: None,
@@ -587,17 +582,15 @@ impl TestEnv {
         local_store: ObjectStore,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let index_aux_path = self.data_home.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-
-        let write_cache = WriteCache::new(local_store, capacity, None, puffin_mgr, intm_mgr)
-            .await
-            .unwrap();
+        let write_cache = WriteCache::new(
+            local_store,
+            capacity,
+            None,
+            self.puffin_manager.clone(),
+            self.intermediate_manager.clone(),
+        )
+        .await
+        .unwrap();
 
         Arc::new(write_cache)
     }
@@ -608,17 +601,15 @@ impl TestEnv {
         path: &str,
         capacity: ReadableSize,
     ) -> WriteCacheRef {
-        let index_aux_path = self.data_home.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-
-        let write_cache = WriteCache::new_fs(path, capacity, None, puffin_mgr, intm_mgr)
-            .await
-            .unwrap();
+        let write_cache = WriteCache::new_fs(
+            path,
+            capacity,
+            None,
+            self.puffin_manager.clone(),
+            self.intermediate_manager.clone(),
+        )
+        .await
+        .unwrap();
 
         Arc::new(write_cache)
     }
@@ -633,6 +624,14 @@ impl TestEnv {
 
     pub(crate) fn get_log_store(&self) -> Option<LogStoreImpl> {
         self.log_store.as_ref().cloned()
+    }
+
+    pub fn get_puffin_manager(&self) -> PuffinManagerFactory {
+        self.puffin_manager.clone()
+    }
+
+    pub fn get_intermediate_manager(&self) -> IntermediateManager {
+        self.intermediate_manager.clone()
     }
 }
 

@@ -14,10 +14,8 @@
 
 use common_telemetry::{debug, warn};
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
+use store_api::storage::ColumnId;
 
-use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
-use crate::sst::index::fulltext_index::creator::FulltextIndexer;
-use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount};
 use crate::sst::index::{
@@ -113,13 +111,14 @@ impl Indexer {
             return true;
         };
 
+        let column_ids = indexer.column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_inverted_index_output(
                     &mut index_output.inverted_index,
                     row_count,
                     byte_count,
-                    &indexer,
+                    column_ids,
                 );
                 return true;
             }
@@ -150,13 +149,14 @@ impl Indexer {
             return true;
         };
 
+        let column_ids = indexer.column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_fulltext_index_output(
                     &mut index_output.fulltext_index,
                     row_count,
                     byte_count,
-                    &indexer,
+                    column_ids,
                 );
                 return true;
             }
@@ -187,13 +187,14 @@ impl Indexer {
             return true;
         };
 
+        let column_ids = indexer.column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_bloom_filter_output(
                     &mut index_output.bloom_filter,
                     row_count,
                     byte_count,
-                    &indexer,
+                    column_ids,
                 );
                 return true;
             }
@@ -220,16 +221,16 @@ impl Indexer {
         output: &mut InvertedIndexOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        indexer: &InvertedIndexer,
+        column_ids: Vec<ColumnId>,
     ) {
         debug!(
-            "Inverted index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}",
-            self.region_id, self.file_id, byte_count, row_count
+            "Inverted index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, column_ids
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = indexer.column_ids().collect();
+        output.columns = column_ids;
     }
 
     fn fill_fulltext_index_output(
@@ -237,16 +238,16 @@ impl Indexer {
         output: &mut FulltextIndexOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        indexer: &FulltextIndexer,
+        column_ids: Vec<ColumnId>,
     ) {
         debug!(
-            "Full-text index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}",
-            self.region_id, self.file_id, byte_count, row_count
+            "Full-text index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, column_ids
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = indexer.column_ids().collect();
+        output.columns = column_ids;
     }
 
     fn fill_bloom_filter_output(
@@ -254,15 +255,15 @@ impl Indexer {
         output: &mut BloomFilterOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        indexer: &BloomFilterIndexer,
+        column_ids: Vec<ColumnId>,
     ) {
         debug!(
-            "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}",
-            self.region_id, self.file_id, byte_count, row_count
+            "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, column_ids
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = indexer.column_ids().collect();
+        output.columns = column_ids;
     }
 }

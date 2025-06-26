@@ -1162,7 +1162,10 @@ impl Drop for ParquetReader {
 
 impl ParquetReader {
     /// Creates a new reader.
-    async fn new(context: FileRangeContextRef, mut selection: RowGroupSelection) -> Result<Self> {
+    pub(crate) async fn new(
+        context: FileRangeContextRef,
+        mut selection: RowGroupSelection,
+    ) -> Result<Self> {
         // No more items in current row group, reads next row group.
         let reader_state = if let Some((row_group_idx, row_selection)) = selection.pop_first() {
             let parquet_reader = context

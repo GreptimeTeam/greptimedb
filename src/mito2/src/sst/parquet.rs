@@ -88,11 +88,12 @@ pub struct SstInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{BinaryExpr, Expr, Operator};
+    use datafusion_expr::{col, lit, BinaryExpr, Expr, Operator};
     use datatypes::arrow;
     use datatypes::arrow::array::RecordBatch;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -104,12 +105,17 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::access_layer::{FilePathProvider, RegionFilePathFactory};
+    use crate::access_layer::{FilePathProvider, OperationType, RegionFilePathFactory};
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::BatchReader;
-    use crate::sst::index::{Indexer, IndexerBuilder};
+    use crate::region::options::{IndexOptions, InvertedIndexOptions};
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file_purger::NoopFilePurger;
+    use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
+    use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+    use crate::sst::index::{Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::format::WriteFormat;
-    use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
     use crate::test_util::sst_util::{
@@ -592,5 +598,190 @@ mod tests {
             }
         }
         assert_eq!(total_rows, rows_read);
+    }
+
+    #[tokio::test]
+    async fn test_write_read_with_index() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let file_path = FixedPathProvider {
+            file_id: FileId::random(),
+        };
+        let metadata = Arc::new(sst_region_metadata());
+        let row_group_size = 50;
+
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 20),
+            new_batch_by_range(&["b", "d"], 0, 20),
+            new_batch_by_range(&["c", "d"], 0, 20),
+            new_batch_by_range(&["c", "f"], 0, 40),
+            new_batch_by_range(&["c", "h"], 100, 200),
+        ]);
+        // Use a small row group size for test.
+        let write_opts = WriteOptions {
+            row_group_size,
+            ..Default::default()
+        };
+
+        let puffin_manager = env
+            .get_puffin_manager()
+            .build(object_store.clone(), file_path.clone());
+        let intermediate_manager = env.get_intermediate_manager();
+
+        let indexer_builder = IndexerBuilderImpl {
+            op_type: OperationType::Flush,
+            metadata: metadata.clone(),
+            row_group_size,
+            puffin_manager,
+            intermediate_manager,
+            index_options: IndexOptions {
+                inverted_index: InvertedIndexOptions {
+                    segment_row_count: 1,
+                    ..Default::default()
+                },
+            },
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+        };
+
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            indexer_builder,
+            file_path.clone(),
+        )
+        .await;
+
+        let mut info = writer
+            .write_all(source, None, &write_opts)
+            .await
+            .unwrap()
+            .remove(0);
+        info.file_id = file_path.file_id;
+        assert_eq!(200, info.num_rows);
+        assert!(info.file_size > 0);
+        assert!(info.index_metadata.file_size > 0);
+
+        assert!(info.index_metadata.inverted_index.index_size > 0);
+        assert_eq!(info.index_metadata.inverted_index.row_count, 200);
+        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+
+        assert!(info.index_metadata.bloom_filter.index_size > 0);
+        assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
+        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+
+        assert_eq!(
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(199)
+            ),
+            info.time_range
+        );
+
+        let handle = FileHandle::new(
+            FileMeta {
+                region_id: metadata.region_id,
+                file_id: file_path.file_id,
+                time_range: info.time_range,
+                level: 0,
+                file_size: info.file_size,
+                available_indexes: info.index_metadata.build_available_indexes(),
+                index_file_size: info.index_metadata.file_size,
+                num_row_groups: info.num_row_groups,
+                num_rows: info.num_rows as u64,
+                sequence: None,
+            },
+            Arc::new(NoopFilePurger),
+        );
+
+        let cache = Arc::new(
+            CacheManager::builder()
+                .index_result_cache_size(1024 * 1024)
+                .index_metadata_size(1024 * 1024)
+                .index_content_page_size(1024 * 1024)
+                .index_content_size(1024 * 1024)
+                .puffin_metadata_size(1024 * 1024)
+                .build(),
+        );
+        let index_result_cache = cache.index_result_cache().unwrap();
+
+        let build_inverted_index_applier = |exprs: &[Expr]| {
+            InvertedIndexApplierBuilder::new(
+                FILE_DIR.to_string(),
+                object_store.clone(),
+                &metadata,
+                HashSet::from_iter([0]),
+                env.get_puffin_manager(),
+            )
+            .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
+            .with_inverted_index_cache(cache.inverted_index_cache().cloned())
+            .build(exprs)
+            .unwrap()
+            .map(Arc::new)
+        };
+
+        let build_bloom_filter_applier = |exprs: &[Expr]| {
+            BloomFilterIndexApplierBuilder::new(
+                FILE_DIR.to_string(),
+                object_store.clone(),
+                &metadata,
+                env.get_puffin_manager(),
+            )
+            .with_puffin_metadata_cache(cache.puffin_metadata_cache().cloned())
+            .with_bloom_filter_index_cache(cache.bloom_filter_index_cache().cloned())
+            .build(exprs)
+            .unwrap()
+            .map(Arc::new)
+        };
+
+        // Data: ts tag_0 tag_1
+        // Data: 0-20 [a, d]
+        //       0-20 [b, d]
+        //       0-20 [c, d]
+        //       0-40 [c, f]
+        //     100-200 [c, h]
+        //
+        // Pred: tag_0 = "b"
+        //
+        // Row groups & rows pruning:
+        //
+        // Row Groups:
+        // - min-max: filter out row groups 1..=3
+        //
+        // Rows:
+        // - inverted index: hit row group 0, hit 20 rows
+        let preds = vec![col("tag_0").eq(lit("b"))];
+        let inverted_index_applier = build_inverted_index_applier(&preds);
+        let bloom_filter_applier = build_bloom_filter_applier(&preds);
+
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+            .predicate(Some(Predicate::new(preds)))
+            .inverted_index_applier(inverted_index_applier.clone())
+            .bloom_filter_index_applier(bloom_filter_applier.clone())
+            .cache(CacheStrategy::EnableAll(cache.clone()));
+
+        let mut metrics = ReaderMetrics::default();
+        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let mut reader = ParquetReader::new(Arc::new(context), selection)
+            .await
+            .unwrap();
+        check_reader_result(&mut reader, &[new_batch_by_range(&["b", "d"], 0, 20)]).await;
+
+        assert_eq!(metrics.filter_metrics.rg_total, 4);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 3);
+        assert_eq!(metrics.filter_metrics.rg_inverted_filtered, 0);
+        assert_eq!(metrics.filter_metrics.rows_inverted_filtered, 30);
+        let cached = index_result_cache
+            .get(
+                inverted_index_applier.unwrap().predicate_key(),
+                handle.file_id(),
+            )
+            .unwrap();
+        // inverted index will search all row groups
+        assert!(cached.contains_row_group(0));
+        assert!(cached.contains_row_group(1));
+        assert!(cached.contains_row_group(2));
+        assert!(cached.contains_row_group(3));
     }
 }
