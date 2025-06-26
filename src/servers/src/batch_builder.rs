@@ -28,7 +28,6 @@ use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use itertools::Itertools;
 use metric_engine::row_modifier::{RowModifier, RowsIter};
-use mito2::sst::file::FileTimeRange;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use operator::schema_helper::{
     ensure_logical_tables_for_metrics, metadatas_for_region_ids, LogicalSchema, LogicalSchemas,
@@ -282,7 +281,7 @@ impl MetricsBatchBuilder {
     /// Finishes current record batch builder and returns record batches grouped by physical table id.
     pub(crate) fn finish(self) -> error::Result<HashMap<TableId, (RecordBatch, (i64, i64))>> {
         let mut table_batches = HashMap::with_capacity(self.builders.len());
-        for (physical_table_id, mut encoder) in self.builders {
+        for (physical_table_id, encoder) in self.builders {
             let rb = encoder.finish()?;
             if let Some(v) = rb {
                 table_batches.insert(physical_table_id, v);
