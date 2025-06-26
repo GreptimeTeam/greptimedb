@@ -389,7 +389,7 @@ async fn edit_region(
             let listener = listener.clone();
 
             let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
-            let remote_path = location::sst_file_path(layer.region_dir(), file_meta.file_id);
+            let remote_path = location::sst_file_path(layer.table_dir(), &file_meta.file_id);
 
             let is_index_exist = file_meta.exists_index();
             let index_file_size = file_meta.index_file_size();
@@ -397,7 +397,7 @@ async fn edit_region(
             let index_file_index_key =
                 IndexKey::new(region_id, file_meta.file_id, FileType::Puffin);
             let index_remote_path =
-                location::index_file_path(layer.region_dir(), file_meta.file_id);
+                location::index_file_path(layer.table_dir(), &file_meta.file_id);
 
             let file_size = file_meta.file_size;
             common_runtime::spawn_global(async move {

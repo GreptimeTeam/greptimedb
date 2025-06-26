@@ -231,13 +231,13 @@ async fn test_engine_region_open_with_custom_store() {
     let object_store_manager = env.get_object_store_manager().unwrap();
     assert!(!object_store_manager
         .default_object_store()
-        .exists(region.access_layer.region_dir())
+        .exists(region.access_layer.table_dir())
         .await
         .unwrap());
     assert!(object_store_manager
         .find("Gcs")
         .unwrap()
-        .exists(region.access_layer.region_dir())
+        .exists(region.access_layer.table_dir())
         .await
         .unwrap());
 }

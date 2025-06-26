@@ -13,41 +13,52 @@
 // limitations under the License.
 
 use object_store::util;
+use store_api::path_utils::region_name;
 
 use crate::sst::file::FileId;
 
-/// Returns the path of the SST file in the object store:
-/// `{region_dir}/{sst_file_id}.parquet`
-pub fn sst_file_path(region_dir: &str, sst_file_id: FileId) -> String {
-    util::join_path(region_dir, &sst_file_id.as_parquet())
+pub fn sst_file_path(table_dir: &str, file_id: &FileId) -> String {
+    let region_name = region_name(
+        file_id.region_id().table_id(),
+        file_id.region_id().region_number(),
+    );
+    let region_dir = util::join_dir(table_dir, &region_name);
+    let file_name = file_id.uuid_str();
+    util::join_path(&region_dir, &format!("{}.parquet", file_name))
 }
 
-/// Returns the path of the index file in the object store:
-/// `{region_dir}/index/{sst_file_id}.puffin`
-pub fn index_file_path(region_dir: &str, sst_file_id: FileId) -> String {
-    let dir = util::join_dir(region_dir, "index");
-    util::join_path(&dir, &sst_file_id.as_puffin())
+pub fn index_file_path(table_dir: &str, file_id: &FileId) -> String {
+    let region_name = region_name(
+        file_id.region_id().table_id(),
+        file_id.region_id().region_number(),
+    );
+    let region_dir = util::join_dir(table_dir, &region_name);
+    let index_dir = util::join_dir(&region_dir, "index");
+    let file_name = file_id.uuid_str();
+    util::join_path(&index_dir, &format!("{}.puffin", file_name))
 }
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::RegionId;
+
     use super::*;
 
     #[test]
     fn test_sst_file_path() {
-        let file_id = FileId::random();
+        let file_id = FileId::new(RegionId::new(1, 2));
         assert_eq!(
-            sst_file_path("region_dir", file_id),
-            format!("region_dir/{file_id}.parquet")
+            sst_file_path("table_dir", &file_id),
+            format!("table_dir/1_0000000002/{}.parquet", file_id.uuid())
         );
     }
 
     #[test]
     fn test_index_file_path() {
-        let file_id = FileId::random();
+        let file_id = FileId::new(RegionId::new(1, 2));
         assert_eq!(
-            index_file_path("region_dir", file_id),
-            format!("region_dir/index/{file_id}.puffin")
+            index_file_path("table_dir", &file_id),
+            format!("table_dir/1_0000000002/index/{}.puffin", file_id.uuid())
         );
     }
 }

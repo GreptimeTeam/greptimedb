@@ -129,7 +129,7 @@ where
         indexer_builder: I,
         path_provider: P,
     ) -> ParquetWriter<F, I, P> {
-        let init_file = FileId::random();
+        let init_file = FileId::new(metadata.region_id);
         let indexer = indexer_builder.build(init_file).await;
 
         ParquetWriter {
@@ -186,7 +186,7 @@ where
                 file_metadata: Some(Arc::new(parquet_metadata)),
                 index_metadata: index_output,
             });
-            self.current_file = FileId::random();
+            self.current_file = FileId::new(self.metadata.region_id);
             self.bytes_written.store(0, Ordering::Relaxed)
         };
 

@@ -50,7 +50,7 @@ where
         region.set_dropping()?;
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
-        let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
+        let marker_path = join_path(region.access_layer.table_dir(), DROPPING_MARKER_FILE);
         region
             .access_layer
             .object_store()
@@ -95,7 +95,7 @@ where
         self.region_count.dec();
 
         // Detaches a background task to delete the region dir
-        let region_dir = region.access_layer.region_dir().to_owned();
+        let region_dir = region.access_layer.table_dir().to_owned();
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();

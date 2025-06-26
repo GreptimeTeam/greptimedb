@@ -490,7 +490,7 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
@@ -524,7 +524,7 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         BloomFilterIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.access_layer.puffin_manager_factory().clone(),
@@ -549,7 +549,7 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
             self.region_id(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),

@@ -80,7 +80,7 @@ impl IntermediateManager {
     }
 
     /// Returns the intermediate directory path for building fulltext index.
-    /// The format is `{aux_path}/__intm/{region_id}/{sst_file_id}/fulltext-{column_id}-{uuid}`.
+    /// The format is `{aux_path}/__intm/{region_id}/{sst_file_uuid}/fulltext-{column_id}-{uuid}`.
     pub(crate) fn fulltext_path(
         &self,
         region_id: &RegionId,
@@ -91,7 +91,7 @@ impl IntermediateManager {
         self.base_dir
             .join(INTERMEDIATE_DIR)
             .join(region_id.as_u64().to_string())
-            .join(sst_file_id.to_string())
+            .join(sst_file_id.uuid_str())
             .join(format!("fulltext-{column_id}-{uuid}"))
     }
 }
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_intermediate_location() {
-        let sst_file_id = FileId::random();
+        let sst_file_id = FileId::new(RegionId::new(0, 0));
         let location = IntermediateLocation::new(&RegionId::new(0, 0), &sst_file_id);
 
         let re = Regex::new(&format!(
@@ -280,7 +280,9 @@ mod tests {
         .unwrap();
         assert!(re.is_match(&location.files_dir));
 
-        let uuid = location.files_dir.split('/').nth(3).unwrap();
+        // Extract UUID from the path - for new FileId format, need to handle the path structure correctly
+        let path_parts: Vec<&str> = location.files_dir.split('/').collect();
+        let uuid = path_parts[path_parts.len() - 2]; // UUID is the second-to-last part
 
         let file_group = "1";
         assert_eq!(
@@ -305,7 +307,7 @@ mod tests {
 
         let manager = IntermediateManager::init_fs(&aux_path).await.unwrap();
         let region_id = RegionId::new(0, 0);
-        let sst_file_id = FileId::random();
+        let sst_file_id = FileId::new(region_id);
         let column_id = 1;
         let fulltext_path = manager.fulltext_path(&region_id, &sst_file_id, column_id);
 
@@ -315,7 +317,7 @@ mod tests {
         }
         assert_eq!(pi.next().unwrap(), INTERMEDIATE_DIR);
         assert_eq!(pi.next().unwrap(), "0"); // region id
-        assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.to_string())); // sst file id
+        assert_eq!(pi.next().unwrap(), OsStr::new(&sst_file_id.uuid_str())); // sst file id
         assert!(Regex::new(r"fulltext-1-\w{8}-\w{4}-\w{4}-\w{4}-\w{12}")
             .unwrap()
             .is_match(&pi.next().unwrap().to_string_lossy())); // fulltext path
@@ -327,7 +329,8 @@ mod tests {
         let temp_dir = temp_dir::create_temp_dir("intermediate");
         let path = temp_dir.path().display().to_string();
 
-        let location = IntermediateLocation::new(&RegionId::new(0, 0), &FileId::random());
+        let region_id = RegionId::new(0, 0);
+        let location = IntermediateLocation::new(&region_id, &FileId::new(region_id));
         let store = IntermediateManager::init_fs(path).await.unwrap();
         let provider = TempFileProvider::new(location.clone(), store);
 

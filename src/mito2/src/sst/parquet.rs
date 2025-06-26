@@ -128,11 +128,11 @@ mod tests {
 
     impl FilePathProvider for FixedPathProvider {
         fn build_index_file_path(&self, _file_id: FileId) -> String {
-            location::index_file_path(FILE_DIR, self.file_id)
+            location::index_file_path(FILE_DIR, &self.file_id)
         }
 
         fn build_sst_file_path(&self, _file_id: FileId) -> String {
-            location::sst_file_path(FILE_DIR, self.file_id)
+            location::sst_file_path(FILE_DIR, &self.file_id)
         }
     }
 
@@ -564,7 +564,7 @@ mod tests {
         };
 
         let path_provider = RegionFilePathFactory {
-            region_dir: "test".to_string(),
+            table_dir: "test".to_string(),
         };
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),

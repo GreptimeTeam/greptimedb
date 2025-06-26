@@ -163,7 +163,7 @@ mod tests {
         let builder = Fs::default().root(&dir_path);
         let sst_file_id = FileId::random();
         let sst_dir = "table1";
-        let path = location::sst_file_path(sst_dir, sst_file_id);
+        let path = location::sst_file_path(sst_dir, &sst_file_id);
 
         let index_aux_path = dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
@@ -229,11 +229,11 @@ mod tests {
             .await
             .unwrap();
 
-        let path = location::sst_file_path(sst_dir, sst_file_id);
+        let path = location::sst_file_path(sst_dir, &sst_file_id);
         let object_store = ObjectStore::new(builder).unwrap().finish();
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let index_path = location::index_file_path(sst_dir, sst_file_id);
+        let index_path = location::index_file_path(sst_dir, &sst_file_id);
         object_store
             .write(&index_path, vec![0; 4096])
             .await

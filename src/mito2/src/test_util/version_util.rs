@@ -88,7 +88,7 @@ impl VersionControlBuilder {
     }
 
     pub(crate) fn push_l0_file(&mut self, start_ms: i64, end_ms: i64) -> &mut Self {
-        let file_id = FileId::random();
+        let file_id = FileId::new(self.metadata.region_id);
         self.files.insert(
             file_id,
             FileMeta {
@@ -186,7 +186,7 @@ pub(crate) fn apply_edit(
         .map(|(start_ms, end_ms)| {
             FileMeta {
                 region_id,
-                file_id: FileId::random(),
+                file_id: FileId::new(region_id),
                 time_range: (
                     Timestamp::new_millisecond(*start_ms),
                     Timestamp::new_millisecond(*end_ms),

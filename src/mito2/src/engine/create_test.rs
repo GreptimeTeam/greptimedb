@@ -186,7 +186,7 @@ async fn test_engine_create_with_custom_store() {
         .unwrap();
     assert!(engine.is_region_exists(region_id));
     let region = engine.get_region(region_id).unwrap();
-    let region_dir = region.access_layer.region_dir();
+    let region_dir = region.access_layer.table_dir();
 
     let object_store_manager = env.get_object_store_manager().unwrap();
     assert!(object_store_manager

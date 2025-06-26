@@ -193,9 +193,9 @@ impl MitoRegion {
         self.last_compaction_millis.store(now, Ordering::Relaxed);
     }
 
-    /// Returns the region dir.
+    /// Returns the table dir.
     pub(crate) fn region_dir(&self) -> &str {
-        self.access_layer.region_dir()
+        self.access_layer.table_dir()
     }
 
     /// Returns whether the region is writable.

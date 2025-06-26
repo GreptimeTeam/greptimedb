@@ -403,7 +403,7 @@ fn parse_index_key(name: &str) -> Option<IndexKey> {
         let id = s.parse::<u64>().ok()?;
         Some(RegionId::from_u64(id))
     })?;
-    let file_id = split.next().and_then(|s| FileId::parse_str(s).ok())?;
+    let file_id = split.next().and_then(|s| s.parse::<FileId>().ok())?;
     let file_type = split.next().and_then(FileType::parse)?;
 
     Some(IndexKey::new(region_id, file_id, file_type))
@@ -626,7 +626,8 @@ mod tests {
 
     #[test]
     fn test_cache_file_path() {
-        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
+        let region_id = RegionId::new(1234, 5);
+        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095", region_id).unwrap();
         assert_eq!(
             "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet",
             cache_file_path(
@@ -645,7 +646,8 @@ mod tests {
 
     #[test]
     fn test_parse_file_name() {
-        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
+        let region_id = RegionId::new(1234, 5);
+        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095", region_id).unwrap();
         let region_id = RegionId::new(1234, 5);
         assert_eq!(
             IndexKey::new(region_id, file_id, FileType::Parquet),
