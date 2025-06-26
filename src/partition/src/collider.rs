@@ -24,6 +24,7 @@ use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 const ZERO: OrderedF64 = OrderedFloat(0.0f64);
 const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
 
+/// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
 pub(crate) struct AtomicExpr {
     /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
@@ -66,6 +67,9 @@ pub struct Collider<'a> {
     source_exprs: &'a [PartitionExpr],
 
     atomic_exprs: Vec<AtomicExpr>,
+    /// A map of column name to a list of `(value, normalized value)` pairs.
+    ///
+    /// The normalized value is used for comparison. The normalization process keeps the order of the values.
     normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
 }
 
