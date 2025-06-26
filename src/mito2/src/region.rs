@@ -194,7 +194,7 @@ impl MitoRegion {
     }
 
     /// Returns the table dir.
-    pub(crate) fn region_dir(&self) -> &str {
+    pub(crate) fn table_dir(&self) -> &str {
         self.access_layer.table_dir()
     }
 
