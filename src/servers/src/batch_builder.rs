@@ -28,6 +28,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use itertools::Itertools;
 use metric_engine::row_modifier::{RowModifier, RowsIter};
+use mito2::sst::file::FileTimeRange;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use operator::schema_helper::{
     ensure_logical_tables_for_metrics, metadatas_for_region_ids, LogicalSchema, LogicalSchemas,
@@ -252,13 +253,16 @@ impl MetricsBatchBuilder {
                     .or(current_schema.as_deref())
                     .unwrap_or(DEFAULT_SCHEMA_NAME);
                 // Look up physical region metadata by schema and table name
-                let schema_metadata = physical_region_metadata.get(schema)
-                    .context(error::TableNotFoundSnafu {
-                        catalog,
-                        schema,
-                        table: logical_table_name,
-                    })?;
-                let (logical_table_id, physical_table) = schema_metadata.get(logical_table_name)
+                let schema_metadata =
+                    physical_region_metadata
+                        .get(schema)
+                        .context(error::TableNotFoundSnafu {
+                            catalog,
+                            schema,
+                            table: logical_table_name,
+                        })?;
+                let (logical_table_id, physical_table) = schema_metadata
+                    .get(logical_table_name)
                     .context(error::TableNotFoundSnafu {
                         catalog,
                         schema,
@@ -269,24 +273,22 @@ impl MetricsBatchBuilder {
                     .builders
                     .entry(physical_table.region_id.table_id())
                     .or_insert_with(|| Self::create_sparse_encoder(&physical_table));
-                encoder.append_rows(
-                    *logical_table_id,
-                    std::mem::take(table),
-                )?;
+                encoder.append_rows(*logical_table_id, std::mem::take(table))?;
             }
         }
         Ok(())
     }
 
     /// Finishes current record batch builder and returns record batches grouped by physical table id.
-    pub(crate) fn finish(self) -> error::Result<HashMap<TableId, RecordBatch>> {
-        self.builders
-            .into_iter()
-            .map(|(physical_table_id, encoder)| {
-                let rb = encoder.finish()?;
-                Ok((physical_table_id, rb))
-            })
-            .collect::<error::Result<HashMap<_, _>>>()
+    pub(crate) fn finish(self) -> error::Result<HashMap<TableId, (RecordBatch, (i64, i64))>> {
+        let mut table_batches = HashMap::with_capacity(self.builders.len());
+        for (physical_table_id, mut encoder) in self.builders {
+            let rb = encoder.finish()?;
+            if let Some(v) = rb {
+                table_batches.insert(physical_table_id, v);
+            }
+        }
+        Ok(table_batches)
     }
 
     /// Creates Encoder that converts Rows into RecordBatch with primary key encoded.
@@ -306,6 +308,7 @@ struct BatchEncoder {
     timestamps: Vec<i64>,
     value: Vec<f64>,
     pk_codec: SparsePrimaryKeyCodec,
+    timestamp_range: Option<(i64, i64)>,
 }
 
 impl BatchEncoder {
@@ -316,6 +319,7 @@ impl BatchEncoder {
             timestamps: Vec::with_capacity(16),
             value: Vec::with_capacity(16),
             pk_codec: SparsePrimaryKeyCodec::schemaless(),
+            timestamp_range: None,
         }
     }
 
@@ -389,6 +393,12 @@ impl BatchEncoder {
                 return error::InvalidTimestampValueTypeSnafu.fail();
             };
             self.timestamps.push(*ts);
+            if let Some((min, max)) = &mut self.timestamp_range {
+                *min = (*min).min(*ts);
+                *max = (*max).max(*ts);
+            } else {
+                self.timestamp_range = Some((*ts, *ts));
+            }
 
             // safety: field values cannot be null in prom remote write
             let ValueData::F64Value(val) = row.value_at(1).value_data.as_ref().unwrap() else {
@@ -405,7 +415,10 @@ impl BatchEncoder {
         Ok(())
     }
 
-    fn finish(mut self) -> error::Result<arrow::record_batch::RecordBatch> {
+    fn finish(mut self) -> error::Result<Option<(RecordBatch, (i64, i64))>> {
+        if self.timestamps.is_empty() {
+            return Ok(None);
+        }
         let num_rows = self.timestamps.len();
         let value = Float64Array::from(self.value);
         let timestamp = TimestampMillisecondArray::from(self.timestamps);
@@ -421,8 +434,9 @@ impl BatchEncoder {
         let value = compute::take(&value, &indices, None).context(error::ArrowSnafu)?;
         let ts = compute::take(&timestamp, &indices, None).context(error::ArrowSnafu)?;
         let pk = compute::take(&pk, &indices, None).context(error::ArrowSnafu)?;
-        arrow::array::RecordBatch::try_new(Self::schema(), vec![value, ts, pk, sequence, op_type])
-            .context(error::ArrowSnafu)
+        let rb = RecordBatch::try_new(Self::schema(), vec![value, ts, pk, sequence, op_type])
+            .context(error::ArrowSnafu)?;
+        Ok(Some((rb, self.timestamp_range.unwrap())))
     }
 }
 

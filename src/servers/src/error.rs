@@ -659,6 +659,29 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to operate object store"))]
+    Opendal {
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to operate object store"))]
+    ObjectStore {
+        source: object_store::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to operate object store"))]
+    Parquet {
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -788,6 +811,9 @@ impl ErrorExt for Error {
             InvalidTimestampValueType { .. } | InvalidFieldValueType { .. } => {
                 StatusCode::Unexpected
             }
+            ObjectStore { source, .. } => source.status_code(),
+            Parquet { .. } => StatusCode::Internal,
+            Opendal { .. } => StatusCode::Internal,
         }
     }
 
