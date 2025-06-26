@@ -604,9 +604,7 @@ mod tests {
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
-        let file_path = FixedPathProvider {
-            file_id: FileId::random(),
-        };
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string());
         let metadata = Arc::new(sst_region_metadata());
         let row_group_size = 50;
 
@@ -653,12 +651,11 @@ mod tests {
         )
         .await;
 
-        let mut info = writer
+        let info = writer
             .write_all(source, None, &write_opts)
             .await
             .unwrap()
             .remove(0);
-        info.file_id = file_path.file_id;
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
         assert!(info.index_metadata.file_size > 0);
@@ -682,7 +679,7 @@ mod tests {
         let handle = FileHandle::new(
             FileMeta {
                 region_id: metadata.region_id,
-                file_id: file_path.file_id,
+                file_id: info.file_id,
                 time_range: info.time_range,
                 level: 0,
                 file_size: info.file_size,
@@ -740,7 +737,7 @@ mod tests {
         //       0-20 [b, d]
         //       0-20 [c, d]
         //       0-40 [c, f]
-        //     100-200 [c, h]
+        //    100-200 [c, h]
         //
         // Pred: tag_0 = "b"
         //
@@ -755,11 +752,12 @@ mod tests {
         let inverted_index_applier = build_inverted_index_applier(&preds);
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .predicate(Some(Predicate::new(preds)))
-            .inverted_index_applier(inverted_index_applier.clone())
-            .bloom_filter_index_applier(bloom_filter_applier.clone())
-            .cache(CacheStrategy::EnableAll(cache.clone()));
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+                .predicate(Some(Predicate::new(preds)))
+                .inverted_index_applier(inverted_index_applier.clone())
+                .bloom_filter_index_applier(bloom_filter_applier.clone())
+                .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
         let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
@@ -779,6 +777,119 @@ mod tests {
             )
             .unwrap();
         // inverted index will search all row groups
+        assert!(cached.contains_row_group(0));
+        assert!(cached.contains_row_group(1));
+        assert!(cached.contains_row_group(2));
+        assert!(cached.contains_row_group(3));
+
+        // Data: ts tag_0 tag_1
+        // Data: 0-20 [a, d]
+        //       0-20 [b, d]
+        //       0-20 [c, d]
+        //       0-40 [c, f]
+        //    100-200 [c, h]
+        //
+        // Pred: 50 <= ts && ts < 200 && tag_1 = "d"
+        //
+        // Row groups & rows pruning:
+        //
+        // Row Groups:
+        // - min-max: filter out row groups 0..=1
+        // - bloom filter: filter out row groups 2..=3
+        let preds = vec![
+            col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(50), None))),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(200), None))),
+            col("tag_1").eq(lit("d")),
+        ];
+        let inverted_index_applier = build_inverted_index_applier(&preds);
+        let bloom_filter_applier = build_bloom_filter_applier(&preds);
+
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+                .predicate(Some(Predicate::new(preds)))
+                .inverted_index_applier(inverted_index_applier.clone())
+                .bloom_filter_index_applier(bloom_filter_applier.clone())
+                .cache(CacheStrategy::EnableAll(cache.clone()));
+
+        let mut metrics = ReaderMetrics::default();
+        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let mut reader = ParquetReader::new(Arc::new(context), selection)
+            .await
+            .unwrap();
+        check_reader_result(&mut reader, &[]).await;
+
+        assert_eq!(metrics.filter_metrics.rg_total, 4);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 2);
+        assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 2);
+        assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 100);
+        let cached = index_result_cache
+            .get(
+                bloom_filter_applier.unwrap().predicate_key(),
+                handle.file_id(),
+            )
+            .unwrap();
+        assert!(cached.contains_row_group(2));
+        assert!(cached.contains_row_group(3));
+        assert!(!cached.contains_row_group(0));
+        assert!(!cached.contains_row_group(1));
+
+        // Remove the pred of `ts`, continue to use the pred of `tag_1`
+        // to test if cache works.
+
+        // Data: ts tag_0 tag_1
+        // Data: 0-20 [a, d]
+        //       0-20 [b, d]
+        //       0-20 [c, d]
+        //       0-40 [c, f]
+        //    100-200 [c, h]
+        //
+        // Pred: tag_1 = "d"
+        //
+        // Row groups & rows pruning:
+        //
+        // Row Groups:
+        // - bloom filter: filter out row groups 2..=3
+        //
+        // Rows:
+        // - bloom filter: hit row group 0, hit 50 rows
+        //                 hit row group 1, hit 10 rows
+        let preds = vec![col("tag_1").eq(lit("d"))];
+        let inverted_index_applier = build_inverted_index_applier(&preds);
+        let bloom_filter_applier = build_bloom_filter_applier(&preds);
+
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+                .predicate(Some(Predicate::new(preds)))
+                .inverted_index_applier(inverted_index_applier.clone())
+                .bloom_filter_index_applier(bloom_filter_applier.clone())
+                .cache(CacheStrategy::EnableAll(cache.clone()));
+
+        let mut metrics = ReaderMetrics::default();
+        let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
+        let mut reader = ParquetReader::new(Arc::new(context), selection)
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_by_range(&["a", "d"], 0, 20),
+                new_batch_by_range(&["b", "d"], 0, 20),
+                new_batch_by_range(&["c", "d"], 0, 10),
+                new_batch_by_range(&["c", "d"], 10, 20),
+            ],
+        )
+        .await;
+
+        assert_eq!(metrics.filter_metrics.rg_total, 4);
+        assert_eq!(metrics.filter_metrics.rg_minmax_filtered, 0);
+        assert_eq!(metrics.filter_metrics.rg_bloom_filtered, 2);
+        assert_eq!(metrics.filter_metrics.rows_bloom_filtered, 140);
+        let cached = index_result_cache
+            .get(
+                bloom_filter_applier.unwrap().predicate_key(),
+                handle.file_id(),
+            )
+            .unwrap();
         assert!(cached.contains_row_group(0));
         assert!(cached.contains_row_group(1));
         assert!(cached.contains_row_group(2));
