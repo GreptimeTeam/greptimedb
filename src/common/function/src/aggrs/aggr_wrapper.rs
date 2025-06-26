@@ -23,9 +23,10 @@
 
 use std::sync::Arc;
 
-use datafusion_common::{format, ScalarValue};
+use arrow::array::StructArray;
+use datafusion_common::ScalarValue;
 use datafusion_expr::function::StateFieldsArgs;
-use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl};
+use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl, Signature};
 use datatypes::arrow::datatypes::{DataType, Field};
 
 /// Returns the name of the state function for the given aggregate function name.
@@ -91,9 +92,9 @@ impl StateMergeWrapper {
         args: WrapperArgs<'a>,
     ) -> datafusion_common::Result<Self> {
         let state_functions = (0..original.state_fields(args.into())?.len())
-            .map(|i| StateWrapper::new(original.clone(), args, i))
+            .map(|i| StateWrapper::new(original.clone()))
             .collect::<Result<Vec<_>, _>>()?;
-        let merge_function = MergeWrapper::new(original.clone(), args)?;
+        let merge_function = MergeWrapper::new(original.clone())?;
         Ok(Self {
             original,
             state_functions,
@@ -119,50 +120,59 @@ impl StateMergeWrapper {
 pub struct StateWrapper {
     inner: AggregateUDF,
     name: String,
-    /// The index of the state in the output of the state function.
-    state_index: usize,
-    /// The ordering fields of the aggregate function.
-    pub ordering_fields: Vec<Field>,
-
-    /// Whether the aggregate function is distinct.
-    pub is_distinct: bool,
-    /// The final return type of the `inner` function.
-    pub final_return_type: DataType,
 }
 
 impl StateWrapper {
     /// `state_index`: The index of the state in the output of the state function.
-    pub fn new<'a>(
-        inner: AggregateUDF,
-        args: WrapperArgs<'a>,
-        state_index: usize,
-    ) -> datafusion_common::Result<Self> {
-        let name = format!("__{}_state_col_{}_udaf", args.name, state_index);
-        let final_return_type = inner.return_type(args.input_types)?;
-        Ok(Self {
-            inner,
-            name,
-            state_index,
-            ordering_fields: args.ordering_fields.to_vec(),
-            is_distinct: args.is_distinct,
-            final_return_type,
-        })
+    pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
+        let name = aggr_state_func_name(inner.name());
+        Ok(Self { inner, name })
     }
 
     pub fn inner(&self) -> &AggregateUDF {
         &self.inner
     }
+
+    /// Deduce the return type of the original aggregate function
+    /// based on the accumulator arguments.
+    ///
+    pub fn deduce_aggr_return_type(
+        &self,
+        acc_args: &datafusion_expr::function::AccumulatorArgs,
+    ) -> datafusion_common::Result<DataType> {
+        let input_exprs = acc_args.exprs;
+        let input_schema = acc_args.schema;
+        let input_types = input_exprs
+            .iter()
+            .map(|e| e.data_type(input_schema))
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = self.inner.return_type(&input_types)?;
+        Ok(return_type)
+    }
 }
 
 impl AggregateUDFImpl for StateWrapper {
-    fn accumulator<'a>(
+    fn accumulator<'a, 'b>(
         &'a self,
-        mut acc_args: datafusion_expr::function::AccumulatorArgs<'a>,
+        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
-        // TODO: fix and recover proper acc args for the original aggregate function.
-        acc_args.return_type = &self.final_return_type;
-        let inner = self.inner.accumulator(acc_args)?;
-        Ok(Box::new(StateAccumWrapper::new(inner, self.state_index)))
+        // fix and recover proper acc args for the original aggregate function.
+
+        let inner = {
+            let old_return_type = self.deduce_aggr_return_type(&acc_args)?;
+            let acc_args = datafusion_expr::function::AccumulatorArgs {
+                return_type: &old_return_type,
+                schema: acc_args.schema,
+                ignore_nulls: acc_args.ignore_nulls,
+                ordering_req: acc_args.ordering_req,
+                is_reversed: acc_args.is_reversed,
+                name: acc_args.name,
+                is_distinct: acc_args.is_distinct,
+                exprs: acc_args.exprs,
+            };
+            self.inner.accumulator(acc_args)?
+        };
+        Ok(Box::new(StateAccumWrapper::new(inner)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -180,21 +190,13 @@ impl AggregateUDFImpl for StateWrapper {
             name: &self.inner().name(),
             input_types: arg_types,
             return_type: &old_return_type,
-            ordering_fields: &self.ordering_fields,
-            is_distinct: self.is_distinct,
+            // TODO: how to get this?, probably ok?
+            ordering_fields: &[],
+            is_distinct: false,
         };
         let state_fields = self.inner.state_fields(state_fields_args)?;
-        let ret = state_fields
-            .get(self.state_index)
-            .ok_or_else(|| {
-                datafusion_common::DataFusionError::Internal(format!(
-                    "State index {} out of bounds for state fields: {:?}",
-                    self.state_index, state_fields
-                ))
-            })?
-            .data_type()
-            .clone();
-        Ok(ret)
+        let struct_field = DataType::Struct(state_fields.into());
+        Ok(struct_field)
     }
 
     /// The state function's output fields are the same as the original aggregate function's state fields.
@@ -202,11 +204,19 @@ impl AggregateUDFImpl for StateWrapper {
         &self,
         args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<Field>> {
-        self.inner.state_fields(args)
+        let old_return_type = self.inner.return_type(args.input_types)?;
+        let state_fields_args = StateFieldsArgs {
+            name: args.name,
+            input_types: args.input_types,
+            return_type: &old_return_type,
+            ordering_fields: args.ordering_fields,
+            is_distinct: args.is_distinct,
+        };
+        self.inner.state_fields(state_fields_args)
     }
 
     /// The state function's signature is the same as the original aggregate function's signature,
-    fn signature(&self) -> &datafusion_expr::Signature {
+    fn signature(&self) -> &Signature {
         self.inner.signature()
     }
 }
@@ -216,26 +226,28 @@ impl AggregateUDFImpl for StateWrapper {
 #[derive(Debug)]
 pub struct StateAccumWrapper {
     inner: Box<dyn Accumulator>,
-    /// The index of the state in the output of the state function.
-    state_index: usize,
 }
 
 impl StateAccumWrapper {
-    pub fn new(inner: Box<dyn Accumulator>, state_index: usize) -> Self {
-        Self { inner, state_index }
+    pub fn new(inner: Box<dyn Accumulator>) -> Self {
+        Self { inner }
     }
 }
 
 impl Accumulator for StateAccumWrapper {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
-        let col = state.get(self.state_index).ok_or_else(|| {
-            datafusion_common::DataFusionError::Internal(format!(
-                "State index {} out of bounds for state: {:?}",
-                self.state_index, state
-            ))
-        })?;
-        Ok(col.clone())
+        let fields = state
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Field::new(format!("col_{i}"), s.data_type(), true))
+            .collect::<Vec<_>>();
+        let array = state
+            .iter()
+            .map(|s| s.to_array())
+            .collect::<Result<Vec<_>, _>>()?;
+        let struct_array = StructArray::try_new(fields.into(), array, None)?;
+        Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 
     fn merge_batch(
@@ -261,60 +273,66 @@ impl Accumulator for StateAccumWrapper {
     }
 }
 
+fn guess_state_fields(
+    original: &AggregateUDF,
+    input_types: &[DataType],
+) -> datafusion_common::Result<Vec<Field>> {
+    let state_fields_args = StateFieldsArgs {
+        name: original.name(),
+        input_types,
+        return_type: &original.return_type(input_types)?,
+        ordering_fields: &[],
+        is_distinct: false,
+    };
+    original.state_fields(state_fields_args)
+}
+
+/// Guess the input types of the state function based on the original aggregate function's state types.
+/// It's not necessarily the same, but it's consisent enough for oringinal aggregate function to behave correctly.
+fn guess_input_type_by_state_type(
+    original: &AggregateUDF,
+    state_types: &[DataType],
+) -> datafusion_common::Result<Vec<DataType>> {
+    // first try if state_types == input_types
+    if let Ok(ret_ty) = original.return_type(state_types) {
+        // check if result state tys is correct
+        let args = StateFieldsArgs {
+            name: original.name(),
+            input_types: state_types,
+            return_type: &ret_ty,
+            ordering_fields: &[],
+            is_distinct: false,
+        };
+        if let Ok(state_fields) = original.state_fields(args) {
+            // check for type
+            let real_state_types = state_fields
+                .iter()
+                .map(|f| f.data_type().clone())
+                .collect::<Vec<_>>();
+            if real_state_types == state_types {
+                return Ok(state_types.to_vec());
+            }
+        }
+    }
+    // if above doesn't work, we try to guess the input types based on the state types.
+    todo!()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeWrapper {
     inner: AggregateUDF,
     name: String,
-    /// The signature of the merge function.
-    /// It is the `state_fields` of the original aggregate function.
-    merge_signature: datafusion_expr::Signature,
-    state_fields: Vec<Field>,
-    original_input_types: Vec<DataType>,
-    original_return_type: DataType,
-    original_schema: arrow_schema::Schema,
-    original_exprs: Vec<Arc<dyn datafusion_physical_expr::PhysicalExpr>>,
+    merge_signature: Signature,
 }
 impl MergeWrapper {
-    pub fn new<'a>(inner: AggregateUDF, args: WrapperArgs<'a>) -> datafusion_common::Result<Self> {
-        let name = format!("__{}_merge_udaf", inner.name());
-        let state_fields_args = args.into();
-        let state_fields = inner.state_fields(state_fields_args)?;
-        let tys = state_fields
-            .iter()
-            .map(|f| f.data_type().clone())
-            .collect::<Vec<_>>();
-        let signature =
-            datafusion_expr::Signature::exact(tys, datafusion_expr::Volatility::Immutable);
-
-        let schema = arrow_schema::Schema::new(
-            args.input_types
-                .to_vec()
-                .iter()
-                .enumerate()
-                .map(|(i, dt)| Field::new(format!("original_input[{}]", i), dt.clone(), true))
-                .collect::<Vec<_>>(),
-        );
-        let exprs = args
-            .input_types
-            .iter()
-            .enumerate()
-            .map(|(i, _dt)| {
-                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                    &format!("original_input[{}]", i),
-                    i,
-                )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>
-            })
-            .collect::<Vec<_>>();
+    pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
+        let name = aggr_merge_func_name(&inner.name());
+        let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
 
         Ok(Self {
             inner,
             name,
-            merge_signature: signature,
-            state_fields,
-            original_input_types: args.input_types.to_vec(),
-            original_return_type: args.return_type.clone(),
-            original_schema: schema,
-            original_exprs: exprs,
+            merge_signature,
         })
     }
 
@@ -328,12 +346,6 @@ impl AggregateUDFImpl for MergeWrapper {
         &'a self,
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
-        // rewrite the accumulator args to match the original aggregate function's input types.
-        let mut acc_args = acc_args;
-
-        acc_args.schema = &self.original_schema;
-        acc_args.exprs = &self.original_exprs;
-
         let inner = self.inner.accumulator(acc_args)?;
         Ok(Box::new(MergeAccum::new(inner)))
     }
@@ -351,17 +363,31 @@ impl AggregateUDFImpl for MergeWrapper {
         // The return type is the same as the original aggregate function's return type.
         // notice here return type is fixed, instead of using the input types to determine the return type.
         // as the input type now is actually `state_fields`'s data type, and can't be use to determine the output type
-        Ok(self.original_return_type.clone())
+        todo!()
     }
-    fn signature(&self) -> &datafusion_expr::Signature {
+    fn signature(&self) -> &Signature {
         &self.merge_signature
     }
 
+    fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
+        Ok(arg_types.to_vec())
+    }
+
+    /// Just return the original aggregate function's state fields.
     fn state_fields(
         &self,
-        _args: datafusion_expr::function::StateFieldsArgs,
+        args: datafusion_expr::function::StateFieldsArgs,
     ) -> datafusion_common::Result<Vec<Field>> {
-        Ok(self.state_fields.clone())
+        let old_return_type = self.inner.return_type(args.input_types)?;
+        let state_fields_args = StateFieldsArgs {
+            name: &self.inner().name(),
+            input_types: args.input_types,
+            return_type: &old_return_type,
+            ordering_fields: args.ordering_fields,
+            is_distinct: args.is_distinct,
+        };
+        let state_fields = self.inner.state_fields(state_fields_args)?;
+        Ok(state_fields)
     }
 }
 
@@ -429,11 +455,7 @@ mod tests {
             original: sum.clone(),
             state_functions: vec![StateWrapper {
                 inner: sum.clone(),
-                name: "__sum_state_col_0_udaf".to_string(),
-                state_index: 0,
-                ordering_fields: vec![],
-                is_distinct: false,
-                final_return_type: DataType::Int64,
+                name: "__sum_state_udaf".to_string(),
             }],
             merge_function: MergeWrapper {
                 inner: sum.clone(),
@@ -442,17 +464,6 @@ mod tests {
                     vec![DataType::Int64],
                     datafusion_expr::Volatility::Immutable,
                 ),
-                state_fields: vec![Field::new("sum[sum]", DataType::Int64, true)],
-                original_input_types: vec![DataType::Int64],
-                original_return_type: DataType::Int64,
-                original_schema: arrow_schema::Schema::new(vec![Field::new(
-                    "original_input[0]",
-                    DataType::Int64,
-                    true,
-                )]),
-                original_exprs: vec![Arc::new(
-                    datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
-                )],
             },
         };
         assert_eq!(wrapper, expected);
@@ -469,7 +480,7 @@ mod tests {
             ordering_req: LexOrdering::empty(),
             is_reversed: false,
             name: state_func.name(),
-            is_distinct: state_func.is_distinct,
+            is_distinct: false,
             exprs: &[Arc::new(
                 datafusion::physical_expr::expressions::Column::new("col", 0),
             )],
@@ -499,7 +510,7 @@ mod tests {
             ordering_req: LexOrdering::empty(),
             is_reversed: false,
             name: state_func.name(),
-            is_distinct: state_func.is_distinct,
+            is_distinct: false,
             exprs: &[Arc::new(
                 datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
             )],
@@ -535,18 +546,10 @@ mod tests {
                 StateWrapper {
                     inner: avg.clone(),
                     name: "__avg_state_col_0_udaf".to_string(),
-                    state_index: 0,
-                    ordering_fields: vec![],
-                    is_distinct: false,
-                    final_return_type: DataType::Float64,
                 },
                 StateWrapper {
                     inner: avg.clone(),
                     name: "__avg_state_col_1_udaf".to_string(),
-                    state_index: 1,
-                    ordering_fields: vec![],
-                    is_distinct: false,
-                    final_return_type: DataType::Float64,
                 },
             ],
             merge_function: MergeWrapper {
@@ -556,21 +559,6 @@ mod tests {
                     vec![DataType::UInt64, DataType::Float64],
                     datafusion_expr::Volatility::Immutable,
                 ),
-                state_fields: vec![
-                    Field::new("avg[count]", DataType::UInt64, true),
-                    Field::new("avg[sum]", DataType::Float64, true),
-                ],
-                original_input_types: vec![DataType::Float64],
-                original_return_type: DataType::Float64,
-
-                original_schema: arrow_schema::Schema::new(vec![Field::new(
-                    "original_input[0]",
-                    DataType::Float64,
-                    true,
-                )]),
-                original_exprs: vec![Arc::new(
-                    datafusion::physical_expr::expressions::Column::new("original_input[0]", 0),
-                )],
             },
         };
         assert_eq!(wrapper, expected);
@@ -587,7 +575,7 @@ mod tests {
             ordering_req: LexOrdering::empty(),
             is_reversed: false,
             name: state_func.name(),
-            is_distinct: state_func.is_distinct,
+            is_distinct: false,
             exprs: &[Arc::new(
                 datafusion::physical_expr::expressions::Column::new("col", 0),
             )],
@@ -612,7 +600,7 @@ mod tests {
             ordering_req: LexOrdering::empty(),
             is_reversed: false,
             name: state_func.name(),
-            is_distinct: state_func.is_distinct,
+            is_distinct: false,
             exprs: &[Arc::new(
                 datafusion::physical_expr::expressions::Column::new("col", 0),
             )],
@@ -645,7 +633,7 @@ mod tests {
             ordering_req: LexOrdering::empty(),
             is_reversed: false,
             name: state_func.name(),
-            is_distinct: state_func.is_distinct,
+            is_distinct: false,
             exprs: &[
                 Arc::new(datafusion::physical_expr::expressions::Column::new(
                     "col0", 0,
