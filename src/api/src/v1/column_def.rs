@@ -226,18 +226,20 @@ mod tests {
         assert!(options.is_none());
 
         let mut schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
-            .with_fulltext_options(FulltextOptions {
-                enable: true,
-                analyzer: FulltextAnalyzer::English,
-                case_sensitive: false,
-                backend: FulltextBackend::Bloom,
-            })
+            .with_fulltext_options(FulltextOptions::new(
+                true,
+                FulltextAnalyzer::English,
+                false,
+                FulltextBackend::Bloom,
+                10240,
+                0.01,
+            ))
             .unwrap();
         schema.set_inverted_index(true);
         let options = options_from_column_schema(&schema).unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\"}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}"
         );
         assert_eq!(
             options.options.get(INVERTED_INDEX_GRPC_KEY).unwrap(),
@@ -247,16 +249,18 @@ mod tests {
 
     #[test]
     fn test_options_with_fulltext() {
-        let fulltext = FulltextOptions {
-            enable: true,
-            analyzer: FulltextAnalyzer::English,
-            case_sensitive: false,
-            backend: FulltextBackend::Bloom,
-        };
+        let fulltext = FulltextOptions::new(
+            true,
+            FulltextAnalyzer::English,
+            false,
+            FulltextBackend::Bloom,
+            10240,
+            0.01,
+        );
         let options = options_from_fulltext(&fulltext).unwrap().unwrap();
         assert_eq!(
             options.options.get(FULLTEXT_GRPC_KEY).unwrap(),
-            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\"}"
+            "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}"
         );
     }
 

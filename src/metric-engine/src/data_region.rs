@@ -145,12 +145,16 @@ impl DataRegion {
                     IndexOptions::Inverted => {
                         c.column_schema.set_inverted_index(true);
                     }
-                    IndexOptions::Skipping { granularity } => {
+                    IndexOptions::Skipping {
+                        granularity,
+                        false_positive_rate,
+                    } => {
                         c.column_schema
-                            .set_skipping_options(&SkippingIndexOptions {
+                            .set_skipping_options(&SkippingIndexOptions::new(
                                 granularity,
-                                index_type: SkippingIndexType::BloomFilter,
-                            })
+                                false_positive_rate,
+                                SkippingIndexType::BloomFilter,
+                            ))
                             .context(SetSkippingIndexOptionSnafu)?;
                     }
                 }

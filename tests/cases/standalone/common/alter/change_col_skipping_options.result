@@ -54,7 +54,7 @@ SELECT * FROM test WHERE metric > 200 ORDER BY time;
 +-------+----------+--------+---------------------+
 
 -- Add skipping index
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = 0.01);
 
 Affected Rows: 0
 
@@ -107,7 +107,7 @@ SELECT * FROM test WHERE value < 3.0 ORDER BY time;
 +-------+----------+--------+---------------------+
 
 -- Test multiple columns with skipping indexes
-ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN metric SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = 0.01);
 
 Affected Rows: 0
 
@@ -124,20 +124,20 @@ SELECT * FROM test WHERE value > 5.0 AND metric < 700 ORDER BY time;
 -- Verify persistence after restart
 SHOW CREATE TABLE test;
 
-+-------+-----------------------------------------------------------------------------------+
-| Table | Create Table                                                                      |
-+-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
-|       | )                                                                                 |
-|       |                                                                                   |
-|       | ENGINE=mito                                                                       |
-|       |                                                                                   |
-+-------+-----------------------------------------------------------------------------------+
++-------+-----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                    |
++-------+-----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                             |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                                                       |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   TIME INDEX ("time")                                                                                           |
+|       | )                                                                                                               |
+|       |                                                                                                                 |
+|       | ENGINE=mito                                                                                                     |
+|       |                                                                                                                 |
++-------+-----------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
@@ -150,31 +150,90 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test modifying existing skipping index options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, type = 'BLOOM', false_positive_rate = 0.01);
 
 Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+-----------------------------------------------------------------------------------+
-| Table | Create Table                                                                      |
-+-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
-|       | )                                                                                 |
-|       |                                                                                   |
-|       | ENGINE=mito                                                                       |
-|       |                                                                                   |
-+-------+-----------------------------------------------------------------------------------+
++-------+-----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                    |
++-------+-----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                             |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '8192', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                                                       |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   TIME INDEX ("time")                                                                                           |
+|       | )                                                                                                               |
+|       |                                                                                                                 |
+|       | ENGINE=mito                                                                                                     |
+|       |                                                                                                                 |
++-------+-----------------------------------------------------------------------------------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+
+-- Test modifying existing skipping index options
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 8192, type = 'BLOOM', false_positive_rate = 0.0001);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                     |
++-------+------------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                              |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(false_positive_rate = '0.0001', granularity = '8192', type = 'BLOOM'), |
+|       |   "category" STRING NULL,                                                                                        |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'),  |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                  |
+|       |   TIME INDEX ("time")                                                                                            |
+|       | )                                                                                                                |
+|       |                                                                                                                  |
+|       | ENGINE=mito                                                                                                      |
+|       |                                                                                                                  |
++-------+------------------------------------------------------------------------------------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test removing skipping index
 ALTER TABLE test MODIFY COLUMN value UNSET SKIPPING INDEX;
 
 Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                    |
++-------+-----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                             |
+|       |   "value" DOUBLE NULL,                                                                                          |
+|       |   "category" STRING NULL,                                                                                       |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   TIME INDEX ("time")                                                                                           |
+|       | )                                                                                                               |
+|       |                                                                                                                 |
+|       | ENGINE=mito                                                                                                     |
+|       |                                                                                                                 |
++-------+-----------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
@@ -186,26 +245,36 @@ SHOW INDEX FROM test;
 +-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test adding back with different options
-ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, type = 'BLOOM');
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 2048, type = 'BLOOM', false_positive_rate = 0.01);
 
 Affected Rows: 0
 
 SHOW CREATE TABLE test;
 
-+-------+-----------------------------------------------------------------------------------+
-| Table | Create Table                                                                      |
-+-------+-----------------------------------------------------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (                                               |
-|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(granularity = '2048', type = 'BLOOM'),  |
-|       |   "category" STRING NULL,                                                         |
-|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(granularity = '1024', type = 'BLOOM'), |
-|       |   "time" TIMESTAMP(3) NOT NULL,                                                   |
-|       |   TIME INDEX ("time")                                                             |
-|       | )                                                                                 |
-|       |                                                                                   |
-|       | ENGINE=mito                                                                       |
-|       |                                                                                   |
-+-------+-----------------------------------------------------------------------------------+
++-------+-----------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                    |
++-------+-----------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                             |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '2048', type = 'BLOOM'),  |
+|       |   "category" STRING NULL,                                                                                       |
+|       |   "metric" BIGINT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'), |
+|       |   "time" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   TIME INDEX ("time")                                                                                           |
+|       | )                                                                                                               |
+|       |                                                                                                                 |
+|       | ENGINE=mito                                                                                                     |
+|       |                                                                                                                 |
++-------+-----------------------------------------------------------------------------------------------------------------+
+
+SHOW INDEX FROM test;
+
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name       | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type               | Comment | Index_comment | Visible | Expression |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
+| test  | 1          | SKIPPING INDEX | 3            | metric      | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
+| test  | 1          | TIME INDEX     | 1            | time        | A         |             |          |        | NO   |                          |         |               | YES     |            |
+| test  | 1          | SKIPPING INDEX | 1            | value       | A         |             |          |        | YES  | greptime-bloom-filter-v1 |         |               | YES     |            |
++-------+------------+----------------+--------------+-------------+-----------+-------------+----------+--------+------+--------------------------+---------+---------------+---------+------------+
 
 -- Test removing all skipping indexes
 ALTER TABLE test MODIFY COLUMN value UNSET SKIPPING INDEX;
@@ -216,6 +285,23 @@ ALTER TABLE test MODIFY COLUMN metric UNSET SKIPPING INDEX;
 
 Affected Rows: 0
 
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------+
+| Table | Create Table                        |
++-------+-------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" ( |
+|       |   "value" DOUBLE NULL,              |
+|       |   "category" STRING NULL,           |
+|       |   "metric" BIGINT NULL,             |
+|       |   "time" TIMESTAMP(3) NOT NULL,     |
+|       |   TIME INDEX ("time")               |
+|       | )                                   |
+|       |                                     |
+|       | ENGINE=mito                         |
+|       |                                     |
++-------+-------------------------------------+
+
 SHOW INDEX FROM test;
 
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
@@ -225,25 +311,53 @@ SHOW INDEX FROM test;
 +-------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 
 -- Test invalid operations and error cases
--- Try to set skipping index on string column (should fail)
-ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
-
-Affected Rows: 0
-
--- Try to set skipping index on timestamp column (should fail)
-ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM');
-
-Affected Rows: 0
-
--- Test invalid option values
+-- Test invalid option values (should fail)
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(blabla = 1024, type = 'BLOOM');
 
 Error: 1004(InvalidArguments), Invalid column option, column name: value, error: invalid SKIPPING INDEX option: blabla
 
+-- Test invalid false_positive_rate values (should fail)
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = 0);
+
+Error: 1002(Unexpected), Invalid skipping index option: Invalid false positive rate: 0, expected: 0.0 < rate <= 1.0
+
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = -0.01);
+
+Error: 1004(InvalidArguments), Unrecognized table option key: false_positive_rate, value: -0.01
+
+ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 1024, type = 'BLOOM', false_positive_rate = 2);
+
+Error: 1002(Unexpected), Invalid skipping index option: Invalid false positive rate: 2, expected: 0.0 < rate <= 1.0
+
 -- Test partial options
+ALTER TABLE test MODIFY COLUMN category SET SKIPPING INDEX WITH(granularity = 1024);
+
+Affected Rows: 0
+
+ALTER TABLE test MODIFY COLUMN time SET SKIPPING INDEX WITH(granularity = 1024);
+
+Affected Rows: 0
+
 ALTER TABLE test MODIFY COLUMN value SET SKIPPING INDEX WITH(granularity = 4096);
 
 Affected Rows: 0
+
+SHOW CREATE TABLE test;
+
++-------+-------------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                            |
++-------+-------------------------------------------------------------------------------------------------------------------------+
+| test  | CREATE TABLE IF NOT EXISTS "test" (                                                                                     |
+|       |   "value" DOUBLE NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '4096', type = 'BLOOM'),          |
+|       |   "category" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'),       |
+|       |   "metric" BIGINT NULL,                                                                                                 |
+|       |   "time" TIMESTAMP(3) NOT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '1024', type = 'BLOOM'), |
+|       |   TIME INDEX ("time")                                                                                                   |
+|       | )                                                                                                                       |
+|       |                                                                                                                         |
+|       | ENGINE=mito                                                                                                             |
+|       |                                                                                                                         |
++-------+-------------------------------------------------------------------------------------------------------------------------+
 
 SHOW INDEX FROM test;
 
