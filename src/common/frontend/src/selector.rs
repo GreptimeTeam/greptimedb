@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Debug;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -30,7 +31,7 @@ use crate::error::{MetaSnafu, Result};
 pub type FrontendClientPtr = Box<dyn FrontendClient>;
 
 #[async_trait::async_trait]
-pub trait FrontendClient: Send {
+pub trait FrontendClient: Send + Debug {
     async fn list_process(&mut self, req: ListProcessRequest) -> Result<ListProcessResponse>;
 
     async fn kill_process(&mut self, req: KillProcessRequest) -> Result<KillProcessResponse>;

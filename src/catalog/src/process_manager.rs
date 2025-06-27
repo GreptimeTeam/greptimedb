@@ -152,7 +152,7 @@ impl ProcessManager {
                         processes.extend(resp.processes);
                     }
                     Err(e) => {
-                        warn!(e; "Skipping failing node")
+                        warn!(e; "Skipping failing node: {:?}", f)
                     }
                 }
             }
