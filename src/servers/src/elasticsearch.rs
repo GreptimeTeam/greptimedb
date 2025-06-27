@@ -25,7 +25,8 @@ use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
 use pipeline::{
-    GreptimePipelineParams, PipelineDefinition, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    serde_value_to_vrl_value, GreptimePipelineParams, PipelineDefinition,
+    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};
@@ -339,7 +340,7 @@ fn parse_bulk_request(
                 }
             );
 
-            let log_value = pipeline::json_to_map(log_value).context(PipelineSnafu)?;
+            let log_value = serde_value_to_vrl_value(log_value).context(PipelineSnafu)?;
             requests.push(PipelineIngestRequest {
                 table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
                 values: vec![log_value],
@@ -414,12 +415,14 @@ mod tests {
                     PipelineIngestRequest {
                         table: "test".to_string(),
                         values: vec![
-                            pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
+                            serde_value_to_vrl_value(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
                         ],
                     },
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap(),
+                        ],
                     },
                 ]),
             ),
@@ -436,11 +439,15 @@ mod tests {
                 Ok(vec![
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
+                        ],
                     },
                     PipelineIngestRequest {
                         table: "logs".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap(),
+                        ],
                     },
                 ]),
             ),
@@ -457,11 +464,15 @@ mod tests {
                 Ok(vec![
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
+                        ],
                     },
                     PipelineIngestRequest {
                         table: "logs".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap(),
+                        ],
                     },
                 ]),
             ),
@@ -477,7 +488,9 @@ mod tests {
                 Ok(vec![
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
+                        ],
                     },
                 ]),
             ),
@@ -494,11 +507,15 @@ mod tests {
                 Ok(vec![
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo1": "foo1_value", "bar1": "bar1_value"})).unwrap(),
+                        ],
                     },
                     PipelineIngestRequest {
                         table: "test".to_string(),
-                        values: vec![pipeline::json_to_map(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap()],
+                        values: vec![
+                            serde_value_to_vrl_value(json!({"foo2": "foo2_value", "bar2": "bar2_value"})).unwrap(),
+                        ],
                     },
                 ]),
             ),
@@ -516,13 +533,13 @@ mod tests {
                     PipelineIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            pipeline::json_to_map(json!({"message": "172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""})).unwrap(),
+                            serde_value_to_vrl_value(json!({"message": "172.16.0.1 - - [25/May/2024:20:19:37 +0000] \"GET /contact HTTP/1.1\" 404 162 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1\""})).unwrap(),
                         ],
                     },
                     PipelineIngestRequest {
                         table: "logs-generic-default".to_string(),
                         values: vec![
-                            pipeline::json_to_map(json!({"message": "10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""})).unwrap(),
+                            serde_value_to_vrl_value(json!({"message": "10.0.0.1 - - [25/May/2024:20:18:37 +0000] \"GET /images/logo.png HTTP/1.1\" 304 0 \"-\" \"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0\""})).unwrap(),
                         ],
                     },
                 ]),

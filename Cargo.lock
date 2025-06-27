@@ -3828,7 +3828,7 @@ dependencies = [
  "jsonb",
  "num",
  "num-traits",
- "ordered-float 3.9.2",
+ "ordered-float 4.3.0",
  "paste",
  "serde",
  "serde_json",
@@ -8562,22 +8562,13 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
-version = "3.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
-dependencies = [
- "num-traits",
- "rand 0.8.5",
- "serde",
-]
-
-[[package]]
-name = "ordered-float"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44d501f1a72f71d3c063a6bbc8f7271fa73aa09fe5d6283b6571e2ed176a2537"
 dependencies = [
  "num-traits",
+ "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]
@@ -9114,6 +9105,7 @@ dependencies = [
  "moka",
  "once_cell",
  "operator",
+ "ordered-float 4.3.0",
  "paste",
  "prometheus",
  "query",
@@ -11360,6 +11352,7 @@ dependencies = [
  "tower-http 0.6.2",
  "urlencoding",
  "uuid",
+ "vrl",
  "zstd 0.13.2",
 ]
 

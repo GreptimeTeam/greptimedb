@@ -167,6 +167,7 @@ opentelemetry-proto = { version = "0.27", features = [
     "with-serde",
     "logs",
 ] }
+ordered-float = { version = "4.3", features = ["serde"] }
 parking_lot = "0.12"
 parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"

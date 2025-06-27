@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
-use pipeline::{json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext};
+use pipeline::{
+    parse, serde_value_to_vrl_value, setup_pipeline, Content, Pipeline, PipelineContext,
+};
 
 /// test util function to parse and execute pipeline
 pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
@@ -34,7 +36,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
     match input_value {
         serde_json::Value::Array(array) => {
             for value in array {
-                let intermediate_status = json_to_map(value).unwrap();
+                let intermediate_status = serde_value_to_vrl_value(value).unwrap();
                 let row = pipeline
                     .exec_mut(intermediate_status, &pipeline_ctx, &mut schema_info)
                     .expect("failed to exec pipeline")
@@ -44,7 +46,7 @@ pub fn parse_and_exec(input_str: &str, pipeline_yaml: &str) -> Rows {
             }
         }
         serde_json::Value::Object(_) => {
-            let intermediate_status = json_to_map(input_value).unwrap();
+            let intermediate_status = serde_value_to_vrl_value(input_value).unwrap();
             let row = pipeline
                 .exec_mut(intermediate_status, &pipeline_ctx, &mut schema_info)
                 .expect("failed to exec pipeline")

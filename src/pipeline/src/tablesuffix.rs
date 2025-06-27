@@ -15,12 +15,12 @@
 use dyn_fmt::AsStrFormatExt;
 use regex::Regex;
 use snafu::{ensure, OptionExt};
+use vrl::value::Value as VrlValue;
 use yaml_rust::Yaml;
 
 use crate::error::{
     Error, InvalidTableSuffixTemplateSnafu, RequiredTableSuffixTemplateSnafu, Result,
 };
-use crate::Value;
 
 const REPLACE_KEY: &str = "{}";
 
@@ -47,22 +47,16 @@ pub(crate) struct TableSuffixTemplate {
 }
 
 impl TableSuffixTemplate {
-    pub fn apply(&self, val: &Value) -> Option<String> {
+    pub fn apply(&self, val: &VrlValue) -> Option<String> {
+        let val = val.as_object()?;
         let values = self
             .keys
             .iter()
             .filter_map(|key| {
-                let v = val.get(key)?;
+                let v = val.get(key.as_str())?;
                 match v {
-                    Value::Int8(v) => Some(v.to_string()),
-                    Value::Int16(v) => Some(v.to_string()),
-                    Value::Int32(v) => Some(v.to_string()),
-                    Value::Int64(v) => Some(v.to_string()),
-                    Value::Uint8(v) => Some(v.to_string()),
-                    Value::Uint16(v) => Some(v.to_string()),
-                    Value::Uint32(v) => Some(v.to_string()),
-                    Value::Uint64(v) => Some(v.to_string()),
-                    Value::String(v) => Some(v.clone()),
+                    VrlValue::Integer(v) => Some(v.to_string()),
+                    VrlValue::Bytes(v) => Some(String::from_utf8_lossy(v).to_string()),
                     _ => None,
                 }
             })

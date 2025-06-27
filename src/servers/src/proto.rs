@@ -20,12 +20,15 @@ use std::slice;
 use api::prom_store::remote::Sample;
 use bytes::{Buf, Bytes};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
-use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value};
+use common_telemetry::warn;
+use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use prost::encoding::message::merge;
 use prost::encoding::{decode_key, decode_varint, WireType};
 use prost::DecodeError;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
+use vrl::prelude::NotNan;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
@@ -342,7 +345,7 @@ impl PromWriteRequest {
 /// let's keep it that way for now.
 pub struct PromSeriesProcessor {
     pub(crate) use_pipeline: bool,
-    pub(crate) table_values: BTreeMap<String, Vec<Value>>,
+    pub(crate) table_values: BTreeMap<String, Vec<VrlValue>>,
 
     // optional fields for pipeline
     pub(crate) pipeline_handler: Option<PipelineHandlerRef>,
@@ -379,29 +382,33 @@ impl PromSeriesProcessor {
         series: &mut PromTimeSeries,
         prom_validation_mode: PromValidationMode,
     ) -> Result<(), DecodeError> {
-        let mut vec_pipeline_map: Vec<Value> = Vec::new();
+        let mut vec_pipeline_map = Vec::new();
         let mut pipeline_map = BTreeMap::new();
         for l in series.labels.iter() {
             let name = prom_validation_mode.decode_string(&l.name)?;
             let value = prom_validation_mode.decode_string(&l.value)?;
-            pipeline_map.insert(name, Value::String(value));
+            pipeline_map.insert(KeyString::from(name), VrlValue::Bytes(value.into()));
         }
 
         let one_sample = series.samples.len() == 1;
 
         for s in series.samples.iter() {
-            // skip NaN value
-            if s.value.is_nan() {
+            let Ok(value) = NotNan::new(s.value) else {
+                warn!("invalid float value: {}", s.value);
                 continue;
-            }
+            };
+
             let timestamp = s.timestamp;
-            pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
-            pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
+            pipeline_map.insert(
+                KeyString::from(GREPTIME_TIMESTAMP),
+                VrlValue::Integer(timestamp),
+            );
+            pipeline_map.insert(KeyString::from(GREPTIME_VALUE), VrlValue::Float(value));
             if one_sample {
-                vec_pipeline_map.push(Value::Map(pipeline_map.into()));
+                vec_pipeline_map.push(VrlValue::Object(pipeline_map));
                 break;
             } else {
-                vec_pipeline_map.push(Value::Map(pipeline_map.clone().into()));
+                vec_pipeline_map.push(VrlValue::Object(pipeline_map.clone()));
             }
         }
 

@@ -127,6 +127,7 @@ tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 urlencoding = "2.1"
 uuid.workspace = true
+vrl = "0.24"
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]

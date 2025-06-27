@@ -62,7 +62,7 @@ pub enum Error {
     #[snafu(display("Processor {processor}: expect string value, but got {v:?}"))]
     ProcessorExpectString {
         processor: String,
-        v: crate::Value,
+        v: vrl::value::Value,
         #[snafu(implicit)]
         location: Location,
     },
@@ -709,6 +709,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid epoch value '{}' for resolution '{}'", value, resolution))]
+    InvalidEpochForResolution {
+        value: i64,
+        resolution: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert bytes to utf8"))]
     BytesToUtf8 {
         #[snafu(source)]
@@ -805,6 +813,21 @@ pub enum Error {
 
     #[snafu(display("Time index must be non null."))]
     TimeIndexMustBeNonNull {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Float is NaN"))]
+    FloatIsNan {
+        #[snafu(source)]
+        error: ordered_float::FloatIsNan,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported type in pipeline: {}", ty))]
+    UnsupportedTypeInPipeline {
+        ty: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -930,6 +953,10 @@ impl ErrorExt for Error {
             | VrlRegexValue { .. }
             | VrlReturnValue { .. }
             | PipelineMissing { .. } => StatusCode::InvalidArguments,
+
+            FloatIsNan { .. }
+            | InvalidEpochForResolution { .. }
+            | UnsupportedTypeInPipeline { .. } => StatusCode::InvalidArguments,
         }
     }
 
