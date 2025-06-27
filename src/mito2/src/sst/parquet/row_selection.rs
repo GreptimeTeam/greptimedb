@@ -31,7 +31,7 @@ pub struct RowGroupSelection {
 }
 
 /// A row selection with its count.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct RowSelectionWithCount {
     /// Row selection.
     selection: RowSelection,
@@ -95,6 +95,7 @@ impl RowGroupSelection {
     /// * The last row group may have fewer rows than `row_group_size`
     pub fn from_inverted_index_apply_output(
         row_group_size: usize,
+        num_row_groups: usize,
         apply_output: ApplyOutput,
     ) -> Self {
         // Step 1: Convert segment IDs to row ranges within row groups
@@ -116,7 +117,7 @@ impl RowGroupSelection {
         // Step 2: Group ranges by row group ID and create row selections
         let mut total_row_count = 0;
         let mut total_selector_len = 0;
-        let selection_in_rg = row_group_ranges
+        let mut selection_in_rg = row_group_ranges
             .chunk_by(|(row_group_id, _)| *row_group_id)
             .into_iter()
             .map(|(row_group_id, group)| {
@@ -141,7 +142,9 @@ impl RowGroupSelection {
                     },
                 )
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+
+        Self::fill_missing_row_groups(&mut selection_in_rg, num_row_groups);
 
         Self {
             selection_in_rg,
@@ -173,7 +176,7 @@ impl RowGroupSelection {
         // Step 2: Create row selections for each row group
         let mut total_row_count = 0;
         let mut total_selector_len = 0;
-        let selection_in_rg = row_group_to_row_ids
+        let mut selection_in_rg = row_group_to_row_ids
             .into_iter()
             .map(|(row_group_id, row_ids)| {
                 let selection =
@@ -191,7 +194,9 @@ impl RowGroupSelection {
                     },
                 )
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+
+        Self::fill_missing_row_groups(&mut selection_in_rg, num_row_groups);
 
         Self {
             selection_in_rg,
@@ -324,19 +329,26 @@ impl RowGroupSelection {
     }
 
     /// Returns the first row group in the selection.
+    ///
+    /// Skip the row group if the row count is 0.
     pub fn pop_first(&mut self) -> Option<(usize, RowSelection)> {
-        let (
+        while let Some((
             row_group_id,
             RowSelectionWithCount {
                 selection,
                 row_count,
                 selector_len,
             },
-        ) = self.selection_in_rg.pop_first()?;
+        )) = self.selection_in_rg.pop_first()
+        {
+            if row_count > 0 {
+                self.row_count -= row_count;
+                self.selector_len -= selector_len;
+                return Some((row_group_id, selection));
+            }
+        }
 
-        self.row_count -= row_count;
-        self.selector_len -= selector_len;
-        Some((row_group_id, selection))
+        None
     }
 
     /// Removes a row group from the selection.
@@ -363,6 +375,14 @@ impl RowGroupSelection {
         self.selection_in_rg.contains_key(&row_group_id)
     }
 
+    /// Returns true if the selection contains a row group with the given ID and the row selection is not empty.
+    pub fn contains_non_empty_row_group(&self, row_group_id: usize) -> bool {
+        self.selection_in_rg
+            .get(&row_group_id)
+            .map(|r| r.row_count > 0)
+            .unwrap_or(false)
+    }
+
     /// Returns an iterator over the row groups in the selection.
     pub fn iter(&self) -> impl Iterator<Item = (&usize, &RowSelection)> {
         self.selection_in_rg
@@ -374,6 +394,32 @@ impl RowGroupSelection {
     pub fn mem_usage(&self) -> usize {
         self.selector_len * size_of::<RowSelector>()
             + self.selection_in_rg.len() * size_of::<RowSelectionWithCount>()
+    }
+
+    /// Concatenates `other` into `self`. `other` must not contain row groups that `self` contains.
+    ///
+    /// Panics if `self` contains row groups that `other` contains.
+    pub fn concat(&mut self, other: &Self) {
+        for (rg_id, other_rs) in other.selection_in_rg.iter() {
+            if self.selection_in_rg.contains_key(rg_id) {
+                panic!("row group {} is already in `self`", rg_id);
+            }
+
+            self.selection_in_rg.insert(*rg_id, other_rs.clone());
+            self.row_count += other_rs.row_count;
+            self.selector_len += other_rs.selector_len;
+        }
+    }
+
+    /// Fills the missing row groups with empty selections.
+    /// This is to indicate that the row groups are searched even if no rows are found.
+    fn fill_missing_row_groups(
+        selection_in_rg: &mut BTreeMap<usize, RowSelectionWithCount>,
+        num_row_groups: usize,
+    ) {
+        for rg_id in 0..num_row_groups {
+            selection_in_rg.entry(rg_id).or_default();
+        }
     }
 }
 
@@ -678,15 +724,14 @@ mod tests {
         let selection =
             RowGroupSelection::from_row_ids(empty_row_ids, row_group_size, num_row_groups);
         assert_eq!(selection.row_count(), 0);
-        assert_eq!(selection.row_group_count(), 0);
-        assert!(selection.get(0).is_none());
+        assert_eq!(selection.row_group_count(), 3);
 
         // Test with consecutive row IDs
         let consecutive_row_ids: BTreeSet<u32> = vec![5, 6, 7, 8, 9].into_iter().collect();
         let selection =
             RowGroupSelection::from_row_ids(consecutive_row_ids, row_group_size, num_row_groups);
         assert_eq!(selection.row_count(), 5);
-        assert_eq!(selection.row_group_count(), 1);
+        assert_eq!(selection.row_group_count(), 3);
 
         let row_selection = selection.get(0).unwrap();
         assert_eq!(row_selection.row_count(), 5); // 5, 6, 7, 8, 9
@@ -1046,5 +1091,26 @@ mod tests {
         // Test empty selection
         let empty_selection = RowGroupSelection::from_row_ranges(vec![], row_group_size);
         assert!(!empty_selection.contains_row_group(0));
+    }
+
+    #[test]
+    fn test_concat() {
+        let row_group_size = 100;
+        let ranges1 = vec![
+            (0, vec![5..15]), // Within [0, 100)
+            (1, vec![5..15]), // Within [0, 100)
+        ];
+
+        let ranges2 = vec![
+            (2, vec![5..15]), // Within [0, 100)
+            (3, vec![5..15]), // Within [0, 100)
+        ];
+
+        let mut selection1 = RowGroupSelection::from_row_ranges(ranges1, row_group_size);
+        let selection2 = RowGroupSelection::from_row_ranges(ranges2, row_group_size);
+
+        selection1.concat(&selection2);
+        assert_eq!(selection1.row_count(), 40);
+        assert_eq!(selection1.row_group_count(), 4);
     }
 }

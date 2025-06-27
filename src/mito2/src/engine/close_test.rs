@@ -21,7 +21,7 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_close_region() {
-    let mut env = TestEnv::with_prefix("close");
+    let mut env = TestEnv::with_prefix("close").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

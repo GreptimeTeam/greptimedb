@@ -136,7 +136,7 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
 #[tokio::test]
 async fn test_compaction_region() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -202,7 +202,7 @@ async fn test_compaction_region() {
 #[tokio::test]
 async fn test_infer_compaction_time_window() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -341,7 +341,7 @@ async fn test_infer_compaction_time_window() {
 #[tokio::test]
 async fn test_compaction_overlapping_files() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -402,7 +402,7 @@ async fn test_compaction_overlapping_files() {
 #[tokio::test]
 async fn test_compaction_region_with_overlapping() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
 
@@ -450,7 +450,7 @@ async fn test_compaction_region_with_overlapping() {
 #[tokio::test]
 async fn test_compaction_region_with_overlapping_delete_all() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -506,7 +506,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
 #[tokio::test]
 async fn test_readonly_during_compaction() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
     let engine = env
         .create_engine_with(
@@ -590,7 +590,7 @@ async fn test_readonly_during_compaction() {
 #[tokio::test]
 async fn test_compaction_update_time_window() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -686,7 +686,7 @@ async fn test_compaction_update_time_window() {
 #[tokio::test]
 async fn test_change_region_compaction_window() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -811,7 +811,7 @@ async fn test_change_region_compaction_window() {
 #[tokio::test]
 async fn test_open_overwrite_compaction_window() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

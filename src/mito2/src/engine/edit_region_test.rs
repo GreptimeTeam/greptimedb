@@ -33,7 +33,7 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
 
     struct EditRegionListener {
         tx: Mutex<Option<oneshot::Sender<RegionId>>>,
@@ -122,7 +122,7 @@ async fn test_edit_region_schedule_compaction() {
 
 #[tokio::test]
 async fn test_edit_region_fill_cache() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
 
     struct EditRegionListener {
         tx: Mutex<Option<oneshot::Sender<FileId>>>,
@@ -241,7 +241,7 @@ async fn test_edit_region_concurrently() {
         }
     }
 
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
             // Suppress the compaction to not impede the speed of this kinda stress testing.
