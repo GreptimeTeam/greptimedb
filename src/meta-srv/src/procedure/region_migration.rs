@@ -62,6 +62,7 @@ use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
 };
+use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
 use crate::service::mailbox::MailboxRef;
 
 /// The default timeout for region migration.
