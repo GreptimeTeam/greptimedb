@@ -76,14 +76,14 @@ impl TaskState {
 
     /// Compute the next query delay based on the time window size or the last query duration.
     /// Aiming to avoid too frequent queries. But also not too long delay.
-    /// The delay is computed as follows:
-    /// - If `time_window_size` is set, the delay is half the time window size, constrained to be
-    ///   at least `last_query_duration` and at most `max_timeout`.
-    /// - If `time_window_size` is not set, the delay defaults to `last_query_duration`, constrained
-    ///   to be at least `MIN_REFRESH_DURATION` and at most `max_timeout`.
     ///
-    /// If there are dirty time windows, the function returns an immediate execution time to clean them.
-    /// TODO: Make this behavior configurable.
+    /// next wait time is calculated as:
+    /// last query duration, capped by [max(min_run_interval, time_window_size), max_timeout],
+    /// note at most wait for `max_timeout`.
+    ///
+    /// if current the dirty time range is longer than one query can handle,
+    /// execute immediately to faster clean up dirty time windows.
+    ///
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
@@ -100,9 +100,12 @@ impl TaskState {
         };
 
         let cur_dirty_window_size = self.dirty_time_windows.window_size();
+        // compute how much time range can be handled in one query
         let max_query_update_range = (*time_window_size)
             .unwrap_or_default()
             .mul_f64(DirtyTimeWindows::MAX_FILTER_NUM as f64);
+        // if dirty time range is more than one query can handle, execute immediately
+        // to faster clean up dirty time windows
         if cur_dirty_window_size < max_query_update_range {
             self.last_update_time + next_duration
         } else {
