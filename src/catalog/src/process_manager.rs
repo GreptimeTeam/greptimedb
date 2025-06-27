@@ -18,7 +18,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ListProcessResponse, ProcessInfo};
+use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_telemetry::{debug, info, warn};
@@ -27,7 +27,6 @@ use meta_client::MetaClientRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
-use crate::error::Error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
 
 pub type ProcessId = u32;
