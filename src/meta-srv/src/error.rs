@@ -54,14 +54,6 @@ pub enum Error {
         peer_id: u64,
     },
 
-    #[snafu(display("Failed to lookup peer: {}", peer_id))]
-    LookupPeer {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_meta::error::Error,
-        peer_id: u64,
-    },
-
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         #[snafu(implicit)]
@@ -695,8 +687,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Maintenance mode manager error"))]
-    MaintenanceModeManager {
+    #[snafu(display("Runtime switch manager error"))]
+    RuntimeSwitchManager {
         source: common_meta::error::Error,
         #[snafu(implicit)]
         location: Location,
@@ -1023,7 +1015,7 @@ impl ErrorExt for Error {
             Error::SubmitDdlTask { source, .. } => source.status_code(),
             Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
-            | Error::MaintenanceModeManager { source, .. }
+            | Error::RuntimeSwitchManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. }
             | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
@@ -1033,7 +1025,6 @@ impl ErrorExt for Error {
             }
 
             Error::Other { source, .. } => source.status_code(),
-            Error::LookupPeer { source, .. } => source.status_code(),
             Error::NoEnoughAvailableNode { .. } => StatusCode::RuntimeResourcesExhausted,
 
             #[cfg(feature = "pg_kvbackend")]

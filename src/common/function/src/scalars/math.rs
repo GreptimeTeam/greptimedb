@@ -14,7 +14,6 @@
 
 pub mod clamp;
 mod modulo;
-mod pow;
 mod rate;
 
 use std::fmt;
@@ -26,7 +25,6 @@ use datafusion::error::DataFusionError;
 use datafusion::logical_expr::Volatility;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
-pub use pow::PowFunction;
 pub use rate::RateFunction;
 use snafu::ResultExt;
 
@@ -39,7 +37,6 @@ pub(crate) struct MathFunction;
 impl MathFunction {
     pub fn register(registry: &FunctionRegistry) {
         registry.register_scalar(ModuloFunction);
-        registry.register_scalar(PowFunction);
         registry.register_scalar(RateFunction);
         registry.register_scalar(RangeFunction);
         registry.register_scalar(ClampFunction);

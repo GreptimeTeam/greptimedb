@@ -45,8 +45,6 @@ struct ScanMetricsSet {
     build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
-    /// Duration to convert batches.
-    convert_cost: Duration,
     /// Duration while waiting for `yield`.
     yield_cost: Duration,
     /// Duration of the scan.
@@ -111,7 +109,6 @@ impl fmt::Debug for ScanMetricsSet {
             prepare_scan_cost,
             build_reader_cost,
             scan_cost,
-            convert_cost,
             yield_cost,
             total_cost,
             num_rows,
@@ -145,7 +142,6 @@ impl fmt::Debug for ScanMetricsSet {
             "{{\"prepare_scan_cost\":\"{prepare_scan_cost:?}\", \
             \"build_reader_cost\":\"{build_reader_cost:?}\", \
             \"scan_cost\":\"{scan_cost:?}\", \
-            \"convert_cost\":\"{convert_cost:?}\", \
             \"yield_cost\":\"{yield_cost:?}\", \
             \"total_cost\":\"{total_cost:?}\", \
             \"num_rows\":{num_rows}, \
@@ -188,7 +184,6 @@ impl ScanMetricsSet {
             prepare_scan_cost,
             build_reader_cost,
             scan_cost,
-            convert_cost,
             yield_cost,
             num_batches,
             num_rows,
@@ -199,7 +194,6 @@ impl ScanMetricsSet {
         self.prepare_scan_cost += *prepare_scan_cost;
         self.build_reader_cost += *build_reader_cost;
         self.scan_cost += *scan_cost;
-        self.convert_cost += *convert_cost;
         self.yield_cost += *yield_cost;
         self.num_rows += *num_rows;
         self.num_batches += *num_batches;
@@ -275,9 +269,6 @@ impl ScanMetricsSet {
             .with_label_values(&["build_reader"])
             .observe(self.build_reader_cost.as_secs_f64());
         READ_STAGE_ELAPSED
-            .with_label_values(&["convert_rb"])
-            .observe(self.convert_cost.as_secs_f64());
-        READ_STAGE_ELAPSED
             .with_label_values(&["scan"])
             .observe(self.scan_cost.as_secs_f64());
         READ_STAGE_ELAPSED
@@ -348,6 +339,8 @@ struct PartitionMetricsInner {
     scan_cost: Time,
     /// Duration while waiting for `yield`.
     yield_cost: Time,
+    /// Duration to convert [`Batch`]es.
+    convert_cost: Time,
 }
 
 impl PartitionMetricsInner {
@@ -367,8 +360,8 @@ impl Drop for PartitionMetricsInner {
         self.in_progress_scan.dec();
 
         debug!(
-            "{} finished, region_id: {}, partition: {}, metrics: {:?}",
-            self.scanner_type, self.region_id, self.partition, metrics
+            "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+            self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
         );
     }
 }
@@ -400,7 +393,7 @@ impl PartitionMetricsList {
 
 /// Metrics while reading a partition.
 #[derive(Clone)]
-pub(crate) struct PartitionMetrics(Arc<PartitionMetricsInner>);
+pub struct PartitionMetrics(Arc<PartitionMetricsInner>);
 
 impl PartitionMetrics {
     pub(crate) fn new(
@@ -427,6 +420,7 @@ impl PartitionMetrics {
                 .subset_time("build_reader_cost", partition),
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
+            convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
         };
         Self(Arc::new(inner))
     }
@@ -441,7 +435,7 @@ impl PartitionMetrics {
         metrics.num_mem_ranges += num;
     }
 
-    pub(crate) fn inc_num_file_ranges(&self, num: usize) {
+    pub fn inc_num_file_ranges(&self, num: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.num_file_ranges += num;
     }
@@ -452,6 +446,10 @@ impl PartitionMetrics {
 
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.build_reader_cost += cost;
+    }
+
+    pub(crate) fn inc_convert_batch_cost(&self, cost: Duration) {
+        self.0.convert_cost.add_duration(cost);
     }
 
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.

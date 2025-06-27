@@ -20,14 +20,14 @@ use std::time::Instant;
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
-use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
-use snafu::ResultExt;
+use futures::StreamExt;
+use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
 use store_api::storage::TimeSeriesRowSelector;
@@ -42,7 +42,8 @@ use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
-use crate::read::{BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -91,6 +92,20 @@ impl SeqScan {
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(aggr_stream))
+    }
+
+    /// Scan [`Batch`] in all partitions one by one.
+    pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+
+        let streams = (0..self.properties.partitions.len())
+            .map(|partition| {
+                let metrics = self.new_partition_metrics(&metrics_set, partition);
+                self.scan_batch_in_partition(partition, metrics)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Box::pin(futures::stream::iter(streams).flatten()))
     }
 
     /// Builds a [BoxedBatchReader] from sequential scan for compaction.
@@ -196,23 +211,40 @@ impl SeqScan {
         &self,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
-    ) -> Result<SendableRecordBatchStream, BoxedError> {
-        if partition >= self.properties.partitions.len() {
-            return Err(BoxedError::new(
-                PartitionOutOfRangeSnafu {
-                    given: partition,
-                    all: self.properties.partitions.len(),
-                }
-                .build(),
-            ));
-        }
+    ) -> Result<SendableRecordBatchStream> {
+        let metrics = self.new_partition_metrics(metrics_set, partition);
+
+        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
+
+        let input = &self.stream_ctx.input;
+        let record_batch_stream = ConvertBatchStream::new(
+            batch_stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+
+        Ok(Box::pin(RecordBatchStreamWrapper::new(
+            input.mapper.output_schema(),
+            Box::pin(record_batch_stream),
+        )))
+    }
+
+    fn scan_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+    ) -> Result<ScanBatchStream> {
+        ensure!(
+            partition < self.properties.partitions.len(),
+            PartitionOutOfRangeSnafu {
+                given: partition,
+                all: self.properties.partitions.len(),
+            }
+        );
+
         if self.properties.partitions[partition].is_empty() {
-            return Ok(Box::pin(RecordBatchStreamWrapper::new(
-                self.stream_ctx.input.mapper.output_schema(),
-                common_recordbatch::EmptyRecordBatchStream::new(
-                    self.stream_ctx.input.mapper.output_schema(),
-                ),
-            )));
+            return Ok(Box::pin(futures::stream::empty()));
         }
 
         let stream_ctx = self.stream_ctx.clone();
@@ -220,7 +252,6 @@ impl SeqScan {
         let partition_ranges = self.properties.partitions[partition].clone();
         let compaction = self.compaction;
         let distinguish_range = self.properties.distinguish_partition_range;
-        let part_metrics = self.new_partition_metrics(metrics_set, partition);
 
         let stream = try_stream! {
             part_metrics.on_first_poll();
@@ -245,21 +276,13 @@ impl SeqScan {
                 let mut fetch_start = Instant::now();
                 let mut reader =
                     Self::build_reader_from_sources(&stream_ctx, sources, semaphore.clone())
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(ExternalSnafu)?;
-                let cache = &stream_ctx.input.cache_strategy;
+                        .await?;
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
                     .with_end(Some(part_range.end));
 
-                while let Some(batch) = reader
-                    .next_batch()
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?
-                {
+                while let Some(batch) = reader.next_batch().await? {
                     metrics.scan_cost += fetch_start.elapsed();
                     metrics.num_batches += 1;
                     metrics.num_rows += batch.num_rows();
@@ -278,11 +301,8 @@ impl SeqScan {
                         &batch,
                     );
 
-                    let convert_start = Instant::now();
-                    let record_batch = stream_ctx.input.mapper.convert(&batch, cache)?;
-                    metrics.convert_cost += convert_start.elapsed();
                     let yield_start = Instant::now();
-                    yield record_batch;
+                    yield ScanBatch::Normal(batch);
                     metrics.yield_cost += yield_start.elapsed();
 
                     fetch_start = Instant::now();
@@ -292,7 +312,7 @@ impl SeqScan {
                 // The query engine can use this to optimize some queries.
                 if distinguish_range {
                     let yield_start = Instant::now();
-                    yield stream_ctx.input.mapper.empty_record_batch();
+                    yield ScanBatch::Normal(Batch::empty());
                     metrics.yield_cost += yield_start.elapsed();
                 }
 
@@ -302,13 +322,7 @@ impl SeqScan {
 
             part_metrics.on_finish();
         };
-
-        let stream = Box::pin(RecordBatchStreamWrapper::new(
-            self.stream_ctx.input.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        Ok(Box::pin(stream))
     }
 
     fn new_semaphore(&self) -> Option<Arc<Semaphore>> {
@@ -368,6 +382,7 @@ impl RegionScanner for SeqScan {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(metrics_set, partition)
+            .map_err(BoxedError::new)
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

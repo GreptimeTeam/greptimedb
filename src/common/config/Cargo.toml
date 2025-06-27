@@ -14,6 +14,7 @@ common-macro.workspace = true
 config.workspace = true
 humantime-serde.workspace = true
 num_cpus.workspace = true
+object-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true

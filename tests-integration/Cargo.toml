@@ -6,14 +6,6 @@ license.workspace = true
 
 [features]
 dashboard = []
-enterprise = [
-    "cmd/enterprise",
-    "common-meta/enterprise",
-    "frontend/enterprise",
-    "meta-srv/enterprise",
-    "operator/enterprise",
-    "sql/enterprise",
-]
 
 [lints]
 workspace = true

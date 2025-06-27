@@ -430,9 +430,10 @@ impl UploadTracker {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
+    use object_store::ATOMIC_WRITE_DIR;
 
     use super::*;
-    use crate::access_layer::{OperationType, ATOMIC_WRITE_DIR};
+    use crate::access_layer::OperationType;
     use crate::cache::test_util::new_fs_store;
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::error::InvalidBatchSnafu;

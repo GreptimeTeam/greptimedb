@@ -29,7 +29,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::distributed_time_constants;
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
-use common_meta::key::maintenance::MaintenanceModeManager;
+use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -64,7 +64,7 @@ use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
-    RegionSupervisorTicker, DEFAULT_TICK_INTERVAL,
+    RegionSupervisorTicker, DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::round_robin::RoundRobinSelector;
@@ -193,7 +193,9 @@ impl MetasrvBuilder {
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
-        let procedure_manager = build_procedure_manager(&options, &kv_backend);
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
+        let procedure_manager =
+            build_procedure_manager(&options, &kv_backend, &runtime_switch_manager);
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
@@ -201,7 +203,7 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-        let maintenance_mode_manager = Arc::new(MaintenanceModeManager::new(kv_backend.clone()));
+
         let selector_ctx = SelectorContext {
             server_addr: options.grpc.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
@@ -299,6 +301,8 @@ impl MetasrvBuilder {
                 Arc::new(RegionFailureDetectorControl::new(tx.clone())) as _,
                 Some(Arc::new(RegionSupervisorTicker::new(
                     DEFAULT_TICK_INTERVAL,
+                    options.region_failure_detector_initialization_delay,
+                    DEFAULT_INITIALIZATION_RETRY_PERIOD,
                     tx.clone(),
                 ))),
             )
@@ -339,8 +343,9 @@ impl MetasrvBuilder {
                 selector_ctx.clone(),
                 supervisor_selector,
                 region_migration_manager.clone(),
-                maintenance_mode_manager.clone(),
+                runtime_switch_manager.clone(),
                 peer_lookup_service.clone(),
+                leader_cached_kv_backend.clone(),
             );
 
             Some(RegionFailureHandler::new(
@@ -353,30 +358,28 @@ impl MetasrvBuilder {
 
         let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
 
+        let ddl_context = DdlContext {
+            node_manager,
+            cache_invalidator: cache_invalidator.clone(),
+            memory_region_keeper: memory_region_keeper.clone(),
+            leader_region_registry: leader_region_registry.clone(),
+            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_allocator: table_metadata_allocator.clone(),
+            flow_metadata_manager: flow_metadata_manager.clone(),
+            flow_metadata_allocator: flow_metadata_allocator.clone(),
+            region_failure_detector_controller,
+        };
+        let procedure_manager_c = procedure_manager.clone();
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+            .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let trigger_ddl_manager = plugins
-            .as_ref()
-            .and_then(|plugins| plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>());
-        let ddl_manager = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager,
-                    cache_invalidator: cache_invalidator.clone(),
-                    memory_region_keeper: memory_region_keeper.clone(),
-                    leader_region_registry: leader_region_registry.clone(),
-                    table_metadata_manager: table_metadata_manager.clone(),
-                    table_metadata_allocator: table_metadata_allocator.clone(),
-                    flow_metadata_manager: flow_metadata_manager.clone(),
-                    flow_metadata_allocator: flow_metadata_allocator.clone(),
-                    region_failure_detector_controller,
-                },
-                procedure_manager.clone(),
-                true,
-                #[cfg(feature = "enterprise")]
-                trigger_ddl_manager,
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
+        let ddl_manager = {
+            let trigger_ddl_manager = plugins.as_ref().and_then(|plugins| {
+                plugins.get::<common_meta::ddl_manager::TriggerDdlManagerRef>()
+            });
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        };
+        let ddl_manager = Arc::new(ddl_manager);
 
         // remote WAL prune ticker and manager
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
@@ -463,7 +466,7 @@ impl MetasrvBuilder {
             procedure_executor: ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
-            maintenance_mode_manager,
+            runtime_switch_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),
                 meta_peer_client,
@@ -506,6 +509,7 @@ fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
 fn build_procedure_manager(
     options: &MetasrvOptions,
     kv_backend: &KvBackendRef,
+    runtime_switch_manager: &RuntimeSwitchManagerRef,
 ) -> ProcedureManagerRef {
     let manager_config = ManagerConfig {
         max_retry_times: options.procedure.max_retry_times,
@@ -526,6 +530,7 @@ fn build_procedure_manager(
         manager_config,
         kv_state_store.clone(),
         kv_state_store,
+        Some(runtime_switch_manager.clone()),
     ))
 }
 

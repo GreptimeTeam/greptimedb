@@ -95,7 +95,7 @@ impl Default for FlowConfig {
 }
 
 /// Options for flow node
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FlownodeOptions {
     pub node_id: Option<u64>,
@@ -250,6 +250,10 @@ impl DiffRequest {
             Self::Insert(v) => v.len(),
             Self::Delete(v) => v.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -927,6 +931,12 @@ pub struct FlowTickManager {
     start: Instant,
     /// The timestamp when the flow started
     start_timestamp: repr::Timestamp,
+}
+
+impl Default for FlowTickManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FlowTickManager {

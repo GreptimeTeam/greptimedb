@@ -50,7 +50,11 @@ use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
+use crate::rpc::ddl::trigger::DropTriggerTask;
+#[cfg(feature = "enterprise")]
 use crate::rpc::ddl::DdlTask::CreateTrigger;
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::DdlTask::DropTrigger;
 use crate::rpc::ddl::DdlTask::{
     AlterDatabase, AlterLogicalTables, AlterTable, CreateDatabase, CreateFlow, CreateLogicalTables,
     CreateTable, CreateView, DropDatabase, DropFlow, DropLogicalTables, DropTable, DropView,
@@ -91,6 +95,14 @@ pub trait TriggerDdlManager: Send + Sync {
         query_context: QueryContext,
     ) -> Result<SubmitDdlTaskResponse>;
 
+    async fn drop_trigger(
+        &self,
+        drop_trigger_task: DropTriggerTask,
+        procedure_manager: ProcedureManagerRef,
+        ddl_context: DdlContext,
+        query_context: QueryContext,
+    ) -> Result<SubmitDdlTaskResponse>;
+
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
@@ -125,18 +137,26 @@ impl DdlManager {
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
         register_loaders: bool,
-        #[cfg(feature = "enterprise")] trigger_ddl_manager: Option<TriggerDdlManagerRef>,
     ) -> Result<Self> {
         let manager = Self {
             ddl_context,
             procedure_manager,
             #[cfg(feature = "enterprise")]
-            trigger_ddl_manager,
+            trigger_ddl_manager: None,
         };
         if register_loaders {
             manager.register_loaders()?;
         }
         Ok(manager)
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_trigger_ddl_manager(
+        mut self,
+        trigger_ddl_manager: Option<TriggerDdlManagerRef>,
+    ) -> Self {
+        self.trigger_ddl_manager = trigger_ddl_manager;
+        self
     }
 
     /// Returns the [TableMetadataManagerRef].
@@ -640,6 +660,28 @@ async fn handle_drop_flow_task(
     })
 }
 
+#[cfg(feature = "enterprise")]
+async fn handle_drop_trigger_task(
+    ddl_manager: &DdlManager,
+    drop_trigger_task: DropTriggerTask,
+    query_context: QueryContext,
+) -> Result<SubmitDdlTaskResponse> {
+    let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
+        return UnsupportedSnafu {
+            operation: "drop trigger",
+        }
+        .fail();
+    };
+
+    m.drop_trigger(
+        drop_trigger_task,
+        ddl_manager.procedure_manager.clone(),
+        ddl_manager.ddl_context.clone(),
+        query_context,
+    )
+    .await
+}
+
 async fn handle_drop_view_task(
     ddl_manager: &DdlManager,
     drop_view_task: DropViewTask,
@@ -827,6 +869,11 @@ impl ProcedureExecutor for DdlManager {
                     handle_create_flow_task(self, create_flow_task, request.query_context.into())
                         .await
                 }
+                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
+                CreateView(create_view_task) => {
+                    handle_create_view_task(self, create_view_task).await
+                }
+                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
                     handle_create_trigger_task(
@@ -836,11 +883,11 @@ impl ProcedureExecutor for DdlManager {
                     )
                     .await
                 }
-                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
-                CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task).await
+                #[cfg(feature = "enterprise")]
+                DropTrigger(drop_trigger_task) => {
+                    handle_drop_trigger_task(self, drop_trigger_task, request.query_context.into())
+                        .await
                 }
-                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
             }
         }
         .trace(span)
@@ -948,6 +995,7 @@ mod tests {
             Default::default(),
             state_store,
             poison_manager,
+            None,
         ));
 
         let _ = DdlManager::try_new(
@@ -964,8 +1012,6 @@ mod tests {
             },
             procedure_manager.clone(),
             true,
-            #[cfg(feature = "enterprise")]
-            None,
         );
 
         let expected_loaders = vec![

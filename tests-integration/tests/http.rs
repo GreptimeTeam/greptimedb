@@ -453,7 +453,28 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let body = &res.text().await;
     // Must be escaped correctly: 66.6,0,"host, ""name"
-    assert_eq!(body, "66.6,0,\"host, \"\"name\"\n");
+    assert_eq!(body, "66.6,0,\"host, \"\"name\"\r\n");
+
+    // csv with names
+    let res = client
+        .get("/v1/sql?format=csvWithNames&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    assert_eq!(body, "cpu,ts,host\r\n66.6,0,\"host, \"\"name\"\r\n");
+
+    // csv with names and types
+    let res = client
+        .get("/v1/sql?format=csvWithNamesAndTypes&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    assert_eq!(
+        body,
+        "cpu,ts,host\r\nFloat64,TimestampMillisecond,String\r\n66.6,0,\"host, \"\"name\"\r\n"
+    );
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
@@ -523,7 +544,7 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let csv_body = &res.text().await;
-    assert_eq!("0,1.0\n5000,1.0\n10000,1.0\n15000,1.0\n20000,1.0\n25000,1.0\n30000,1.0\n35000,1.0\n40000,1.0\n45000,1.0\n50000,1.0\n55000,1.0\n60000,1.0\n65000,1.0\n70000,1.0\n75000,1.0\n80000,1.0\n85000,1.0\n90000,1.0\n95000,1.0\n100000,1.0\n", csv_body);
+    assert_eq!("0,1.0\r\n5000,1.0\r\n10000,1.0\r\n15000,1.0\r\n20000,1.0\r\n25000,1.0\r\n30000,1.0\r\n35000,1.0\r\n40000,1.0\r\n45000,1.0\r\n50000,1.0\r\n55000,1.0\r\n60000,1.0\r\n65000,1.0\r\n70000,1.0\r\n75000,1.0\r\n80000,1.0\r\n85000,1.0\r\n90000,1.0\r\n95000,1.0\r\n100000,1.0\r\n", csv_body);
 
     guard.remove_all().await;
 }

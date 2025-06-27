@@ -20,7 +20,6 @@
 pub mod codec;
 pub mod data_source;
 pub mod logstore;
-// pub mod manifest;
 pub mod metadata;
 pub mod metric_engine_consts;
 mod metrics;

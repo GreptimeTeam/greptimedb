@@ -16,11 +16,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use arrow_flight::FlightData;
+use common_error::ext::ErrorExt;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing::{info_span, Instrument};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::warn;
+use common_telemetry::{error, warn};
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
@@ -90,6 +91,10 @@ impl FlightRecordBatchStream {
                     }
                 }
                 Err(e) => {
+                    if e.status_code().should_log_error() {
+                        error!("{e:?}");
+                    }
+
                     let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
                         warn!(e; "stop sending Flight data");

@@ -27,7 +27,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::distributed_time_constants;
-use common_meta::key::maintenance::MaintenanceModeManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
@@ -110,6 +110,14 @@ pub struct MetasrvOptions {
     pub use_memory_store: bool,
     /// Whether to enable region failover.
     pub enable_region_failover: bool,
+    /// Delay before initializing region failure detectors.
+    ///
+    /// This delay helps prevent premature initialization of region failure detectors in cases where
+    /// cluster maintenance mode is enabled right after metasrv starts, especially when the cluster
+    /// is not deployed via the recommended GreptimeDB Operator. Without this delay, early detector registration
+    /// may trigger unnecessary region failovers during datanode startup.
+    #[serde(with = "humantime_serde")]
+    pub region_failure_detector_initialization_delay: Duration,
     /// Whether to allow region failover on local WAL.
     ///
     /// If it's true, the region failover will be allowed even if the local WAL is used.
@@ -219,6 +227,7 @@ impl Default for MetasrvOptions {
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
+            region_failure_detector_initialization_delay: Duration::from_secs(10 * 60),
             allow_region_failover_on_local_wal: false,
             grpc: GrpcOptions {
                 bind_addr: format!("127.0.0.1:{}", DEFAULT_METASRV_ADDR_PORT),
@@ -428,7 +437,7 @@ pub struct Metasrv {
     procedure_executor: ProcedureExecutorRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    maintenance_mode_manager: MaintenanceModeManagerRef,
+    runtime_switch_manager: RuntimeSwitchManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -687,8 +696,8 @@ impl Metasrv {
         &self.table_metadata_manager
     }
 
-    pub fn maintenance_mode_manager(&self) -> &MaintenanceModeManagerRef {
-        &self.maintenance_mode_manager
+    pub fn runtime_switch_manager(&self) -> &RuntimeSwitchManagerRef {
+        &self.runtime_switch_manager
     }
 
     pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {

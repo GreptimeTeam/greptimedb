@@ -30,20 +30,16 @@ use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{metadata_store_dir, Configurable, KvBackendConfig};
 use common_error::ext::BoxedError;
 use common_meta::cache::LayeredCacheRegistryBuilder;
-use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cluster::{NodeInfo, NodeStatus};
 use common_meta::datanode::RegionStat;
-use common_meta::ddl::flow_meta::{FlowMetadataAllocator, FlowMetadataAllocatorRef};
-use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
+use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
 use common_meta::ddl_manager::DdlManager;
-#[cfg(feature = "enterprise")]
-use common_meta::ddl_manager::TriggerDdlManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
-use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
-use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
@@ -261,14 +257,33 @@ pub struct Instance {
     flownode: FlownodeInstance,
     procedure_manager: ProcedureManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
+
+    // The components of standalone, which make it easier to expand based
+    // on the components.
+    #[cfg(feature = "enterprise")]
+    components: Components,
+
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
+}
+
+#[cfg(feature = "enterprise")]
+pub struct Components {
+    pub plugins: Plugins,
+    pub kv_backend: KvBackendRef,
+    pub frontend_client: Arc<FrontendClient>,
+    pub catalog_manager: catalog::CatalogManagerRef,
 }
 
 impl Instance {
     /// Find the socket addr of a server by its `name`.
     pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
         self.frontend.server_handlers().addr(name)
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn components(&self) -> &Components {
+        &self.components
     }
 }
 
@@ -550,13 +565,14 @@ impl StartCommand {
         // actually make a connection
         let (frontend_client, frontend_instance_handler) =
             FrontendClient::from_empty_grpc_handler();
+        let frontend_client = Arc::new(frontend_client);
         let flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
             catalog_manager.clone(),
             flow_metadata_manager.clone(),
-            Arc::new(frontend_client.clone()),
+            frontend_client.clone(),
         );
         let flownode = flow_builder
             .build()
@@ -594,28 +610,36 @@ impl StartCommand {
             .await
             .context(error::BuildWalOptionsAllocatorSnafu)?;
         let wal_options_allocator = Arc::new(wal_options_allocator);
-        let table_meta_allocator = Arc::new(TableMetadataAllocator::new(
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_sequence,
             wal_options_allocator.clone(),
         ));
-        let flow_meta_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
             flow_id_sequence,
         ));
 
+        let ddl_context = DdlContext {
+            node_manager: node_manager.clone(),
+            cache_invalidator: layered_cache_registry.clone(),
+            memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+            leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_allocator: table_metadata_allocator.clone(),
+            flow_metadata_manager: flow_metadata_manager.clone(),
+            flow_metadata_allocator: flow_metadata_allocator.clone(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+        };
+        let procedure_manager_c = procedure_manager.clone();
+
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+            .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
-        let trigger_ddl_manager: Option<TriggerDdlManagerRef> = plugins.get();
-        let ddl_task_executor = Self::create_ddl_task_executor(
-            procedure_manager.clone(),
-            node_manager.clone(),
-            layered_cache_registry.clone(),
-            table_metadata_manager,
-            table_meta_allocator,
-            flow_metadata_manager,
-            flow_meta_allocator,
-            #[cfg(feature = "enterprise")]
-            trigger_ddl_manager,
-        )
-        .await?;
+        let ddl_manager = {
+            let trigger_ddl_manager: Option<common_meta::ddl_manager::TriggerDdlManagerRef> =
+                plugins.get();
+            ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
+        };
+        let ddl_task_executor: ProcedureExecutorRef = Arc::new(ddl_manager);
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -658,7 +682,7 @@ impl StartCommand {
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
             .context(error::ServersSnafu)?;
 
-        let servers = Services::new(opts, fe_instance.clone(), plugins)
+        let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
             .context(error::StartFrontendSnafu)?;
 
@@ -669,49 +693,24 @@ impl StartCommand {
             export_metrics_task,
         };
 
+        #[cfg(feature = "enterprise")]
+        let components = Components {
+            plugins,
+            kv_backend,
+            frontend_client,
+            catalog_manager,
+        };
+
         Ok(Instance {
             datanode,
             frontend,
             flownode,
             procedure_manager,
             wal_options_allocator,
+            #[cfg(feature = "enterprise")]
+            components,
             _guard: guard,
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_ddl_task_executor(
-        procedure_manager: ProcedureManagerRef,
-        node_manager: NodeManagerRef,
-        cache_invalidator: CacheInvalidatorRef,
-        table_metadata_manager: TableMetadataManagerRef,
-        table_metadata_allocator: TableMetadataAllocatorRef,
-        flow_metadata_manager: FlowMetadataManagerRef,
-        flow_metadata_allocator: FlowMetadataAllocatorRef,
-        #[cfg(feature = "enterprise")] trigger_ddl_manager: Option<TriggerDdlManagerRef>,
-    ) -> Result<ProcedureExecutorRef> {
-        let procedure_executor: ProcedureExecutorRef = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager,
-                    cache_invalidator,
-                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
-                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
-                    table_metadata_manager,
-                    table_metadata_allocator,
-                    flow_metadata_manager,
-                    flow_metadata_allocator,
-                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
-                },
-                procedure_manager,
-                true,
-                #[cfg(feature = "enterprise")]
-                trigger_ddl_manager,
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
-
-        Ok(procedure_executor)
     }
 
     pub async fn create_table_metadata_manager(
@@ -849,7 +848,7 @@ mod tests {
     use common_config::ENV_VAR_SEP;
     use common_test_util::temp_dir::create_named_temp_file;
     use common_wal::config::DatanodeWalConfig;
-    use datanode::config::{FileConfig, GcsConfig};
+    use object_store::config::{FileConfig, GcsConfig};
 
     use super::*;
     use crate::options::GlobalOptions;
@@ -968,15 +967,15 @@ mod tests {
 
         assert!(matches!(
             &dn_opts.storage.store,
-            datanode::config::ObjectStoreConfig::File(FileConfig { .. })
+            object_store::config::ObjectStoreConfig::File(FileConfig { .. })
         ));
         assert_eq!(dn_opts.storage.providers.len(), 2);
         assert!(matches!(
             dn_opts.storage.providers[0],
-            datanode::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
+            object_store::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
         ));
         match &dn_opts.storage.providers[1] {
-            datanode::config::ObjectStoreConfig::S3(s3_config) => {
+            object_store::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "SecretBox<alloc::string::String>([REDACTED])".to_string(),
                     format!("{:?}", s3_config.access_key_id)

@@ -28,7 +28,7 @@ use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_recordbatch::RecordBatch;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -37,6 +37,7 @@ use datatypes::value::transform_value_ref_to_json_value;
 use event::{LogState, LogValidatorRef};
 use futures::FutureExt;
 use http::{HeaderValue, Method};
+use prost::DecodeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ensure, ResultExt};
@@ -117,7 +118,7 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
+pub static PUBLIC_APIS: [&str; 3] = ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -163,6 +164,24 @@ pub enum PromValidationMode {
     Lossy,
     /// Do not validate UTF8 strings.
     Unchecked,
+}
+
+impl PromValidationMode {
+    /// Decodes provided bytes to [String] with optional UTF-8 validation.
+    pub fn decode_string(&self, bytes: &[u8]) -> std::result::Result<String, DecodeError> {
+        let result = match self {
+            PromValidationMode::Strict => match String::from_utf8(bytes.to_vec()) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Invalid UTF-8 string value: {:?}, error: {:?}", bytes, e);
+                    return Err(DecodeError::new("invalid utf-8"));
+                }
+            },
+            PromValidationMode::Lossy => String::from_utf8_lossy(bytes).to_string(),
+            PromValidationMode::Unchecked => unsafe { String::from_utf8_unchecked(bytes.to_vec()) },
+        };
+        Ok(result)
+    }
 }
 
 impl Default for HttpOptions {
@@ -306,7 +325,8 @@ pub enum GreptimeQueryOutput {
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     Arrow,
-    Csv,
+    // (with_names, with_types)
+    Csv(bool, bool),
     Table,
     #[default]
     GreptimedbV1,
@@ -318,7 +338,9 @@ impl ResponseFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "arrow" => Some(ResponseFormat::Arrow),
-            "csv" => Some(ResponseFormat::Csv),
+            "csv" => Some(ResponseFormat::Csv(false, false)),
+            "csvwithnames" => Some(ResponseFormat::Csv(true, false)),
+            "csvwithnamesandtypes" => Some(ResponseFormat::Csv(true, true)),
             "table" => Some(ResponseFormat::Table),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
@@ -330,7 +352,7 @@ impl ResponseFormat {
     pub fn as_str(&self) -> &'static str {
         match self {
             ResponseFormat::Arrow => "arrow",
-            ResponseFormat::Csv => "csv",
+            ResponseFormat::Csv(_, _) => "csv",
             ResponseFormat::Table => "table",
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
@@ -718,6 +740,10 @@ impl HttpServer {
         router = router
             .route(
                 "/health",
+                routing::get(handler::health).post(handler::health),
+            )
+            .route(
+                &format!("/{HTTP_API_VERSION}/health"),
                 routing::get(handler::health).post(handler::health),
             )
             .route(
@@ -1296,6 +1322,16 @@ mod test {
             "*"
         );
 
+        let res = client.get("/v1/health").send().await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .expect("expect cors header origin"),
+            "*"
+        );
+
         let res = client
             .options("/health")
             .header("Access-Control-Request-Headers", "x-greptime-auth")
@@ -1480,7 +1516,7 @@ mod test {
         for format in [
             ResponseFormat::GreptimedbV1,
             ResponseFormat::InfluxdbV1,
-            ResponseFormat::Csv,
+            ResponseFormat::Csv(true, true),
             ResponseFormat::Table,
             ResponseFormat::Arrow,
             ResponseFormat::Json,
@@ -1490,7 +1526,9 @@ mod test {
             let outputs = vec![Ok(Output::new_with_record_batches(recordbatches))];
             let json_resp = match format {
                 ResponseFormat::Arrow => ArrowResponse::from_output(outputs, None).await,
-                ResponseFormat::Csv => CsvResponse::from_output(outputs).await,
+                ResponseFormat::Csv(with_names, with_types) => {
+                    CsvResponse::from_output(outputs, with_names, with_types).await
+                }
                 ResponseFormat::Table => TableResponse::from_output(outputs).await,
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
@@ -1582,5 +1620,47 @@ mod test {
                 HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_response_format_misc() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::GreptimedbV1);
+        assert_eq!(ResponseFormat::parse("arrow"), Some(ResponseFormat::Arrow));
+        assert_eq!(
+            ResponseFormat::parse("csv"),
+            Some(ResponseFormat::Csv(false, false))
+        );
+        assert_eq!(
+            ResponseFormat::parse("csvwithnames"),
+            Some(ResponseFormat::Csv(true, false))
+        );
+        assert_eq!(
+            ResponseFormat::parse("csvwithnamesandtypes"),
+            Some(ResponseFormat::Csv(true, true))
+        );
+        assert_eq!(ResponseFormat::parse("table"), Some(ResponseFormat::Table));
+        assert_eq!(
+            ResponseFormat::parse("greptimedb_v1"),
+            Some(ResponseFormat::GreptimedbV1)
+        );
+        assert_eq!(
+            ResponseFormat::parse("influxdb_v1"),
+            Some(ResponseFormat::InfluxdbV1)
+        );
+        assert_eq!(ResponseFormat::parse("json"), Some(ResponseFormat::Json));
+
+        // invalid formats
+        assert_eq!(ResponseFormat::parse("invalid"), None);
+        assert_eq!(ResponseFormat::parse(""), None);
+        assert_eq!(ResponseFormat::parse("CSV"), None); // Case sensitive
+
+        // as str
+        assert_eq!(ResponseFormat::Arrow.as_str(), "arrow");
+        assert_eq!(ResponseFormat::Csv(false, false).as_str(), "csv");
+        assert_eq!(ResponseFormat::Csv(true, true).as_str(), "csv");
+        assert_eq!(ResponseFormat::Table.as_str(), "table");
+        assert_eq!(ResponseFormat::GreptimedbV1.as_str(), "greptimedb_v1");
+        assert_eq!(ResponseFormat::InfluxdbV1.as_str(), "influxdb_v1");
+        assert_eq!(ResponseFormat::Json.as_str(), "json");
     }
 }

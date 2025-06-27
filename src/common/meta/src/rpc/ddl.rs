@@ -69,6 +69,8 @@ pub enum DdlTask {
     AlterDatabase(AlterDatabaseTask),
     CreateFlow(CreateFlowTask),
     DropFlow(DropFlowTask),
+    #[cfg(feature = "enterprise")]
+    DropTrigger(trigger::DropTriggerTask),
     CreateView(CreateViewTask),
     DropView(DropViewTask),
     #[cfg(feature = "enterprise")]
@@ -259,6 +261,18 @@ impl TryFrom<Task> for DdlTask {
                     .fail()
                 }
             }
+            Task::DropTriggerTask(drop_trigger) => {
+                #[cfg(feature = "enterprise")]
+                return Ok(DdlTask::DropTrigger(drop_trigger.try_into()?));
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    let _ = drop_trigger;
+                    crate::error::UnsupportedSnafu {
+                        operation: "drop trigger",
+                    }
+                    .fail()
+                }
+            }
         }
     }
 }
@@ -311,6 +325,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
             #[cfg(feature = "enterprise")]
             DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
+            #[cfg(feature = "enterprise")]
+            DdlTask::DropTrigger(task) => Task::DropTriggerTask(task.into()),
         };
 
         Ok(Self {

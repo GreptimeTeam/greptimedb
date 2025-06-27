@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
-use object_store::{ErrorKind, ObjectStore};
+use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR};
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -41,10 +41,6 @@ use crate::sst::parquet::{SstInfo, WriteOptions};
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
-
-pub const ATOMIC_WRITE_DIR: &str = "tmp/";
-/// For compatibility. Remove this after a major version release.
-pub const OLD_ATOMIC_WRITE_DIR: &str = ".tmp/";
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
