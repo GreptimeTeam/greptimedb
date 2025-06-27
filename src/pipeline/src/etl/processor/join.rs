@@ -40,8 +40,8 @@ impl JoinProcessor {
     fn process(&self, arr: &[VrlValue]) -> Result<VrlValue> {
         let val = arr
             .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<String>>()
+            .map(|v| v.to_string_lossy())
+            .collect::<Vec<_>>()
             .join(&self.separator);
 
         Ok(VrlValue::Bytes(Bytes::from(val)))
