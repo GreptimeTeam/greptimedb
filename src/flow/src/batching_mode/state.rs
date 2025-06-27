@@ -112,7 +112,7 @@ impl TaskState {
             // if dirty time windows can't be clean up in one query, execute immediately to faster
             // clean up dirty time windows
             debug!(
-                "Flow id = {}, still have too many{} dirty time window({:?}), execute immediately",
+                "Flow id = {}, still have too many {} dirty time window({:?}), execute immediately",
                 flow_id,
                 self.dirty_time_windows.windows.len(),
                 self.dirty_time_windows.windows
