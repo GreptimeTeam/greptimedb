@@ -12,6 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Provides a Collider tool to convert [`PartitionExpr`] into a form that is easier to operate by program.
+//!
+//! This mod provides the following major structs:
+//!
+//! - [`Collider`]: The main struct that converts [`PartitionExpr`].
+//! - [`AtomicExpr`]: An "atomic" Expression, which isn't composed (OR-ed) of other expressions.
+//! - [`NucleonExpr`]: A simplified expression representation.
+//! - [`GluonOp`]: Further restricted operation set.
+//!
+//! On the naming aspect, "collider" is a high-energy machine that cracks particles, "atomic" is a typical
+//! non-divisible particle before ~100 years ago, "nucleon" is what composes an atom and "gluon" is the
+//! force inside nucleons.
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
