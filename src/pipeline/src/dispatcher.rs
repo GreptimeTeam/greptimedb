@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+
 use common_telemetry::debug;
-use snafu::OptionExt;
+use ordered_float::NotNan;
+use snafu::{OptionExt, ResultExt};
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 use yaml_rust::Yaml;
 
 use crate::error::{
-    Error, FieldRequiredForDispatcherSnafu, Result, TableSuffixRequiredForDispatcherRuleSnafu,
-    ValueRequiredForDispatcherRuleSnafu,
+    Error, FieldRequiredForDispatcherSnafu, FloatIsNanSnafu, Result,
+    TableSuffixRequiredForDispatcherRuleSnafu, ValueParseFloatSnafu,
+    ValueRequiredForDispatcherRuleSnafu, ValueUnsupportedYamlTypeSnafu,
+    ValueYamlKeyMustBeStringSnafu,
 };
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
-use crate::Value;
 
 const FIELD: &str = "field";
 const PIPELINE: &str = "pipeline";
@@ -62,7 +68,7 @@ pub(crate) struct Dispatcher {
 ///   name
 #[derive(Debug, PartialEq)]
 pub(crate) struct Rule {
-    pub value: Value,
+    pub value: VrlValue,
     pub table_suffix: String,
     pub pipeline: Option<String>,
 }
@@ -90,7 +96,8 @@ impl TryFrom<&Yaml> for Dispatcher {
                     if rule[VALUE].is_badvalue() {
                         ValueRequiredForDispatcherRuleSnafu.fail()?;
                     }
-                    let value = Value::try_from(&rule[VALUE])?;
+
+                    let value = yaml_to_vrl_value(&rule[VALUE])?;
 
                     Ok(Rule {
                         value,
@@ -107,10 +114,44 @@ impl TryFrom<&Yaml> for Dispatcher {
     }
 }
 
+pub(crate) fn yaml_to_vrl_value(v: &yaml_rust::Yaml) -> Result<VrlValue> {
+    match v {
+        yaml_rust::Yaml::Null => Ok(VrlValue::Null),
+        yaml_rust::Yaml::Boolean(v) => Ok(VrlValue::Boolean(*v)),
+        yaml_rust::Yaml::Integer(v) => Ok(VrlValue::Integer(*v)),
+        yaml_rust::Yaml::Real(v) => {
+            let f = v
+                .parse::<f64>()
+                .context(ValueParseFloatSnafu { ty: "float64", v })?;
+            NotNan::new(f).map(VrlValue::Float).context(FloatIsNanSnafu)
+        }
+        yaml_rust::Yaml::String(v) => Ok(VrlValue::Bytes(Bytes::from(v.to_string()))),
+        yaml_rust::Yaml::Array(arr) => {
+            let mut values = vec![];
+            for v in arr {
+                values.push(yaml_to_vrl_value(v)?);
+            }
+            Ok(VrlValue::Array(values))
+        }
+        yaml_rust::Yaml::Hash(v) => {
+            let mut values = BTreeMap::new();
+            for (k, v) in v {
+                let key = k
+                    .as_str()
+                    .with_context(|| ValueYamlKeyMustBeStringSnafu { value: v.clone() })?;
+                values.insert(KeyString::from(key), yaml_to_vrl_value(v)?);
+            }
+            Ok(VrlValue::Object(values))
+        }
+        _ => ValueUnsupportedYamlTypeSnafu { value: v.clone() }.fail(),
+    }
+}
+
 impl Dispatcher {
     /// execute dispatcher and returns matched rule if any
-    pub(crate) fn exec(&self, data: &Value) -> Option<&Rule> {
-        if let Some(value) = data.get(&self.field) {
+    pub(crate) fn exec(&self, data: &VrlValue) -> Option<&Rule> {
+        let data = data.as_object()?;
+        if let Some(value) = data.get(self.field.as_str()) {
             for rule in &self.rules {
                 if rule.value == *value {
                     return Some(rule);

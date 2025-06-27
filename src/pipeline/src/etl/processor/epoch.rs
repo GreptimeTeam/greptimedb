@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use chrono::{DateTime, Utc};
 use common_time::timestamp::TimeUnit;
 use snafu::{OptionExt, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, KeyMustBeStringSnafu,
-    ProcessorMissingFieldSnafu, ProcessorUnsupportedValueSnafu, Result,
+    EpochInvalidResolutionSnafu, Error, FailedToParseIntSnafu, InvalidEpochForResolutionSnafu,
+    KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, ProcessorUnsupportedValueSnafu, Result,
+    ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
@@ -29,7 +32,6 @@ use crate::etl::value::time::{
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,
 };
-use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_EPOCH: &str = "epoch";
 const RESOLUTION_NAME: &str = "resolution";
@@ -41,6 +43,18 @@ pub(crate) enum Resolution {
     Milli,
     Micro,
     Nano,
+}
+
+impl std::fmt::Display for Resolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Resolution::Second => SECOND_RESOLUTION,
+            Resolution::Milli => MILLISECOND_RESOLUTION,
+            Resolution::Micro => MICROSECOND_RESOLUTION,
+            Resolution::Nano => NANOSECOND_RESOLUTION,
+        };
+        write!(f, "{}", text)
+    }
 }
 
 impl TryFrom<&str> for Resolution {
@@ -84,43 +98,36 @@ pub struct EpochProcessor {
 }
 
 impl EpochProcessor {
-    fn parse(&self, val: &Value) -> Result<Timestamp> {
-        let t: i64 = match val {
-            Value::String(s) => s
-                .parse::<i64>()
-                .context(FailedToParseIntSnafu { value: s })?,
-            Value::Int16(i) => *i as i64,
-            Value::Int32(i) => *i as i64,
-            Value::Int64(i) => *i,
-            Value::Uint8(i) => *i as i64,
-            Value::Uint16(i) => *i as i64,
-            Value::Uint32(i) => *i as i64,
-            Value::Uint64(i) => *i as i64,
-            Value::Float32(f) => *f as i64,
-            Value::Float64(f) => *f as i64,
-
-            Value::Timestamp(t) => match self.resolution {
-                Resolution::Second => t.timestamp(),
-                Resolution::Milli => t.timestamp_millis(),
-                Resolution::Micro => t.timestamp_micros(),
-                Resolution::Nano => t.timestamp_nanos(),
-            },
-
-            _ => {
-                return ProcessorUnsupportedValueSnafu {
-                    processor: PROCESSOR_EPOCH,
-                    val: val.to_string(),
+    fn parse(&self, val: &VrlValue) -> Result<DateTime<Utc>> {
+        let t: i64 =
+            match val {
+                VrlValue::Bytes(bytes) => String::from_utf8_lossy(bytes).parse::<i64>().context(
+                    FailedToParseIntSnafu {
+                        value: val.to_string_lossy(),
+                    },
+                )?,
+                VrlValue::Integer(ts) => *ts,
+                VrlValue::Float(not_nan) => not_nan.into_inner() as i64,
+                VrlValue::Timestamp(date_time) => return Ok(*date_time),
+                _ => {
+                    return ProcessorUnsupportedValueSnafu {
+                        processor: PROCESSOR_EPOCH,
+                        val: val.to_string(),
+                    }
+                    .fail();
                 }
-                .fail();
-            }
-        };
+            };
 
         match self.resolution {
-            Resolution::Second => Ok(Timestamp::Second(t)),
-            Resolution::Milli => Ok(Timestamp::Millisecond(t)),
-            Resolution::Micro => Ok(Timestamp::Microsecond(t)),
-            Resolution::Nano => Ok(Timestamp::Nanosecond(t)),
+            Resolution::Second => DateTime::from_timestamp(t, 0),
+            Resolution::Milli => DateTime::from_timestamp_millis(t),
+            Resolution::Micro => DateTime::from_timestamp_micros(t),
+            Resolution::Nano => Some(DateTime::from_timestamp_nanos(t)),
         }
+        .context(InvalidEpochForResolutionSnafu {
+            value: t,
+            resolution: self.resolution.to_string(),
+        })
     }
 }
 
@@ -174,11 +181,12 @@ impl Processor for EpochProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -190,7 +198,10 @@ impl Processor for EpochProcessor {
                 Some(v) => {
                     let timestamp = self.parse(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), Value::Timestamp(timestamp))?;
+                    val.insert(
+                        KeyString::from(output_index.to_string()),
+                        VrlValue::Timestamp(timestamp),
+                    );
                 }
             }
         }
@@ -200,8 +211,12 @@ impl Processor for EpochProcessor {
 
 #[cfg(test)]
 mod tests {
+    use chrono::DateTime;
+    use ordered_float::NotNan;
+    use vrl::prelude::Bytes;
+    use vrl::value::Value as VrlValue;
+
     use super::EpochProcessor;
-    use crate::etl::value::Value;
 
     #[test]
     fn test_parse_epoch() {
@@ -211,15 +226,15 @@ mod tests {
         };
 
         let values = [
-            Value::String("1573840000".into()),
-            Value::Int32(1573840000),
-            Value::Uint64(1573840000),
-            Value::Float32(1573840000.0),
+            VrlValue::Bytes(Bytes::from("1573840000")),
+            VrlValue::Integer(1573840000),
+            VrlValue::Integer(1573840000),
+            VrlValue::Float(NotNan::new(1573840000.0).unwrap()),
         ];
 
         for value in values {
             let parsed = processor.parse(&value).unwrap();
-            assert_eq!(parsed, super::Timestamp::Second(1573840000));
+            assert_eq!(parsed, DateTime::from_timestamp(1573840000, 0).unwrap());
         }
     }
 }

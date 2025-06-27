@@ -17,7 +17,7 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::error::Result;
 use pipeline::{
-    json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo,
+    parse, serde_value_to_vrl_value, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo,
 };
 use serde_json::{Deserializer, Value};
 
@@ -30,7 +30,7 @@ fn processor_mut(
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        let payload = json_to_map(v).unwrap();
+        let payload = serde_value_to_vrl_value(v).unwrap();
         let r = pipeline
             .exec_mut(payload, pipeline_ctx, schema_info)?
             .into_transformed()

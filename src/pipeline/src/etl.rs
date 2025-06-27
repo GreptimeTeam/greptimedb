@@ -27,13 +27,15 @@ use itertools::Itertools;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
-use value::Value;
+use vrl::core::Value as VrlValue;
+use vrl::prelude::{Bytes, NotNan};
+use vrl::value::KeyString;
 use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, Error, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu,
-    InvalidVersionNumberSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, Error, FloatIsNanSnafu, IntermediateKeyIndexSnafu,
+    InvalidVersionNumberSnafu, Result, UnsupportedNumberTypeSnafu, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_row;
@@ -228,7 +230,7 @@ impl DispatchedTo {
 #[derive(Debug)]
 pub enum PipelineExecOutput {
     Transformed(TransformedOutput),
-    DispatchedTo(DispatchedTo, Value),
+    DispatchedTo(DispatchedTo, VrlValue),
 }
 
 #[derive(Debug)]
@@ -261,39 +263,79 @@ impl PipelineExecOutput {
     }
 }
 
-pub fn json_to_map(val: serde_json::Value) -> Result<Value> {
+pub fn json_array_to_vrl_array(val: Vec<serde_json::Value>) -> Result<Vec<VrlValue>> {
+    val.into_iter()
+        .map(serde_value_to_vrl_value)
+        .collect::<Result<Vec<_>>>()
+}
+
+pub fn serde_value_to_vrl_value(val: serde_json::Value) -> Result<VrlValue> {
     match val {
+        serde_json::Value::Null => Ok(VrlValue::Null),
+        serde_json::Value::Bool(b) => Ok(VrlValue::Boolean(b)),
+        serde_json::Value::Number(number) => {
+            if let Some(v) = number.as_i64() {
+                Ok(VrlValue::Integer(v))
+            } else if let Some(v) = number.as_u64() {
+                Ok(VrlValue::Integer(v as i64))
+            } else if let Some(v) = number.as_f64() {
+                NotNan::new(v).context(FloatIsNanSnafu).map(VrlValue::Float)
+            } else {
+                UnsupportedNumberTypeSnafu { value: number }.fail()
+            }
+        }
+        serde_json::Value::String(s) => Ok(VrlValue::Bytes(Bytes::from(s))),
+        serde_json::Value::Array(values) => {
+            let v = values
+                .into_iter()
+                .map(serde_value_to_vrl_value)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(VrlValue::Array(v))
+        }
         serde_json::Value::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
+            let mut new_map = BTreeMap::new();
             for (k, v) in map {
-                intermediate_state.insert(k, Value::try_from(v)?);
+                new_map.insert(KeyString::from(k), serde_value_to_vrl_value(v)?);
             }
-            Ok(Value::Map(intermediate_state.into()))
+            Ok(VrlValue::Object(new_map))
         }
-        _ => InputValueMustBeObjectSnafu.fail(),
     }
 }
 
-pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<Value>> {
-    val.into_iter().map(json_to_map).collect()
-}
-
-pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<Value> {
+pub fn simd_json_to_vrl_value(val: simd_json::OwnedValue) -> Result<VrlValue> {
     match val {
-        simd_json::OwnedValue::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
-            for (k, v) in map.into_iter() {
-                intermediate_state.insert(k, Value::try_from(v)?);
+        simd_json::value::OwnedValue::Static(v) => match v {
+            simd_json::value::StaticNode::Null => Ok(VrlValue::Null),
+            simd_json::value::StaticNode::Bool(v) => Ok(VrlValue::Boolean(v)),
+            simd_json::value::StaticNode::I64(v) => Ok(VrlValue::Integer(v)),
+            simd_json::value::StaticNode::U64(v) => Ok(VrlValue::Integer(v as i64)),
+            simd_json::value::StaticNode::F64(v) => {
+                NotNan::new(v).context(FloatIsNanSnafu).map(VrlValue::Float)
             }
-            Ok(Value::Map(intermediate_state.into()))
+        },
+        simd_json::OwnedValue::String(s) => Ok(VrlValue::Bytes(Bytes::from(s))),
+        simd_json::OwnedValue::Array(values) => {
+            let mut re = Vec::with_capacity(values.len());
+            for v in values.into_iter() {
+                re.push(simd_json_to_vrl_value(v)?);
+            }
+            Ok(VrlValue::Array(re))
         }
-        _ => InputValueMustBeObjectSnafu.fail(),
+        simd_json::OwnedValue::Object(map) => {
+            let mut values = BTreeMap::new();
+            for (k, v) in map.into_iter() {
+                values.insert(KeyString::from(k), simd_json_to_vrl_value(v)?);
+            }
+            Ok(VrlValue::Object(values))
+        }
     }
 }
 
-pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<Value>> {
-    val.into_iter().map(simd_json_to_map).collect()
-}
+// pub fn simd_json_array_to_vrl_array(val: Vec<simd_json::OwnedValue>) -> Result<Vec<VrlValue>> {
+//     val.into_iter()
+//         .map(simd_json_to_vrl_value)
+//         .collect::<Result<Vec<_>>>()
+// }
 
 impl Pipeline {
     fn is_v1(&self) -> bool {
@@ -302,7 +344,7 @@ impl Pipeline {
 
     pub fn exec_mut(
         &self,
-        mut val: Value,
+        mut val: VrlValue,
         pipeline_ctx: &PipelineContext<'_>,
         schema_info: &mut SchemaInfo,
     ) -> Result<PipelineExecOutput> {
@@ -454,7 +496,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = json_to_map(input_value).unwrap();
+        let payload = serde_value_to_vrl_value(input_value).unwrap();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -515,9 +557,10 @@ transform:
             &pipeline_param,
             session::context::Channel::Unknown,
         );
-        let mut payload = BTreeMap::new();
-        payload.insert("message".to_string(), Value::String(message));
-        let payload = Value::Map(payload.into());
+        let payload = VrlValue::Object(BTreeMap::from([(
+            KeyString::from("message"),
+            VrlValue::Bytes(Bytes::from(message)),
+        )]));
 
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
@@ -613,7 +656,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = json_to_map(input_value).unwrap();
+        let payload = serde_value_to_vrl_value(input_value).unwrap();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -666,7 +709,7 @@ transform:
             session::context::Channel::Unknown,
         );
         let schema = pipeline.schemas().unwrap().clone();
-        let result = json_to_map(input_value).unwrap();
+        let result = serde_value_to_vrl_value(input_value).unwrap();
 
         let row = pipeline
             .exec_mut(result, &pipeline_ctx, &mut schema_info)
@@ -732,7 +775,7 @@ transform:
         assert_eq!(
             dispatcher.rules[0],
             crate::dispatcher::Rule {
-                value: Value::String("http".to_string()),
+                value: VrlValue::Bytes(Bytes::from("http")),
                 table_suffix: "http_events".to_string(),
                 pipeline: None
             }
@@ -741,7 +784,7 @@ transform:
         assert_eq!(
             dispatcher.rules[1],
             crate::dispatcher::Rule {
-                value: Value::String("database".to_string()),
+                value: VrlValue::Bytes(Bytes::from("database")),
                 table_suffix: "db_events".to_string(),
                 pipeline: Some("database_pipeline".to_string()),
             }

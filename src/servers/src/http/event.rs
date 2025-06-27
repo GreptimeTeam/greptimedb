@@ -36,13 +36,15 @@ use lazy_static::lazy_static;
 use mime_guess::mime;
 use pipeline::util::to_pipeline_version;
 use pipeline::{
-    ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition, Value as PipelineValue,
+    json_array_to_vrl_array, simd_json_to_vrl_value, ContextReq, GreptimePipelineParams,
+    PipelineContext, PipelineDefinition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value as JsonValue};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     status_code_to_http_status, Error, InvalidParameterSnafu, ParseJsonSnafu, PipelineSnafu, Result,
@@ -117,7 +119,7 @@ pub(crate) struct PipelineIngestRequest {
     /// The table where the log data will be written to.
     pub table: String,
     /// The log data to be ingested.
-    pub values: Vec<PipelineValue>,
+    pub values: Vec<VrlValue>,
 }
 
 pub struct PipelineContent(String);
@@ -331,7 +333,7 @@ fn transform_ndjson_array_factory(
 
 /// Dryrun pipeline with given data
 async fn dryrun_pipeline_inner(
-    value: Vec<PipelineValue>,
+    value: Vec<VrlValue>,
     pipeline: Arc<pipeline::Pipeline>,
     pipeline_handler: PipelineHandlerRef,
     query_ctx: &QueryContextRef,
@@ -494,7 +496,7 @@ fn add_step_info_for_pipeline_dryrun_error(step_msg: &str, e: Error) -> Response
 /// Parse the data with given content type
 /// If the content type is invalid, return error
 /// content type is one of application/json, text/plain, application/x-ndjson
-fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<PipelineValue>> {
+fn parse_dryrun_data(data_type: String, data: String) -> Result<Vec<VrlValue>> {
     if let Ok(content_type) = ContentType::from_str(&data_type) {
         extract_pipeline_value_by_content_type(content_type, Bytes::from(data), false)
     } else {
@@ -741,10 +743,10 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 }
 
 impl EventPayloadResolver<'_> {
-    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<PipelineValue>> {
+    fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
             EventPayloadResolverInner::Json => {
-                pipeline::json_array_to_map(transform_ndjson_array_factory(
+                json_array_to_vrl_array(transform_ndjson_array_factory(
                     Deserializer::from_slice(&payload).into_iter(),
                     ignore_errors,
                 )?)
@@ -769,7 +771,7 @@ impl EventPayloadResolver<'_> {
                     // simd_json, according to description, only de-escapes string at character level,
                     // like any other json parser. So it should be safe here.
                     if let Ok(v) = simd_json::to_owned_value(unsafe { line.as_bytes_mut() }) {
-                        let v = pipeline::simd_json_to_map(v).context(PipelineSnafu)?;
+                        let v = simd_json_to_vrl_value(v).context(PipelineSnafu)?;
                         result.push(v);
                     } else if !ignore_errors {
                         warn!("invalid JSON at index: {}, content: {:?}", index, line);
@@ -787,8 +789,11 @@ impl EventPayloadResolver<'_> {
                     .filter_map(|line| line.ok().filter(|line| !line.is_empty()))
                     .map(|line| {
                         let mut map = BTreeMap::new();
-                        map.insert("message".to_string(), PipelineValue::String(line));
-                        PipelineValue::Map(map.into())
+                        map.insert(
+                            KeyString::from("message"),
+                            VrlValue::Bytes(Bytes::from(line)),
+                        );
+                        VrlValue::Object(map)
                     })
                     .collect::<Vec<_>>();
                 Ok(result)
@@ -801,7 +806,7 @@ fn extract_pipeline_value_by_content_type(
     content_type: ContentType,
     payload: Bytes,
     ignore_errors: bool,
-) -> Result<Vec<PipelineValue>> {
+) -> Result<Vec<VrlValue>> {
     EventPayloadResolver::try_from(&content_type).and_then(|resolver| {
         resolver
             .parse_payload(payload, ignore_errors)
@@ -947,7 +952,7 @@ mod tests {
         assert!(fail_rest.is_ok());
         assert_eq!(
             fail_rest.unwrap(),
-            pipeline::json_array_to_map(vec![json!({"a": 1})]).unwrap()
+            json_array_to_vrl_array(vec![json!({"a": 1})]).unwrap()
         );
 
         let fail_only_wrong =
@@ -955,11 +960,11 @@ mod tests {
         assert!(fail_only_wrong.is_ok());
 
         let mut map1 = BTreeMap::new();
-        map1.insert("a".to_string(), PipelineValue::Uint64(1));
-        let map1 = PipelineValue::Map(map1.into());
+        map1.insert(KeyString::from("a"), VrlValue::Integer(1));
+        let map1 = VrlValue::Object(map1);
         let mut map2 = BTreeMap::new();
-        map2.insert("c".to_string(), PipelineValue::Uint64(1));
-        let map2 = PipelineValue::Map(map2.into());
+        map2.insert(KeyString::from("c"), VrlValue::Integer(1));
+        let map2 = VrlValue::Object(map2);
         assert_eq!(fail_only_wrong.unwrap(), vec![map1, map2]);
     }
 }

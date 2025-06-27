@@ -25,6 +25,7 @@ use axum::extract::State;
 use axum::Extension;
 use axum_extra::TypedHeader;
 use bytes::Bytes;
+use chrono::DateTime;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
@@ -34,11 +35,14 @@ use lazy_static::lazy_static;
 use loki_proto::logproto::LabelPairAdapter;
 use loki_proto::prost_types::Timestamp as LokiTimestamp;
 use pipeline::util::to_pipeline_version;
-use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
+use pipeline::{
+    serde_value_to_vrl_value, ContextReq, PipelineContext, PipelineDefinition, SchemaInfo,
+};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, OptionExt, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
@@ -218,7 +222,7 @@ pub struct LokiRawItem {
 
 /// This is the line item prepared for the pipeline engine.
 pub struct LokiPipeline {
-    pub map: pipeline::Value,
+    pub map: VrlValue,
 }
 
 /// This is the flow of the Loki ingestion.
@@ -447,19 +451,22 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            GREPTIME_TIMESTAMP.to_string(),
-            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+            KeyString::from(GREPTIME_TIMESTAMP),
+            VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(
-            LOKI_LINE_COLUMN_NAME.to_string(),
-            pipeline::Value::String(line),
+            KeyString::from(LOKI_LINE_COLUMN_NAME),
+            VrlValue::Bytes(line.into()),
         );
 
         if let Some(serde_json::Value::Object(m)) = structured_metadata {
             for (k, v) in m {
-                match pipeline::Value::try_from(v) {
+                match serde_value_to_vrl_value(v) {
                     Ok(v) => {
-                        map.insert(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k), v);
+                        map.insert(
+                            KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k)),
+                            v,
+                        );
                     }
                     Err(e) => {
                         warn!("not a valid value, {:?}", e);
@@ -470,14 +477,14 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
-                    pipeline::Value::String(v),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k)),
+                    VrlValue::Bytes(v.into()),
                 );
             });
         }
 
         LokiPipeline {
-            map: pipeline::Value::Map(pipeline::Map::from(map)),
+            map: VrlValue::Object(map),
         }
     }
 }
@@ -584,12 +591,12 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            GREPTIME_TIMESTAMP.to_string(),
-            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+            KeyString::from(GREPTIME_TIMESTAMP),
+            VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(
-            LOKI_LINE_COLUMN_NAME.to_string(),
-            pipeline::Value::String(line),
+            KeyString::from(LOKI_LINE_COLUMN_NAME),
+            VrlValue::Bytes(line.into()),
         );
 
         structured_metadata
@@ -597,22 +604,22 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
             .into_iter()
             .for_each(|d| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, d.name),
-                    pipeline::Value::String(d.value),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, d.name)),
+                    VrlValue::Bytes(d.value.into()),
                 );
             });
 
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
-                    pipeline::Value::String(v),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k)),
+                    VrlValue::Bytes(v.into()),
                 );
             });
         }
 
         LokiPipeline {
-            map: pipeline::Value::Map(pipeline::Map::from(map)),
+            map: VrlValue::Object(map),
         }
     }
 }

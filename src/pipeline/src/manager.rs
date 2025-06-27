@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use chrono::{DateTime, Utc};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::timestamp::TimestampNanosecond;
@@ -23,11 +24,12 @@ use itertools::Itertools;
 use session::context::Channel;
 use snafu::ensure;
 use util::to_pipeline_version;
+use vrl::value::Value as VrlValue;
 
 use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
 use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
-use crate::{GreptimePipelineParams, Pipeline, Value};
+use crate::{GreptimePipelineParams, Pipeline};
 
 mod pipeline_cache;
 pub mod pipeline_operator;
@@ -232,7 +234,7 @@ impl IdentityTimeIndex {
         }
     }
 
-    pub fn get_column_name(&self) -> &String {
+    pub fn get_column_name(&self) -> &str {
         match self {
             IdentityTimeIndex::Epoch(field, _, _) => field,
             IdentityTimeIndex::DateStr(field, _, _) => field,
@@ -258,25 +260,25 @@ impl IdentityTimeIndex {
         }
     }
 
-    pub fn get_timestamp(&self, value: Option<&Value>) -> Result<ValueData> {
+    pub fn get_timestamp_value(&self, value: Option<&VrlValue>) -> Result<ValueData> {
         match self {
             IdentityTimeIndex::Epoch(_, unit, ignore_errors) => {
                 let v = match value {
-                    Some(Value::Int32(v)) => *v as i64,
-                    Some(Value::Int64(v)) => *v,
-                    Some(Value::Uint32(v)) => *v as i64,
-                    Some(Value::Uint64(v)) => *v as i64,
-                    Some(Value::String(s)) => match s.parse::<i64>() {
+                    Some(VrlValue::Integer(v)) => *v,
+                    Some(VrlValue::Bytes(s)) => match String::from_utf8_lossy(s).parse::<i64>() {
                         Ok(v) => v,
                         Err(_) => {
                             return if_ignore_errors(
                                 *ignore_errors,
                                 *unit,
-                                format!("failed to convert {} to number", s),
+                                format!(
+                                    "failed to convert {} to number",
+                                    String::from_utf8_lossy(s)
+                                ),
                             )
                         }
                     },
-                    Some(Value::Timestamp(timestamp)) => timestamp.to_unit(unit),
+                    Some(VrlValue::Timestamp(timestamp)) => datetime_utc_to_unit(timestamp, unit),
                     Some(v) => {
                         return if_ignore_errors(
                             *ignore_errors,
@@ -292,7 +294,7 @@ impl IdentityTimeIndex {
             }
             IdentityTimeIndex::DateStr(_, format, ignore_errors) => {
                 let v = match value {
-                    Some(Value::String(s)) => s,
+                    Some(VrlValue::Bytes(s)) => String::from_utf8_lossy(s),
                     Some(v) => {
                         return if_ignore_errors(
                             *ignore_errors,
@@ -309,7 +311,7 @@ impl IdentityTimeIndex {
                     }
                 };
 
-                let timestamp = match chrono::DateTime::parse_from_str(v, format) {
+                let timestamp = match chrono::DateTime::parse_from_str(&v, format) {
                     Ok(ts) => ts,
                     Err(_) => {
                         return if_ignore_errors(
@@ -325,6 +327,15 @@ impl IdentityTimeIndex {
                 ))
             }
         }
+    }
+}
+
+fn datetime_utc_to_unit(timestamp: &DateTime<Utc>, unit: &TimeUnit) -> i64 {
+    match unit {
+        TimeUnit::Nanosecond => timestamp.timestamp_nanos_opt().unwrap_or_default(),
+        TimeUnit::Microsecond => timestamp.timestamp_micros(),
+        TimeUnit::Millisecond => timestamp.timestamp_millis(),
+        TimeUnit::Second => timestamp.timestamp(),
     }
 }
 

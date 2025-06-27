@@ -16,7 +16,7 @@ mod common;
 
 use greptime_proto::v1::value::ValueData::StringValue;
 use greptime_proto::v1::{ColumnDataType, SemanticType};
-use pipeline::{json_to_map, setup_pipeline, PipelineContext};
+use pipeline::{serde_value_to_vrl_value, setup_pipeline, PipelineContext};
 
 fn make_string_column_schema(name: String) -> greptime_proto::v1::ColumnSchema {
     common::make_column_schema(name, ColumnDataType::String, SemanticType::Field)
@@ -282,7 +282,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let result = json_to_map(input_value).unwrap();
+    let result = serde_value_to_vrl_value(input_value).unwrap();
 
     let row = pipeline.exec_mut(result, &pipeline_ctx, &mut schema_info);
 

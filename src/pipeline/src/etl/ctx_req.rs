@@ -19,10 +19,10 @@ use ahash::{HashMap, HashMapExt};
 use api::v1::{RowInsertRequest, RowInsertRequests, Rows};
 use session::context::{QueryContext, QueryContextRef};
 use snafu::OptionExt;
+use vrl::value::Value as VrlValue;
 
 use crate::error::{Result, ValueMustBeMapSnafu};
 use crate::tablesuffix::TableSuffixTemplate;
-use crate::Value;
 
 const GREPTIME_AUTO_CREATE_TABLE: &str = "greptime_auto_create_table";
 const GREPTIME_TTL: &str = "greptime_ttl";
@@ -86,32 +86,33 @@ impl ContextOpt {
 }
 
 impl ContextOpt {
-    pub fn from_pipeline_map_to_opt(pipeline_map: &mut Value) -> Result<Self> {
-        let pipeline_map = pipeline_map.as_map_mut().context(ValueMustBeMapSnafu)?;
+    pub fn from_pipeline_map_to_opt(value: &mut VrlValue) -> Result<Self> {
+        let map = value.as_object_mut().context(ValueMustBeMapSnafu)?;
+
         let mut opt = Self::default();
         for k in PIPELINE_HINT_KEYS {
-            if let Some(v) = pipeline_map.remove(k) {
+            if let Some(v) = map.remove(k) {
                 match k {
                     GREPTIME_AUTO_CREATE_TABLE => {
-                        opt.auto_create_table = Some(v.to_str_value());
+                        opt.auto_create_table = Some(v.to_string());
                     }
                     GREPTIME_TTL => {
-                        opt.ttl = Some(v.to_str_value());
+                        opt.ttl = Some(v.to_string());
                     }
                     GREPTIME_APPEND_MODE => {
-                        opt.append_mode = Some(v.to_str_value());
+                        opt.append_mode = Some(v.to_string());
                     }
                     GREPTIME_MERGE_MODE => {
-                        opt.merge_mode = Some(v.to_str_value());
+                        opt.merge_mode = Some(v.to_string());
                     }
                     GREPTIME_PHYSICAL_TABLE => {
-                        opt.physical_table = Some(v.to_str_value());
+                        opt.physical_table = Some(v.to_string());
                     }
                     GREPTIME_SKIP_WAL => {
-                        opt.skip_wal = Some(v.to_str_value());
+                        opt.skip_wal = Some(v.to_string());
                     }
                     GREPTIME_TABLE_SUFFIX => {
-                        opt.table_suffix = Some(v.to_str_value());
+                        opt.table_suffix = Some(v.to_string());
                     }
                     _ => {}
                 }
@@ -123,7 +124,7 @@ impl ContextOpt {
     pub(crate) fn resolve_table_suffix(
         &mut self,
         table_suffix: Option<&TableSuffixTemplate>,
-        pipeline_map: &Value,
+        pipeline_map: &VrlValue,
     ) -> Option<String> {
         self.table_suffix
             .take()

@@ -15,19 +15,18 @@
 use std::collections::BTreeMap;
 
 use chrono_tz::Tz;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 use vrl::compiler::runtime::Runtime;
 use vrl::compiler::{compile, Program, TargetValue};
 use vrl::diagnostic::Formatter;
-use vrl::prelude::{Bytes, NotNan, TimeZone};
-use vrl::value::{KeyString, Kind, Secrets, Value as VrlValue};
+use vrl::prelude::TimeZone;
+use vrl::value::{Kind, Secrets, Value as VrlValue};
 
 use crate::error::{
-    BytesToUtf8Snafu, CompileVrlSnafu, Error, ExecuteVrlSnafu, FloatNaNSnafu,
-    InvalidTimestampSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu, VrlReturnValueSnafu,
+    CompileVrlSnafu, Error, ExecuteVrlSnafu, KeyMustBeStringSnafu, Result, VrlRegexValueSnafu,
+    VrlReturnValueSnafu,
 };
 use crate::etl::processor::yaml_string;
-use crate::Value as PipelineValue;
 
 pub(crate) const PROCESSOR_VRL: &str = "vrl";
 const SOURCE: &str = "source";
@@ -62,11 +61,9 @@ impl VrlProcessor {
         Ok(Self { source, program })
     }
 
-    pub fn resolve(&self, m: PipelineValue) -> Result<PipelineValue> {
-        let pipeline_vrl = pipeline_value_to_vrl_value(m)?;
-
+    pub fn resolve(&self, m: VrlValue) -> Result<VrlValue> {
         let mut target = TargetValue {
-            value: pipeline_vrl,
+            value: m,
             metadata: VrlValue::Object(BTreeMap::new()),
             secrets: Secrets::default(),
         };
@@ -82,7 +79,7 @@ impl VrlProcessor {
                 .build()
             })?;
 
-        vrl_value_to_pipeline_value(re)
+        Ok(re)
     }
 }
 
@@ -113,90 +110,90 @@ impl crate::etl::processor::Processor for VrlProcessor {
         true
     }
 
-    fn exec_mut(&self, val: PipelineValue) -> Result<PipelineValue> {
+    fn exec_mut(&self, val: VrlValue) -> Result<VrlValue> {
         let val = self.resolve(val)?;
 
-        if let PipelineValue::Map(m) = val {
-            Ok(PipelineValue::Map(m.values.into()))
+        if let VrlValue::Object(m) = val {
+            Ok(VrlValue::Object(m))
         } else {
             VrlRegexValueSnafu.fail()
         }
     }
 }
 
-fn pipeline_value_to_vrl_value(v: PipelineValue) -> Result<VrlValue> {
-    match v {
-        PipelineValue::Null => Ok(VrlValue::Null),
-        PipelineValue::Int8(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Int16(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Int32(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Int64(x) => Ok(VrlValue::Integer(x)),
-        PipelineValue::Uint8(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Uint16(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Uint32(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Uint64(x) => Ok(VrlValue::Integer(x as i64)),
-        PipelineValue::Float32(x) => NotNan::new(x as f64)
-            .map_err(|_| FloatNaNSnafu { input_float: x }.build())
-            .map(VrlValue::Float),
-        PipelineValue::Float64(x) => NotNan::new(x)
-            .map_err(|_| FloatNaNSnafu { input_float: x }.build())
-            .map(VrlValue::Float),
-        PipelineValue::Boolean(x) => Ok(VrlValue::Boolean(x)),
-        PipelineValue::String(x) => Ok(VrlValue::Bytes(Bytes::copy_from_slice(x.as_bytes()))),
-        PipelineValue::Timestamp(x) => x
-            .to_datetime()
-            .context(InvalidTimestampSnafu {
-                input: x.to_string(),
-            })
-            .map(VrlValue::Timestamp),
-        PipelineValue::Array(array) => Ok(VrlValue::Array(
-            array
-                .into_iter()
-                .map(pipeline_value_to_vrl_value)
-                .collect::<Result<Vec<_>>>()?,
-        )),
-        PipelineValue::Map(m) => {
-            let values = m
-                .values
-                .into_iter()
-                .map(|(k, v)| pipeline_value_to_vrl_value(v).map(|v| (KeyString::from(k), v)))
-                .collect::<Result<BTreeMap<_, _>>>()?;
-            Ok(VrlValue::Object(values))
-        }
-    }
-}
+// fn pipeline_value_to_vrl_value(v: PipelineValue) -> Result<VrlValue> {
+//     match v {
+//         PipelineValue::Null => Ok(VrlValue::Null),
+//         PipelineValue::Int8(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Int16(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Int32(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Int64(x) => Ok(VrlValue::Integer(x)),
+//         PipelineValue::Uint8(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Uint16(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Uint32(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Uint64(x) => Ok(VrlValue::Integer(x as i64)),
+//         PipelineValue::Float32(x) => NotNan::new(x as f64)
+//             .map_err(|_| FloatNaNSnafu { input_float: x }.build())
+//             .map(VrlValue::Float),
+//         PipelineValue::Float64(x) => NotNan::new(x)
+//             .map_err(|_| FloatNaNSnafu { input_float: x }.build())
+//             .map(VrlValue::Float),
+//         PipelineValue::Boolean(x) => Ok(VrlValue::Boolean(x)),
+//         PipelineValue::String(x) => Ok(VrlValue::Bytes(Bytes::copy_from_slice(x.as_bytes()))),
+//         PipelineValue::Timestamp(x) => x
+//             .to_datetime()
+//             .context(InvalidTimestampSnafu {
+//                 input: x.to_string(),
+//             })
+//             .map(VrlValue::Timestamp),
+//         PipelineValue::Array(array) => Ok(VrlValue::Array(
+//             array
+//                 .into_iter()
+//                 .map(pipeline_value_to_vrl_value)
+//                 .collect::<Result<Vec<_>>>()?,
+//         )),
+//         PipelineValue::Map(m) => {
+//             let values = m
+//                 .values
+//                 .into_iter()
+//                 .map(|(k, v)| pipeline_value_to_vrl_value(v).map(|v| (KeyString::from(k), v)))
+//                 .collect::<Result<BTreeMap<_, _>>>()?;
+//             Ok(VrlValue::Object(values))
+//         }
+//     }
+// }
 
-fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
-    match v {
-        VrlValue::Bytes(bytes) => String::from_utf8(bytes.to_vec())
-            .context(BytesToUtf8Snafu)
-            .map(PipelineValue::String),
-        VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
-        VrlValue::Integer(x) => Ok(PipelineValue::Int64(x)),
-        VrlValue::Float(not_nan) => Ok(PipelineValue::Float64(not_nan.into_inner())),
-        VrlValue::Boolean(b) => Ok(PipelineValue::Boolean(b)),
-        VrlValue::Timestamp(date_time) => crate::etl::value::Timestamp::from_datetime(date_time)
-            .context(InvalidTimestampSnafu {
-                input: date_time.to_string(),
-            })
-            .map(PipelineValue::Timestamp),
-        VrlValue::Object(bm) => {
-            let b = bm
-                .into_iter()
-                .map(|(k, v)| vrl_value_to_pipeline_value(v).map(|v| (k.to_string(), v)))
-                .collect::<Result<BTreeMap<String, PipelineValue>>>()?;
-            Ok(PipelineValue::Map(b.into()))
-        }
-        VrlValue::Array(values) => {
-            let a = values
-                .into_iter()
-                .map(vrl_value_to_pipeline_value)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(PipelineValue::Array(a.into()))
-        }
-        VrlValue::Null => Ok(PipelineValue::Null),
-    }
-}
+// fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
+//     match v {
+//         VrlValue::Bytes(bytes) => String::from_utf8(bytes.to_vec())
+//             .context(BytesToUtf8Snafu)
+//             .map(PipelineValue::String),
+//         VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
+//         VrlValue::Integer(x) => Ok(PipelineValue::Int64(x)),
+//         VrlValue::Float(not_nan) => Ok(PipelineValue::Float64(not_nan.into_inner())),
+//         VrlValue::Boolean(b) => Ok(PipelineValue::Boolean(b)),
+//         VrlValue::Timestamp(date_time) => crate::etl::value::Timestamp::from_datetime(date_time)
+//             .context(InvalidTimestampSnafu {
+//                 input: date_time.to_string(),
+//             })
+//             .map(PipelineValue::Timestamp),
+//         VrlValue::Object(bm) => {
+//             let b = bm
+//                 .into_iter()
+//                 .map(|(k, v)| vrl_value_to_pipeline_value(v).map(|v| (k.to_string(), v)))
+//                 .collect::<Result<BTreeMap<String, PipelineValue>>>()?;
+//             Ok(PipelineValue::Map(b.into()))
+//         }
+//         VrlValue::Array(values) => {
+//             let a = values
+//                 .into_iter()
+//                 .map(vrl_value_to_pipeline_value)
+//                 .collect::<Result<Vec<_>>>()?;
+//             Ok(PipelineValue::Array(a.into()))
+//         }
+//         VrlValue::Null => Ok(PipelineValue::Null),
+//     }
+// }
 
 fn check_regex_output(output_kind: &Kind) -> Result<()> {
     if output_kind.is_regex() {
@@ -223,9 +220,10 @@ fn check_regex_output(output_kind: &Kind) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
+    use vrl::prelude::Bytes;
+    use vrl::value::KeyString;
+
     use super::*;
-    use crate::etl::value::Timestamp;
-    use crate::Map;
 
     #[test]
     fn test_vrl() {
@@ -243,31 +241,27 @@ del(.user_info)
 
         let mut n = BTreeMap::new();
         n.insert(
-            "name".to_string(),
-            PipelineValue::String("certain_name".to_string()),
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("certain_name")),
         );
 
         let mut m = BTreeMap::new();
-        m.insert(
-            "user_info".to_string(),
-            PipelineValue::Map(Map { values: n }),
-        );
+        m.insert(KeyString::from("user_info"), VrlValue::Object(n));
 
-        let re = v.resolve(PipelineValue::Map(Map { values: m }));
+        let re = v.resolve(VrlValue::Object(m));
         assert!(re.is_ok());
         let re = re.unwrap();
 
-        assert!(matches!(re, PipelineValue::Map(_)));
+        assert!(matches!(re, VrlValue::Object(_)));
+        let re = re.as_object().unwrap();
         assert!(re.get("name").is_some());
         let name = re.get("name").unwrap();
-        assert!(matches!(name.get("a").unwrap(), PipelineValue::String(x) if x == "certain_name"));
-        assert!(matches!(name.get("b").unwrap(), PipelineValue::String(x) if x == "certain_name"));
+        let name = name.as_object().unwrap();
+        assert!(matches!(name.get("a").unwrap(), VrlValue::Bytes(x) if x == "certain_name"));
+        assert!(matches!(name.get("b").unwrap(), VrlValue::Bytes(x) if x == "certain_name"));
         assert!(re.get("timestamp").is_some());
         let timestamp = re.get("timestamp").unwrap();
-        assert!(matches!(
-            timestamp,
-            PipelineValue::Timestamp(Timestamp::Nanosecond(_))
-        ));
+        assert!(matches!(timestamp, VrlValue::Timestamp(_)));
     }
 
     #[test]

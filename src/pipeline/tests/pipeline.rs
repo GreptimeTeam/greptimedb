@@ -20,7 +20,9 @@ use greptime_proto::v1::value::ValueData::{
     U32Value, U64Value, U8Value,
 };
 use greptime_proto::v1::Value as GreptimeValue;
-use pipeline::{json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext};
+use pipeline::{
+    parse, serde_value_to_vrl_value, setup_pipeline, Content, Pipeline, PipelineContext,
+};
 
 #[test]
 fn test_complex_data() {
@@ -425,7 +427,7 @@ transform:
         &pipeline_param,
         session::context::Channel::Unknown,
     );
-    let stats = json_to_map(input_value).unwrap();
+    let stats = serde_value_to_vrl_value(input_value).unwrap();
 
     let row = pipeline
         .exec_mut(stats, &pipeline_ctx, &mut schema_info)
@@ -500,7 +502,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -615,7 +617,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -687,7 +689,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -733,7 +735,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -798,7 +800,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -845,7 +847,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -913,7 +915,7 @@ transform:
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value1).unwrap();
+    let status = serde_value_to_vrl_value(input_value1).unwrap();
     let dispatched_to = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -922,7 +924,7 @@ transform:
     assert_eq!(dispatched_to.table_suffix, "http");
     assert_eq!(dispatched_to.pipeline.unwrap(), "access_log_pipeline");
 
-    let status = json_to_map(input_value2).unwrap();
+    let status = serde_value_to_vrl_value(input_value2).unwrap();
     let row = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap()
@@ -983,7 +985,7 @@ table_suffix: _${logger}
         session::context::Channel::Unknown,
     );
 
-    let status = json_to_map(input_value).unwrap();
+    let status = serde_value_to_vrl_value(input_value).unwrap();
     let exec_re = pipeline
         .exec_mut(status, &pipeline_ctx, &mut schema_info)
         .unwrap();

@@ -15,16 +15,19 @@
 pub mod index;
 pub mod transformer;
 
-use snafu::{ensure, OptionExt};
+use api::v1::value::ValueData;
+use api::v1::ColumnDataType;
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
     TransformFieldMustBeSetSnafu, TransformOnFailureInvalidValueSnafu, TransformTypeMustBeSetSnafu,
+    UnsupportedTypeInPipelineSnafu, ValueDefaultValueUnsupportedSnafu, ValueInvalidResolutionSnafu,
+    ValueParseBooleanSnafu, ValueParseFloatSnafu, ValueParseIntSnafu, ValueParseTypeSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{yaml_bool, yaml_new_field, yaml_new_fields, yaml_string};
 use crate::etl::transform::index::Index;
-use crate::etl::value::{Timestamp, Value};
 
 const TRANSFORM_FIELD: &str = "field";
 const TRANSFORM_FIELDS: &str = "fields";
@@ -124,39 +127,57 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 #[derive(Debug, Clone)]
 pub struct Transform {
     pub fields: Fields,
-    pub type_: Value,
-    pub default: Option<Value>,
+    pub type_: ColumnDataType,
+    pub default: Option<ValueData>,
     pub index: Option<Index>,
     pub tag: bool,
     pub on_failure: Option<OnFailure>,
 }
 
-impl Default for Transform {
-    fn default() -> Self {
-        Transform {
-            fields: Fields::default(),
-            type_: Value::Null,
-            default: None,
-            index: None,
-            tag: false,
-            on_failure: None,
-        }
-    }
-}
+// valid types
+// ColumnDataType::Int8
+// ColumnDataType::Int16
+// ColumnDataType::Int32
+// ColumnDataType::Int64
+// ColumnDataType::Uint8
+// ColumnDataType::Uint16
+// ColumnDataType::Uint32
+// ColumnDataType::Uint64
+// ColumnDataType::Float32
+// ColumnDataType::Float64
+// ColumnDataType::Boolean
+// ColumnDataType::String
+// ColumnDataType::TimestampNanosecond
+// ColumnDataType::TimestampMicrosecond
+// ColumnDataType::TimestampMillisecond
+// ColumnDataType::TimestampSecond
+// ColumnDataType::Binary
+
+// impl Default for Transform {
+//     fn default() -> Self {
+//         Transform {
+//             fields: Fields::default(),
+//             type_: ,
+//             default: None,
+//             index: None,
+//             tag: false,
+//             on_failure: None,
+//         }
+//     }
+// }
 
 impl Transform {
-    pub(crate) fn get_default(&self) -> Option<&Value> {
+    pub(crate) fn get_default(&self) -> Option<&ValueData> {
         self.default.as_ref()
     }
 
-    pub(crate) fn get_type_matched_default_val(&self) -> &Value {
-        &self.type_
+    pub(crate) fn get_type_matched_default_val(&self) -> Result<ValueData> {
+        get_default_for_type(&self.type_)
     }
 
-    pub(crate) fn get_default_value_when_data_is_none(&self) -> Option<Value> {
-        if matches!(self.type_, Value::Timestamp(_)) && self.index.is_some_and(|i| i == Index::Time)
-        {
-            return Some(Value::Timestamp(Timestamp::default()));
+    pub(crate) fn get_default_value_when_data_is_none(&self) -> Option<ValueData> {
+        if is_timestamp_type(&self.type_) && self.index.is_some_and(|i| i == Index::Time) {
+            return get_default_for_type(&self.type_).ok();
         }
         None
     }
@@ -166,16 +187,56 @@ impl Transform {
     }
 }
 
+fn is_timestamp_type(ty: &ColumnDataType) -> bool {
+    matches!(
+        ty,
+        ColumnDataType::TimestampSecond
+            | ColumnDataType::TimestampMillisecond
+            | ColumnDataType::TimestampMicrosecond
+            | ColumnDataType::TimestampNanosecond
+    )
+}
+
+fn get_default_for_type(ty: &ColumnDataType) -> Result<ValueData> {
+    let v = match ty {
+        ColumnDataType::Boolean => ValueData::BoolValue(false),
+        ColumnDataType::Int8 => ValueData::I8Value(0),
+        ColumnDataType::Int16 => ValueData::I16Value(0),
+        ColumnDataType::Int32 => ValueData::I32Value(0),
+        ColumnDataType::Int64 => ValueData::I64Value(0),
+        ColumnDataType::Uint8 => ValueData::U8Value(0),
+        ColumnDataType::Uint16 => ValueData::U16Value(0),
+        ColumnDataType::Uint32 => ValueData::U32Value(0),
+        ColumnDataType::Uint64 => ValueData::U64Value(0),
+        ColumnDataType::Float32 => ValueData::F32Value(0.0),
+        ColumnDataType::Float64 => ValueData::F64Value(0.0),
+        ColumnDataType::Binary => ValueData::BinaryValue(jsonb::Value::Null.to_vec()),
+        ColumnDataType::String => ValueData::StringValue(String::new()),
+
+        ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(0),
+        ColumnDataType::TimestampMillisecond => ValueData::TimestampMillisecondValue(0),
+        ColumnDataType::TimestampMicrosecond => ValueData::TimestampMicrosecondValue(0),
+        ColumnDataType::TimestampNanosecond => ValueData::TimestampNanosecondValue(0),
+
+        _ => UnsupportedTypeInPipelineSnafu {
+            ty: ty.as_str_name(),
+        }
+        .fail()?,
+    };
+    Ok(v)
+}
+
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
     type Error = Error;
 
     fn try_from(hash: &yaml_rust::yaml::Hash) -> Result<Self> {
         let mut fields = Fields::default();
-        let mut type_ = Value::Null;
         let mut default = None;
         let mut index = None;
         let mut tag = false;
         let mut on_failure = None;
+
+        let mut type_ = None;
 
         for (k, v) in hash {
             let key = k
@@ -192,7 +253,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
 
                 TRANSFORM_TYPE => {
                     let t = yaml_string(v, TRANSFORM_TYPE)?;
-                    type_ = Value::parse_str_type(&t)?;
+                    type_ = Some(parse_str_type(&t)?);
                 }
 
                 TRANSFORM_INDEX => {
@@ -205,7 +266,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 }
 
                 TRANSFORM_DEFAULT => {
-                    default = Some(Value::try_from(v)?);
+                    default = v.as_str();
                 }
 
                 TRANSFORM_ON_FAILURE => {
@@ -219,23 +280,14 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
 
         // ensure fields and type
         ensure!(!fields.is_empty(), TransformFieldMustBeSetSnafu);
-        ensure!(
-            type_ != Value::Null,
-            TransformTypeMustBeSetSnafu {
-                fields: format!("{:?}", fields)
-            }
-        );
+        let type_ = type_.context(TransformTypeMustBeSetSnafu {
+            fields: format!("{:?}", fields),
+        })?;
 
         let final_default = if let Some(default_value) = default {
-            match default_value {
-                // if default is not set, then it will be regarded as default null
-                Value::Null => None,
-                _ => {
-                    let target = type_.parse_str_value(default_value.to_str_value().as_str())?;
-                    on_failure = Some(OnFailure::Default);
-                    Some(target)
-                }
-            }
+            let target = parse_str_value(&type_, default_value)?;
+            on_failure = Some(OnFailure::Default);
+            Some(target)
         } else {
             None
         };
@@ -252,3 +304,141 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         Ok(builder)
     }
 }
+
+pub fn parse_str_type(t: &str) -> Result<ColumnDataType> {
+    let mut parts = t.splitn(2, ',');
+    let head = parts.next().unwrap_or_default();
+    let tail = parts.next().map(|s| s.trim().to_string());
+    match head.to_lowercase().as_str() {
+        "int8" => Ok(ColumnDataType::Int8),
+        "int16" => Ok(ColumnDataType::Int16),
+        "int32" => Ok(ColumnDataType::Int32),
+        "int64" => Ok(ColumnDataType::Int64),
+
+        "uint8" => Ok(ColumnDataType::Uint8),
+        "uint16" => Ok(ColumnDataType::Uint16),
+        "uint32" => Ok(ColumnDataType::Uint32),
+        "uint64" => Ok(ColumnDataType::Uint64),
+
+        "float32" => Ok(ColumnDataType::Float32),
+        "float64" => Ok(ColumnDataType::Float64),
+
+        "boolean" => Ok(ColumnDataType::Boolean),
+        "string" => Ok(ColumnDataType::String),
+
+        "timestamp" | "epoch" | "time" => match tail {
+            Some(resolution) if !resolution.is_empty() => match resolution.as_str() {
+                NANOSECOND_RESOLUTION | NANO_RESOLUTION | NS_RESOLUTION => {
+                    Ok(ColumnDataType::TimestampNanosecond)
+                }
+                MICROSECOND_RESOLUTION | MICRO_RESOLUTION | US_RESOLUTION => {
+                    Ok(ColumnDataType::TimestampMicrosecond)
+                }
+                MILLISECOND_RESOLUTION | MILLI_RESOLUTION | MS_RESOLUTION => {
+                    Ok(ColumnDataType::TimestampMillisecond)
+                }
+                SECOND_RESOLUTION | SEC_RESOLUTION | S_RESOLUTION => {
+                    Ok(ColumnDataType::TimestampSecond)
+                }
+                _ => ValueInvalidResolutionSnafu {
+                    resolution,
+                    valid_resolution: VALID_RESOLUTIONS.join(","),
+                }
+                .fail(),
+            },
+            _ => Ok(ColumnDataType::TimestampNanosecond),
+        },
+
+        // We only consider object and array to be json types. and use Map to represent json
+        // TODO(qtang): Needs to be defined with better semantics
+        "json" => Ok(ColumnDataType::Binary),
+
+        _ => ValueParseTypeSnafu { t }.fail(),
+    }
+}
+
+pub fn parse_str_value(type_: &ColumnDataType, v: &str) -> Result<ValueData> {
+    match type_ {
+        ColumnDataType::Int8 => v
+            .parse::<i8>()
+            .map(|v| ValueData::I8Value(v as i32))
+            .context(ValueParseIntSnafu { ty: "int8", v }),
+        ColumnDataType::Int16 => v
+            .parse::<i16>()
+            .map(|v| ValueData::I16Value(v as i32))
+            .context(ValueParseIntSnafu { ty: "int16", v }),
+        ColumnDataType::Int32 => v
+            .parse::<i32>()
+            .map(ValueData::I32Value)
+            .context(ValueParseIntSnafu { ty: "int32", v }),
+        ColumnDataType::Int64 => v
+            .parse::<i64>()
+            .map(ValueData::I64Value)
+            .context(ValueParseIntSnafu { ty: "int64", v }),
+
+        ColumnDataType::Uint8 => v
+            .parse::<u8>()
+            .map(|v| ValueData::U8Value(v as u32))
+            .context(ValueParseIntSnafu { ty: "uint8", v }),
+        ColumnDataType::Uint16 => v
+            .parse::<u16>()
+            .map(|v| ValueData::U16Value(v as u32))
+            .context(ValueParseIntSnafu { ty: "uint16", v }),
+        ColumnDataType::Uint32 => v
+            .parse::<u32>()
+            .map(ValueData::U32Value)
+            .context(ValueParseIntSnafu { ty: "uint32", v }),
+        ColumnDataType::Uint64 => v
+            .parse::<u64>()
+            .map(ValueData::U64Value)
+            .context(ValueParseIntSnafu { ty: "uint64", v }),
+
+        ColumnDataType::Float32 => v
+            .parse::<f32>()
+            .map(ValueData::F32Value)
+            .context(ValueParseFloatSnafu { ty: "float32", v }),
+        ColumnDataType::Float64 => v
+            .parse::<f64>()
+            .map(ValueData::F64Value)
+            .context(ValueParseFloatSnafu { ty: "float64", v }),
+
+        ColumnDataType::Boolean => v
+            .parse::<bool>()
+            .map(ValueData::BoolValue)
+            .context(ValueParseBooleanSnafu { ty: "boolean", v }),
+        ColumnDataType::String => Ok(ValueData::StringValue(v.to_string())),
+
+        _ => ValueDefaultValueUnsupportedSnafu {
+            value: format!("{:?}", type_),
+        }
+        .fail(),
+    }
+}
+
+pub(crate) const NANOSECOND_RESOLUTION: &str = "nanosecond";
+pub(crate) const NANO_RESOLUTION: &str = "nano";
+pub(crate) const NS_RESOLUTION: &str = "ns";
+pub(crate) const MICROSECOND_RESOLUTION: &str = "microsecond";
+pub(crate) const MICRO_RESOLUTION: &str = "micro";
+pub(crate) const US_RESOLUTION: &str = "us";
+pub(crate) const MILLISECOND_RESOLUTION: &str = "millisecond";
+pub(crate) const MILLI_RESOLUTION: &str = "milli";
+pub(crate) const MS_RESOLUTION: &str = "ms";
+pub(crate) const SECOND_RESOLUTION: &str = "second";
+pub(crate) const SEC_RESOLUTION: &str = "sec";
+pub(crate) const S_RESOLUTION: &str = "s";
+
+pub(crate) const VALID_RESOLUTIONS: [&str; 12] = [
+    NANOSECOND_RESOLUTION,
+    NANO_RESOLUTION,
+    NS_RESOLUTION,
+    MICROSECOND_RESOLUTION,
+    MICRO_RESOLUTION,
+    US_RESOLUTION,
+    MILLISECOND_RESOLUTION,
+    MILLI_RESOLUTION,
+    MS_RESOLUTION,
+    SECOND_RESOLUTION,
+    SEC_RESOLUTION,
+    S_RESOLUTION,
+];
