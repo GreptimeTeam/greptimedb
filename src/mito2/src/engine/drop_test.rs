@@ -35,7 +35,7 @@ use crate::worker::DROPPING_MARKER_FILE;
 async fn test_engine_drop_region() {
     common_telemetry::init_default_ut_logging();
 
-    let mut env = TestEnv::with_prefix("drop");
+    let mut env = TestEnv::with_prefix("drop").await;
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
         .create_engine_with(MitoConfig::default(), None, Some(listener.clone()))
@@ -143,7 +143,7 @@ async fn test_engine_drop_region_for_custom_store() {
         put_rows(engine, region_id, rows).await;
         flush_region(engine, region_id, None).await;
     }
-    let mut env = TestEnv::with_prefix("drop");
+    let mut env = TestEnv::with_prefix("drop").await;
     let listener = Arc::new(DropListener::new(Duration::from_millis(100)));
     let engine = env
         .create_engine_with_multiple_object_stores(

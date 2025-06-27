@@ -71,7 +71,7 @@ async fn scan_check(
 #[tokio::test]
 async fn test_sync_after_flush_region() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -163,7 +163,7 @@ async fn test_sync_after_flush_region() {
 async fn test_sync_after_alter_region() {
     common_telemetry::init_default_ut_logging();
 
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

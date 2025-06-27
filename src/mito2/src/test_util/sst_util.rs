@@ -20,7 +20,7 @@ use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
 use datatypes::arrow::array::{BinaryArray, TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use parquet::file::metadata::ParquetMetaData;
@@ -57,7 +57,12 @@ pub fn sst_region_metadata() -> RegionMetadata {
                 "tag_1".to_string(),
                 ConcreteDataType::string_datatype(),
                 true,
-            ),
+            )
+            .with_skipping_options(SkippingIndexOptions {
+                granularity: 1,
+                ..Default::default()
+            })
+            .unwrap(),
             semantic_type: SemanticType::Tag,
             column_id: 1,
         })

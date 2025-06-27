@@ -27,7 +27,7 @@ use crate::test_util::{
 };
 
 async fn check_prune_row_groups(exprs: Vec<Expr>, expected: &str) {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -147,7 +147,7 @@ fn time_range_expr(start_sec: i64, end_sec: i64) -> Expr {
 
 #[tokio::test]
 async fn test_prune_memtable() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -221,7 +221,7 @@ async fn test_prune_memtable() {
 
 #[tokio::test]
 async fn test_prune_memtable_complex_expr() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -274,7 +274,7 @@ async fn test_prune_memtable_complex_expr() {
 
 #[tokio::test]
 async fn test_mem_range_prune() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

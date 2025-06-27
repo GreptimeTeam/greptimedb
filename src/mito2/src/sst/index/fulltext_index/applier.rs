@@ -231,6 +231,9 @@ impl FulltextIndexApplier {
 impl FulltextIndexApplier {
     /// Applies coarse-grained fulltext index to the specified SST file.
     /// Returns (row group id -> ranges) that match the queries.
+    ///
+    /// Row group id existing in the returned result means that the row group is searched.
+    /// Empty ranges means that the row group is searched but no rows are found.
     pub async fn apply_coarse(
         &self,
         file_id: FileId,
@@ -367,7 +370,7 @@ impl FulltextIndexApplier {
     /// Adjusts the coarse output. Makes the output ranges based on row group start.
     fn adjust_coarse_output(
         input: Vec<(usize, Range<usize>)>,
-        output: &mut Vec<(usize, Vec<Range<usize>>)>,
+        output: &mut [(usize, Vec<Range<usize>>)],
     ) {
         // adjust ranges to be based on row group
         for ((_, output), (_, input)) in output.iter_mut().zip(input) {
@@ -377,7 +380,6 @@ impl FulltextIndexApplier {
                 range.end -= start;
             }
         }
-        output.retain(|(_, ranges)| !ranges.is_empty());
     }
 
     /// Converts terms to predicates.
