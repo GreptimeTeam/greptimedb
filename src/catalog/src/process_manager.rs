@@ -21,7 +21,7 @@ use std::sync::{Arc, RwLock};
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -141,14 +141,20 @@ impl ProcessManager {
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
-                processes.extend(
-                    f.list_process(ListProcessRequest {
+                let result = f
+                    .list_process(ListProcessRequest {
                         catalog: catalog.unwrap_or_default().to_string(),
                     })
                     .await
-                    .context(error::InvokeFrontendSnafu)?
-                    .processes,
-                );
+                    .context(error::InvokeFrontendSnafu);
+                match result {
+                    Ok(resp) => {
+                        processes.extend(resp.processes);
+                    }
+                    Err(e) => {
+                        warn!(e; "Skipping failing node: {:?}", f)
+                    }
+                }
             }
         }
         processes.extend(self.local_processes(catalog)?);

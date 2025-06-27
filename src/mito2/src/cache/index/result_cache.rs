@@ -31,6 +31,11 @@ use crate::sst::parquet::row_selection::RowGroupSelection;
 const INDEX_RESULT_TYPE: &str = "index_result";
 
 /// Cache for storing index query results.
+///
+/// The `RowGroupSelection` is a collection of row groups that match the predicate.
+///
+/// Row groups can be partially searched. Row groups that not contained in `RowGroupSelection` are not searched.
+/// User can retrieve the partial results and handle uncontained row groups required by the predicate subsequently.
 pub struct IndexResultCache {
     cache: Cache<(PredicateKey, FileId), Arc<RowGroupSelection>>,
 }
@@ -64,6 +69,8 @@ impl IndexResultCache {
     }
 
     /// Puts a query result into the cache.
+    ///
+    /// Allow user to put a partial result (not containing all row groups) into the cache.
     pub fn put(&self, key: PredicateKey, file_id: FileId, result: Arc<RowGroupSelection>) {
         let key = (key, file_id);
         let size = Self::index_result_cache_weight(&key, &result);
@@ -74,6 +81,9 @@ impl IndexResultCache {
     }
 
     /// Gets a query result from the cache.
+    ///
+    /// Note: the returned `RowGroupSelection` only contains the row groups that are searched.
+    ///       Caller should handle the uncontained row groups required by the predicate subsequently.
     pub fn get(&self, key: &PredicateKey, file_id: FileId) -> Option<Arc<RowGroupSelection>> {
         let res = self.cache.get(&(key.clone(), file_id));
         if res.is_some() {

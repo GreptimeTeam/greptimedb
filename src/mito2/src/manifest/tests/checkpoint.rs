@@ -34,7 +34,7 @@ async fn build_manager(
     compress_type: CompressionType,
 ) -> (TestEnv, RegionManifestManager) {
     let metadata = Arc::new(basic_region_metadata());
-    let env = TestEnv::new();
+    let env = TestEnv::new().await;
     let manager = env
         .create_manifest_manager(compress_type, checkpoint_distance, Some(metadata.clone()))
         .await

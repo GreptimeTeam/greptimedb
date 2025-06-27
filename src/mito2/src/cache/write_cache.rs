@@ -450,7 +450,7 @@ mod tests {
     async fn test_write_and_upload_sst() {
         // TODO(QuenKar): maybe find a way to create some object server for testing,
         // and now just use local file system to mock.
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let mock_store = env.init_object_store_manager();
         let path_provider = RegionFilePathFactory::new("test".to_string());
 
@@ -538,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_metadata_from_write_cache() {
         common_telemetry::init_default_ut_logging();
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
 
@@ -607,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn test_write_cache_clean_tmp_files() {
         common_telemetry::init_default_ut_logging();
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let data_home = env.data_home().display().to_string();
         let mock_store = env.init_object_store_manager();
 

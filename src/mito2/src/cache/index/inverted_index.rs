@@ -245,7 +245,7 @@ mod test {
         let blob = create_inverted_index_blob().await;
 
         // Init a test range reader in local fs.
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let file_size = blob.len() as u64;
         let store = env.init_object_store_manager();
         let temp_path = "data";

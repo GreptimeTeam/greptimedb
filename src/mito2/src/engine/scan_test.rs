@@ -27,7 +27,7 @@ use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_scan_with_min_sst_sequence() {
-    let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence");
+    let mut env = TestEnv::with_prefix("test_scan_with_min_sst_sequence").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -153,7 +153,7 @@ async fn test_scan_with_min_sst_sequence() {
 
 #[tokio::test]
 async fn test_series_scan() {
-    let mut env = TestEnv::with_prefix("test_series_scan");
+    let mut env = TestEnv::with_prefix("test_series_scan").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

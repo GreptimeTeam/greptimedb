@@ -278,7 +278,7 @@ mod tests {
         let mut region_server = mock_region_server();
         let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
 
-        let mut engine_env = TestEnv::with_prefix("close-region");
+        let mut engine_env = TestEnv::with_prefix("close-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine));
         let region_id = RegionId::new(1024, 1);
@@ -326,7 +326,7 @@ mod tests {
         let mut region_server = mock_region_server();
         let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
 
-        let mut engine_env = TestEnv::with_prefix("open-region");
+        let mut engine_env = TestEnv::with_prefix("open-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine));
         let region_id = RegionId::new(1024, 1);
@@ -374,7 +374,7 @@ mod tests {
         let mut region_server = mock_region_server();
         let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
 
-        let mut engine_env = TestEnv::with_prefix("open-not-exists-region");
+        let mut engine_env = TestEnv::with_prefix("open-not-exists-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine));
         let region_id = RegionId::new(1024, 1);
@@ -406,7 +406,7 @@ mod tests {
         let mut region_server = mock_region_server();
         let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
 
-        let mut engine_env = TestEnv::with_prefix("downgrade-region");
+        let mut engine_env = TestEnv::with_prefix("downgrade-region").await;
         let engine = engine_env.create_engine(MitoConfig::default()).await;
         region_server.register_engine(Arc::new(engine));
         let region_id = RegionId::new(1024, 1);

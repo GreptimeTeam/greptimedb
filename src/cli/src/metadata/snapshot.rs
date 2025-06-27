@@ -301,7 +301,6 @@ struct MetaInfoTool {
 
 #[async_trait]
 impl Tool for MetaInfoTool {
-    #[allow(clippy::print_stdout)]
     async fn do_work(&self) -> std::result::Result<(), BoxedError> {
         let result = MetadataSnapshotManager::info(
             &self.inner,

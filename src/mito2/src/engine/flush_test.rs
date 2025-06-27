@@ -41,7 +41,7 @@ use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
 
 #[tokio::test]
 async fn test_manual_flush() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -91,7 +91,7 @@ async fn test_manual_flush() {
 
 #[tokio::test]
 async fn test_flush_engine() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
     let engine = env
@@ -161,7 +161,7 @@ async fn test_flush_engine() {
 
 #[tokio::test]
 async fn test_write_stall() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(StallListener::default());
     let engine = env
@@ -236,7 +236,7 @@ async fn test_write_stall() {
 
 #[tokio::test]
 async fn test_flush_empty() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let engine = env
         .create_engine_with(
@@ -289,7 +289,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
+    let mut env = TestEnv::new().await.with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
     env.get_schema_metadata_manager()
@@ -396,7 +396,7 @@ impl MockTimeProvider {
 
 #[tokio::test]
 async fn test_auto_flush_engine() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
     let now = current_time_millis();
@@ -467,7 +467,7 @@ async fn test_auto_flush_engine() {
 
 #[tokio::test]
 async fn test_flush_workers() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
     let engine = env
@@ -554,7 +554,7 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushListener::default());
 
-    let mut env = TestEnv::new().with_log_store_factory(factory.clone());
+    let mut env = TestEnv::new().await.with_log_store_factory(factory.clone());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
