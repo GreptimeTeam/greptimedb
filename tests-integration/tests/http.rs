@@ -3969,7 +3969,7 @@ pub async fn test_loki_pb_logs_with_pipeline(store_type: StorageType) {
     let pipeline = r#"
 processors:
   - epoch:
-      field: loki_timestamp
+      field: greptime_timestamp
       resolution: ms
     "#;
 
@@ -4057,7 +4057,7 @@ processors:
 
     // test schema
     // CREATE TABLE IF NOT EXISTS "loki_table_name" (
-    //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "loki_label_service" STRING NULL,
     //     "loki_label_source" STRING NULL,
     //     "loki_label_wadaxi" STRING NULL,
@@ -4065,13 +4065,13 @@ processors:
     //     "loki_metadata_key1" STRING NULL,
     //     "loki_metadata_key2" STRING NULL,
     //     "loki_metadata_key3" STRING NULL,
-    //     TIME INDEX ("loki_timestamp")
+    //     TIME INDEX ("greptime_timestamp")
     //     )
     //   ENGINE=mito
     //   WITH(
     //     append_mode = 'true'
     //   )
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -4173,7 +4173,7 @@ pub async fn test_loki_json_logs_with_pipeline(store_type: StorageType) {
     let pipeline = r#"
 processors:
   - epoch:
-      field: loki_timestamp
+      field: greptime_timestamp
       resolution: ms
     "#;
 
@@ -4231,20 +4231,20 @@ processors:
 
     // test schema
     // CREATE TABLE IF NOT EXISTS "loki_table_name" (
-    //     "loki_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "loki_label_sender" STRING NULL,
     //     "loki_label_source" STRING NULL,
     //     "loki_line" STRING NULL,
     //     "loki_metadata_key1" STRING NULL,
     //     "loki_metadata_key2" STRING NULL,
     //     "loki_metadata_key3" STRING NULL,
-    //     TIME INDEX ("loki_timestamp")
+    //     TIME INDEX ("greptime_timestamp")
     //     )
     //   ENGINE=mito
     //   WITH(
     //     append_mode = 'true'
     //   )
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"loki_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"loki_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,

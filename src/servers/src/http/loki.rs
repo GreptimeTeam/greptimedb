@@ -59,7 +59,6 @@ const LOKI_TABLE_NAME: &str = "loki_logs";
 const LOKI_LINE_COLUMN: &str = "line";
 const LOKI_STRUCTURED_METADATA_COLUMN: &str = "structured_metadata";
 
-const LOKI_TIMESTAMP_COLUMN_NAME: &str = "loki_timestamp";
 const LOKI_LINE_COLUMN_NAME: &str = "loki_line";
 
 const LOKI_PIPELINE_METADATA_PREFIX: &str = "loki_metadata_";
@@ -117,7 +116,7 @@ pub async fn loki_ingest(
 
     let handler = log_state.log_handler;
 
-    let c = if let Some(pipeline_name) = pipeline_info.pipeline_name {
+    let ctx_req = if let Some(pipeline_name) = pipeline_info.pipeline_name {
         // go pipeline
         let version = to_pipeline_version(pipeline_info.pipeline_version.as_deref())
             .context(PipelineSnafu)?;
@@ -168,8 +167,8 @@ pub async fn loki_ingest(
         ContextReq::default_opt_with_reqs(vec![ins_req])
     };
 
-    let mut outputs = Vec::new();
-    for (temp_ctx, req) in c.as_req_iter(ctx) {
+    let mut outputs = Vec::with_capacity(ctx_req.map_len());
+    for (temp_ctx, req) in ctx_req.as_req_iter(ctx) {
         let output = handler.insert(req, temp_ctx).await;
 
         if let Ok(Output {
@@ -197,6 +196,9 @@ pub async fn loki_ingest(
     Ok(response)
 }
 
+/// This is the holder of the loki lines parsed from json or protobuf.
+/// The generic here is either [serde_json::Value] or [Vec<LabelPairAdapter>].
+/// Depending on the target destination, this can be converted to [LokiRawItem] or [LokiPipeline].
 pub struct LokiMiddleItem<T> {
     pub ts: i64,
     pub line: String,
@@ -204,6 +206,9 @@ pub struct LokiMiddleItem<T> {
     pub labels: Option<BTreeMap<String, String>>,
 }
 
+/// This is the line item for the Loki raw ingestion.
+/// We'll persist the line in its whole, set labels into tags,
+/// and structured metadata into a big JSON.
 pub struct LokiRawItem {
     pub ts: i64,
     pub line: String,
@@ -211,10 +216,43 @@ pub struct LokiRawItem {
     pub labels: Option<BTreeMap<String, String>>,
 }
 
+/// This is the line item prepared for the pipeline engine.
 pub struct LokiPipeline {
     pub map: pipeline::Value,
 }
 
+/// This is the flow of the Loki ingestion.
+/// +--------+
+/// | bytes  |
+/// +--------+
+///     |
+/// +----------------------+----------------------+
+/// |                      |                      |
+/// |   JSON content type  |   PB content type    |
+/// +----------------------+----------------------+
+/// |                      |                      |
+/// | JsonStreamItem       | PbStreamItem         |
+/// | stream: serde_json   | stream: adapter      |
+/// +----------------------+----------------------+
+/// |                      |                      |
+/// | MiddleItem<serde_json> | MiddleItem<entry>  |
+/// +----------------------+----------------------+
+///           \                  /
+///            \                /
+///             \              /
+///         +----------------------+
+///         |   MiddleItem<T>      |
+///         +----------------------+
+///                 |
+///     +----------------+----------------+
+///     |                                 |
+/// +------------------+         +---------------------+
+/// |   LokiRawItem    |         |  LokiPipelineItem   |
+/// +------------------+         +---------------------+
+///           |                             |
+/// +------------------+         +---------------------+
+/// |   Loki ingest    |         |   run_pipeline      |
+/// +------------------+         +---------------------+
 fn extract_item<T>(content_type: ContentType, bytes: Bytes) -> Result<Box<dyn Iterator<Item = T>>>
 where
     LokiMiddleItem<serde_json::Value>: Into<T>,
@@ -268,41 +306,43 @@ impl Iterator for LokiJsonParser {
     type Item = JsonStreamItem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let stream = self.streams.pop_front()?;
-        // get lines from the map
-        let serde_json::Value::Object(mut map) = stream else {
-            warn!("stream is not an object, {:?}", stream);
-            return self.next();
-        };
-        let Some(lines) = map.remove(LINES_KEY) else {
-            warn!("missing lines on stream, {:?}", map);
-            return self.next();
-        };
-        let serde_json::Value::Array(lines) = lines else {
-            warn!("lines is not an array, {:?}", lines);
-            return self.next();
-        };
+        while let Some(stream) = self.streams.pop_front() {
+            // get lines from the map
+            let serde_json::Value::Object(mut map) = stream else {
+                warn!("stream is not an object, {:?}", stream);
+                continue;
+            };
+            let Some(lines) = map.remove(LINES_KEY) else {
+                warn!("missing lines on stream, {:?}", map);
+                continue;
+            };
+            let serde_json::Value::Array(lines) = lines else {
+                warn!("lines is not an array, {:?}", lines);
+                continue;
+            };
 
-        // get labels
-        let labels = map
-            .remove(LABEL_KEY)
-            .and_then(|m| match m {
-                serde_json::Value::Object(labels) => Some(labels),
-                _ => None,
-            })
-            .map(|m| {
-                m.into_iter()
-                    .filter_map(|(k, v)| match v {
-                        serde_json::Value::String(v) => Some((k, v)),
-                        _ => None,
-                    })
-                    .collect::<BTreeMap<String, String>>()
+            // get labels
+            let labels = map
+                .remove(LABEL_KEY)
+                .and_then(|m| match m {
+                    serde_json::Value::Object(labels) => Some(labels),
+                    _ => None,
+                })
+                .map(|m| {
+                    m.into_iter()
+                        .filter_map(|(k, v)| match v {
+                            serde_json::Value::String(v) => Some((k, v)),
+                            _ => None,
+                        })
+                        .collect::<BTreeMap<String, String>>()
+                });
+
+            return Some(JsonStreamItem {
+                lines: lines.into(),
+                labels,
             });
-
-        Some(JsonStreamItem {
-            lines: lines.into(),
-            labels,
-        })
+        }
+        None
     }
 }
 
@@ -407,7 +447,7 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            LOKI_TIMESTAMP_COLUMN_NAME.to_string(),
+            GREPTIME_TIMESTAMP.to_string(),
             pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
         );
         map.insert(
@@ -486,23 +526,25 @@ impl Iterator for PbStreamItem {
     type Item = LokiMiddleItem<Vec<LabelPairAdapter>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.entries.pop_front()?;
+        while let Some(entry) = self.entries.pop_front() {
+            let ts = if let Some(ts) = entry.timestamp {
+                ts
+            } else {
+                warn!("missing timestamp, {:?}", entry);
+                continue;
+            };
+            let line = entry.line;
 
-        let ts = if let Some(ts) = entry.timestamp {
-            ts
-        } else {
-            return self.next();
-        };
-        let line = entry.line;
+            let structured_metadata = entry.structured_metadata;
 
-        let structured_metadata = entry.structured_metadata;
-
-        Some(LokiMiddleItem {
-            ts: prost_ts_to_nano(&ts),
-            line,
-            structured_metadata: Some(structured_metadata),
-            labels: self.labels.clone(),
-        })
+            return Some(LokiMiddleItem {
+                ts: prost_ts_to_nano(&ts),
+                line,
+                structured_metadata: Some(structured_metadata),
+                labels: self.labels.clone(),
+            });
+        }
+        None
     }
 }
 
@@ -542,7 +584,7 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            LOKI_TIMESTAMP_COLUMN_NAME.to_string(),
+            GREPTIME_TIMESTAMP.to_string(),
             pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
         );
         map.insert(
