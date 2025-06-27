@@ -266,7 +266,17 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 }
 
                 TRANSFORM_DEFAULT => {
-                    default = v.as_str();
+                    default = match v {
+                        yaml_rust::Yaml::Real(r) => Some(r.clone()),
+                        yaml_rust::Yaml::Integer(i) => Some(i.to_string()),
+                        yaml_rust::Yaml::String(s) => Some(s.clone()),
+                        yaml_rust::Yaml::Boolean(b) => Some(b.to_string()),
+                        yaml_rust::Yaml::Array(_)
+                        | yaml_rust::Yaml::Hash(_)
+                        | yaml_rust::Yaml::Alias(_)
+                        | yaml_rust::Yaml::Null
+                        | yaml_rust::Yaml::BadValue => None,
+                    };
                 }
 
                 TRANSFORM_ON_FAILURE => {
@@ -285,7 +295,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         })?;
 
         let final_default = if let Some(default_value) = default {
-            let target = parse_str_value(&type_, default_value)?;
+            let target = parse_str_value(&type_, &default_value)?;
             on_failure = Some(OnFailure::Default);
             Some(target)
         } else {
