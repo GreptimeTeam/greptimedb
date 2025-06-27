@@ -944,16 +944,6 @@ impl ScanInput {
         self.files.len()
     }
 
-    #[cfg(feature = "enterprise")]
-    pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
-        &self.extension_ranges
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
-        &self.extension_ranges[i - self.num_memtables() - self.num_files()]
-    }
-
     pub fn region_metadata(&self) -> &RegionMetadataRef {
         self.mapper.metadata()
     }
@@ -967,6 +957,17 @@ impl ScanInput {
             extension_ranges,
             ..self
         }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
+        &self.extension_ranges
+    }
+
+    /// Get a boxed [ExtensionRange] by the index in all ranges.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
+        &self.extension_ranges[i - self.num_memtables() - self.num_files()]
     }
 }
 
