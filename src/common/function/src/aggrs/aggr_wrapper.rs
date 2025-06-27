@@ -288,7 +288,7 @@ fn guess_state_fields(
 }
 
 /// Guess the input types of the state function based on the original aggregate function's state types.
-/// It's not necessarily the same, but it's consisent enough for oringinal aggregate function to behave correctly.
+/// It's not necessarily the same, but it's consistent enough for original aggregate function to behave correctly.
 fn guess_input_type_by_state_type(
     original: &AggregateUDF,
     state_types: &[DataType],
@@ -326,7 +326,7 @@ pub struct MergeWrapper {
 }
 impl MergeWrapper {
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
-        let name = aggr_merge_func_name(&inner.name());
+        let name = aggr_merge_func_name(inner.name());
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
 
         Ok(Self {
@@ -380,7 +380,7 @@ impl AggregateUDFImpl for MergeWrapper {
     ) -> datafusion_common::Result<Vec<Field>> {
         let old_return_type = self.inner.return_type(args.input_types)?;
         let state_fields_args = StateFieldsArgs {
-            name: &self.inner().name(),
+            name: self.inner().name(),
             input_types: args.input_types,
             return_type: &old_return_type,
             ordering_fields: args.ordering_fields,
