@@ -128,6 +128,9 @@ impl BloomFilterIndexApplier {
     /// list of row group ranges that match the predicates.
     ///
     /// The `row_groups` iterator provides the row group lengths and whether to search in the row group.
+    ///
+    /// Row group id existing in the returned result means that the row group is searched.
+    /// Empty ranges means that the row group is searched but no rows are found.
     pub async fn apply(
         &self,
         file_id: FileId,
@@ -195,7 +198,6 @@ impl BloomFilterIndexApplier {
                 range.end -= start;
             }
         }
-        output.retain(|(_, ranges)| !ranges.is_empty());
 
         Ok(output)
     }
@@ -386,6 +388,9 @@ mod tests {
                     .apply(file_id, None, row_groups.into_iter())
                     .await
                     .unwrap()
+                    .into_iter()
+                    .filter(|(_, ranges)| !ranges.is_empty())
+                    .collect()
             })
         }
     }

@@ -39,8 +39,9 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
     let Some(factory) = factory else {
         return;
     };
-    let mut env =
-        TestEnv::with_prefix("open-batch-regions").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("open-batch-regions")
+        .await
+        .with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
 
@@ -160,8 +161,9 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
     let Some(factory) = factory else {
         return;
     };
-    let mut env =
-        TestEnv::with_prefix("open-batch-regions-err").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("open-batch-regions-err")
+        .await
+        .with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let mut options = HashMap::new();

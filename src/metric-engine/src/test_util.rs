@@ -59,7 +59,7 @@ impl TestEnv {
 
     /// Returns a new env with specific `prefix` and `config` for test.
     pub async fn with_prefix_and_config(prefix: &str, config: EngineConfig) -> Self {
-        let mut mito_env = MitoTestEnv::with_prefix(prefix);
+        let mut mito_env = MitoTestEnv::with_prefix(prefix).await;
         let mito = mito_env.create_engine(MitoConfig::default()).await;
         let metric = MetricEngine::try_new(mito.clone(), config).unwrap();
         Self {
