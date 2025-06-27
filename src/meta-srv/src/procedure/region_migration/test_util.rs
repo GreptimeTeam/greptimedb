@@ -41,6 +41,7 @@ use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::error::{self, Error, Result};
+use crate::event_recorder::{EventRecorderImpl, EventRecorderRef};
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -68,6 +69,7 @@ pub struct TestingEnv {
     procedure_manager: ProcedureManagerRef,
     tracker: RegionMigrationProcedureTracker,
     kv_backend: KvBackendRef,
+    event_recorder: EventRecorderRef,
 }
 
 impl Default for TestingEnv {
@@ -97,6 +99,8 @@ impl TestingEnv {
             None,
         ));
 
+        let event_recorder = Arc::new(EventRecorderImpl::new(kv_backend.clone()));
+
         Self {
             table_metadata_manager,
             opening_region_keeper,
@@ -105,6 +109,7 @@ impl TestingEnv {
             procedure_manager,
             tracker: Default::default(),
             kv_backend,
+            event_recorder,
         }
     }
 
@@ -179,6 +184,11 @@ impl TestingEnv {
             )
             .await
             .unwrap();
+    }
+
+    /// Returns the [EventRecorderRef].
+    pub fn event_recorder(&self) -> EventRecorderRef {
+        self.event_recorder.clone()
     }
 }
 
