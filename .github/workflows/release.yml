@@ -110,6 +110,8 @@ jobs:
 
       # The 'version' use as the global tag name of the release workflow.
       version: ${{ steps.create-version.outputs.version }}
+
+      should-push-latest-tag: ${{ steps.check-version.outputs.should-push-latest-tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,6 +136,11 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
+
+      - name: Check version
+        id: check-version
+        run: |
+          ./.github/scripts/check-version.sh "${{ steps.create-version.outputs.version }}"
 
       - name: Allocate linux-amd64 runner
         if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
@@ -314,7 +321,7 @@ jobs:
           image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.should-push-latest-tag == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
       - name: Set build image result
         id: set-build-image-result
@@ -361,7 +368,7 @@ jobs:
           dev-mode: false
           upload-to-s3: true
           update-version-info: true
-          push-latest-tag: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
+          push-latest-tag: ${{ needs.allocate-runners.outputs.should-push-latest-tag == 'true' && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' }}
 
   publish-github-release:
     name: Create GitHub release and upload artifacts
