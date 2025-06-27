@@ -129,11 +129,11 @@ dir = "./greptimedb_data/wal"
 ## **It's only used when the provider is `raft_engine`**.
 file_size = "128MB"
 
-## The threshold of the WAL size to trigger a flush.
+## The threshold of the WAL size to trigger a purge.
 ## **It's only used when the provider is `raft_engine`**.
 purge_threshold = "1GB"
 
-## The interval to trigger a flush.
+## The interval to trigger a purge.
 ## **It's only used when the provider is `raft_engine`**.
 purge_interval = "1m"
 
