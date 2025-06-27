@@ -572,12 +572,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "TODO: fix this test or remove it"]
     fn test_file_id_serialization() {
-        let region_id = RegionId::new(1, 2);
+        let region_id = RegionId::new(1270, 2);
         let id = FileId::new(region_id);
         let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(format!("\"{id}\""), json);
+        assert_eq!(
+            format!(
+                "{{\"region_id\":{},\"uuid\":\"{}\"}}",
+                id.region_id().as_u64(),
+                id.uuid_str()
+            ),
+            json
+        );
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
