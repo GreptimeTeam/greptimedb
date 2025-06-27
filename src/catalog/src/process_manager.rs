@@ -18,15 +18,16 @@ use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
+use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ListProcessResponse, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
+use crate::error::Error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
 
 pub type ProcessId = u32;
@@ -141,14 +142,20 @@ impl ProcessManager {
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
-                processes.extend(
-                    f.list_process(ListProcessRequest {
+                let result = f
+                    .list_process(ListProcessRequest {
                         catalog: catalog.unwrap_or_default().to_string(),
                     })
                     .await
-                    .context(error::InvokeFrontendSnafu)?
-                    .processes,
-                );
+                    .context(error::InvokeFrontendSnafu);
+                match result {
+                    Ok(resp) => {
+                        processes.extend(resp.processes);
+                    }
+                    Err(e) => {
+                        warn!(e; "Skipping failing node")
+                    }
+                }
             }
         }
         processes.extend(self.local_processes(catalog)?);
