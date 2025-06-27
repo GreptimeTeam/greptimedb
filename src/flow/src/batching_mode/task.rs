@@ -577,8 +577,8 @@ impl BatchingTask {
         };
 
         debug!(
-            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
-            self.config.flow_id, l, u
+            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
+            self.config.flow_id, l, u, self.state.read().unwrap().dirty_time_windows
         );
         let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
             reason: format!("Can't get window size from {u:?} - {l:?}"),
