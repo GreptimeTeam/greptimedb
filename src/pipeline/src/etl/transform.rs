@@ -17,6 +17,7 @@ pub mod transformer;
 
 use api::v1::value::ValueData;
 use api::v1::ColumnDataType;
+use chrono::Utc;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
@@ -177,7 +178,24 @@ impl Transform {
 
     pub(crate) fn get_default_value_when_data_is_none(&self) -> Option<ValueData> {
         if is_timestamp_type(&self.type_) && self.index.is_some_and(|i| i == Index::Time) {
-            return get_default_for_type(&self.type_).ok();
+            let now = Utc::now();
+            match self.type_ {
+                ColumnDataType::TimestampSecond => {
+                    return Some(ValueData::TimestampSecondValue(now.timestamp()));
+                }
+                ColumnDataType::TimestampMillisecond => {
+                    return Some(ValueData::TimestampMillisecondValue(now.timestamp_millis()));
+                }
+                ColumnDataType::TimestampMicrosecond => {
+                    return Some(ValueData::TimestampMicrosecondValue(now.timestamp_micros()));
+                }
+                ColumnDataType::TimestampNanosecond => {
+                    return Some(ValueData::TimestampNanosecondValue(
+                        now.timestamp_nanos_opt()?,
+                    ));
+                }
+                _ => {}
+            }
         }
         None
     }
