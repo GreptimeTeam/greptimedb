@@ -30,7 +30,9 @@ use tonic::{Request, Response};
 
 use crate::error;
 use crate::metasrv::Metasrv;
-use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
+use crate::procedure::region_migration::manager::{
+    RegionMigrationProcedureTask, RegionMigrationTriggerReason,
+};
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
@@ -154,6 +156,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 from_peer,
                 to_peer,
                 timeout: Duration::from_secs(timeout_secs.into()),
+                trigger_reason: RegionMigrationTriggerReason::Manual,
             })
             .await?
             .map(procedure::pid_to_pb_pid);
