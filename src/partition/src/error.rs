@@ -24,7 +24,7 @@ use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::expr::PartitionExpr;
+use crate::expr::{Operand, PartitionExpr};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -162,6 +162,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unexpected operand: {:?}, want Expr", operand))]
+    NoExprOperand {
+        operand: Operand,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Undefined column: {}", column))]
     UndefinedColumn {
         column: String,
@@ -239,6 +246,7 @@ impl ErrorExt for Error {
             Error::ConjunctExprWithNonExpr { .. }
             | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
+            | Error::NoExprOperand { .. }
             | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
 
             Error::RegionKeysSize { .. }
