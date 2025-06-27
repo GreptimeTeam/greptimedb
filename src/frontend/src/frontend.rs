@@ -19,6 +19,7 @@ use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
@@ -62,6 +63,7 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: Option<SlowQueryOptions>,
+    pub store: ObjectStoreConfig,
 }
 
 impl Default for FrontendOptions {
@@ -88,6 +90,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
             slow_query: Some(SlowQueryOptions::default()),
+            store: ObjectStoreConfig::default(),
         }
     }
 }

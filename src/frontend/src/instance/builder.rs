@@ -37,6 +37,7 @@ use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::region_query::RegionQueryHandlerFactoryRef;
 use query::QueryEngineFactory;
+use servers::access_layer::AccessLayerFactory;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
@@ -219,6 +220,7 @@ impl FrontendBuilder {
                 Arc::new(Limiter::new(max_in_flight_write_bytes.as_bytes()))
             });
 
+        let access_layer_factory = AccessLayerFactory::new(&self.options.store).await.unwrap();
         Ok(Instance {
             catalog_manager: self.catalog_manager,
             pipeline_operator,
@@ -231,6 +233,7 @@ impl FrontendBuilder {
             slow_query_recorder,
             limiter,
             process_manager,
+            access_layer_factory,
         })
     }
 }

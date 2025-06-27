@@ -62,6 +62,7 @@ pub struct PromBulkState {
     pub schema_helper: SchemaHelper,
     pub partition_manager: PartitionRuleManagerRef,
     pub node_manager: NodeManagerRef,
+    pub access_layer_factory: AccessLayerFactory,
 }
 
 #[derive(Clone)]
@@ -144,6 +145,25 @@ pub async fn remote_write(
         })?;
 
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
+    }
+
+    if let Some(state) = state.bulk_state {
+        let context = PromBulkContext {
+            schema_helper: state.schema_helper,
+            query_ctx: query_ctx.clone(),
+            partition_manager: state.partition_manager,
+            node_manager: state.node_manager,
+            access_layer_factory: state.access_layer_factory,
+        };
+        decode_remote_write_request_to_batch(
+            is_zstd,
+            body,
+            prom_validation_mode,
+            &mut processor,
+            context,
+        )
+        .await?;
+        return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
     }
 
     let req =

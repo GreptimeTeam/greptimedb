@@ -101,6 +101,7 @@ where
                     schema_helper: self.instance.create_schema_helper(),
                     partition_manager: self.instance.partition_manager().clone(),
                     node_manager: self.instance.node_manager().clone(),
+                    access_layer_factory: self.instance.access_layer_factory().clone(),
                 })
             } else {
                 None

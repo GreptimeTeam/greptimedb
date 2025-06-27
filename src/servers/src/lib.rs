@@ -21,7 +21,7 @@
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
 
-mod access_layer;
+pub mod access_layer;
 pub mod addrs;
 #[allow(dead_code)]
 mod batch_builder;

@@ -49,6 +49,7 @@ log-query.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
 num_cpus.workspace = true
+object-store.workspace = true
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true

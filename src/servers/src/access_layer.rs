@@ -37,12 +37,13 @@ use crate::error;
 
 type AsyncParquetWriter = AsyncArrowWriter<AsyncWriter>;
 
+#[derive(Clone)]
 pub struct AccessLayerFactory {
     object_store: ObjectStore,
 }
 
 impl AccessLayerFactory {
-    async fn new(config: &ObjectStoreConfig) -> error::Result<AccessLayerFactory> {
+    pub async fn new(config: &ObjectStoreConfig) -> error::Result<AccessLayerFactory> {
         let object_store = object_store::factory::new_raw_object_store(config, "")
             .await
             .context(error::ObjectStoreSnafu)?;

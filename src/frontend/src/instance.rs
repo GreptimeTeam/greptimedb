@@ -61,6 +61,7 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::QueryEngineRef;
+use servers::access_layer::AccessLayerFactory;
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
 use servers::interceptor::{
@@ -103,6 +104,7 @@ pub struct Instance {
     slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
+    access_layer_factory: AccessLayerFactory,
 }
 
 impl Instance {
@@ -180,6 +182,10 @@ impl Instance {
 
     pub fn node_manager(&self) -> &NodeManagerRef {
         self.inserter.node_manager()
+    }
+
+    pub fn access_layer_factory(&self) -> &AccessLayerFactory {
+        &self.access_layer_factory
     }
 }
 

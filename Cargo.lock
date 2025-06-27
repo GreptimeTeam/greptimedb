@@ -4738,6 +4738,7 @@ dependencies = [
  "log-store",
  "meta-client",
  "num_cpus",
+ "object-store",
  "opentelemetry-proto 0.27.0",
  "operator",
  "otel-arrow-rust",
