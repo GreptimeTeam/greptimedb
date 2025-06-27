@@ -115,6 +115,18 @@ impl Operand {
     pub fn eq(self, rhs: impl Into<Self>) -> PartitionExpr {
         PartitionExpr::new(self, RestrictedOp::Eq, rhs.into())
     }
+
+    pub fn not_eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::NotEq, rhs.into())
+    }
+
+    pub fn gt(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::Gt, rhs.into())
+    }
+
+    pub fn lt_eq(self, rhs: impl Into<Self>) -> PartitionExpr {
+        PartitionExpr::new(self, RestrictedOp::LtEq, rhs.into())
+    }
 }
 
 impl Display for Operand {

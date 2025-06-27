@@ -18,7 +18,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
 use common_meta::rpc::router::Partition as MetaPartition;
-use datafusion_expr::Operator;
 use datatypes::arrow::array::{BooleanArray, RecordBatch};
 use datatypes::prelude::Value;
 use itertools::Itertools;
@@ -154,27 +153,6 @@ impl TryFrom<PartitionDef> for MetaPartition {
             column_list,
             value_list,
         })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct PartitionExpr {
-    pub column: String,
-    pub op: Operator,
-    pub value: Value,
-}
-
-impl PartitionExpr {
-    pub fn new(column: impl Into<String>, op: Operator, value: Value) -> Self {
-        Self {
-            column: column.into(),
-            op,
-            value,
-        }
-    }
-
-    pub fn value(&self) -> &Value {
-        &self.value
     }
 }
 
