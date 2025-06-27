@@ -29,7 +29,7 @@ use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig}
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
@@ -94,7 +94,7 @@ impl AccessLayer {
 
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
-        let path = location::sst_file_path(&self.table_dir, &file_meta.file_id);
+        let path = location::sst_file_path(&self.table_dir, file_meta.file_id());
         self.object_store
             .delete(&path)
             .await
@@ -102,7 +102,7 @@ impl AccessLayer {
                 file_id: file_meta.file_id,
             })?;
 
-        let path = location::index_file_path(&self.table_dir, &file_meta.file_id);
+        let path = location::index_file_path(&self.table_dir, file_meta.file_id());
         self.object_store
             .delete(&path)
             .await
@@ -182,8 +182,7 @@ impl AccessLayer {
             for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
                     cache_manager.put_parquet_meta_data(
-                        region_id,
-                        sst.file_id,
+                        RegionFileId::new(region_id, sst.file_id),
                         parquet_metadata.clone(),
                     )
                 }
@@ -320,37 +319,34 @@ async fn clean_dir(dir: &str) -> Result<()> {
 /// Path provider for SST file and index file.
 pub trait FilePathProvider: Send + Sync {
     /// Creates index file path of given file id.
-    fn build_index_file_path(&self, file_id: FileId) -> String;
+    fn build_index_file_path(&self, file_id: RegionFileId) -> String;
 
     /// Creates SST file path of given file id.
-    fn build_sst_file_path(&self, file_id: FileId) -> String;
+    fn build_sst_file_path(&self, file_id: RegionFileId) -> String;
 }
 
 /// Path provider that builds paths in local write cache.
 #[derive(Clone)]
 pub(crate) struct WriteCachePathProvider {
-    region_id: RegionId,
     file_cache: FileCacheRef,
 }
 
 impl WriteCachePathProvider {
     /// Creates a new `WriteCachePathProvider` instance.
-    pub fn new(region_id: RegionId, file_cache: FileCacheRef) -> Self {
-        Self {
-            region_id,
-            file_cache,
-        }
+    pub fn new(file_cache: FileCacheRef) -> Self {
+        Self { file_cache }
     }
 }
 
 impl FilePathProvider for WriteCachePathProvider {
-    fn build_index_file_path(&self, file_id: FileId) -> String {
-        let puffin_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+    fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+        let puffin_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
         self.file_cache.cache_file_path(puffin_key)
     }
 
-    fn build_sst_file_path(&self, file_id: FileId) -> String {
-        let parquet_file_key = IndexKey::new(self.region_id, file_id, FileType::Parquet);
+    fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+        let parquet_file_key =
+            IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
         self.file_cache.cache_file_path(parquet_file_key)
     }
 }
@@ -369,11 +365,11 @@ impl RegionFilePathFactory {
 }
 
 impl FilePathProvider for RegionFilePathFactory {
-    fn build_index_file_path(&self, file_id: FileId) -> String {
-        location::index_file_path(&self.table_dir, &file_id)
+    fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+        location::index_file_path(&self.table_dir, file_id)
     }
 
-    fn build_sst_file_path(&self, file_id: FileId) -> String {
-        location::sst_file_path(&self.table_dir, &file_id)
+    fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+        location::sst_file_path(&self.table_dir, file_id)
     }
 }

@@ -109,7 +109,7 @@ mod tests {
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::BatchReader;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
-    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -129,16 +129,16 @@ mod tests {
 
     #[derive(Clone)]
     struct FixedPathProvider {
-        file_id: FileId,
+        region_file_id: RegionFileId,
     }
 
     impl FilePathProvider for FixedPathProvider {
-        fn build_index_file_path(&self, _file_id: FileId) -> String {
-            location::index_file_path(FILE_DIR, &self.file_id)
+        fn build_index_file_path(&self, _file_id: RegionFileId) -> String {
+            location::index_file_path(FILE_DIR, self.region_file_id)
         }
 
-        fn build_sst_file_path(&self, _file_id: FileId) -> String {
-            location::sst_file_path(FILE_DIR, &self.file_id)
+        fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
+            location::sst_file_path(FILE_DIR, self.region_file_id)
         }
     }
 
@@ -157,7 +157,7 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = FixedPathProvider {
-            file_id: handle.file_id(),
+            region_file_id: handle.file_id(),
         };
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
@@ -231,7 +231,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -266,15 +266,18 @@ mod tests {
         }
 
         // Doesn't have compressed page cached.
-        let page_key = PageKey::new_compressed(metadata.region_id, handle.file_id(), 0, 0);
+        let page_key =
+            PageKey::new_compressed(metadata.region_id, handle.file_id().file_id(), 0, 0);
         assert!(cache.get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), i, 0);
+            let page_key =
+                PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), i, 0);
             assert!(cache.get_pages(&page_key).is_some());
         }
-        let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), 5, 0);
+        let page_key =
+            PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), 5, 0);
         assert!(cache.get_pages(&page_key).is_none());
     }
 
@@ -302,7 +305,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -344,7 +347,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -396,7 +399,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -433,7 +436,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -773,7 +776,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 inverted_index_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         // inverted index will search all row groups
@@ -825,7 +828,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         assert!(cached.contains_row_group(2));
@@ -887,7 +890,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         assert!(cached.contains_row_group(0));

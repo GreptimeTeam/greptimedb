@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(3, outputs.len());
 
         assert_eq!(1, outputs[0].inputs.len());
-        assert_eq!(files[0].0, outputs[0].inputs[0].file_id());
+        assert_eq!(files[0].0, outputs[0].inputs[0].file_id().file_id());
         assert_eq!(
             TimestampRange::new(
                 Timestamp::new_millisecond(0),
@@ -332,7 +332,7 @@ mod tests {
         );
 
         assert_eq!(1, outputs[2].inputs.len());
-        assert_eq!(files[1].0, outputs[2].inputs[0].file_id());
+        assert_eq!(files[1].0, outputs[2].inputs[0].file_id().file_id());
         assert_eq!(
             TimestampRange::new(
                 Timestamp::new_millisecond(2 * HOUR),

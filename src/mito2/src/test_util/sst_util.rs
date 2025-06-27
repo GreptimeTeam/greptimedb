@@ -30,7 +30,7 @@ use store_api::metadata::{
 use store_api::storage::RegionId;
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
 use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 
 /// Test region id.
@@ -135,7 +135,7 @@ pub fn sst_file_handle_with_file_id(file_id: FileId, start_ms: i64, end_ms: i64)
 
 /// Creates a new [FileHandle] for a SST.
 pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
-    sst_file_handle_with_file_id(FileId::new(REGION_ID), start_ms, end_ms)
+    sst_file_handle_with_file_id(FileId::random(), start_ms, end_ms)
 }
 
 pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {

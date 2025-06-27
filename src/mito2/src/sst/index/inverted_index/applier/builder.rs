@@ -140,7 +140,6 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         Ok(Some(
             InvertedIndexApplier::new(
                 self.region_dir,
-                self.metadata.region_id,
                 self.object_store,
                 Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,

@@ -115,7 +115,7 @@ impl Scanner {
     }
 
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
@@ -559,7 +559,6 @@ impl ScanRegion {
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
             self.access_layer.table_dir().to_string(),
-            self.region_id(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
@@ -915,7 +914,7 @@ impl ScanInput {
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
     }
 }

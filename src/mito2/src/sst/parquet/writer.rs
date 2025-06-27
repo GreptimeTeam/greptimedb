@@ -41,7 +41,7 @@ use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 use crate::access_layer::{FilePathProvider, SstInfoArray, TempFileCleaner};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
-use crate::sst::file::FileId;
+use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
@@ -129,7 +129,7 @@ where
         indexer_builder: I,
         path_provider: P,
     ) -> ParquetWriter<F, I, P> {
-        let init_file = FileId::new(metadata.region_id);
+        let init_file = FileId::random();
         let indexer = indexer_builder.build(init_file).await;
 
         ParquetWriter {
@@ -186,7 +186,7 @@ where
                 file_metadata: Some(Arc::new(parquet_metadata)),
                 index_metadata: index_output,
             });
-            self.current_file = FileId::new(self.metadata.region_id);
+            self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)
         };
 
@@ -320,7 +320,10 @@ where
             let props_builder = Self::customize_column_config(props_builder, &self.metadata);
             let writer_props = props_builder.build();
 
-            let sst_file_path = self.path_provider.build_sst_file_path(self.current_file);
+            let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(
+                self.metadata.region_id,
+                self.current_file,
+            ));
             let writer = SizeAwareWriter::new(
                 self.writer_factory.create(&sst_file_path).await?,
                 self.bytes_written.clone(),

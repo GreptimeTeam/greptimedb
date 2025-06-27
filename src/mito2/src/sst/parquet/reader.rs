@@ -322,14 +322,9 @@ impl ParquetReaderBuilder {
             .with_label_values(&["read_parquet_metadata"])
             .start_timer();
 
-        let region_id = self.file_handle.region_id();
         let file_id = self.file_handle.file_id();
         // Tries to get from global cache.
-        if let Some(metadata) = self
-            .cache_strategy
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-        {
+        if let Some(metadata) = self.cache_strategy.get_parquet_meta_data(file_id).await {
             return Ok(metadata);
         }
 
@@ -338,11 +333,8 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load().await?;
         let metadata = Arc::new(metadata);
         // Cache the metadata.
-        self.cache_strategy.put_parquet_meta_data(
-            self.file_handle.region_id(),
-            self.file_handle.file_id(),
-            metadata.clone(),
-        );
+        self.cache_strategy
+            .put_parquet_meta_data(file_id, metadata.clone());
 
         Ok(metadata)
     }
@@ -438,7 +430,7 @@ impl ParquetReaderBuilder {
         let cached = self
             .cache_strategy
             .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
         if let Some(result) = cached.as_ref() {
             if all_required_row_groups_searched(output, result) {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
@@ -462,7 +454,7 @@ impl ParquetReaderBuilder {
 
         self.apply_index_result_and_update_cache(
             predicate_key,
-            self.file_handle.file_id(),
+            self.file_handle.file_id().file_id(),
             selection,
             output,
             metrics,
@@ -495,7 +487,7 @@ impl ParquetReaderBuilder {
         let cached = self
             .cache_strategy
             .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
         if let Some(result) = cached.as_ref() {
             if all_required_row_groups_searched(output, result) {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_INVERTED);
@@ -522,7 +514,7 @@ impl ParquetReaderBuilder {
 
         self.apply_index_result_and_update_cache(
             predicate_key,
-            self.file_handle.file_id(),
+            self.file_handle.file_id().file_id(),
             selection,
             output,
             metrics,
@@ -550,7 +542,7 @@ impl ParquetReaderBuilder {
         let cached = self
             .cache_strategy
             .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
         if let Some(result) = cached.as_ref() {
             if all_required_row_groups_searched(output, result) {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_BLOOM);
@@ -589,7 +581,7 @@ impl ParquetReaderBuilder {
 
         self.apply_index_result_and_update_cache(
             predicate_key,
-            self.file_handle.file_id(),
+            self.file_handle.file_id().file_id(),
             selection,
             output,
             metrics,
@@ -617,7 +609,7 @@ impl ParquetReaderBuilder {
         let cached = self
             .cache_strategy
             .index_result_cache()
-            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id()));
+            .and_then(|cache| cache.get(predicate_key, self.file_handle.file_id().file_id()));
         if let Some(result) = cached.as_ref() {
             if all_required_row_groups_searched(output, result) {
                 apply_selection_and_update_metrics(output, result, metrics, INDEX_TYPE_FULLTEXT);
@@ -659,7 +651,7 @@ impl ParquetReaderBuilder {
 
         self.apply_index_result_and_update_cache(
             predicate_key,
-            self.file_handle.file_id(),
+            self.file_handle.file_id().file_id(),
             selection,
             output,
             metrics,
@@ -935,7 +927,7 @@ impl RowGroupReaderBuilder {
     ) -> Result<ParquetRecordBatchReader> {
         let mut row_group = InMemoryRowGroup::create(
             self.file_handle.region_id(),
-            self.file_handle.file_id(),
+            self.file_handle.file_id().file_id(),
             &self.parquet_meta,
             row_group_idx,
             self.cache_strategy.clone(),

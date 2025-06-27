@@ -16,6 +16,7 @@ use common_telemetry::{debug, warn};
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 use store_api::storage::ColumnId;
 
+use crate::sst::file::RegionFileId;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount};
 use crate::sst::index::{
@@ -60,7 +61,10 @@ impl Indexer {
     async fn build_puffin_writer(&mut self) -> Option<SstPuffinWriter> {
         let puffin_manager = self.puffin_manager.take()?;
 
-        let err = match puffin_manager.writer(&self.file_id).await {
+        let err = match puffin_manager
+            .writer(&RegionFileId::new(self.region_id, self.file_id))
+            .await
+        {
             Ok(writer) => return Some(writer),
             Err(err) => err,
         };

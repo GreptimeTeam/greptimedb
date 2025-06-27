@@ -78,10 +78,6 @@ pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
     /// SST files.
-    #[serde(
-        serialize_with = "serialize_files_map",
-        deserialize_with = "deserialize_files_map"
-    )]
     pub files: HashMap<FileId, FileMeta>,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
@@ -94,56 +90,6 @@ pub struct RegionManifest {
     /// Inferred compaction time window.
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
-}
-
-fn serialize_files_map<S>(
-    files: &HashMap<FileId, FileMeta>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use serde::ser::SerializeMap;
-    let mut map = serializer.serialize_map(Some(files.len()))?;
-    for (file_id, file_meta) in files {
-        map.serialize_entry(&file_id.to_string(), file_meta)?;
-    }
-    map.end()
-}
-
-fn deserialize_files_map<'de, D>(deserializer: D) -> Result<HashMap<FileId, FileMeta>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use std::fmt;
-
-    use serde::de::{self, MapAccess, Visitor};
-
-    struct FilesMapVisitor;
-
-    impl<'de> Visitor<'de> for FilesMapVisitor {
-        type Value = HashMap<FileId, FileMeta>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a map of file_id strings to FileMeta objects")
-        }
-
-        fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
-        where
-            V: MapAccess<'de>,
-        {
-            let mut files = HashMap::new();
-            while let Some((key, value)) = map.next_entry::<String, FileMeta>()? {
-                let file_id = FileId::parse_str(&key, value.region_id).map_err(|_| {
-                    de::Error::invalid_value(de::Unexpected::Str(&key), &"a valid FileId string")
-                })?;
-                files.insert(file_id, value);
-            }
-            Ok(files)
-        }
-    }
-
-    deserializer.deserialize_map(FilesMapVisitor)
 }
 
 #[derive(Debug, Default)]
@@ -368,7 +314,7 @@ mod tests {
                     },
                     {
                         "column_schema": {
-                            "name": "b", 
+                            "name": "b",
                             "data_type": {"Float64": {}},
                             "is_nullable": false,
                             "is_time_index": false,
@@ -438,8 +384,8 @@ mod tests {
         assert_eq!(
             file_ids,
             vec![
-                "1025_0000000000/34b6ebb9-b8a5-4a4b-b744-56f67defad02",
-                "1025_0000000000/4b220a70-2b03-4641-9687-b65d94641208",
+                "34b6ebb9-b8a5-4a4b-b744-56f67defad02",
+                "4b220a70-2b03-4641-9687-b65d94641208",
             ]
         );
 

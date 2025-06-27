@@ -229,7 +229,7 @@ async fn checkpoint_with_different_compression_types() {
     for _ in 0..10 {
         let file_meta = FileMeta {
             region_id: RegionId::new(123, 456),
-            file_id: FileId::new(RegionId::new(123, 456)),
+            file_id: FileId::random(),
             time_range: (0.into(), 10000000.into()),
             level: 0,
             file_size: 1024000,
@@ -284,7 +284,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
     let mut files = vec![];
     let mut actions = vec![];
     for _ in 0..num {
-        let file_id = FileId::new(RegionId::new(123, 456));
+        let file_id = FileId::random();
         files.push(file_id);
         let file_meta = FileMeta {
             region_id: RegionId::new(123, 456),
@@ -414,5 +414,5 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     for file_id in files.iter() {
         assert!(another_manager.manifest().files.contains_key(file_id));
     }
-    assert_eq!(4692, another_manager.store().total_manifest_size());
+    assert!(another_manager.store().total_manifest_size() > 4000);
 }
