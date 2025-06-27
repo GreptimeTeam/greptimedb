@@ -57,7 +57,9 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env = TestEnv::with_prefix("last_entry_id").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("last_entry_id")
+        .await
+        .with_log_store_factory(factory.clone());
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
@@ -175,8 +177,9 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
         return;
     };
 
-    let mut env =
-        TestEnv::with_prefix("incorrect_last_entry_id").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("incorrect_last_entry_id")
+        .await
+        .with_log_store_factory(factory.clone());
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
@@ -277,8 +280,9 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env =
-        TestEnv::with_prefix("without_last_entry_id").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("without_last_entry_id")
+        .await
+        .with_log_store_factory(factory.clone());
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
@@ -380,8 +384,9 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env =
-        TestEnv::with_prefix("without_manifest_update").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("without_manifest_update")
+        .await
+        .with_log_store_factory(factory.clone());
     let topic = prepare_test_for_kafka_log_store(&factory).await;
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let follower_engine = env.create_follower_engine(MitoConfig::default()).await;
@@ -545,7 +550,9 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         return;
     };
 
-    let mut env = TestEnv::with_prefix("local_catchup").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("local_catchup")
+        .await
+        .with_log_store_factory(factory.clone());
     let leader_engine = env.create_engine(MitoConfig::default()).await;
     let Some(LogStoreImpl::RaftEngine(log_store)) = env.get_log_store() else {
         unreachable!()
@@ -686,7 +693,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_catchup_not_exist() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let non_exist_region_id = RegionId::new(1, 1);

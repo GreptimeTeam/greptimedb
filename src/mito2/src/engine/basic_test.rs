@@ -42,7 +42,7 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_engine_new_stop() {
-    let mut env = TestEnv::with_prefix("engine-stop");
+    let mut env = TestEnv::with_prefix("engine-stop").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -69,7 +69,7 @@ async fn test_engine_new_stop() {
 
 #[tokio::test]
 async fn test_write_to_region() {
-    let mut env = TestEnv::with_prefix("write-to-region");
+    let mut env = TestEnv::with_prefix("write-to-region").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -97,7 +97,9 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
     let Some(factory) = factory else {
         return;
     };
-    let mut env = TestEnv::with_prefix("region-replay").with_log_store_factory(factory.clone());
+    let mut env = TestEnv::with_prefix("region-replay")
+        .await
+        .with_log_store_factory(factory.clone());
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -173,7 +175,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
 
 #[tokio::test]
 async fn test_write_query_region() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -207,7 +209,7 @@ async fn test_write_query_region() {
 
 #[tokio::test]
 async fn test_different_order() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -268,7 +270,7 @@ async fn test_different_order() {
 
 #[tokio::test]
 async fn test_different_order_and_type() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -332,7 +334,7 @@ async fn test_different_order_and_type() {
 async fn test_put_delete() {
     common_telemetry::init_default_ut_logging();
 
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -384,7 +386,7 @@ async fn test_put_delete() {
 
 #[tokio::test]
 async fn test_delete_not_null_fields() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -433,7 +435,7 @@ async fn test_delete_not_null_fields() {
 
 #[tokio::test]
 async fn test_put_overwrite() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -493,7 +495,7 @@ async fn test_put_overwrite() {
 
 #[tokio::test]
 async fn test_absent_and_invalid_columns() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -541,7 +543,7 @@ async fn test_absent_and_invalid_columns() {
 
 #[tokio::test]
 async fn test_region_usage() {
-    let mut env = TestEnv::with_prefix("region_usage");
+    let mut env = TestEnv::with_prefix("region_usage").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -595,7 +597,7 @@ async fn test_region_usage() {
 async fn test_engine_with_write_cache() {
     common_telemetry::init_default_ut_logging();
 
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let path = env.data_home().to_str().unwrap().to_string();
     let mito_config = MitoConfig::default().enable_write_cache(path, ReadableSize::mb(512), None);
     let engine = env.create_engine(mito_config).await;
@@ -635,7 +637,7 @@ async fn test_engine_with_write_cache() {
 
 #[tokio::test]
 async fn test_cache_null_primary_key() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
             vector_cache_size: ReadableSize::mb(32),

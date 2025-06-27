@@ -73,7 +73,7 @@ async fn scan_in_parallel(
 
 #[tokio::test]
 async fn test_parallel_scan() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

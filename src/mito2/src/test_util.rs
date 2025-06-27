@@ -211,32 +211,28 @@ pub struct TestEnv {
     kv_backend: KvBackendRef,
 }
 
-impl Default for TestEnv {
-    fn default() -> Self {
-        TestEnv::new()
-    }
-}
-
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
-    pub fn new() -> TestEnv {
-        Self::with_prefix("")
+    pub async fn new() -> TestEnv {
+        Self::with_prefix("").await
     }
 
     /// Returns a new env with specific `prefix` for test.
-    pub fn with_prefix(prefix: &str) -> TestEnv {
-        Self::with_data_home(create_temp_dir(prefix))
+    pub async fn with_prefix(prefix: &str) -> TestEnv {
+        Self::with_data_home(create_temp_dir(prefix)).await
     }
 
     /// Returns a new env with specific `data_home` for test.
-    pub fn with_data_home(data_home: TempDir) -> TestEnv {
+    pub async fn with_data_home(data_home: TempDir) -> TestEnv {
         let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
 
         let index_aux_path = data_home.path().join("index_aux");
-        let f = PuffinManagerFactory::new(&index_aux_path, 4096, None, None);
-        let puffin_manager = futures::executor::block_on(f).unwrap();
-        let f = IntermediateManager::init_fs(index_aux_path.to_str().unwrap());
-        let intermediate_manager = futures::executor::block_on(f).unwrap();
+        let puffin_manager = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intermediate_manager = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         TestEnv {
             data_home,

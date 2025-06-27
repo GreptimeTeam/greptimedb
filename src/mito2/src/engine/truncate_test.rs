@@ -33,7 +33,7 @@ use crate::test_util::{
 
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
-    let mut env = TestEnv::with_prefix("truncate-basic");
+    let mut env = TestEnv::with_prefix("truncate-basic").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     // Create the region.
@@ -83,7 +83,7 @@ async fn test_engine_truncate_region_basic() {
 
 #[tokio::test]
 async fn test_engine_put_data_after_truncate() {
-    let mut env = TestEnv::with_prefix("truncate-put");
+    let mut env = TestEnv::with_prefix("truncate-put").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     // Create the region.
@@ -146,7 +146,7 @@ async fn test_engine_put_data_after_truncate() {
 
 #[tokio::test]
 async fn test_engine_truncate_after_flush() {
-    let mut env = TestEnv::with_prefix("truncate-flush");
+    let mut env = TestEnv::with_prefix("truncate-flush").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     // Create the region.
@@ -223,7 +223,7 @@ async fn test_engine_truncate_after_flush() {
 
 #[tokio::test]
 async fn test_engine_truncate_reopen() {
-    let mut env = TestEnv::with_prefix("truncate-reopen");
+    let mut env = TestEnv::with_prefix("truncate-reopen").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     // Create the region.
@@ -282,7 +282,7 @@ async fn test_engine_truncate_reopen() {
 #[tokio::test]
 async fn test_engine_truncate_during_flush() {
     init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("truncate-during-flush");
+    let mut env = TestEnv::with_prefix("truncate-during-flush").await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let listener = Arc::new(FlushTruncateListener::default());
     let engine = env

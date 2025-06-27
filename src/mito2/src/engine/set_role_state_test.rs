@@ -32,7 +32,7 @@ async fn test_set_role_state_gracefully() {
         SettableRegionRoleState::DowngradingLeader,
     ];
     for settable_role_state in settable_role_states {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
 
         let region_id = RegionId::new(1, 1);
@@ -101,7 +101,7 @@ async fn test_set_role_state_gracefully() {
 
 #[tokio::test]
 async fn test_set_role_state_gracefully_not_exist() {
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let non_exist_region_id = RegionId::new(1, 1);
@@ -116,7 +116,7 @@ async fn test_set_role_state_gracefully_not_exist() {
 
 #[tokio::test]
 async fn test_write_downgrading_region() {
-    let mut env = TestEnv::with_prefix("write-to-downgrading-region");
+    let mut env = TestEnv::with_prefix("write-to-downgrading-region").await;
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);

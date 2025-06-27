@@ -153,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_read() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = FixedPathProvider {
@@ -211,7 +211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_cache() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
@@ -281,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn test_parquet_metadata_eq() {
         // create test env
-        let mut env = crate::test_util::TestEnv::new();
+        let mut env = crate::test_util::TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
@@ -324,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_tag_filter() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
@@ -376,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_empty_batch() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
@@ -413,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_with_field_filter() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let metadata = Arc::new(sst_region_metadata());
@@ -459,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_large_binary() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = handle.file_path(FILE_DIR);
@@ -550,7 +550,7 @@ mod tests {
     async fn test_write_multiple_files() {
         common_telemetry::init_default_ut_logging();
         // create test env
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let metadata = Arc::new(sst_region_metadata());
         let batches = &[
@@ -602,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_read_with_index() {
-        let mut env = TestEnv::new();
+        let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let file_path = RegionFilePathFactory::new(FILE_DIR.to_string());
         let metadata = Arc::new(sst_region_metadata());
