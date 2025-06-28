@@ -2635,6 +2635,7 @@ dependencies = [
  "datafusion-common",
  "datatypes",
  "futures",
+ "jsonb",
  "pin-project",
  "regex",
  "serde",
