@@ -26,7 +26,7 @@ use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
     DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
     ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
-    SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions,
+    SetDefaults, SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions,
     SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
     UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
@@ -645,6 +645,21 @@ pub(crate) fn to_alter_table_expr(
                     .collect::<Result<Vec<_>>>()?,
             })
         }
+        AlterTableOperation::SetDefaults { defaults } => AlterTableKind::SetDefaults(SetDefaults {
+            set_defaults: defaults
+                .into_iter()
+                .map(|col| {
+                    let column_name = col.column_name.to_string();
+                    let default_constraint = serde_json::to_string(&col.default_constraint)
+                        .context(EncodeJsonSnafu)?
+                        .into_bytes();
+                    Ok(api::v1::SetDefault {
+                        column_name,
+                        default_constraint,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+        }),
     };
 
     Ok(AlterTableExpr {
