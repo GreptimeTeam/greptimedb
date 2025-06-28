@@ -2458,6 +2458,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-query",
+ "common-sql",
  "common-time",
  "datatypes",
  "paste",
@@ -2721,6 +2722,7 @@ dependencies = [
  "datatypes",
  "hex",
  "jsonb",
+ "serde_json",
  "snafu 0.8.5",
  "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
 ]
@@ -5223,7 +5225,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7fcaa3e413947a7a28d9af95812af26c1939ce78#7fcaa3e413947a7a28d9af95812af26c1939ce78"
+source = "git+https://github.com/firefantasy/greptime-proto.git?rev=b04e88508a963cf7bba1222f5ab5b9da6efc377f#b04e88508a963cf7bba1222f5ab5b9da6efc377f"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -12143,6 +12145,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-recordbatch",
+ "common-sql",
  "common-time",
  "common-wal",
  "datafusion-expr",
@@ -12157,6 +12160,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "strum 0.27.1",
  "tokio",
 ]
@@ -12505,6 +12509,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-recordbatch",
+ "common-sql",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -12524,6 +12529,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.5",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "tokio",
  "tokio-util",

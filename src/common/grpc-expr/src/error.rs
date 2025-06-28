@@ -161,6 +161,26 @@ pub enum Error {
         #[snafu(source)]
         error: datatypes::error::Error,
     },
+
+    #[snafu(display("Sql common error"))]
+    SqlCommon {
+        source: common_sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing required field in protobuf, column name: {}", column_name))]
+    ColumnNotFound {
+        column_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Need table metadata, but not found"))]
+    MissingTableMeta {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -190,6 +210,9 @@ impl ErrorExt for Error {
             | Error::InvalidSetSkippingIndexOptionRequest { .. }
             | Error::MissingAlterIndexOption { .. }
             | Error::InvalidIndexOption { .. } => StatusCode::InvalidArguments,
+            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+            Error::SqlCommon { source, .. } => source.status_code(),
+            Error::MissingTableMeta { .. } => StatusCode::Internal,
         }
     }
 

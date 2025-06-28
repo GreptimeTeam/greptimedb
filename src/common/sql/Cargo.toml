@@ -15,6 +15,7 @@ datafusion-sql.workspace = true
 datatypes.workspace = true
 hex = "0.4"
 jsonb.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 

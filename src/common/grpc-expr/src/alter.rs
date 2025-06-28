@@ -27,16 +27,17 @@ use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, FulltextOptions, RawSchema, SkippingIndexOptions};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableMeta};
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOption,
-    UnsetIndexOption,
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetDefaultRequest,
+    SetIndexOption, UnsetIndexOption,
 };
 
 use crate::error::{
-    InvalidColumnDefSnafu, InvalidIndexOptionSnafu, InvalidSetFulltextOptionRequestSnafu,
-    InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
-    InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
+    ColumnNotFoundSnafu, InvalidColumnDefSnafu, InvalidIndexOptionSnafu,
+    InvalidSetFulltextOptionRequestSnafu, InvalidSetSkippingIndexOptionRequestSnafu,
+    InvalidSetTableOptionRequestSnafu, InvalidUnsetTableOptionRequestSnafu,
+    MissingAlterIndexOptionSnafu, MissingFieldSnafu, MissingTableMetaSnafu,
     MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
 
@@ -97,7 +98,13 @@ fn unset_index_option_from_proto(unset_index: api::v1::UnsetIndex) -> Result<Uns
 }
 
 /// Convert an [`AlterTableExpr`] to an [`AlterTableRequest`]
-pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<AlterTableRequest> {
+///
+/// note: `table_meta` must not be None if [`AlterTableExpr`] is `SetDefault`
+pub fn alter_expr_to_request(
+    table_id: TableId,
+    expr: AlterTableExpr,
+    table_meta: Option<&TableMeta>,
+) -> Result<AlterTableRequest> {
     let catalog_name = expr.catalog_name;
     let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
@@ -218,6 +225,31 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                 .collect::<Result<Vec<_>>>()?;
             AlterKind::DropDefaults { names }
         }
+        Kind::SetDefaults(o) => {
+            let table_meta = table_meta.context(MissingTableMetaSnafu)?;
+            let defaults = o
+                .set_defaults
+                .into_iter()
+                .map(|col| {
+                    let column_scheme = table_meta
+                        .schema
+                        .column_schema_by_name(&col.column_name)
+                        .context(ColumnNotFoundSnafu {
+                        column_name: &col.column_name,
+                    })?;
+                    Ok(SetDefaultRequest {
+                        column_name: col.column_name.clone(),
+                        default_constraint: common_sql::convert::deserialize_default_constraint(
+                            col.default_constraint.as_slice(),
+                            &col.column_name,
+                            &column_scheme.data_type,
+                        )
+                        .context(crate::error::SqlCommonSnafu)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            AlterKind::SetDefaults { defaults }
+        }
     };
 
     let request = AlterTableRequest {
@@ -317,7 +349,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
         assert_eq!(alter_request.catalog_name, "");
         assert_eq!(alter_request.schema_name, "");
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -381,7 +413,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
         assert_eq!(alter_request.catalog_name, "");
         assert_eq!(alter_request.schema_name, "");
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -433,7 +465,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
         assert_eq!(alter_request.catalog_name, "test_catalog");
         assert_eq!(alter_request.schema_name, "test_schema");
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -465,7 +497,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(1, expr).unwrap();
+        let alter_request = alter_expr_to_request(1, expr, None).unwrap();
         assert_eq!(alter_request.catalog_name, "test_catalog");
         assert_eq!(alter_request.schema_name, "test_schema");
         assert_eq!("monitor".to_string(), alter_request.table_name);
