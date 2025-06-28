@@ -119,6 +119,11 @@ pub enum StatusCode {
     FlowAlreadyExists = 8000,
     FlowNotFound = 8001,
     // ====== End of flow related status code =====
+
+    // ====== Begin of trigger related status code =====
+    TriggerAlreadyExists = 9000,
+    TriggerNotFound = 9001,
+    // ====== End of trigger related status code =====
 }
 
 impl StatusCode {
@@ -155,6 +160,8 @@ impl StatusCode {
             | StatusCode::RegionNotFound
             | StatusCode::FlowAlreadyExists
             | StatusCode::FlowNotFound
+            | StatusCode::TriggerAlreadyExists
+            | StatusCode::TriggerNotFound
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
@@ -198,6 +205,8 @@ impl StatusCode {
             | StatusCode::PlanQuery
             | StatusCode::FlowAlreadyExists
             | StatusCode::FlowNotFound
+            | StatusCode::TriggerAlreadyExists
+            | StatusCode::TriggerNotFound
             | StatusCode::RegionNotReady
             | StatusCode::RegionBusy
             | StatusCode::RegionReadonly
@@ -281,12 +290,14 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::TableColumnExists
         | StatusCode::RegionAlreadyExists
         | StatusCode::DatabaseAlreadyExists
+        | StatusCode::TriggerAlreadyExists
         | StatusCode::FlowAlreadyExists => Code::AlreadyExists,
         StatusCode::TableNotFound
         | StatusCode::RegionNotFound
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound
+        | StatusCode::TriggerNotFound
         | StatusCode::FlowNotFound => Code::NotFound,
         StatusCode::TableUnavailable
         | StatusCode::StorageUnavailable
