@@ -27,7 +27,7 @@ use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME,
 };
-use crate::etl::value::time::{
+use crate::etl::value::{
     MICROSECOND_RESOLUTION, MICRO_RESOLUTION, MILLISECOND_RESOLUTION, MILLI_RESOLUTION,
     MS_RESOLUTION, NANOSECOND_RESOLUTION, NANO_RESOLUTION, NS_RESOLUTION, SECOND_RESOLUTION,
     SEC_RESOLUTION, S_RESOLUTION, US_RESOLUTION,

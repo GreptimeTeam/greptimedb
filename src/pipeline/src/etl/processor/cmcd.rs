@@ -256,14 +256,13 @@ impl Processor for CmcdProcessor {
     fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let name = field.input_field();
-
-            match val.as_object().and_then(|m| m.get(name)) {
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
+            match val.get(name) {
                 Some(VrlValue::Bytes(s)) => {
                     let s = String::from_utf8_lossy(s);
                     let results = self.parse(field.target_or_input_field(), &s)?;
 
-                    let v = val.as_object_mut().context(ValueMustBeMapSnafu)?;
-                    v.extend(results);
+                    val.extend(results);
                 }
                 Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {

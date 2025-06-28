@@ -348,49 +348,6 @@ fn resolve_schema(
     }
 }
 
-// fn resolve_number_schema(
-//     n: Number,
-//     column_name: String,
-//     index: Option<usize>,
-//     row: &mut Vec<GreptimeValue>,
-//     schema_info: &mut SchemaInfo,
-// ) -> Result<()> {
-//     let (value, datatype, semantic_type) = if n.is_i64() {
-//         (
-//             ValueData::I64Value(n.as_i64().unwrap()),
-//             ColumnDataType::Int64 as i32,
-//             SemanticType::Field as i32,
-//         )
-//     } else if n.is_u64() {
-//         (
-//             ValueData::U64Value(n.as_u64().unwrap()),
-//             ColumnDataType::Uint64 as i32,
-//             SemanticType::Field as i32,
-//         )
-//     } else if n.is_f64() {
-//         (
-//             ValueData::F64Value(n.as_f64().unwrap()),
-//             ColumnDataType::Float64 as i32,
-//             SemanticType::Field as i32,
-//         )
-//     } else {
-//         return UnsupportedNumberTypeSnafu { value: n }.fail();
-//     };
-//     resolve_schema(
-//         index,
-//         value,
-//         ColumnSchema {
-//             column_name,
-//             datatype,
-//             semantic_type,
-//             datatype_extension: None,
-//             options: None,
-//         },
-//         row,
-//         schema_info,
-//     )
-// }
-
 fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueData>> {
     match p_ctx.channel {
         Channel::Prometheus => {

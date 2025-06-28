@@ -35,13 +35,11 @@ use headers::ContentType;
 use lazy_static::lazy_static;
 use mime_guess::mime;
 use pipeline::util::to_pipeline_version;
-use pipeline::{
-    json_array_to_vrl_array, simd_json_to_vrl_value, ContextReq, GreptimePipelineParams,
-    PipelineContext, PipelineDefinition,
-};
+use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Deserializer, Map, Value as JsonValue};
 use session::context::{Channel, QueryContext, QueryContextRef};
+use simd_json::Buffers;
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{EnumIter, IntoEnumIterator};
 use vrl::value::{KeyString, Value as VrlValue};
@@ -297,18 +295,18 @@ pub async fn delete_pipeline(
 /// Transform NDJSON array into a single array
 /// always return an array
 fn transform_ndjson_array_factory(
-    values: impl IntoIterator<Item = Result<JsonValue, serde_json::Error>>,
+    values: impl IntoIterator<Item = Result<VrlValue, serde_json::Error>>,
     ignore_error: bool,
-) -> Result<Vec<JsonValue>> {
+) -> Result<Vec<VrlValue>> {
     values
         .into_iter()
         .try_fold(Vec::with_capacity(100), |mut acc_array, item| match item {
             Ok(item_value) => {
                 match item_value {
-                    JsonValue::Array(item_array) => {
+                    VrlValue::Array(item_array) => {
                         acc_array.extend(item_array);
                     }
-                    JsonValue::Object(_) => {
+                    VrlValue::Object(_) => {
                         acc_array.push(item_value);
                     }
                     _ => {
@@ -745,15 +743,13 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
-            EventPayloadResolverInner::Json => {
-                json_array_to_vrl_array(transform_ndjson_array_factory(
-                    Deserializer::from_slice(&payload).into_iter(),
-                    ignore_errors,
-                )?)
-                .context(PipelineSnafu)
-            }
+            EventPayloadResolverInner::Json => transform_ndjson_array_factory(
+                Deserializer::from_slice(&payload).into_iter(),
+                ignore_errors,
+            ),
             EventPayloadResolverInner::Ndjson => {
                 let mut result = Vec::with_capacity(1000);
+                let mut buffer = Buffers::new(1000);
                 for (index, line) in payload.lines().enumerate() {
                     let mut line = match line {
                         Ok(line) if !line.is_empty() => line,
@@ -770,8 +766,10 @@ impl EventPayloadResolver<'_> {
 
                     // simd_json, according to description, only de-escapes string at character level,
                     // like any other json parser. So it should be safe here.
-                    if let Ok(v) = simd_json::to_owned_value(unsafe { line.as_bytes_mut() }) {
-                        let v = simd_json_to_vrl_value(v).context(PipelineSnafu)?;
+                    if let Ok(v) = simd_json::serde::from_slice_with_buffers(
+                        unsafe { line.as_bytes_mut() },
+                        &mut buffer,
+                    ) {
                         result.push(v);
                     } else if !ignore_errors {
                         warn!("invalid JSON at index: {}, content: {:?}", index, line);
@@ -904,36 +902,38 @@ pub struct LogState {
 
 #[cfg(test)]
 mod tests {
+    use pipeline::json_array_to_vrl_array;
+
     use super::*;
 
     #[test]
     fn test_transform_ndjson() {
         let s = "{\"a\": 1}\n{\"b\": 2}";
-        let a = JsonValue::Array(
-            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        let a = serde_json::to_string(
+            &transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
-        .to_string();
+        .unwrap();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
 
         let s = "{\"a\": 1}";
-        let a = JsonValue::Array(
-            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        let a = serde_json::to_string(
+            &transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
-        .to_string();
+        .unwrap();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}]";
-        let a = JsonValue::Array(
-            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        let a = serde_json::to_string(
+            &transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
-        .to_string();
+        .unwrap();
         assert_eq!(a, "[{\"a\":1}]");
 
         let s = "[{\"a\": 1}, {\"b\": 2}]";
-        let a = JsonValue::Array(
-            transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
+        let a = serde_json::to_string(
+            &transform_ndjson_array_factory(Deserializer::from_str(s).into_iter(), false).unwrap(),
         )
-        .to_string();
+        .unwrap();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
     }
 

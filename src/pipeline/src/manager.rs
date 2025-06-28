@@ -27,7 +27,7 @@ use util::to_pipeline_version;
 use vrl::value::Value as VrlValue;
 
 use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
-use crate::etl::value::time::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
+use crate::etl::value::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
 use crate::{GreptimePipelineParams, Pipeline};
 

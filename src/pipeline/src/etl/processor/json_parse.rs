@@ -23,7 +23,7 @@ use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::{json_array_to_vrl_array, serde_value_to_vrl_value, Processor};
+use crate::Processor;
 
 pub(crate) const PROCESSOR_JSON_PARSE: &str = "json_parse";
 
@@ -76,10 +76,10 @@ impl JsonParseProcessor {
             }
             .fail();
         };
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).context(JsonParseSnafu)?;
+        let parsed: VrlValue = serde_json::from_str(&json_str).context(JsonParseSnafu)?;
         match parsed {
-            serde_json::Value::Object(_) => Ok(serde_value_to_vrl_value(parsed)?),
-            serde_json::Value::Array(arr) => Ok(VrlValue::Array(json_array_to_vrl_array(arr)?)),
+            VrlValue::Object(_) => Ok(parsed),
+            VrlValue::Array(_) => Ok(parsed),
             _ => ProcessorUnsupportedValueSnafu {
                 processor: self.kind(),
                 val: val.to_string(),

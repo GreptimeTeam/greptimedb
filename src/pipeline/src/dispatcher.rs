@@ -12,22 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
 use common_telemetry::debug;
-use ordered_float::NotNan;
-use snafu::{OptionExt, ResultExt};
-use vrl::prelude::Bytes;
-use vrl::value::{KeyString, Value as VrlValue};
+use snafu::OptionExt;
+use vrl::value::Value as VrlValue;
 use yaml_rust::Yaml;
 
 use crate::error::{
-    Error, FieldRequiredForDispatcherSnafu, FloatIsNanSnafu, Result,
-    TableSuffixRequiredForDispatcherRuleSnafu, ValueParseFloatSnafu,
-    ValueRequiredForDispatcherRuleSnafu, ValueUnsupportedYamlTypeSnafu,
-    ValueYamlKeyMustBeStringSnafu,
+    Error, FieldRequiredForDispatcherSnafu, Result, TableSuffixRequiredForDispatcherRuleSnafu,
+    ValueRequiredForDispatcherRuleSnafu,
 };
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
+use crate::etl::value::yaml_to_vrl_value;
 
 const FIELD: &str = "field";
 const PIPELINE: &str = "pipeline";
@@ -111,39 +106,6 @@ impl TryFrom<&Yaml> for Dispatcher {
         };
 
         Ok(Dispatcher { field, rules })
-    }
-}
-
-pub(crate) fn yaml_to_vrl_value(v: &yaml_rust::Yaml) -> Result<VrlValue> {
-    match v {
-        yaml_rust::Yaml::Null => Ok(VrlValue::Null),
-        yaml_rust::Yaml::Boolean(v) => Ok(VrlValue::Boolean(*v)),
-        yaml_rust::Yaml::Integer(v) => Ok(VrlValue::Integer(*v)),
-        yaml_rust::Yaml::Real(v) => {
-            let f = v
-                .parse::<f64>()
-                .context(ValueParseFloatSnafu { ty: "float64", v })?;
-            NotNan::new(f).map(VrlValue::Float).context(FloatIsNanSnafu)
-        }
-        yaml_rust::Yaml::String(v) => Ok(VrlValue::Bytes(Bytes::from(v.to_string()))),
-        yaml_rust::Yaml::Array(arr) => {
-            let mut values = vec![];
-            for v in arr {
-                values.push(yaml_to_vrl_value(v)?);
-            }
-            Ok(VrlValue::Array(values))
-        }
-        yaml_rust::Yaml::Hash(v) => {
-            let mut values = BTreeMap::new();
-            for (k, v) in v {
-                let key = k
-                    .as_str()
-                    .with_context(|| ValueYamlKeyMustBeStringSnafu { value: v.clone() })?;
-                values.insert(KeyString::from(key), yaml_to_vrl_value(v)?);
-            }
-            Ok(VrlValue::Object(values))
-        }
-        _ => ValueUnsupportedYamlTypeSnafu { value: v.clone() }.fail(),
     }
 }
 
