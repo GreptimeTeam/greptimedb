@@ -37,6 +37,8 @@ lazy_static.workspace = true
 paste.workspace = true
 serde.workspace = true
 snafu.workspace = true
+sql-common.workspace = true
+sqlparser.workspace = true
 store-api.workspace = true
 tokio.workspace = true
 

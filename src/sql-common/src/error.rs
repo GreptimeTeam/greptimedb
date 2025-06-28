@@ -131,6 +131,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to deserialize data, json: {}", json))]
+    Deserialize {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+        json: String,
+    },
 }
 
 impl ErrorExt for Error {
@@ -138,15 +147,16 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            UnsupportedDefaultValue { .. } | ParseSqlValue { .. } => StatusCode::InvalidSyntax,
-
+            UnsupportedDefaultValue { .. } => StatusCode::Unsupported,
+            ParseSqlValue { .. } => StatusCode::InvalidSyntax,
             ColumnTypeMismatch { .. }
             | InvalidSqlValue { .. }
             | UnsupportedUnaryOp { .. }
             | InvalidUnaryOp { .. }
             | InvalidCast { .. }
             | ConvertStr { .. }
-            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. }
+            | Deserialize { .. } => StatusCode::InvalidArguments,
 
             Datatype { source, .. } => source.status_code(),
 

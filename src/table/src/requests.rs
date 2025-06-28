@@ -29,6 +29,7 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::Expr;
 use store_api::metric_engine_consts::{
     is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
 };
@@ -260,6 +261,15 @@ pub enum AlterKind {
     DropDefaults {
         names: Vec<String>,
     },
+    SetDefaults {
+        defaults: Vec<SetDefaultRequest>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetDefaultRequest {
+    pub column_name: String,
+    pub default_constraint: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
