@@ -302,41 +302,6 @@ pub fn serde_value_to_vrl_value(val: serde_json::Value) -> Result<VrlValue> {
     }
 }
 
-pub fn simd_json_to_vrl_value(val: simd_json::OwnedValue) -> Result<VrlValue> {
-    match val {
-        simd_json::value::OwnedValue::Static(v) => match v {
-            simd_json::value::StaticNode::Null => Ok(VrlValue::Null),
-            simd_json::value::StaticNode::Bool(v) => Ok(VrlValue::Boolean(v)),
-            simd_json::value::StaticNode::I64(v) => Ok(VrlValue::Integer(v)),
-            simd_json::value::StaticNode::U64(v) => Ok(VrlValue::Integer(v as i64)),
-            simd_json::value::StaticNode::F64(v) => {
-                NotNan::new(v).context(FloatIsNanSnafu).map(VrlValue::Float)
-            }
-        },
-        simd_json::OwnedValue::String(s) => Ok(VrlValue::Bytes(Bytes::from(s))),
-        simd_json::OwnedValue::Array(values) => {
-            let mut re = Vec::with_capacity(values.len());
-            for v in values.into_iter() {
-                re.push(simd_json_to_vrl_value(v)?);
-            }
-            Ok(VrlValue::Array(re))
-        }
-        simd_json::OwnedValue::Object(map) => {
-            let mut values = BTreeMap::new();
-            for (k, v) in map.into_iter() {
-                values.insert(KeyString::from(k), simd_json_to_vrl_value(v)?);
-            }
-            Ok(VrlValue::Object(values))
-        }
-    }
-}
-
-// pub fn simd_json_array_to_vrl_array(val: Vec<simd_json::OwnedValue>) -> Result<Vec<VrlValue>> {
-//     val.into_iter()
-//         .map(simd_json_to_vrl_value)
-//         .collect::<Result<Vec<_>>>()
-// }
-
 impl Pipeline {
     fn is_v1(&self) -> bool {
         self.doc_version == PipelineDocVersion::V1

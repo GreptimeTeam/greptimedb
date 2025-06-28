@@ -24,10 +24,9 @@ pub use etl::processor::Processor;
 pub use etl::transform::transformer::greptime::{GreptimePipelineParams, SchemaInfo};
 pub use etl::transform::transformer::identity_pipeline;
 pub use etl::transform::GreptimeTransformer;
-pub use etl::value::Timestamp;
 pub use etl::{
-    json_array_to_vrl_array, parse, serde_value_to_vrl_value, simd_json_to_vrl_value, Content,
-    DispatchedTo, Pipeline, PipelineExecOutput, TransformedOutput, TransformerMode,
+    json_array_to_vrl_array, parse, serde_value_to_vrl_value, Content, DispatchedTo, Pipeline,
+    PipelineExecOutput, TransformedOutput, TransformerMode,
 };
 pub use manager::{
     pipeline_operator, table, util, IdentityTimeIndex, PipelineContext, PipelineDefinition,

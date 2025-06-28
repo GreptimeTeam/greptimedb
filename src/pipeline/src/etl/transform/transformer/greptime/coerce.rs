@@ -30,48 +30,6 @@ use crate::etl::transform::index::Index;
 use crate::etl::transform::transformer::greptime::vrl_value_to_jsonb_value;
 use crate::etl::transform::{OnFailure, Transform};
 
-// impl TryFrom<Value> for ValueData {
-//     type Error = Error;
-
-//     fn try_from(value: Value) -> Result<Self> {
-//         match value {
-//             Value::Null => CoerceUnsupportedNullTypeSnafu.fail(),
-
-//             Value::Int8(v) => Ok(ValueData::I32Value(v as i32)),
-//             Value::Int16(v) => Ok(ValueData::I32Value(v as i32)),
-//             Value::Int32(v) => Ok(ValueData::I32Value(v)),
-//             Value::Int64(v) => Ok(ValueData::I64Value(v)),
-
-//             Value::Uint8(v) => Ok(ValueData::U32Value(v as u32)),
-//             Value::Uint16(v) => Ok(ValueData::U32Value(v as u32)),
-//             Value::Uint32(v) => Ok(ValueData::U32Value(v)),
-//             Value::Uint64(v) => Ok(ValueData::U64Value(v)),
-
-//             Value::Float32(v) => Ok(ValueData::F32Value(v)),
-//             Value::Float64(v) => Ok(ValueData::F64Value(v)),
-
-//             Value::Boolean(v) => Ok(ValueData::BoolValue(v)),
-//             Value::String(v) => Ok(ValueData::StringValue(v)),
-
-//             Value::Timestamp(Timestamp::Nanosecond(ns)) => {
-//                 Ok(ValueData::TimestampNanosecondValue(ns))
-//             }
-//             Value::Timestamp(Timestamp::Microsecond(us)) => {
-//                 Ok(ValueData::TimestampMicrosecondValue(us))
-//             }
-//             Value::Timestamp(Timestamp::Millisecond(ms)) => {
-//                 Ok(ValueData::TimestampMillisecondValue(ms))
-//             }
-//             Value::Timestamp(Timestamp::Second(s)) => Ok(ValueData::TimestampSecondValue(s)),
-
-//             Value::Array(_) | Value::Map(_) => {
-//                 let data: jsonb::Value = value.into();
-//                 Ok(ValueData::BinaryValue(data.to_vec()))
-//             }
-//         }
-//     }
-// }
-
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
     let mut columns = Vec::new();
 
@@ -130,49 +88,6 @@ fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
         _ => Ok(None),
     }
 }
-
-// fn coerce_type(transform: &Transform) -> Result<(ColumnDataType, Option<ColumnDataTypeExtension>)> {
-//     match transform.type_ {
-//         Value::Int8(_) => Ok((ColumnDataType::Int8, None)),
-//         Value::Int16(_) => Ok((ColumnDataType::Int16, None)),
-//         Value::Int32(_) => Ok((ColumnDataType::Int32, None)),
-//         Value::Int64(_) => Ok((ColumnDataType::Int64, None)),
-
-//         Value::Uint8(_) => Ok((ColumnDataType::Uint8, None)),
-//         Value::Uint16(_) => Ok((ColumnDataType::Uint16, None)),
-//         Value::Uint32(_) => Ok((ColumnDataType::Uint32, None)),
-//         Value::Uint64(_) => Ok((ColumnDataType::Uint64, None)),
-
-//         Value::Float32(_) => Ok((ColumnDataType::Float32, None)),
-//         Value::Float64(_) => Ok((ColumnDataType::Float64, None)),
-
-//         Value::Boolean(_) => Ok((ColumnDataType::Boolean, None)),
-//         Value::String(_) => Ok((ColumnDataType::String, None)),
-
-//         Value::Timestamp(Timestamp::Nanosecond(_)) => {
-//             Ok((ColumnDataType::TimestampNanosecond, None))
-//         }
-//         Value::Timestamp(Timestamp::Microsecond(_)) => {
-//             Ok((ColumnDataType::TimestampMicrosecond, None))
-//         }
-//         Value::Timestamp(Timestamp::Millisecond(_)) => {
-//             Ok((ColumnDataType::TimestampMillisecond, None))
-//         }
-//         Value::Timestamp(Timestamp::Second(_)) => Ok((ColumnDataType::TimestampSecond, None)),
-
-//         Value::Array(_) | Value::Map(_) => Ok((
-//             ColumnDataType::Binary,
-//             Some(ColumnDataTypeExtension {
-//                 type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-//             }),
-//         )),
-
-//         Value::Null => CoerceUnsupportedNullTypeToSnafu {
-//             ty: transform.type_.to_str_type(),
-//         }
-//         .fail(),
-//     }
-// }
 
 pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Option<ValueData>> {
     match val {
