@@ -302,6 +302,7 @@ fn build_new_table_info(
         | AlterKind::SetIndex { .. }
         | AlterKind::UnsetIndex { .. }
         | AlterKind::DropDefaults { .. } => {}
+        AlterKind::SetDefaults { .. } => {}
     }
 
     Ok(new_info)

@@ -29,8 +29,8 @@ pub use sqlparser::ast::{
 
 use crate::error::{
     ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertStrSnafu, DatatypeSnafu,
-    InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu, ParseSqlValueSnafu, Result,
-    TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
+    DeserializeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
+    ParseSqlValueSnafu, Result, TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
 };
 
 fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>
@@ -356,6 +356,12 @@ pub(crate) fn parse_hex_string(s: &str) -> Result<Value> {
         }
         .fail(),
     }
+}
+
+/// Deserialize expr from json bytes
+pub fn deserialize_expr(bytes: &[u8]) -> Result<Expr> {
+    let json = String::from_utf8_lossy(bytes);
+    serde_json::from_str(&json).context(DeserializeSnafu { json })
 }
 
 #[cfg(test)]
