@@ -33,6 +33,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::DATA_REGION_SUBDIR;
 use store_api::storage::RegionId;
 
+use crate::batch_builder::physical_schema;
 use crate::error;
 
 type AsyncParquetWriter = AsyncArrowWriter<AsyncWriter>;
@@ -64,7 +65,8 @@ impl AccessLayerFactory {
             .writer(&file_path)
             .await
             .context(error::OpendalSnafu)?;
-        let schema = region_metadata.schema.arrow_schema().clone();
+
+        let schema = physical_schema();
 
         let key_value_meta = KeyValue::new(
             PARQUET_METADATA_KEY.to_string(),
@@ -104,10 +106,10 @@ impl ParquetWriter {
         batch: &RecordBatch,
         timestamp_range: Option<(i64, i64)>,
     ) -> error::Result<()> {
-        self.writer
-            .write(&batch)
-            .await
-            .context(error::ParquetSnafu)?;
+        if let Err(e) = self.writer.write(&batch).await.context(error::ParquetSnafu) {
+            common_telemetry::error!(e; "Region metadata: {:?}, batch schema: {:?}", self.region_metadata, batch.schema_ref());
+            return Err(e);
+        }
 
         let (batch_min, batch_max) =
             get_or_calculate_timestamp_range(timestamp_range, batch, &self.region_metadata)?;

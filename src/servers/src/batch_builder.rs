@@ -48,7 +48,8 @@ use crate::prom_row_builder::{PromCtx, TableBuilder};
 
 pub struct MetricsBatchBuilder {
     schema_helper: SchemaHelper,
-    builders: HashMap<String /*schema*/, HashMap<String /*logical table name*/, BatchEncoder>>,
+    builders:
+        HashMap<String /*schema*/, HashMap<RegionId /*physical table name*/, BatchEncoder>>,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
 }
@@ -239,7 +240,13 @@ impl MetricsBatchBuilder {
         current_catalog: Option<String>,
         current_schema: Option<String>,
         table_data: &mut HashMap<PromCtx, HashMap<String, TableBuilder>>,
-        physical_region_metadata: &HashMap<String, HashMap<String, (TableId, RegionMetadataRef)>>,
+        physical_region_metadata: &HashMap<
+            String, /*schema name*/
+            HashMap<
+                String, /*logical table name*/
+                (TableId /*logical table id*/, RegionMetadataRef),
+            >,
+        >,
     ) -> error::Result<()> {
         for (ctx, tables_in_schema) in table_data {
             for (logical_table_name, table) in tables_in_schema {
@@ -272,7 +279,7 @@ impl MetricsBatchBuilder {
                     .builders
                     .entry(schema.to_string())
                     .or_default()
-                    .entry(logical_table_name.clone())
+                    .entry(physical_table.region_id)
                     .or_insert_with(|| Self::create_sparse_encoder(&physical_table));
                 encoder.append_rows(*logical_table_id, std::mem::take(table))?;
             }
@@ -286,18 +293,18 @@ impl MetricsBatchBuilder {
     ) -> error::Result<
         HashMap<
             String, /*schema name*/
-            HashMap<String /*logical table name*/, (RecordBatch, (i64, i64))>,
+            HashMap<RegionId /*physical region id*/, (RecordBatch, (i64, i64))>,
         >,
     > {
-        let mut table_batches: HashMap<String, HashMap<String, (RecordBatch, (i64, i64))>> =
+        let mut table_batches: HashMap<String, HashMap<RegionId, (RecordBatch, (i64, i64))>> =
             HashMap::with_capacity(self.builders.len());
 
         for (schema_name, schema_tables) in self.builders {
             let schema_batches = table_batches.entry(schema_name).or_default();
-            for (logical_table_name, table_data) in schema_tables {
+            for (physical_region_id, table_data) in schema_tables {
                 let rb = table_data.finish()?;
                 if let Some(v) = rb {
-                    schema_batches.entry(logical_table_name).insert_entry(v);
+                    schema_batches.entry(physical_region_id).insert_entry(v);
                 }
             }
         }
@@ -334,36 +341,6 @@ impl BatchEncoder {
             pk_codec: SparsePrimaryKeyCodec::schemaless(),
             timestamp_range: None,
         }
-    }
-
-    /// Creates the schema of output record batch.
-    fn schema() -> arrow::datatypes::SchemaRef {
-        Arc::new(arrow::datatypes::Schema::new(vec![
-            Field::new(GREPTIME_VALUE, arrow::datatypes::DataType::Float64, false),
-            Field::new(
-                GREPTIME_TIMESTAMP,
-                arrow::datatypes::DataType::Timestamp(
-                    arrow::datatypes::TimeUnit::Millisecond,
-                    None,
-                ),
-                false,
-            ),
-            Field::new(
-                PRIMARY_KEY_COLUMN_NAME,
-                arrow::datatypes::DataType::Binary,
-                false,
-            ),
-            Field::new(
-                SEQUENCE_COLUMN_NAME,
-                arrow::datatypes::DataType::UInt64,
-                false,
-            ),
-            Field::new(
-                OP_TYPE_COLUMN_NAME,
-                arrow::datatypes::DataType::UInt8,
-                false,
-            ),
-        ]))
     }
 
     fn append_rows(
@@ -447,7 +424,7 @@ impl BatchEncoder {
         let value = compute::take(&value, &indices, None).context(error::ArrowSnafu)?;
         let ts = compute::take(&timestamp, &indices, None).context(error::ArrowSnafu)?;
         let pk = compute::take(&pk, &indices, None).context(error::ArrowSnafu)?;
-        let rb = RecordBatch::try_new(Self::schema(), vec![value, ts, pk, sequence, op_type])
+        let rb = RecordBatch::try_new(physical_schema(), vec![value, ts, pk, sequence, op_type])
             .context(error::ArrowSnafu)?;
         Ok(Some((rb, self.timestamp_range.unwrap())))
     }
@@ -473,7 +450,7 @@ fn tags_to_logical_schemas(
                         .collect();
                     columns.push(ColumnSchema {
                         column_name: GREPTIME_TIMESTAMP.to_string(),
-                        datatype: ColumnDataType::TimestampNanosecond as i32,
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
                         semantic_type: SemanticType::Timestamp as i32,
                         ..Default::default()
                     });
@@ -494,4 +471,31 @@ fn tags_to_logical_schemas(
         .collect();
 
     LogicalSchemas { schemas }
+}
+
+/// Creates the schema of output record batch.
+pub fn physical_schema() -> arrow::datatypes::SchemaRef {
+    Arc::new(arrow::datatypes::Schema::new(vec![
+        Field::new(GREPTIME_VALUE, arrow::datatypes::DataType::Float64, false),
+        Field::new(
+            GREPTIME_TIMESTAMP,
+            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new(
+            PRIMARY_KEY_COLUMN_NAME,
+            arrow::datatypes::DataType::Binary,
+            false,
+        ),
+        Field::new(
+            SEQUENCE_COLUMN_NAME,
+            arrow::datatypes::DataType::UInt64,
+            false,
+        ),
+        Field::new(
+            OP_TYPE_COLUMN_NAME,
+            arrow::datatypes::DataType::UInt8,
+            false,
+        ),
+    ]))
 }

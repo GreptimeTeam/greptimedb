@@ -24,7 +24,7 @@ use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_telemetry::tracing;
+use common_telemetry::{info, tracing};
 use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
@@ -112,7 +112,7 @@ pub async fn remote_write(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
-        bulk_state: _,
+        bulk_state,
     } = state;
 
     if let Some(_vm_handshake) = params.get_vm_proto_version {
@@ -147,7 +147,8 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    if let Some(state) = state.bulk_state {
+    if let Some(state) = bulk_state {
+        info!("Use bulk mode");
         let context = PromBulkContext {
             schema_helper: state.schema_helper,
             query_ctx: query_ctx.clone(),
@@ -165,6 +166,8 @@ pub async fn remote_write(
         .await?;
         return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
     }
+
+    info!("Use original mode");
 
     let req =
         decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor).await?;

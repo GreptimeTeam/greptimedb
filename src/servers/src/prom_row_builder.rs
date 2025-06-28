@@ -15,11 +15,13 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::string::ToString;
+use std::time::Instant;
 
 use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_telemetry::info;
 use pipeline::{ContextOpt, ContextReq};
 use prost::DecodeError;
 
@@ -104,9 +106,14 @@ impl TablesBuilder {
         );
         let mut tables = std::mem::take(&mut self.tables);
 
+        let start = Instant::now();
         batch_builder
             .create_or_alter_physical_tables(&tables, &bulk_ctx.query_ctx)
             .await?;
+        info!(
+            "create_or_alter_physical_tables, elapsed time: {}ms",
+            start.elapsed().as_millis()
+        );
 
         // Extract logical table names from tables for metadata collection
         let current_schema = bulk_ctx.query_ctx.current_schema();
@@ -120,24 +127,52 @@ impl TablesBuilder {
             })
             .collect();
 
+        let start = Instant::now();
         // Gather all region metadata for region 0 of physical tables.
         let physical_region_metadata = batch_builder
             .collect_physical_region_metadata(&logical_tables, &bulk_ctx.query_ctx)
             .await?;
 
+        info!(
+            "collect_physical_region_metadata, elapsed time: {}ms",
+            start.elapsed().as_millis()
+        );
+
+        let start = Instant::now();
         batch_builder
             .append_rows_to_batch(None, None, &mut tables, &physical_region_metadata)
             .await?;
-
         let record_batches = batch_builder.finish()?;
+        info!(
+            "append_rows_to_batch, elapsed time: {}ms",
+            start.elapsed().as_millis()
+        );
 
+        let physical_region_id_to_meta = physical_region_metadata
+            .into_iter()
+            .map(|(schema_name, tables)| {
+                let region_id_to_meta = tables
+                    .into_values()
+                    .map(|(_, physical_region_meta)| {
+                        (physical_region_meta.region_id, physical_region_meta)
+                    })
+                    .collect::<HashMap<_, _>>();
+                (schema_name, region_id_to_meta)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let start = Instant::now();
+
+        let mut tables_per_schema = HashMap::with_capacity(record_batches.len());
         for (schema_name, schema_batches) in record_batches {
-            let schema_regions = physical_region_metadata
+            let tables_in_schema = tables_per_schema.entry(schema_name.clone()).or_insert(0);
+            *tables_in_schema = *tables_in_schema + 1;
+            let schema_regions = physical_region_id_to_meta
                 .get(&schema_name)
                 .expect("physical region metadata not found");
-            for (logical_table_name, (rb, time_range)) in schema_batches {
-                let (_table_id, physical_region_metadata) = schema_regions
-                    .get(&logical_table_name)
+            for (physical_region_id, (rb, time_range)) in schema_batches {
+                let physical_region_metadata = schema_regions
+                    .get(&physical_region_id)
                     .expect("physical region metadata not found");
                 let mut writer = bulk_ctx
                     .access_layer_factory
@@ -149,9 +184,16 @@ impl TablesBuilder {
                     .await?;
 
                 writer.write_record_batch(&rb, Some(time_range)).await?;
-                let _file_meta = writer.finish().await?;
+                let file_meta = writer.finish().await?;
+                info!("file meta: {:?}", file_meta);
             }
         }
+        info!(
+            "upload sst files, elapsed time: {}ms, schema num: {} tables_per_schema: {:?}",
+            start.elapsed().as_millis(),
+            tables_per_schema.len(),
+            tables_per_schema
+        );
         Ok(())
     }
 }
