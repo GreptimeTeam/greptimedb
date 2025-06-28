@@ -807,6 +807,8 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::TableColumnNotFound
         | StatusCode::PlanQuery
         | StatusCode::DatabaseAlreadyExists
+        | StatusCode::TriggerAlreadyExists
+        | StatusCode::TriggerNotFound
         | StatusCode::FlowNotFound
         | StatusCode::FlowAlreadyExists => HttpStatusCode::BAD_REQUEST,
 
