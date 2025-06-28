@@ -34,6 +34,7 @@ use datafusion::physical_plan::{
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::{DataFusionError, ToDFSchema};
 use datatypes::arrow::array::Array;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::ready;
 use pin_project::pin_project;
@@ -142,7 +143,7 @@ where
                 for (idx,field) in projected_schema.fields.iter().enumerate() {
                     let column = projected_column.column(idx);
                     if column.data_type() != field.data_type() {
-                        let output = cast(&column, field.data_type())?;
+                        let output = custom_cast(&column, field.data_type())?;
                         columns.push(output)
                     } else {
                         columns.push(column.clone())
@@ -527,11 +528,100 @@ impl Stream for AsyncRecordBatchStreamAdapter {
     }
 }
 
+/// Custom cast function that handles Map -> Binary (JSON) conversion
+fn custom_cast(
+    array: &dyn Array,
+    target_type: &ArrowDataType,
+) -> std::result::Result<Arc<dyn Array>, ArrowError> {
+    if let ArrowDataType::Map(_, _) = array.data_type() {
+        if let ArrowDataType::Binary = target_type {
+            return convert_map_to_json_binary(array);
+        }
+    }
+
+    cast(array, target_type)
+}
+
+/// Convert a Map array to a Binary array containing JSON data
+fn convert_map_to_json_binary(
+    array: &dyn Array,
+) -> std::result::Result<Arc<dyn Array>, ArrowError> {
+    use datatypes::arrow::array::{BinaryArray, MapArray};
+    use serde_json::Value;
+
+    let map_array = array
+        .as_any()
+        .downcast_ref::<MapArray>()
+        .ok_or_else(|| ArrowError::CastError("Failed to downcast to MapArray".to_string()))?;
+
+    let mut json_values = Vec::new();
+
+    for i in 0..map_array.len() {
+        if map_array.is_null(i) {
+            json_values.push(None);
+        } else {
+            // Extract the map entry at index i
+            let map_entry = map_array.value(i);
+            let key_value_array = map_entry
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StructArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError("Failed to downcast to StructArray".to_string())
+                })?;
+
+            // Convert to JSON object
+            let mut json_obj = serde_json::Map::new();
+
+            for j in 0..key_value_array.len() {
+                if !key_value_array.is_null(j) {
+                    let key_field = key_value_array.column(0);
+                    let value_field = key_value_array.column(1);
+
+                    if !key_field.is_null(j) && !value_field.is_null(j) {
+                        let key = key_field
+                            .as_any()
+                            .downcast_ref::<datatypes::arrow::array::StringArray>()
+                            .ok_or_else(|| {
+                                ArrowError::CastError(
+                                    "Failed to downcast key to StringArray".to_string(),
+                                )
+                            })?
+                            .value(j);
+
+                        let value = value_field
+                            .as_any()
+                            .downcast_ref::<datatypes::arrow::array::StringArray>()
+                            .ok_or_else(|| {
+                                ArrowError::CastError(
+                                    "Failed to downcast value to StringArray".to_string(),
+                                )
+                            })?
+                            .value(j);
+
+                        json_obj.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                }
+            }
+
+            let json_bytes = serde_json::to_vec(&Value::Object(json_obj))
+                .map_err(|e| ArrowError::CastError(format!("Failed to serialize JSON: {}", e)))?;
+
+            json_values.push(Some(json_bytes));
+        }
+    }
+
+    let binary_array = BinaryArray::from_iter(json_values);
+    Ok(Arc::new(binary_array))
+}
+
 #[cfg(test)]
 mod test {
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use datatypes::arrow::array::{ArrayRef, MapArray, StringArray, StructArray};
+    use datatypes::arrow::buffer::OffsetBuffer;
+    use datatypes::arrow::datatypes::Field;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int32Vector;
@@ -634,5 +724,59 @@ mod test {
             matches!(err, Error::External { .. }),
             "unexpected err {err}"
         );
+    }
+
+    #[test]
+    fn test_convert_map_to_json_binary() {
+        // Build key-value StructArray
+        let keys = StringArray::from(vec![Some("a"), Some("b"), Some("x")]);
+        let values = StringArray::from(vec![Some("1"), Some("2"), Some("42")]);
+        let key_field = Arc::new(Field::new("key", ArrowDataType::Utf8, false));
+        let value_field = Arc::new(Field::new("value", ArrowDataType::Utf8, false));
+        let struct_type = ArrowDataType::Struct(vec![key_field, value_field].into());
+
+        let entries_field = Arc::new(Field::new("entries", struct_type, false));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", ArrowDataType::Utf8, false)),
+                Arc::new(keys) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", ArrowDataType::Utf8, false)),
+                Arc::new(values) as ArrayRef,
+            ),
+        ]);
+
+        // Define offsets and null bitmap for 3 rows: [{a:1,b:2}, null, {x:42}]
+        let offsets = OffsetBuffer::from_lengths([2, 0, 1]);
+        let nulls = datatypes::arrow::buffer::NullBuffer::from(vec![true, false, true]);
+
+        let map_array = MapArray::new(
+            entries_field,
+            offsets,
+            struct_array,
+            Some(nulls), // nulls
+            false,
+        );
+
+        let result = convert_map_to_json_binary(&map_array).unwrap();
+        let binary_array = result
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::BinaryArray>()
+            .unwrap();
+
+        let expected_jsons = [Some(r#"{"a":"1","b":"2"}"#), None, Some(r#"{"x":"42"}"#)];
+
+        for (i, _) in expected_jsons.iter().enumerate() {
+            if let Some(expected) = &expected_jsons[i] {
+                assert!(!binary_array.is_null(i));
+                let actual_bytes = binary_array.value(i);
+                let actual_str = std::str::from_utf8(actual_bytes).unwrap();
+                assert_eq!(actual_str, *expected);
+            } else {
+                assert!(binary_array.is_null(i));
+            }
+        }
     }
 }
