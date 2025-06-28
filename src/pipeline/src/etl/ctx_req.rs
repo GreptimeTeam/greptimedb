@@ -220,6 +220,10 @@ impl ContextReq {
     pub fn ref_all_req(&self) -> impl Iterator<Item = &RowInsertRequest> {
         self.req.values().flatten()
     }
+
+    pub fn map_len(&self) -> usize {
+        self.req.len()
+    }
 }
 
 // ContextReqIter is an iterator that iterates over the ContextReq.
