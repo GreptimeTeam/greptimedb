@@ -164,35 +164,37 @@ impl TablesBuilder {
         let start = Instant::now();
 
         let mut tables_per_schema = HashMap::with_capacity(record_batches.len());
+        let mut file_metas = vec![];
         for (schema_name, schema_batches) in record_batches {
             let tables_in_schema = tables_per_schema.entry(schema_name.clone()).or_insert(0);
             *tables_in_schema = *tables_in_schema + 1;
             let schema_regions = physical_region_id_to_meta
                 .get(&schema_name)
                 .expect("physical region metadata not found");
-            for (physical_region_id, (rb, time_range)) in schema_batches {
+            for (physical_region_id, record_batches) in schema_batches {
                 let physical_region_metadata = schema_regions
                     .get(&physical_region_id)
                     .expect("physical region metadata not found");
-                let mut writer = bulk_ctx
-                    .access_layer_factory
-                    .create_sst_writer(
-                        "greptime", //todo(hl): use the catalog name in query context.
-                        &schema_name,
-                        physical_region_metadata.clone(),
-                    )
-                    .await?;
-
-                writer.write_record_batch(&rb, Some(time_range)).await?;
-                let file_meta = writer.finish().await?;
-                info!("file meta: {:?}", file_meta);
+                for (rb, time_range) in record_batches {
+                    let mut writer = bulk_ctx
+                        .access_layer_factory
+                        .create_sst_writer(
+                            "greptime", //todo(hl): use the catalog name in query context.
+                            &schema_name,
+                            physical_region_metadata.clone(),
+                        )
+                        .await?;
+                    writer.write_record_batch(&rb, Some(time_range)).await?;
+                    let file_meta = writer.finish().await?;
+                    file_metas.push(file_meta);
+                }
             }
         }
         info!(
-            "upload sst files, elapsed time: {}ms, schema num: {} tables_per_schema: {:?}",
+            "upload sst files, elapsed time: {}ms, schema num: {} tables_per_schema: {:?}, file_metas: {:?}",
             start.elapsed().as_millis(),
             tables_per_schema.len(),
-            tables_per_schema
+            tables_per_schema, file_metas
         );
         Ok(())
     }

@@ -148,7 +148,6 @@ pub async fn remote_write(
     }
 
     if let Some(state) = bulk_state {
-        info!("Use bulk mode");
         let context = PromBulkContext {
             schema_helper: state.schema_helper,
             query_ctx: query_ctx.clone(),
@@ -166,8 +165,6 @@ pub async fn remote_write(
         .await?;
         return Ok((StatusCode::NO_CONTENT, write_cost_header_map(0)).into_response());
     }
-
-    info!("Use original mode");
 
     let req =
         decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor).await?;
