@@ -92,27 +92,28 @@ impl ContextOpt {
         let mut opt = Self::default();
         for k in PIPELINE_HINT_KEYS {
             if let Some(v) = map.remove(k) {
+                let v = v.to_string_lossy().to_string();
                 match k {
                     GREPTIME_AUTO_CREATE_TABLE => {
-                        opt.auto_create_table = Some(v.to_string_lossy().to_string());
+                        opt.auto_create_table = Some(v);
                     }
                     GREPTIME_TTL => {
-                        opt.ttl = Some(v.to_string_lossy().to_string());
+                        opt.ttl = Some(v);
                     }
                     GREPTIME_APPEND_MODE => {
-                        opt.append_mode = Some(v.to_string_lossy().to_string());
+                        opt.append_mode = Some(v);
                     }
                     GREPTIME_MERGE_MODE => {
-                        opt.merge_mode = Some(v.to_string_lossy().to_string());
+                        opt.merge_mode = Some(v);
                     }
                     GREPTIME_PHYSICAL_TABLE => {
-                        opt.physical_table = Some(v.to_string_lossy().to_string());
+                        opt.physical_table = Some(v);
                     }
                     GREPTIME_SKIP_WAL => {
-                        opt.skip_wal = Some(v.to_string_lossy().to_string());
+                        opt.skip_wal = Some(v);
                     }
                     GREPTIME_TABLE_SUFFIX => {
-                        opt.table_suffix = Some(v.to_string_lossy().to_string());
+                        opt.table_suffix = Some(v);
                     }
                     _ => {}
                 }

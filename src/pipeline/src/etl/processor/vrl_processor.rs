@@ -61,9 +61,9 @@ impl VrlProcessor {
         Ok(Self { source, program })
     }
 
-    pub fn resolve(&self, m: VrlValue) -> Result<VrlValue> {
+    pub fn resolve(&self, value: VrlValue) -> Result<VrlValue> {
         let mut target = TargetValue {
-            value: m,
+            value,
             metadata: VrlValue::Object(BTreeMap::new()),
             secrets: Secrets::default(),
         };
@@ -113,87 +113,13 @@ impl crate::etl::processor::Processor for VrlProcessor {
     fn exec_mut(&self, val: VrlValue) -> Result<VrlValue> {
         let val = self.resolve(val)?;
 
-        if let VrlValue::Object(m) = val {
-            Ok(VrlValue::Object(m))
+        if let VrlValue::Object(_) = val {
+            Ok(val)
         } else {
             VrlRegexValueSnafu.fail()
         }
     }
 }
-
-// fn pipeline_value_to_vrl_value(v: PipelineValue) -> Result<VrlValue> {
-//     match v {
-//         PipelineValue::Null => Ok(VrlValue::Null),
-//         PipelineValue::Int8(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Int16(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Int32(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Int64(x) => Ok(VrlValue::Integer(x)),
-//         PipelineValue::Uint8(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Uint16(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Uint32(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Uint64(x) => Ok(VrlValue::Integer(x as i64)),
-//         PipelineValue::Float32(x) => NotNan::new(x as f64)
-//             .map_err(|_| FloatNaNSnafu { input_float: x }.build())
-//             .map(VrlValue::Float),
-//         PipelineValue::Float64(x) => NotNan::new(x)
-//             .map_err(|_| FloatNaNSnafu { input_float: x }.build())
-//             .map(VrlValue::Float),
-//         PipelineValue::Boolean(x) => Ok(VrlValue::Boolean(x)),
-//         PipelineValue::String(x) => Ok(VrlValue::Bytes(Bytes::copy_from_slice(x.as_bytes()))),
-//         PipelineValue::Timestamp(x) => x
-//             .to_datetime()
-//             .context(InvalidTimestampSnafu {
-//                 input: x.to_string(),
-//             })
-//             .map(VrlValue::Timestamp),
-//         PipelineValue::Array(array) => Ok(VrlValue::Array(
-//             array
-//                 .into_iter()
-//                 .map(pipeline_value_to_vrl_value)
-//                 .collect::<Result<Vec<_>>>()?,
-//         )),
-//         PipelineValue::Map(m) => {
-//             let values = m
-//                 .values
-//                 .into_iter()
-//                 .map(|(k, v)| pipeline_value_to_vrl_value(v).map(|v| (KeyString::from(k), v)))
-//                 .collect::<Result<BTreeMap<_, _>>>()?;
-//             Ok(VrlValue::Object(values))
-//         }
-//     }
-// }
-
-// fn vrl_value_to_pipeline_value(v: VrlValue) -> Result<PipelineValue> {
-//     match v {
-//         VrlValue::Bytes(bytes) => String::from_utf8(bytes.to_vec())
-//             .context(BytesToUtf8Snafu)
-//             .map(PipelineValue::String),
-//         VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
-//         VrlValue::Integer(x) => Ok(PipelineValue::Int64(x)),
-//         VrlValue::Float(not_nan) => Ok(PipelineValue::Float64(not_nan.into_inner())),
-//         VrlValue::Boolean(b) => Ok(PipelineValue::Boolean(b)),
-//         VrlValue::Timestamp(date_time) => crate::etl::value::Timestamp::from_datetime(date_time)
-//             .context(InvalidTimestampSnafu {
-//                 input: date_time.to_string(),
-//             })
-//             .map(PipelineValue::Timestamp),
-//         VrlValue::Object(bm) => {
-//             let b = bm
-//                 .into_iter()
-//                 .map(|(k, v)| vrl_value_to_pipeline_value(v).map(|v| (k.to_string(), v)))
-//                 .collect::<Result<BTreeMap<String, PipelineValue>>>()?;
-//             Ok(PipelineValue::Map(b.into()))
-//         }
-//         VrlValue::Array(values) => {
-//             let a = values
-//                 .into_iter()
-//                 .map(vrl_value_to_pipeline_value)
-//                 .collect::<Result<Vec<_>>>()?;
-//             Ok(PipelineValue::Array(a.into()))
-//         }
-//         VrlValue::Null => Ok(PipelineValue::Null),
-//     }
-// }
 
 fn check_regex_output(output_kind: &Kind) -> Result<()> {
     if output_kind.is_regex() {

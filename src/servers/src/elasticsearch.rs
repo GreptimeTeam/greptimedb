@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,6 +31,7 @@ use pipeline::{
 use serde_json::{json, Deserializer, Value};
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, ResultExt};
+use vrl::value::Value as VrlValue;
 
 use crate::error::{
     status_code_to_http_status, InvalidElasticsearchInputSnafu, ParseJsonSnafu,
@@ -287,8 +289,8 @@ fn parse_bulk_request(
     msg_field: &Option<String>,
 ) -> ServersResult<Vec<PipelineIngestRequest>> {
     // Read the ndjson payload and convert it to `Vec<Value>`. Return error if the input is not a valid JSON.
-    let values: Vec<Value> = Deserializer::from_str(input)
-        .into_iter::<Value>()
+    let values: Vec<VrlValue> = Deserializer::from_str(input)
+        .into_iter::<VrlValue>()
         .collect::<Result<_, _>>()
         .context(ParseJsonSnafu)?;
 
@@ -307,12 +309,13 @@ fn parse_bulk_request(
     // For Elasticsearch post `_bulk` API, each chunk contains two objects:
     //   1. The first object is the command, it should be `create` or `index`.
     //   2. The second object is the document data.
-    while let Some(mut cmd) = values.next() {
+    while let Some(cmd) = values.next() {
         // NOTE: Although the native Elasticsearch API supports upsert in `index` command, we don't support change any data in `index` command and it's same as `create` command.
-        let index = if let Some(cmd) = cmd.get_mut("create") {
-            get_index_from_cmd(cmd.take())?
-        } else if let Some(cmd) = cmd.get_mut("index") {
-            get_index_from_cmd(cmd.take())?
+        let mut cmd = cmd.into_object();
+        let index = if let Some(cmd) = cmd.as_mut().and_then(|c| c.remove("create")) {
+            get_index_from_cmd(cmd)?
+        } else if let Some(cmd) = cmd.as_mut().and_then(|c| c.remove("index")) {
+            get_index_from_cmd(cmd)?
         } else {
             return InvalidElasticsearchInputSnafu {
                 reason: format!(
@@ -339,7 +342,6 @@ fn parse_bulk_request(
                 }
             );
 
-            let log_value = log_value.into();
             requests.push(PipelineIngestRequest {
                 table: index.unwrap_or_else(|| index_from_url.as_ref().unwrap().clone()),
                 values: vec![log_value],
@@ -357,39 +359,50 @@ fn parse_bulk_request(
 }
 
 // Get the index from the command. We will take index as the table name in GreptimeDB.
-fn get_index_from_cmd(mut v: Value) -> ServersResult<Option<String>> {
-    if let Some(index) = v.get_mut("_index") {
-        if let Value::String(index) = index.take() {
-            Ok(Some(index))
-        } else {
-            // If the `_index` exists, it should be a string.
-            InvalidElasticsearchInputSnafu {
-                reason: "index is not a string in bulk request".to_string(),
-            }
-            .fail()
-        }
+fn get_index_from_cmd(v: VrlValue) -> ServersResult<Option<String>> {
+    let Some(index) = v.into_object().and_then(|mut m| m.remove("_index")) else {
+        return Ok(None);
+    };
+
+    if let VrlValue::Bytes(index) = index {
+        Ok(Some(String::from_utf8_lossy(&index).to_string()))
     } else {
-        Ok(None)
+        // If the `_index` exists, it should be a string.
+        InvalidElasticsearchInputSnafu {
+            reason: "index is not a string in bulk request",
+        }
+        .fail()
     }
 }
 
 // If the msg_field is provided, fetch the value of the field from the document data.
 // For example, if the `msg_field` is `message`, and the document data is `{"message":"hello"}`, the log value will be Value::String("hello").
-fn get_log_value_from_msg_field(mut v: Value, msg_field: &str) -> Value {
-    if let Some(message) = v.get_mut(msg_field) {
-        let message = message.take();
+fn get_log_value_from_msg_field(v: VrlValue, msg_field: &str) -> VrlValue {
+    let VrlValue::Object(mut m) = v else {
+        return v;
+    };
+
+    if let Some(message) = m.remove(msg_field) {
         match message {
-            Value::String(s) => match serde_json::from_str::<Value>(&s) {
-                Ok(s) => s,
-                // If the message is not a valid JSON, return a map with the original message key and value.
-                Err(_) => json!({msg_field: s}),
-            },
+            VrlValue::Bytes(bytes) => {
+                match serde_json::from_slice::<VrlValue>(&bytes) {
+                    Ok(v) => v,
+                    // If the message is not a valid JSON, return a map with the original message key and value.
+                    Err(_) => {
+                        let map = BTreeMap::from([(
+                            msg_field.to_string().into(),
+                            VrlValue::Bytes(bytes),
+                        )]);
+                        VrlValue::Object(map)
+                    }
+                }
+            }
             // If the message is not a string, just use the original message as the log value.
             _ => message,
         }
     } else {
         // If the msg_field is not found, just use the original message as the log value.
-        v
+        VrlValue::Object(m)
     }
 }
 
