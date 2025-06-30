@@ -21,12 +21,14 @@
 //! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
 //!
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::StructArray;
+use arrow_schema::Fields;
 use datafusion_common::ScalarValue;
 use datafusion_expr::function::StateFieldsArgs;
-use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl, Signature};
+use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl, Signature, TypeSignature};
 use datatypes::arrow::datatypes::{DataType, Field};
 
 /// Returns the name of the state function for the given aggregate function name.
@@ -273,49 +275,65 @@ impl Accumulator for StateAccumWrapper {
     }
 }
 
-fn guess_state_fields(
-    original: &AggregateUDF,
-    input_types: &[DataType],
-) -> datafusion_common::Result<Vec<Field>> {
-    let state_fields_args = StateFieldsArgs {
-        name: original.name(),
-        input_types,
-        return_type: &original.return_type(input_types)?,
-        ordering_fields: &[],
-        is_distinct: false,
-    };
-    original.state_fields(state_fields_args)
+struct StateTypeToInputType {
+    /// A mapping from state types to input types.
+    mapping: HashMap<Vec<DataType>, Vec<DataType>>,
 }
 
-/// Guess the input types of the state function based on the original aggregate function's state types.
-/// It's not necessarily the same, but it's consistent enough for original aggregate function to behave correctly.
-fn guess_input_type_by_state_type(
-    original: &AggregateUDF,
-    state_types: &[DataType],
-) -> datafusion_common::Result<Vec<DataType>> {
-    // first try if state_types == input_types
-    if let Ok(ret_ty) = original.return_type(state_types) {
-        // check if result state tys is correct
-        let args = StateFieldsArgs {
-            name: original.name(),
-            input_types: state_types,
-            return_type: &ret_ty,
-            ordering_fields: &[],
-            is_distinct: false,
-        };
-        if let Ok(state_fields) = original.state_fields(args) {
-            // check for type
-            let real_state_types = state_fields
-                .iter()
-                .map(|f| f.data_type().clone())
-                .collect::<Vec<_>>();
-            if real_state_types == state_types {
-                return Ok(state_types.to_vec());
+fn get_all_possible_input_types(
+    inner: &AggregateUDF,
+) -> datafusion_common::Result<StateTypeToInputType> {
+    let signature = inner.signature();
+    let mut mapping = HashMap::new();
+    match &signature.type_signature {
+        TypeSignature::Exact(input_types) => {
+            let ret_type = inner.return_type(input_types).unwrap();
+            let state_fields_args = StateFieldsArgs {
+                name: inner.name(),
+                input_types,
+                return_type: &ret_type,
+                ordering_fields: &[],
+                is_distinct: false,
+            };
+            let state_fields = inner.state_fields(state_fields_args).unwrap();
+            mapping.insert(
+                state_fields.iter().map(|f| f.data_type().clone()).collect(),
+                input_types.to_vec(),
+            );
+        }
+        TypeSignature::OneOf(type_sig) => {}
+        TypeSignature::UserDefined => todo!("special handling for user defined type signature"),
+        _ => (),
+    }
+
+    Ok(StateTypeToInputType { mapping })
+}
+
+fn all_possible_sig(
+    inner: &AggregateUDF,
+    mapping: &mut HashMap<Fields, Vec<DataType>>,
+    type_sig: &TypeSignature,
+) {
+    match type_sig {
+        TypeSignature::Exact(input_types) => {
+            let ret_type = inner.return_type(input_types).unwrap();
+            let state_fields_args = StateFieldsArgs {
+                name: inner.name(),
+                input_types,
+                return_type: &ret_type,
+                ordering_fields: &[],
+                is_distinct: false,
+            };
+            let state_fields = inner.state_fields(state_fields_args).unwrap();
+            mapping.insert(state_fields.into(), input_types.to_vec());
+        }
+        TypeSignature::OneOf(type_sigs) => {
+            for sig in type_sigs {
+                all_possible_sig(inner, mapping, sig);
             }
         }
+        _ => (),
     }
-    // if above doesn't work, we try to guess the input types based on the state types.
-    todo!()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +346,7 @@ impl MergeWrapper {
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
         let name = aggr_merge_func_name(inner.name());
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
+        // TODO: a mapping of acceptable input types to state fields' data types for the original function
 
         Ok(Self {
             inner,
