@@ -85,9 +85,14 @@ impl MultiDimPartitionRule {
         };
 
         let mut checker = RuleChecker::new(&rule);
+        #[allow(deprecated)]
         checker.check()?;
 
         Ok(rule)
+    }
+
+    pub fn exprs(&self) -> &[PartitionExpr] {
+        &self.exprs
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -373,6 +378,7 @@ impl<'a> RuleChecker<'a> {
         }
     }
 
+    #[deprecated(note = "non-completeness implementation")]
     pub fn check(&mut self) -> Result<()> {
         for expr in &self.rule.exprs {
             self.walk_expr(expr)?

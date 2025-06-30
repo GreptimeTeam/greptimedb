@@ -27,7 +27,12 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 
+use datafusion_expr::Operator;
+use datafusion_physical_expr::expressions::{col, lit, BinaryExpr};
+use datafusion_physical_expr::PhysicalExpr;
+use datatypes::arrow::datatypes::Schema;
 use datatypes::value::{OrderedF64, OrderedFloat, Value};
 
 use crate::error;
@@ -36,33 +41,65 @@ use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 
 const ZERO: OrderedF64 = OrderedFloat(0.0f64);
 const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
+pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord)]
 pub(crate) struct AtomicExpr {
     /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
-    nucleons: Vec<NucleonExpr>,
+    pub(crate) nucleons: Vec<NucleonExpr>,
     /// Index to reference the [`PartitionExpr`] that this [`AtomicExpr`] is derived from.
     /// This index is used with `exprs` field in [`MultiDimPartitionRule`](crate::multi_dim::MultiDimPartitionRule).
     source_expr_index: usize,
 }
 
+impl AtomicExpr {
+    pub fn to_physical_expr(&self, schema: &Schema) -> Arc<dyn PhysicalExpr> {
+        let mut exprs = Vec::with_capacity(self.nucleons.len());
+        for nucleon in &self.nucleons {
+            exprs.push(nucleon.to_physical_expr(schema));
+        }
+        let result: Arc<dyn PhysicalExpr> = exprs
+            .into_iter()
+            .reduce(|l, r| Arc::new(BinaryExpr::new(l, Operator::And, r)))
+            .unwrap();
+        result
+    }
+}
+
+impl PartialOrd for AtomicExpr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.nucleons.cmp(&other.nucleons))
+    }
+}
+
 /// A simplified expression representation.
 ///
 /// This struct is used to compose [`AtomicExpr`], hence "nucleon".
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct NucleonExpr {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct NucleonExpr {
     column: String,
     op: GluonOp,
     /// Normalized [`Value`].
     value: OrderedF64,
 }
 
+impl NucleonExpr {
+    pub fn to_physical_expr(&self, schema: &Schema) -> Arc<dyn PhysicalExpr> {
+        Arc::new(BinaryExpr::new(
+            col(&self.column, schema).unwrap(),
+            self.op.to_operator(),
+            lit(*self.value.as_ref()),
+        ))
+    }
+}
+
 /// Further restricted operation set.
 ///
 /// Conjunction operations are removed from [`RestrictedOp`].
 /// This enumeration is used to bind elements in [`NucleonExpr`], hence "gluon".
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum GluonOp {
     Eq,
     NotEq,
@@ -72,6 +109,19 @@ enum GluonOp {
     GtEq,
 }
 
+impl GluonOp {
+    pub fn to_operator(&self) -> Operator {
+        match self {
+            GluonOp::Eq => Operator::Eq,
+            GluonOp::NotEq => Operator::NotEq,
+            GluonOp::Lt => Operator::Lt,
+            GluonOp::LtEq => Operator::LtEq,
+            GluonOp::Gt => Operator::Gt,
+            GluonOp::GtEq => Operator::GtEq,
+        }
+    }
+}
+
 /// Collider is used to collide a list of [`PartitionExpr`] into a list of [`AtomicExpr`]
 ///
 /// It also normalizes the values of the columns in the expressions.
@@ -79,11 +129,11 @@ enum GluonOp {
 pub struct Collider<'a> {
     source_exprs: &'a [PartitionExpr],
 
-    atomic_exprs: Vec<AtomicExpr>,
+    pub(crate) atomic_exprs: Vec<AtomicExpr>,
     /// A map of column name to a list of `(value, normalized value)` pairs.
     ///
     /// The normalized value is used for comparison. The normalization process keeps the order of the values.
-    normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
+    pub(crate) normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
 }
 
 impl<'a> Collider<'a> {
@@ -113,6 +163,10 @@ impl<'a> Collider<'a> {
         let mut atomic_exprs = Vec::with_capacity(source_exprs.len());
         for (index, expr) in source_exprs.iter().enumerate() {
             Self::collide_expr(expr, index, &normalized_values, &mut atomic_exprs)?;
+        }
+        // sort nucleon exprs
+        for expr in &mut atomic_exprs {
+            expr.nucleons.sort_unstable();
         }
 
         // convert normalized values to a map
