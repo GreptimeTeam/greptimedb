@@ -44,7 +44,7 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
-    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedImpureDefaultSnafu,
+    FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
 };
 use crate::manifest::action::RegionEdit;
 use crate::memtable::bulk::part::BulkPart;
@@ -380,10 +380,13 @@ impl WriteRequest {
             OpType::Put => {
                 // For put requests, we use the default value from column schema.
                 if column.column_schema.is_default_impure() {
-                    UnexpectedImpureDefaultSnafu {
-                        region_id: self.region_id,
-                        column: &column.column_schema.name,
-                        default_value: format!("{:?}", column.column_schema.default_constraint()),
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "unexpected impure default value with region_id: {}, column: {}, default_value: {:?}", 
+                            self.region_id,
+                            column.column_schema.name,
+                            column.column_schema.default_constraint(),
+                        ),
                     }
                     .fail()?
                 }
@@ -1201,7 +1204,7 @@ mod tests {
             .fill_missing_columns(&metadata)
             .unwrap_err()
             .to_string()
-            .contains("Unexpected impure default value with region_id"));
+            .contains("unexpected impure default value with region_id"));
     }
 
     #[test]

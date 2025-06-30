@@ -31,7 +31,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::error::{self, Error};
+use crate::error::Error;
 use crate::test_util::{
     build_rows, flush_region, kafka_log_store_factory, prepare_test_for_kafka_log_store, put_rows,
     raft_engine_log_store_factory, rows_schema, single_kafka_log_store_factory,
@@ -255,7 +255,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
         .unwrap_err();
     let err = err.as_any().downcast_ref::<Error>().unwrap();
 
-    assert_matches!(err, error::Error::UnexpectedReplay { .. });
+    assert_matches!(err, Error::Unexpected { .. });
 
     // It should ignore requests to writable regions.
     region.set_role(RegionRole::Leader);
