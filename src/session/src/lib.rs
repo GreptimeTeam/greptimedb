@@ -43,6 +43,8 @@ pub struct Session {
     configuration_variables: Arc<ConfigurationVariables>,
     // the process id to use when killing the query
     process_id: u32,
+    // a postgres specific key for cancel request
+    secret_key: Option<i32>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -85,7 +87,13 @@ impl Session {
             configuration_variables: Arc::new(configuration_variables),
             mutable_inner: Arc::new(RwLock::new(MutableInner::default())),
             process_id,
+            secret_key: None,
         }
+    }
+
+    pub fn with_secret_key(mut self, secret_key: i32) -> Self {
+        self.secret_key = Some(secret_key);
+        self
     }
 
     pub fn new_query_context(&self) -> QueryContextRef {
@@ -154,5 +162,9 @@ impl Session {
 
     pub fn process_id(&self) -> u32 {
         self.process_id
+    }
+
+    pub fn secret_key(&self) -> Option<i32> {
+        self.secret_key
     }
 }

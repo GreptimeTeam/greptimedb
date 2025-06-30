@@ -15,6 +15,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -99,6 +100,27 @@ impl ProcessManager {
     /// Generates the next process id.
     pub fn next_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Generate a Postgres specific secret key
+    ///
+    /// According to Postgres this secret key is a 32-bit long integer for
+    /// identify a connection. This implementation uses first 16bits hash value
+    /// of server address and 16bit random data for this key.
+    pub fn generate_secret_key(&self) -> i32 {
+        let mut hasher = DefaultHasher::new();
+        self.server_addr.hash(&mut hasher);
+        let hostname_hash = hasher.finish();
+
+        // Take lower 16 bits of the hash for first part
+        let first_part = (hostname_hash & 0xFFFF) as u16;
+
+        // Generate random 16 bits for second part
+        let second_part = rand::random::<u16>();
+
+        // Combine both parts into i32
+        let result = ((first_part as u32) << 16) | (second_part as u32);
+        result as i32
     }
 
     /// De-register a query from process list.
