@@ -34,6 +34,7 @@ use crate::metrics::{
     FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
     WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
+use crate::sst::file::RegionFileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
@@ -115,7 +116,7 @@ impl WriteCache {
         let region_id = write_request.metadata.region_id;
 
         let store = self.file_cache.local_store();
-        let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
+        let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
             op_type: write_request.op_type,
             metadata: write_request.metadata.clone(),
@@ -159,7 +160,7 @@ impl WriteCache {
             let parquet_key = IndexKey::new(region_id, sst.file_id, FileType::Parquet);
             let parquet_path = upload_request
                 .dest_path_provider
-                .build_sst_file_path(sst.file_id);
+                .build_sst_file_path(RegionFileId::new(region_id, sst.file_id));
             if let Err(e) = self.upload(parquet_key, &parquet_path, remote_store).await {
                 err = Some(e);
                 break;
@@ -170,7 +171,7 @@ impl WriteCache {
                 let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
                 let puffin_path = upload_request
                     .dest_path_provider
-                    .build_index_file_path(sst.file_id);
+                    .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
                 if let Err(e) = self.upload(puffin_key, &puffin_path, remote_store).await {
                     err = Some(e);
                     break;
@@ -501,8 +502,10 @@ mod tests {
             .remove(0); //todo(hl): we assume it only creates one file.
 
         let file_id = sst_info.file_id;
-        let sst_upload_path = path_provider.build_sst_file_path(file_id);
-        let index_upload_path = path_provider.build_index_file_path(file_id);
+        let sst_upload_path =
+            path_provider.build_sst_file_path(RegionFileId::new(region_id, file_id));
+        let index_upload_path =
+            path_provider.build_index_file_path(RegionFileId::new(region_id, file_id));
 
         // Check write cache contains the key
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);

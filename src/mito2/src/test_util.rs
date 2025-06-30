@@ -72,7 +72,7 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::read::{Batch, BatchBuilder, BatchReader};
-use crate::sst::file_purger::{FilePurger, FilePurgerRef, NoopFilePurger, PurgeRequest};
+use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};

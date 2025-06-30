@@ -28,7 +28,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -38,7 +38,7 @@ use crate::error::{
     ApplyInvertedIndexSnafu, MetadataSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
-use crate::sst::file::FileId;
+use crate::sst::file::RegionFileId;
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::TYPE_INVERTED_INDEX;
@@ -48,9 +48,6 @@ use crate::sst::index::TYPE_INVERTED_INDEX;
 pub(crate) struct InvertedIndexApplier {
     /// The root directory of the region.
     region_dir: String,
-
-    /// Region ID.
-    region_id: RegionId,
 
     /// Store responsible for accessing remote index files.
     store: ObjectStore,
@@ -81,7 +78,6 @@ impl InvertedIndexApplier {
     /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
-        region_id: RegionId,
         store: ObjectStore,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -91,7 +87,6 @@ impl InvertedIndexApplier {
 
         Self {
             region_dir,
-            region_id,
             store,
             file_cache: None,
             index_applier,
@@ -124,7 +119,11 @@ impl InvertedIndexApplier {
     }
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
-    pub async fn apply(&self, file_id: FileId, file_size_hint: Option<u64>) -> Result<ApplyOutput> {
+    pub async fn apply(
+        &self,
+        file_id: RegionFileId,
+        file_size_hint: Option<u64>,
+    ) -> Result<ApplyOutput> {
         let _timer = INDEX_APPLY_ELAPSED
             .with_label_values(&[TYPE_INVERTED_INDEX])
             .start_timer();
@@ -147,7 +146,7 @@ impl InvertedIndexApplier {
         if let Some(index_cache) = &self.inverted_index_cache {
             let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
             let mut index_reader = CachedInvertedIndexBlobReader::new(
-                file_id,
+                file_id.file_id(),
                 blob_size,
                 InvertedIndexBlobReader::new(blob),
                 index_cache.clone(),
@@ -168,21 +167,21 @@ impl InvertedIndexApplier {
     /// Creates a blob reader from the cached index file.
     async fn cached_blob_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
 
         let puffin_manager = self.puffin_manager_factory.build(
             file_cache.local_store(),
-            WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+            WriteCachePathProvider::new(file_cache.clone()),
         );
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
@@ -203,7 +202,7 @@ impl InvertedIndexApplier {
     /// Creates a blob reader from the remote index file.
     async fn remote_blob_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
         let puffin_manager = self
@@ -248,13 +247,14 @@ mod tests {
     use puffin::puffin_manager::PuffinWriter;
 
     use super::*;
+    use crate::sst::file::FileId;
 
     #[tokio::test]
     async fn test_index_applier_apply_basic() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_index_applier_apply_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let file_id = FileId::random();
+        let file_id = RegionFileId::new(0.into(), FileId::random());
         let region_dir = "region_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
@@ -285,7 +285,6 @@ mod tests {
 
         let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
-            RegionId::new(0, 0),
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
@@ -308,7 +307,7 @@ mod tests {
             PuffinManagerFactory::new_for_test_async("test_index_applier_apply_invalid_blob_type_")
                 .await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
-        let file_id = FileId::random();
+        let file_id = RegionFileId::new(0.into(), FileId::random());
         let region_dir = "region_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
@@ -333,7 +332,6 @@ mod tests {
 
         let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
-            RegionId::new(0, 0),
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,

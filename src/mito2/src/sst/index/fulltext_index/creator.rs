@@ -376,7 +376,7 @@ mod tests {
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
-    use crate::sst::file::FileId;
+    use crate::sst::file::{FileId, RegionFileId};
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
@@ -561,7 +561,8 @@ mod tests {
             object_store.clone(),
             RegionFilePathFactory::new(region_dir.clone()),
         );
-        let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
+        let region_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
+        let mut writer = puffin_manager.writer(&region_file_id).await.unwrap();
         let _ = indexer.finish(&mut writer).await.unwrap();
         writer.finish().await.unwrap();
 
@@ -601,26 +602,20 @@ mod tests {
                     .extend(fulltext_terms);
             }
 
-            let applier = FulltextIndexApplier::new(
-                region_dir,
-                region_metadata.region_id,
-                object_store,
-                requests,
-                factory,
-            );
+            let applier = FulltextIndexApplier::new(region_dir, object_store, requests, factory);
 
             let backend = backend.clone();
             async move {
                 match backend {
                     FulltextBackend::Tantivy => {
-                        applier.apply_fine(sst_file_id, None).await.unwrap()
+                        applier.apply_fine(region_file_id, None).await.unwrap()
                     }
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(sst_file_id, None, row_groups)
+                            .apply_coarse(region_file_id, None, row_groups)
                             .await
                             .unwrap();
                         resp.map(|r| {

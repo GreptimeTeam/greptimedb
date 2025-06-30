@@ -71,7 +71,7 @@ async fn test_engine_drop_region() {
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    let region_dir = region.access_layer.region_dir().to_string();
+    let region_dir = region.access_layer.table_dir().to_string();
     // no dropping marker file
     assert!(!env
         .get_object_store()
@@ -177,10 +177,10 @@ async fn test_engine_drop_region_for_custom_store() {
     .await;
 
     let global_region = engine.get_region(global_region_id).unwrap();
-    let global_region_dir = global_region.access_layer.region_dir().to_string();
+    let global_region_dir = global_region.access_layer.table_dir().to_string();
 
     let custom_region = engine.get_region(custom_region_id).unwrap();
-    let custom_region_dir = custom_region.access_layer.region_dir().to_string();
+    let custom_region_dir = custom_region.access_layer.table_dir().to_string();
 
     // Both these regions should exist before dropping the custom region.
     assert!(object_store_manager

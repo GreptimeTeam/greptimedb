@@ -99,7 +99,6 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
         let applier = BloomFilterIndexApplier::new(
             self.region_dir,
-            self.metadata.region_id,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,

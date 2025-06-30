@@ -20,7 +20,7 @@ use datafusion_expr::{BinaryExpr, Expr, Operator};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
-use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
+use store_api::storage::{ColumnId, ConcreteDataType};
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
@@ -81,7 +81,6 @@ pub struct FulltextTerm {
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
 pub struct FulltextIndexApplierBuilder<'a> {
     region_dir: String,
-    region_id: RegionId,
     store: ObjectStore,
     puffin_manager_factory: PuffinManagerFactory,
     metadata: &'a RegionMetadata,
@@ -94,14 +93,12 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     /// Creates a new `FulltextIndexApplierBuilder`.
     pub fn new(
         region_dir: String,
-        region_id: RegionId,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         metadata: &'a RegionMetadata,
     ) -> Self {
         Self {
             region_dir,
-            region_id,
             store,
             puffin_manager_factory,
             metadata,
@@ -150,7 +147,6 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
-                self.region_id,
                 self.store,
                 requests,
                 self.puffin_manager_factory,

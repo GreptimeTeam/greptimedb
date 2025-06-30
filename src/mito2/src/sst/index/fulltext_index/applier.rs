@@ -27,7 +27,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -40,7 +40,7 @@ use crate::error::{
     PuffinReadBlobSnafu, Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
-use crate::sst::file::FileId;
+use crate::sst::file::RegionFileId;
 use crate::sst::index::fulltext_index::applier::builder::{FulltextRequest, FulltextTerm};
 use crate::sst::index::fulltext_index::{INDEX_BLOB_TYPE_BLOOM, INDEX_BLOB_TYPE_TANTIVY};
 use crate::sst::index::puffin_manager::{
@@ -71,13 +71,12 @@ impl FulltextIndexApplier {
     /// Creates a new `FulltextIndexApplier`.
     pub fn new(
         region_dir: String,
-        region_id: RegionId,
         store: ObjectStore,
         requests: BTreeMap<ColumnId, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         let requests = Arc::new(requests);
-        let index_source = IndexSource::new(region_dir, region_id, puffin_manager_factory, store);
+        let index_source = IndexSource::new(region_dir, puffin_manager_factory, store);
 
         Self {
             predicate_key: PredicateKey::new_fulltext(requests.clone()),
@@ -123,7 +122,7 @@ impl FulltextIndexApplier {
     /// Returns the row ids that match the queries.
     pub async fn apply_fine(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BTreeSet<RowId>>> {
         let timer = INDEX_APPLY_ELAPSED
@@ -165,7 +164,7 @@ impl FulltextIndexApplier {
     async fn apply_fine_one_column(
         &self,
         file_size_hint: Option<u64>,
-        file_id: FileId,
+        file_id: RegionFileId,
         column_id: ColumnId,
         request: &FulltextRequest,
     ) -> Result<Option<BTreeSet<RowId>>> {
@@ -236,7 +235,7 @@ impl FulltextIndexApplier {
     /// Empty ranges means that the row group is searched but no rows are found.
     pub async fn apply_coarse(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
     ) -> Result<Option<Vec<(usize, Vec<Range<usize>>)>>> {
@@ -275,7 +274,7 @@ impl FulltextIndexApplier {
 
     async fn apply_coarse_one_column(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
         column_id: ColumnId,
         terms: &[FulltextTerm],
@@ -305,7 +304,7 @@ impl FulltextIndexApplier {
                 .context(MetadataSnafu)?
                 .content_length;
             let reader = CachedBloomFilterIndexBlobReader::new(
-                file_id,
+                file_id.file_id(),
                 column_id,
                 Tag::Fulltext,
                 blob_size,
@@ -422,7 +421,6 @@ impl FulltextIndexApplier {
 /// The source of the index.
 struct IndexSource {
     region_dir: String,
-    region_id: RegionId,
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
@@ -440,13 +438,11 @@ struct IndexSource {
 impl IndexSource {
     fn new(
         region_dir: String,
-        region_id: RegionId,
         puffin_manager_factory: PuffinManagerFactory,
         remote_store: ObjectStore,
     ) -> Self {
         Self {
             region_dir,
-            region_id,
             puffin_manager_factory,
             remote_store,
             file_cache: None,
@@ -468,7 +464,7 @@ impl IndexSource {
     #[allow(unused)]
     async fn blob(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         key: &str,
         file_size_hint: Option<u64>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinBlob>>> {
@@ -499,7 +495,7 @@ impl IndexSource {
     /// Returns `None` if the directory is not found.
     async fn dir(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         key: &str,
         file_size_hint: Option<u64>,
     ) -> Result<Option<GuardWithMetadata<SstPuffinDir>>> {
@@ -528,7 +524,7 @@ impl IndexSource {
     /// Return reader and whether it is fallbacked to remote store.
     async fn ensure_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<(SstPuffinReader, bool)> {
         match self.build_local_cache(file_id, file_size_hint).await {
@@ -540,14 +536,14 @@ impl IndexSource {
 
     async fn build_local_cache(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<SstPuffinReader>> {
         let Some(file_cache) = &self.file_cache else {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
@@ -556,7 +552,7 @@ impl IndexSource {
             .puffin_manager_factory
             .build(
                 file_cache.local_store(),
-                WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+                WriteCachePathProvider::new(file_cache.clone()),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
         let reader = puffin_manager
@@ -569,7 +565,7 @@ impl IndexSource {
 
     async fn build_remote(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
     ) -> Result<SstPuffinReader> {
         let puffin_manager = self
