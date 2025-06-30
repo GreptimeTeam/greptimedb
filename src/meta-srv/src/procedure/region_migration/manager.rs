@@ -24,6 +24,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
@@ -104,15 +105,38 @@ pub struct RegionMigrationProcedureTask {
     pub(crate) from_peer: Peer,
     pub(crate) to_peer: Peer,
     pub(crate) timeout: Duration,
+    pub(crate) trigger_reason: RegionMigrationTriggerReason,
+}
+
+/// The reason why the region migration procedure is triggered.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
+#[strum(serialize_all = "PascalCase")]
+pub enum RegionMigrationTriggerReason {
+    #[default]
+    /// The region migration procedure is triggered by unknown reason.
+    Unknown,
+    /// The region migration procedure is triggered by administrator.
+    Manual,
+    /// The region migration procedure is triggered by auto rebalance.
+    AutoRebalance,
+    /// The region migration procedure is triggered by failover.
+    Failover,
 }
 
 impl RegionMigrationProcedureTask {
-    pub fn new(region_id: RegionId, from_peer: Peer, to_peer: Peer, timeout: Duration) -> Self {
+    pub fn new(
+        region_id: RegionId,
+        from_peer: Peer,
+        to_peer: Peer,
+        timeout: Duration,
+        trigger_reason: RegionMigrationTriggerReason,
+    ) -> Self {
         Self {
             region_id,
             from_peer,
             to_peer,
             timeout,
+            trigger_reason,
         }
     }
 }
@@ -121,8 +145,8 @@ impl Display for RegionMigrationProcedureTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "region: {}, from_peer: {}, to_peer: {}",
-            self.region_id, self.from_peer, self.to_peer
+            "region: {}, from_peer: {}, to_peer: {}, trigger_reason: {}",
+            self.region_id, self.from_peer, self.to_peer, self.trigger_reason
         )
     }
 }
@@ -357,6 +381,7 @@ impl RegionMigrationManager {
             from_peer,
             to_peer,
             timeout,
+            trigger_reason,
         } = task.clone();
         let procedure = RegionMigrationProcedure::new(
             PersistentContext {
@@ -366,6 +391,7 @@ impl RegionMigrationManager {
                 from_peer,
                 to_peer,
                 timeout,
+                trigger_reason,
             },
             self.context_factory.clone(),
             Some(guard),
@@ -424,6 +450,7 @@ mod test {
             from_peer: Peer::empty(2),
             to_peer: Peer::empty(1),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
         // Inserts one
         manager
@@ -448,6 +475,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(1),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -465,6 +493,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let err = manager.submit_procedure(task).await.unwrap_err();
@@ -482,6 +511,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -509,6 +539,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -537,6 +568,7 @@ mod test {
             from_peer: Peer::empty(3),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -570,6 +602,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let table_info = new_test_table_info(1024, vec![1]).into();
@@ -597,6 +630,7 @@ mod test {
             from_peer: Peer::empty(1),
             to_peer: Peer::empty(2),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         };
 
         let err = manager

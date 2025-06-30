@@ -45,7 +45,9 @@ use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
-use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
+use crate::procedure::region_migration::manager::{
+    RegionMigrationProcedureTracker, RegionMigrationTriggerReason,
+};
 use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
@@ -189,6 +191,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         to_peer: Peer::empty(to),
         region_id,
         timeout: Duration::from_secs(10),
+        trigger_reason: RegionMigrationTriggerReason::default(),
     }
 }
 
