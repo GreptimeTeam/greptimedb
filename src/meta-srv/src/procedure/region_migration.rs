@@ -49,6 +49,7 @@ use common_telemetry::{error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
+    RegionMigrationTriggerReason,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -86,6 +87,8 @@ pub struct PersistentContext {
     /// The timeout for downgrading leader region and upgrading candidate region operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
     timeout: Duration,
+    /// The trigger reason of region migration.
+    trigger_reason: RegionMigrationTriggerReason,
 }
 
 fn default_timeout() -> Duration {
@@ -617,6 +620,7 @@ impl RegionMigrationProcedure {
             from_peer: persistent_ctx.from_peer.clone(),
             to_peer: persistent_ctx.to_peer.clone(),
             timeout: persistent_ctx.timeout,
+            trigger_reason: persistent_ctx.trigger_reason.clone(),
         });
         let context = context_factory.new_context(persistent_ctx);
 
@@ -793,7 +797,7 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
         let serialized = procedure.dump().unwrap();
-        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"persistent_ctx":{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"timeout":"10s","trigger_reason":"Manual"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
@@ -801,7 +805,7 @@ mod tests {
     fn test_backward_compatibility() {
         let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
         // NOTES: Changes it will break backward compatibility.
-        let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
+        let serialized = r#"{"catalog":"greptime","schema":"public","from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105,"trigger_reason":"Manual"}"#;
         let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
 
         assert_eq!(persistent_ctx, deserialized);

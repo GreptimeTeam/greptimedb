@@ -352,6 +352,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+    use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::test_util::{new_procedure_context, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
@@ -366,6 +367,7 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             timeout: Duration::from_millis(1000),
+            trigger_reason: RegionMigrationTriggerReason::Manual,
         }
     }
 

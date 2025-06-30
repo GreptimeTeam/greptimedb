@@ -35,7 +35,9 @@ use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::SelectorContext;
-use meta_srv::procedure::region_migration::RegionMigrationProcedureTask;
+use meta_srv::procedure::region_migration::{
+    RegionMigrationProcedureTask, RegionMigrationTriggerReason,
+};
 use meta_srv::selector::{Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
@@ -174,6 +176,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap();
@@ -225,6 +228,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
@@ -483,6 +487,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
@@ -587,6 +592,7 @@ pub async fn test_region_migration_multiple_regions(
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap();
@@ -638,6 +644,7 @@ pub async fn test_region_migration_multiple_regions(
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
@@ -727,6 +734,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap();
@@ -776,6 +784,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
@@ -854,6 +863,7 @@ pub async fn test_region_migration_incorrect_from_peer(
             peer_factory(5),
             peer_factory(1),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
@@ -936,6 +946,7 @@ pub async fn test_region_migration_incorrect_region_id(
             peer_factory(2),
             peer_factory(1),
             Duration::from_millis(1000),
+            RegionMigrationTriggerReason::Manual,
         ))
         .await
         .unwrap_err();
