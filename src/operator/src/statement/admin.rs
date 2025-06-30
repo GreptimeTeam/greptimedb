@@ -30,7 +30,7 @@ use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
 use sql::statements::admin::Admin;
-use sql::statements::sql_value_to_value;
+use sql_common::convert::sql_value_to_value;
 
 use crate::error::{self, Result};
 use crate::statement::StatementExecutor;
@@ -186,7 +186,7 @@ fn values_to_vectors_by_exact_types(
         .zip(exact_types.iter())
         .map(|(value, data_type)| {
             let value = sql_value_to_value(DUMMY_COLUMN, data_type, value, tz, None, false)
-                .context(error::ParseSqlValueSnafu)?;
+                .context(error::SQLCommonSnafu)?;
 
             Ok(value_to_vector(value))
         })

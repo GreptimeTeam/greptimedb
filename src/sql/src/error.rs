@@ -410,6 +410,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("SQLCommon error: {}", source))]
+    SQLCommon {
+        source: sql_common::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -464,6 +471,7 @@ impl ErrorExt for Error {
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             Datatype { source, .. } => source.status_code(),
+            SQLCommon { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
             ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
 

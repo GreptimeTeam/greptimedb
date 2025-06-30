@@ -36,6 +36,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
+sql-common.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
 store-api.workspace = true

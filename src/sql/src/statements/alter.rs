@@ -19,7 +19,7 @@ use common_query::AddColumnLocation;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -95,11 +95,21 @@ pub enum AlterTableOperation {
     DropDefaults {
         columns: Vec<DropDefaultsOperation>,
     },
+    /// `ALTER <column_name> SET DEFAULT <default_value>`
+    SetDefaults {
+        defaults: Vec<SetDefaultsOperation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 /// `ALTER <column_name> DROP DEFAULT`
 pub struct DropDefaultsOperation(pub Ident);
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct SetDefaultsOperation {
+    pub column_name: Ident,
+    pub default_constraint: Expr,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum SetIndexOperation {
@@ -217,6 +227,18 @@ impl Display for AlterTableOperation {
                     .map(|column| format!("ALTER {} DROP DEFAULT", column.0))
                     .join(", ");
                 write!(f, "{columns}")
+            }
+            AlterTableOperation::SetDefaults { defaults } => {
+                let defaults = defaults
+                    .iter()
+                    .map(|column| {
+                        format!(
+                            "ALTER {} SET DEFAULT {}",
+                            column.column_name, column.default_constraint
+                        )
+                    })
+                    .join(", ");
+                write!(f, "{defaults}")
             }
         }
     }
