@@ -15,7 +15,7 @@
 //! Path constants for table engines, cluster states and WAL
 //! All paths relative to data_home(file storage) or root path(S3, OSS etc).
 
-use crate::storage::{RegionId, RegionNumber, TableId};
+use crate::storage::{RegionId, RegionSeq, TableId};
 
 /// WAL dir for local file storage
 pub const WAL_DIR: &str = "wal";
@@ -26,10 +26,10 @@ pub const DATA_DIR: &str = "data/";
 /// Cluster state dir
 pub const CLUSTER_DIR: &str = "cluster/";
 
-/// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
+/// Generate region name in the form of "{TABLE_ID}_{REGION_SEQUENCE}"
 #[inline]
-pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
-    format!("{table_id}_{region_number:010}")
+pub fn region_name(table_id: TableId, region_sequence: RegionSeq) -> String {
+    format!("{table_id}_{region_sequence:010}")
 }
 
 #[inline]
@@ -41,7 +41,7 @@ pub fn region_dir(path: &str, region_id: RegionId) -> String {
     format!(
         "{}{}/",
         table_dir(path, region_id.table_id()),
-        region_name(region_id.table_id(), region_id.region_number())
+        region_name(region_id.table_id(), region_id.region_sequence())
     )
 }
 
@@ -66,7 +66,7 @@ pub fn get_storage_path(region_dir: &str, region_id: RegionId) -> Option<String>
     let parts = format!(
         "{}/{}",
         region_id.table_id(),
-        region_name(region_id.table_id(), region_id.region_number())
+        region_name(region_id.table_id(), region_id.region_sequence())
     );
 
     // Ignore the last '/'. The original path will be like "${DATA_DIR}${catalog}/${schema}".

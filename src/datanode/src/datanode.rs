@@ -48,9 +48,9 @@ use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::path_utils::{region_dir, WAL_DIR};
+use store_api::path_utils::{table_dir, WAL_DIR};
 use store_api::region_engine::{RegionEngineRef, RegionRole};
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{PathType, RegionOpenRequest};
 use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
@@ -603,12 +603,13 @@ async fn open_all_regions(
 
     let mut region_requests = Vec::with_capacity(regions.len());
     for (region_id, engine, store_path, options) in regions {
-        let region_dir = region_dir(&store_path, region_id);
+        let table_dir = table_dir(&store_path, region_id.table_id());
         region_requests.push((
             region_id,
             RegionOpenRequest {
                 engine,
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare, // Default to Bare for mito tables
                 options,
                 skip_wal_replay: false,
             },
@@ -647,12 +648,13 @@ async fn open_all_regions(
         );
         let mut region_requests = Vec::with_capacity(follower_regions.len());
         for (region_id, engine, store_path, options) in follower_regions {
-            let region_dir = region_dir(&store_path, region_id);
+            let table_dir = table_dir(&store_path, region_id.table_id());
             region_requests.push((
                 region_id,
                 RegionOpenRequest {
                     engine,
-                    region_dir,
+                    table_dir,
+                    path_type: PathType::Bare, // Default to Bare for mito tables
                     options,
                     skip_wal_replay: true,
                 },

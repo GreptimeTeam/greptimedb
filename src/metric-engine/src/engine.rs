@@ -46,7 +46,7 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
     SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{BatchRegionDdlRequest, PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
@@ -478,7 +478,7 @@ mod test {
     use std::collections::HashMap;
 
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-    use store_api::region_request::{RegionCloseRequest, RegionOpenRequest};
+    use store_api::region_request::{PathType, RegionCloseRequest, RegionOpenRequest};
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -505,7 +505,8 @@ mod test {
             .collect();
         let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: env.default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
             options: physical_region_option,
             skip_wal_replay: false,
         };
@@ -527,7 +528,8 @@ mod test {
         // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: env.default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
             options: HashMap::new(),
             skip_wal_replay: false,
         };

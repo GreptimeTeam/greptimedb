@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
+use store_api::path_utils::{region_name, table_dir};
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 

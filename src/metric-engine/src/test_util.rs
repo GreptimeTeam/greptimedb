@@ -29,7 +29,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
 
@@ -101,7 +101,8 @@ impl TestEnv {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: METRIC_ENGINE_NAME.to_string(),
-                    region_dir: self.default_region_dir(),
+                    table_dir: self.default_table_dir(),
+                    path_type: PathType::Bare, // Use Bare path type for engine regions
                     options: physical_region_option,
                     skip_wal_replay: true,
                 }),
@@ -144,7 +145,8 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            region_dir: self.default_region_dir(),
+            table_dir: self.default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
         };
 
         // create physical region
@@ -158,7 +160,7 @@ impl TestEnv {
         let region_create_request = create_logical_region_request(
             &["job"],
             self.default_physical_region_id(),
-            "test_metric_logical_region",
+            "test_metric_logical_table",
         );
         self.metric()
             .handle_request(region_id, RegionRequest::Create(region_create_request))
@@ -184,9 +186,9 @@ impl TestEnv {
         RegionId::new(3, 2)
     }
 
-    /// Default region dir `test_metric_region`
-    pub fn default_region_dir(&self) -> String {
-        "test_metric_region".to_string()
+    /// Default table dir `test_metric_table`
+    pub fn default_table_dir(&self) -> String {
+        "test_metric_table".to_string()
     }
 }
 
@@ -222,7 +224,7 @@ pub fn alter_logical_region_add_tag_columns(
 pub fn create_logical_region_request(
     tags: &[&str],
     physical_region_id: RegionId,
-    region_dir: &str,
+    table_dir: &str,
 ) -> RegionCreateRequest {
     let mut column_metadatas = vec![
         ColumnMetadata {
@@ -265,7 +267,8 @@ pub fn create_logical_region_request(
         )]
         .into_iter()
         .collect(),
-        region_dir: region_dir.to_string(),
+        table_dir: table_dir.to_string(),
+        path_type: PathType::Bare, // Use Bare path type for engine regions
     }
 }
 

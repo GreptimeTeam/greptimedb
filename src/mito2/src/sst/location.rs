@@ -17,25 +17,52 @@ use store_api::path_utils::region_name;
 
 use crate::sst::file::RegionFileId;
 
-pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId) -> String {
-    let region_name = region_name(
-        region_file_id.region_id().table_id(),
-        region_file_id.region_id().region_number(),
-    );
-    let region_dir = util::join_dir(table_dir, &region_name);
-    util::join_path(
-        &region_dir,
-        &format!("{}.parquet", region_file_id.file_id()),
-    )
+/// The type of path to generate.
+pub enum PathType {
+    /// A bare path - the original path of an engine.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/`.
+    Bare,
+    /// A path for the data region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/data/`.
+    Data,
+    /// A path for the metadata region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/metadata/`.
+    Metadata,
 }
 
-pub fn index_file_path(table_dir: &str, region_file_id: RegionFileId) -> String {
+pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
     let region_name = region_name(
         region_file_id.region_id().table_id(),
-        region_file_id.region_id().region_number(),
+        region_file_id.region_id().region_sequence(),
     );
     let region_dir = util::join_dir(table_dir, &region_name);
-    let index_dir = util::join_dir(&region_dir, "index");
+    let final_dir = match path_type {
+        PathType::Bare => region_dir,
+        PathType::Data => util::join_dir(&region_dir, "data"),
+        PathType::Metadata => util::join_dir(&region_dir, "metadata"),
+    };
+    util::join_path(&final_dir, &format!("{}.parquet", region_file_id.file_id()))
+}
+
+pub fn index_file_path(
+    table_dir: &str,
+    region_file_id: RegionFileId,
+    path_type: PathType,
+) -> String {
+    let region_name = region_name(
+        region_file_id.region_id().table_id(),
+        region_file_id.region_id().region_sequence(),
+    );
+    let region_dir = util::join_dir(table_dir, &region_name);
+    let final_dir = match path_type {
+        PathType::Bare => region_dir,
+        PathType::Data => util::join_dir(&region_dir, "data"),
+        PathType::Metadata => util::join_dir(&region_dir, "metadata"),
+    };
+    let index_dir = util::join_dir(&final_dir, "index");
     util::join_path(&index_dir, &format!("{}.puffin", region_file_id.file_id()))
 }
 
@@ -51,8 +78,16 @@ mod tests {
         let file_id = FileId::random();
         let region_file_id = RegionFileId::new(RegionId::new(1, 2), file_id);
         assert_eq!(
-            sst_file_path("table_dir", region_file_id),
+            sst_file_path("table_dir", region_file_id, PathType::Bare),
             format!("table_dir/1_0000000002/{}.parquet", file_id)
+        );
+        assert_eq!(
+            sst_file_path("table_dir", region_file_id, PathType::Data),
+            format!("table_dir/1_0000000002/data/{}.parquet", file_id)
+        );
+        assert_eq!(
+            sst_file_path("table_dir", region_file_id, PathType::Metadata),
+            format!("table_dir/1_0000000002/metadata/{}.parquet", file_id)
         );
     }
 
@@ -61,8 +96,16 @@ mod tests {
         let file_id = FileId::random();
         let region_file_id = RegionFileId::new(RegionId::new(1, 2), file_id);
         assert_eq!(
-            index_file_path("table_dir", region_file_id),
+            index_file_path("table_dir", region_file_id, PathType::Bare),
             format!("table_dir/1_0000000002/index/{}.puffin", file_id)
+        );
+        assert_eq!(
+            index_file_path("table_dir", region_file_id, PathType::Data),
+            format!("table_dir/1_0000000002/data/index/{}.puffin", file_id)
+        );
+        assert_eq!(
+            index_file_path("table_dir", region_file_id, PathType::Metadata),
+            format!("table_dir/1_0000000002/metadata/index/{}.puffin", file_id)
         );
     }
 }
