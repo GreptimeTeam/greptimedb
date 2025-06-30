@@ -15,12 +15,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use datatypes::arrow::array::{BooleanArray, Float64Builder, RecordBatch};
+use datatypes::arrow::array::{BooleanArray, Float64Array, Float64Builder, RecordBatch};
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::value::OrderedF64;
 
-use crate::collider::{Collider, CHECK_STEP};
-use crate::error::Result;
+use crate::collider::{Collider, CHECK_STEP, NORMALIZE_STEP};
+use crate::error::{
+    CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
+};
+use crate::expr::{PartitionExpr, RestrictedOp};
 use crate::multi_dim::MultiDimPartitionRule;
 
 pub struct PartitionChecker<'a> {
@@ -40,20 +43,37 @@ impl<'a> PartitionChecker<'a> {
     }
 }
 
-// logic of checking rules
+// Logic of checking rules
 impl<'a> PartitionChecker<'a> {
     fn run(&self) -> Result<()> {
-        // sort atomic exprs and check uniqueness
+        // Sort atomic exprs and check uniqueness
         let mut atomic_exprs = BTreeMap::new();
         for expr in self.collider.atomic_exprs.iter() {
             let key = &expr.nucleons;
             atomic_exprs.insert(key, expr);
         }
         if atomic_exprs.len() != self.collider.atomic_exprs.len() {
-            todo!("error: atomic exprs are not unique");
+            // Find the duplication for error message
+            for expr in self.collider.atomic_exprs.iter() {
+                if atomic_exprs.get(&expr.nucleons).unwrap().source_expr_index
+                    != expr.source_expr_index
+                {
+                    let expr = self.rule.exprs()[expr.source_expr_index].clone();
+                    return DuplicateExprSnafu { expr }.fail();
+                }
+            }
+            // Or return a placeholder. This should never happen.
+            return DuplicateExprSnafu {
+                expr: PartitionExpr::new(
+                    crate::expr::Operand::Column("unknown".to_string()),
+                    RestrictedOp::Eq,
+                    crate::expr::Operand::Column("expr".to_string()),
+                ),
+            }
+            .fail();
         }
 
-        // TODO(ruihang): merge atomic exprs
+        // TODO(ruihang): merge atomic exprs to improve checker's performance
 
         // matrix test
         let mut matrix_fundation = HashMap::new();
@@ -95,12 +115,88 @@ impl<'a> PartitionChecker<'a> {
                     true_count += 1;
                 }
             }
-            if true_count != 1 {
-                todo!("error: check failed");
+
+            if true_count == 0 {
+                return CheckpointNotCoveredSnafu {
+                    checkpoint: self.remap_checkpoint(i, &batch),
+                }
+                .fail();
+            } else if true_count > 1 {
+                return CheckpointOverlappedSnafu {
+                    checkpoint: self.remap_checkpoint(i, &batch),
+                }
+                .fail();
             }
         }
 
         Ok(())
+    }
+
+    /// Remap the normalized checkpoint data to the original values.
+    fn remap_checkpoint(&self, i: usize, batch: &RecordBatch) -> String {
+        let normalized_row = batch
+            .columns()
+            .iter()
+            .map(|col| {
+                let array = col.as_any().downcast_ref::<Float64Array>().unwrap();
+                array.value(i)
+            })
+            .collect::<Vec<_>>();
+
+        let mut check_point = String::new();
+        let schema = batch.schema();
+        for (col_index, normalized_value) in normalized_row.iter().enumerate() {
+            let col_name = schema.field(col_index).name();
+
+            if col_index > 0 {
+                check_point.push_str(", ");
+            }
+
+            // Check if point is on NORMALIZE_STEP or between steps
+            if let Some(values) = self.collider.normalized_values.get(col_name) {
+                let normalize_step = NORMALIZE_STEP.0;
+
+                // Check if the normalized value is on a NORMALIZE_STEP boundary
+                let remainder = normalized_value % normalize_step;
+                let is_on_step = remainder.abs() < f64::EPSILON
+                    || (normalize_step - remainder).abs() < f64::EPSILON * 2.0;
+
+                if is_on_step {
+                    let index = (normalized_value / normalize_step).round() as usize;
+                    if index < values.len() {
+                        let original_value = &values[index].0;
+                        check_point.push_str(&format!("{}={}", col_name, original_value));
+                    } else {
+                        check_point.push_str(&format!("{}=unknown", col_name));
+                    }
+                } else {
+                    let lower_index = (normalized_value / normalize_step).floor() as usize;
+                    let upper_index = (normalized_value / normalize_step).ceil() as usize;
+
+                    let lower_original = if lower_index < values.len() {
+                        values[lower_index].0.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    let upper_original = if upper_index < values.len() {
+                        values[upper_index].0.to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    check_point.push_str(&format!(
+                        "{}<{}<{}",
+                        lower_original, col_name, upper_original
+                    ));
+                }
+            } else {
+                // Fallback if column not found in normalized values
+                check_point.push_str(&format!("{}:unknown", col_name));
+            }
+        }
+
+        check_point
     }
 }
 

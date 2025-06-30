@@ -235,6 +235,27 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Duplicate expr: {:?}", expr))]
+    DuplicateExpr {
+        expr: PartitionExpr,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Checkpoint `{}` is not covered", checkpoint))]
+    CheckpointNotCovered {
+        checkpoint: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Checkpoint `{}` is overlapped", checkpoint))]
+    CheckpointOverlapped {
+        checkpoint: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -247,7 +268,10 @@ impl ErrorExt for Error {
             | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
             | Error::NoExprOperand { .. }
-            | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
+            | Error::UndefinedColumn { .. }
+            | Error::DuplicateExpr { .. }
+            | Error::CheckpointNotCovered { .. }
+            | Error::CheckpointOverlapped { .. } => StatusCode::InvalidArguments,
 
             Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }

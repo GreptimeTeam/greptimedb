@@ -40,7 +40,7 @@ use crate::error::Result;
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 
 const ZERO: OrderedF64 = OrderedFloat(0.0f64);
-const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
+pub(crate) const NORMALIZE_STEP: OrderedF64 = OrderedFloat(1.0f64);
 pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
@@ -51,7 +51,7 @@ pub(crate) struct AtomicExpr {
     pub(crate) nucleons: Vec<NucleonExpr>,
     /// Index to reference the [`PartitionExpr`] that this [`AtomicExpr`] is derived from.
     /// This index is used with `exprs` field in [`MultiDimPartitionRule`](crate::multi_dim::MultiDimPartitionRule).
-    source_expr_index: usize,
+    pub(crate) source_expr_index: usize,
 }
 
 impl AtomicExpr {
