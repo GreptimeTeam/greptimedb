@@ -34,6 +34,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -89,6 +90,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -127,6 +129,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- this is expected to be the same as above("2") since the new `input_basic` table
 -- have different table id, so is a different table
 SELECT wildcard FROM out_basic;
@@ -168,6 +171,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- flow batching mode
 SELECT wildcard FROM out_basic;
 
@@ -231,6 +235,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -273,6 +278,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -340,6 +346,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -407,6 +414,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -458,6 +466,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- this is expected to be the same as above("2") since the new `input_basic` table
 -- have different table id, so is a different table
 SELECT wildcard FROM out_basic;
@@ -510,6 +519,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 -- 4 is also expected, since flow batching mode
 SELECT wildcard FROM out_basic;
 
@@ -585,6 +595,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -638,6 +649,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 |  FLOW_FLUSHED  |
 +-----------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT wildcard FROM out_basic;
 
 +----------+
@@ -721,6 +733,7 @@ ADMIN FLUSH_FLOW('api_stats_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 +-----+
@@ -754,6 +767,7 @@ ADMIN FLUSH_FLOW('api_stats_flow');
 |  FLOW_FLUSHED  |
 +------------------------------------+
 
+-- SQLNESS SLEEP 1s
 SELECT key FROM api_stats;
 
 +-----+
