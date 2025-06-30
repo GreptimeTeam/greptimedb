@@ -250,24 +250,25 @@ impl MetricsBatchBuilder {
         >,
     ) -> error::Result<()> {
         for (ctx, tables_in_schema) in table_data {
+            // use session catalog.
+            let catalog = current_catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+            // schema in PromCtx precedes session schema.
+            let schema = ctx
+                .schema
+                .as_deref()
+                .or(current_schema.as_deref())
+                .unwrap_or(DEFAULT_SCHEMA_NAME);
+            // Look up physical region metadata by schema and table name
+            let schema_metadata =
+                physical_region_metadata
+                    .get(schema)
+                    .context(error::TableNotFoundSnafu {
+                        catalog,
+                        schema,
+                        table: "",
+                    })?;
+
             for (logical_table_name, table) in tables_in_schema {
-                // use session catalog.
-                let catalog = current_catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-                // schema in PromCtx precedes session schema.
-                let schema = ctx
-                    .schema
-                    .as_deref()
-                    .or(current_schema.as_deref())
-                    .unwrap_or(DEFAULT_SCHEMA_NAME);
-                // Look up physical region metadata by schema and table name
-                let schema_metadata =
-                    physical_region_metadata
-                        .get(schema)
-                        .context(error::TableNotFoundSnafu {
-                            catalog,
-                            schema,
-                            table: logical_table_name,
-                        })?;
                 let (logical_table_id, physical_table) = schema_metadata
                     .get(logical_table_name)
                     .context(error::TableNotFoundSnafu {
@@ -282,6 +283,12 @@ impl MetricsBatchBuilder {
                     .or_default()
                     .entry(physical_table.region_id)
                     .or_insert_with(|| Self::create_sparse_encoder(&physical_table));
+                let name_to_id: HashMap<_, _> = physical_table
+                    .column_metadatas
+                    .iter()
+                    .map(|c| (c.column_schema.name.clone(), c.column_id))
+                    .collect();
+                let _ = std::mem::replace(encoder.name_to_id_mut(), name_to_id);
                 encoder.append_rows(*logical_table_id, std::mem::take(table))?;
             }
         }
@@ -441,6 +448,10 @@ impl BatchEncoder {
             .iter()
             .map(|v| v.timestamps.len())
             .sum()
+    }
+
+    pub(crate) fn name_to_id_mut(&mut self) -> &mut HashMap<String, ColumnId> {
+        &mut self.name_to_id
     }
 
     fn append_rows(

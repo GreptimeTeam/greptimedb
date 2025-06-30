@@ -284,7 +284,7 @@ pub(crate) fn decode_string(
 
 #[derive(Default, Debug)]
 pub struct PromWriteRequest {
-    table_data: TablesBuilder,
+    pub table_data: TablesBuilder,
     series: PromTimeSeries,
 }
 

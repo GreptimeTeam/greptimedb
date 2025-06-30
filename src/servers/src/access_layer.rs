@@ -101,6 +101,12 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
+    pub(crate) fn file_id(&self) -> FileId {
+        self.file_id
+    }
+}
+
+impl ParquetWriter {
     pub async fn write_record_batch(
         &mut self,
         batch: &RecordBatch,

@@ -43,7 +43,7 @@ pub struct PromCtx {
 #[derive(Default, Debug)]
 pub(crate) struct TablesBuilder {
     // schema -> table -> table_builder
-    tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
 }
 
 impl Clear for TablesBuilder {
@@ -202,7 +202,7 @@ impl TablesBuilder {
 
 /// Builder for one table.
 #[derive(Debug, Clone)]
-pub(crate) struct TableBuilder {
+pub struct TableBuilder {
     /// Column schemas.
     schema: Vec<ColumnSchema>,
     /// Rows written.

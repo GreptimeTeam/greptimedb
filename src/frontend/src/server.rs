@@ -97,12 +97,15 @@ where
 
         if opts.prom_store.enable {
             let bulk_state = if opts.prom_store.bulk_mode {
-                Some(PromBulkState {
+                let mut state = PromBulkState {
                     schema_helper: self.instance.create_schema_helper(),
                     partition_manager: self.instance.partition_manager().clone(),
                     node_manager: self.instance.node_manager().clone(),
                     access_layer_factory: self.instance.access_layer_factory().clone(),
-                })
+                    tx: None,
+                };
+                state.start_background_task();
+                Some(state)
             } else {
                 None
             };
