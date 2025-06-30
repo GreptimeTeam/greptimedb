@@ -35,8 +35,8 @@ use vrl::prelude::VrlValueConvert;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    IdentifyPipelineColumnTypeMismatchSnafu, ReachedMaxNestedLevelsSnafu, Result,
-    TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
+    IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, ReachedMaxNestedLevelsSnafu,
+    Result, TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
 };
 use crate::etl::ctx_req::ContextOpt;
@@ -362,8 +362,7 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
             let custom_ts = p_ctx.pipeline_definition.get_custom_ts();
             match custom_ts {
                 Some(ts) => {
-                    let col_name = KeyString::from(ts.get_column_name());
-                    let ts_field = values.as_object().and_then(|m| m.get(&col_name));
+                    let ts_field = values.as_object().and_then(|m| m.get(ts.get_column_name()));
                     Some(ts.get_timestamp_value(ts_field)).transpose()
                 }
                 None => Ok(Some(ValueData::TimestampNanosecondValue(
@@ -490,7 +489,9 @@ fn resolve_value(
         }
 
         VrlValue::Timestamp(ts) => {
-            let ns = ts.timestamp_nanos_opt().unwrap_or_default();
+            let ns = ts.timestamp_nanos_opt().context(InvalidTimestampSnafu {
+                input: ts.to_rfc3339(),
+            })?;
             resolve_simple_type(
                 ValueData::TimestampNanosecondValue(ns),
                 column_name,

@@ -36,7 +36,6 @@ pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>>
     for field in transform.fields.iter() {
         let column_name = field.target_or_input_field().to_string();
 
-        // let (datatype, datatype_extension) = coerce_type(transform)?;
         let ext = if matches!(transform.type_, ColumnDataType::Binary) {
             Some(ColumnDataTypeExtension {
                 type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
@@ -95,9 +94,7 @@ pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Opti
         VrlValue::Integer(n) => coerce_i64_value(*n, transform),
         VrlValue::Float(n) => coerce_f64_value(n.into_inner(), transform),
         VrlValue::Boolean(b) => coerce_bool_value(*b, transform),
-        VrlValue::Bytes(b) => {
-            coerce_string_value(&String::from_utf8_lossy(b).to_string(), transform)
-        }
+        VrlValue::Bytes(b) => coerce_string_value(String::from_utf8_lossy(b).as_ref(), transform),
         VrlValue::Timestamp(ts) => match transform.type_ {
             ColumnDataType::TimestampNanosecond => Ok(Some(ValueData::TimestampNanosecondValue(
                 ts.timestamp_nanos_opt().context(InvalidTimestampSnafu {
@@ -308,7 +305,7 @@ macro_rules! coerce_string_value {
     };
 }
 
-fn coerce_string_value(s: &String, transform: &Transform) -> Result<Option<ValueData>> {
+fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>> {
     match transform.type_ {
         ColumnDataType::Int8 => {
             coerce_string_value!(s, transform, i32, I8Value)

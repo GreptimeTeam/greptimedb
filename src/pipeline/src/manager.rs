@@ -22,11 +22,13 @@ use common_time::Timestamp;
 use datatypes::timestamp::TimestampNanosecond;
 use itertools::Itertools;
 use session::context::Channel;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use util::to_pipeline_version;
 use vrl::value::Value as VrlValue;
 
-use crate::error::{CastTypeSnafu, InvalidCustomTimeIndexSnafu, PipelineMissingSnafu, Result};
+use crate::error::{
+    CastTypeSnafu, InvalidCustomTimeIndexSnafu, InvalidTimestampSnafu, PipelineMissingSnafu, Result,
+};
 use crate::etl::value::{MS_RESOLUTION, NS_RESOLUTION, S_RESOLUTION, US_RESOLUTION};
 use crate::table::PipelineTable;
 use crate::{GreptimePipelineParams, Pipeline};
@@ -278,7 +280,7 @@ impl IdentityTimeIndex {
                             )
                         }
                     },
-                    Some(VrlValue::Timestamp(timestamp)) => datetime_utc_to_unit(timestamp, unit),
+                    Some(VrlValue::Timestamp(timestamp)) => datetime_utc_to_unit(timestamp, unit)?,
                     Some(v) => {
                         return if_ignore_errors(
                             *ignore_errors,
@@ -323,20 +325,29 @@ impl IdentityTimeIndex {
                 };
 
                 Ok(ValueData::TimestampNanosecondValue(
-                    timestamp.timestamp_nanos_opt().unwrap_or_default(),
+                    timestamp
+                        .timestamp_nanos_opt()
+                        .context(InvalidTimestampSnafu {
+                            input: timestamp.to_rfc3339(),
+                        })?,
                 ))
             }
         }
     }
 }
 
-fn datetime_utc_to_unit(timestamp: &DateTime<Utc>, unit: &TimeUnit) -> i64 {
-    match unit {
-        TimeUnit::Nanosecond => timestamp.timestamp_nanos_opt().unwrap_or_default(),
+fn datetime_utc_to_unit(timestamp: &DateTime<Utc>, unit: &TimeUnit) -> Result<i64> {
+    let ts = match unit {
+        TimeUnit::Nanosecond => timestamp
+            .timestamp_nanos_opt()
+            .context(InvalidTimestampSnafu {
+                input: timestamp.to_rfc3339(),
+            })?,
         TimeUnit::Microsecond => timestamp.timestamp_micros(),
         TimeUnit::Millisecond => timestamp.timestamp_millis(),
         TimeUnit::Second => timestamp.timestamp(),
-    }
+    };
+    Ok(ts)
 }
 
 fn if_ignore_errors(ignore_errors: bool, unit: TimeUnit, msg: String) -> Result<ValueData> {
