@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use ::auth::{Identity, Password, UserProviderRef};
 use async_trait::async_trait;
+use catalog::process_manager::ProcessManagerRef;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -83,6 +84,23 @@ pub struct MysqlInstanceShim {
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    process_manager: Option<ProcessManagerRef>,
+}
+
+impl Drop for MysqlInstanceShim {
+    fn drop(&mut self) {
+        let Some(process_manager) = self.process_manager.as_ref() else {
+            return;
+        };
+        let Ok(all_process) = process_manager.local_processes(None) else {
+            return;
+        };
+        let Some(remaining_processes) = all_process.into_iter().find(|p| p.id == self.process_id)
+        else {
+            return;
+        };
+        let _ = process_manager.kill_local_process(remaining_processes.catalog, self.process_id);
+    }
 }
 
 impl MysqlInstanceShim {
@@ -91,6 +109,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        process_manager: Option<ProcessManagerRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -118,6 +137,7 @@ impl MysqlInstanceShim {
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            process_manager,
         }
     }
 

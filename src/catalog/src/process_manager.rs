@@ -163,7 +163,7 @@ impl ProcessManager {
         id: ProcessId,
     ) -> error::Result<bool> {
         if server_addr == self.server_addr {
-            self.kill_local_process(catalog, id).await
+            self.kill_local_process(catalog, id)
         } else {
             let mut nodes = self
                 .frontend_selector
@@ -191,7 +191,7 @@ impl ProcessManager {
     }
 
     /// Kills local query with provided catalog and id.
-    pub async fn kill_local_process(&self, catalog: String, id: ProcessId) -> error::Result<bool> {
+    pub fn kill_local_process(&self, catalog: String, id: ProcessId) -> error::Result<bool> {
         if let Some(catalogs) = self.catalogs.write().unwrap().get_mut(&catalog) {
             if let Some(process) = catalogs.remove(&id) {
                 process.handle.cancel();

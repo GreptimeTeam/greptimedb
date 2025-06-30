@@ -71,7 +71,6 @@ impl StatementExecutor {
         connection_id: u32,
     ) -> error::Result<bool> {
         pm.kill_local_process(query_ctx.current_catalog().to_string(), connection_id)
-            .await
             .context(error::CatalogSnafu)
     }
 }
