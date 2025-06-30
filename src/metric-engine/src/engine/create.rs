@@ -55,6 +55,7 @@ use crate::utils::{
 };
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
+const DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE: f64 = 0.01;
 
 impl MetricEngineInner {
     pub async fn create_regions(
@@ -542,10 +543,11 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .with_skipping_options(SkippingIndexOptions {
-                granularity: DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
-                index_type: datatypes::schema::SkippingIndexType::BloomFilter,
-            })
+            .with_skipping_options(SkippingIndexOptions::new(
+                DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
+                DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
+                datatypes::schema::SkippingIndexType::BloomFilter,
+            ))
             .unwrap(),
         };
         let tsid_col = ColumnMetadata {

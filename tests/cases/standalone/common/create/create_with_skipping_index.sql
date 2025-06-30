@@ -4,7 +4,11 @@ create table
         `id` string skipping index,
         `name` string skipping index
         with
-            (granularity = 8192),
+            (
+                granularity = 8192,
+                false_positive_rate = 0.05,
+                type = 'BLOOM',
+            ),
     );
 
 show

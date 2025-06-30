@@ -45,6 +45,7 @@ impl BloomFilterFulltextIndexCreator {
     pub fn new(
         config: Config,
         rows_per_segment: usize,
+        false_positive_rate: f64,
         intermediate_provider: Arc<dyn ExternalTempFileProvider>,
         global_memory_usage: Arc<AtomicUsize>,
         global_memory_usage_threshold: Option<usize>,
@@ -57,6 +58,7 @@ impl BloomFilterFulltextIndexCreator {
 
         let inner = BloomFilterCreator::new(
             rows_per_segment,
+            false_positive_rate,
             intermediate_provider,
             global_memory_usage,
             global_memory_usage_threshold,

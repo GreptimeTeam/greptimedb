@@ -57,20 +57,32 @@ SHOW CREATE TABLE test;
 
 SHOW INDEX FROM test;
 
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'bloom', granularity = 1000);
+
+SHOW CREATE TABLE test;
+
+SHOW INDEX FROM test;
+
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'bloom', granularity = 1000, false_positive_rate = 0.05);
+
+SHOW CREATE TABLE test;
+
+SHOW INDEX FROM test;
+
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'tantivy');
 
 SHOW CREATE TABLE test;
 
 SHOW INDEX FROM test;
 
+-- Invalid options
+
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinglish', case_sensitive = 'false');
-
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'no');
-
 ALTER TABLE test MODIFY COLUMN time SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'false');
-
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'English', case_sensitive = 'true');
-
 ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(backend = 'xor');
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(analyzer = 'Chinese', case_sensitive = 'true', backend = 'bloom', granularity = 0);
+ALTER TABLE test MODIFY COLUMN message SET FULLTEXT INDEX WITH(false_positive_rate = '0');
 
 DROP TABLE test;

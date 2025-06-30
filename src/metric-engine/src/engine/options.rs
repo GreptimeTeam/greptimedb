@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 
 use store_api::metric_engine_consts::{
+    METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION,
+    METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION_DEFAULT,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
 };
@@ -31,19 +33,20 @@ use crate::error::{Error, ParseRegionOptionsSnafu, Result};
 const SEG_ROW_COUNT_FOR_DATA_REGION: u32 = 256;
 
 /// Physical region options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhysicalRegionOptions {
     pub index: IndexOptions,
 }
 
 /// Index options for auto created columns
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum IndexOptions {
     #[default]
     None,
     Inverted,
     Skipping {
         granularity: u32,
+        false_positive_rate: f64,
     },
 }
 
@@ -54,6 +57,7 @@ pub fn set_data_region_options(
 ) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
+    options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION);
     options.insert(
         "index.inverted_index.segment_row_count".to_string(),
         SEG_ROW_COUNT_FOR_DATA_REGION.to_string(),
@@ -93,7 +97,23 @@ impl TryFrom<&HashMap<String, String>> for PhysicalRegionOptions {
                             })
                         },
                     )?;
-                Ok(IndexOptions::Skipping { granularity })
+                let false_positive_rate = value
+                    .get(METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION)
+                    .map_or(
+                        Ok(METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION_DEFAULT),
+                        |f| {
+                            f.parse().ok().filter(|f| *f > 0.0 && *f <= 1.0).ok_or(
+                                ParseRegionOptionsSnafu {
+                                    reason: format!("Invalid false positive rate: {}", f),
+                                }
+                                .build(),
+                            )
+                        },
+                    )?;
+                Ok(IndexOptions::Skipping {
+                    granularity,
+                    false_positive_rate,
+                })
             }
             Some(index_type) => ParseRegionOptionsSnafu {
                 reason: format!("Invalid index type: {}", index_type),
@@ -121,11 +141,16 @@ mod tests {
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION.to_string(),
             "102400".to_string(),
         );
+        options.insert(
+            METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION.to_string(),
+            "0.01".to_string(),
+        );
         set_data_region_options(&mut options, false);
 
         for key in [
             METRIC_ENGINE_INDEX_TYPE_OPTION,
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
+            METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION,
         ] {
             assert_eq!(options.get(key), None);
         }
@@ -154,11 +179,16 @@ mod tests {
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION.to_string(),
             "102400".to_string(),
         );
+        options.insert(
+            METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION.to_string(),
+            "0.01".to_string(),
+        );
         let physical_region_options = PhysicalRegionOptions::try_from(&options).unwrap();
         assert_eq!(
             physical_region_options.index,
             IndexOptions::Skipping {
-                granularity: 102400
+                granularity: 102400,
+                false_positive_rate: 0.01,
             }
         );
     }

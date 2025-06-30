@@ -47,12 +47,17 @@ pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
 pub const COLUMN_FULLTEXT_OPT_KEY_ANALYZER: &str = "analyzer";
 pub const COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE: &str = "case_sensitive";
 pub const COLUMN_FULLTEXT_OPT_KEY_BACKEND: &str = "backend";
+pub const COLUMN_FULLTEXT_OPT_KEY_GRANULARITY: &str = "granularity";
+pub const COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_rate";
 
 /// Keys used in SKIPPING index options
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
+pub const COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_rate";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
+
+pub const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
 
 /// Schema of a column, used as an immutable struct.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,7 +509,7 @@ impl TryFrom<&ColumnSchema> for Field {
 }
 
 /// Fulltext options for a column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 #[serde(rename_all = "kebab-case")]
 pub struct FulltextOptions {
     /// Whether the fulltext index is enabled.
@@ -518,6 +523,66 @@ pub struct FulltextOptions {
     /// The fulltext backend to use.
     #[serde(default)]
     pub backend: FulltextBackend,
+    /// The granularity of the fulltext index (for bloom backend only)
+    #[serde(default = "fulltext_options_default_granularity")]
+    pub granularity: u32,
+    /// The false positive rate of the fulltext index (for bloom backend only)
+    #[serde(default = "fulltext_options_default_false_positive_rate_in_10000")]
+    pub false_positive_rate_in_10000: u32,
+}
+
+fn fulltext_options_default_granularity() -> u32 {
+    DEFAULT_GRANULARITY
+}
+
+fn fulltext_options_default_false_positive_rate_in_10000() -> u32 {
+    (DEFAULT_FALSE_POSITIVE_RATE * 10000.0) as u32
+}
+
+impl FulltextOptions {
+    pub fn new(
+        enable: bool,
+        analyzer: FulltextAnalyzer,
+        case_sensitive: bool,
+        backend: FulltextBackend,
+        granularity: u32,
+        false_positive_rate: f64,
+    ) -> Self {
+        let false_positive_rate = if 0.0 < false_positive_rate && false_positive_rate <= 1.0 {
+            false_positive_rate
+        } else {
+            DEFAULT_FALSE_POSITIVE_RATE
+        };
+        let granularity = if granularity > 0 {
+            granularity
+        } else {
+            DEFAULT_GRANULARITY
+        };
+        Self {
+            enable,
+            analyzer,
+            case_sensitive,
+            backend,
+            granularity,
+            false_positive_rate_in_10000: (false_positive_rate * 10000.0) as u32,
+        }
+    }
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate_in_10000 as f64 / 10000.0
+    }
+}
+
+impl Default for FulltextOptions {
+    fn default() -> Self {
+        Self::new(
+            false,
+            FulltextAnalyzer::default(),
+            false,
+            FulltextBackend::default(),
+            DEFAULT_GRANULARITY,
+            DEFAULT_FALSE_POSITIVE_RATE,
+        )
+    }
 }
 
 impl fmt::Display for FulltextOptions {
@@ -527,6 +592,10 @@ impl fmt::Display for FulltextOptions {
             write!(f, ", analyzer={}", self.analyzer)?;
             write!(f, ", case_sensitive={}", self.case_sensitive)?;
             write!(f, ", backend={}", self.backend)?;
+            if self.backend == FulltextBackend::Bloom {
+                write!(f, ", granularity={}", self.granularity)?;
+                write!(f, ", false_positive_rate={}", self.false_positive_rate())?;
+            }
         }
         Ok(())
     }
@@ -611,6 +680,45 @@ impl TryFrom<HashMap<String, String>> for FulltextOptions {
             }
         }
 
+        if fulltext_options.backend == FulltextBackend::Bloom {
+            // Parse granularity with default value 10240
+            let granularity = match options.get(COLUMN_FULLTEXT_OPT_KEY_GRANULARITY) {
+                Some(value) => value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&v| v > 0)
+                    .ok_or_else(|| {
+                        error::InvalidFulltextOptionSnafu {
+                            msg: format!(
+                                "Invalid granularity: {value}, expected: positive integer"
+                            ),
+                        }
+                        .build()
+                    })?,
+                None => DEFAULT_GRANULARITY,
+            };
+            fulltext_options.granularity = granularity;
+
+            // Parse false positive rate with default value 0.01
+            let false_positive_rate = match options.get(COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE)
+            {
+                Some(value) => value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|&v| v > 0.0 && v <= 1.0)
+                    .ok_or_else(|| {
+                        error::InvalidFulltextOptionSnafu {
+                            msg: format!(
+                                "Invalid false positive rate: {value}, expected: 0.0 < rate <= 1.0"
+                            ),
+                        }
+                        .build()
+                    })?,
+                None => DEFAULT_FALSE_POSITIVE_RATE,
+            };
+            fulltext_options.false_positive_rate_in_10000 = (false_positive_rate * 10000.0) as u32;
+        }
+
         Ok(fulltext_options)
     }
 }
@@ -638,23 +746,53 @@ impl fmt::Display for FulltextAnalyzer {
 pub struct SkippingIndexOptions {
     /// The granularity of the skip index.
     pub granularity: u32,
+    /// The false positive rate of the skip index (in ten-thousandths, e.g., 100 = 1%).
+    pub false_positive_rate_in_10000: u32,
     /// The type of the skip index.
     #[serde(default)]
     pub index_type: SkippingIndexType,
 }
 
+impl SkippingIndexOptions {
+    /// Creates a new skipping index options.
+    pub fn new(granularity: u32, false_positive_rate: f64, index_type: SkippingIndexType) -> Self {
+        let granularity = if granularity > 0 {
+            granularity
+        } else {
+            DEFAULT_GRANULARITY
+        };
+        let false_positive_rate = if 0.0 < false_positive_rate && false_positive_rate <= 1.0 {
+            false_positive_rate
+        } else {
+            DEFAULT_FALSE_POSITIVE_RATE
+        };
+        Self {
+            granularity,
+            false_positive_rate_in_10000: (false_positive_rate * 10000.0) as u32,
+            index_type,
+        }
+    }
+
+    /// Gets the false positive rate.
+    pub fn false_positive_rate(&self) -> f64 {
+        self.false_positive_rate_in_10000 as f64 / 10000.0
+    }
+}
+
 impl Default for SkippingIndexOptions {
     fn default() -> Self {
-        Self {
-            granularity: DEFAULT_GRANULARITY,
-            index_type: SkippingIndexType::default(),
-        }
+        Self::new(
+            DEFAULT_GRANULARITY,
+            DEFAULT_FALSE_POSITIVE_RATE,
+            SkippingIndexType::default(),
+        )
     }
 }
 
 impl fmt::Display for SkippingIndexOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "granularity={}", self.granularity)?;
+        write!(f, ", false_positive_rate={}", self.false_positive_rate())?;
         write!(f, ", index_type={}", self.index_type)?;
         Ok(())
     }
@@ -681,14 +819,36 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
     fn try_from(options: HashMap<String, String>) -> Result<Self> {
         // Parse granularity with default value 1
         let granularity = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY) {
-            Some(value) => value.parse::<u32>().map_err(|_| {
-                error::InvalidSkippingIndexOptionSnafu {
-                    msg: format!("Invalid granularity: {value}, expected: positive integer"),
-                }
-                .build()
-            })?,
+            Some(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|&v| v > 0)
+                .ok_or_else(|| {
+                    error::InvalidSkippingIndexOptionSnafu {
+                        msg: format!("Invalid granularity: {value}, expected: positive integer"),
+                    }
+                    .build()
+                })?,
             None => DEFAULT_GRANULARITY,
         };
+
+        // Parse false positive rate with default value 100
+        let false_positive_rate =
+            match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE) {
+                Some(value) => value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|&v| v > 0.0 && v <= 1.0)
+                    .ok_or_else(|| {
+                        error::InvalidSkippingIndexOptionSnafu {
+                            msg: format!(
+                                "Invalid false positive rate: {value}, expected: 0.0 < rate <= 1.0"
+                            ),
+                        }
+                        .build()
+                    })?,
+                None => DEFAULT_FALSE_POSITIVE_RATE,
+            };
 
         // Parse index type with default value BloomFilter
         let index_type = match options.get(COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE) {
@@ -704,10 +864,11 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
             None => SkippingIndexType::default(),
         };
 
-        Ok(SkippingIndexOptions {
+        Ok(SkippingIndexOptions::new(
             granularity,
+            false_positive_rate,
             index_type,
-        })
+        ))
     }
 }
 

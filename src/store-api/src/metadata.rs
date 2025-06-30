@@ -1620,12 +1620,14 @@ mod test {
             .alter(AlterKind::SetIndex {
                 options: ApiSetIndexOptions::Fulltext {
                     column_name: "b".to_string(),
-                    options: FulltextOptions {
-                        enable: true,
-                        analyzer: FulltextAnalyzer::Chinese,
-                        case_sensitive: true,
-                        backend: FulltextBackend::Bloom,
-                    },
+                    options: FulltextOptions::new(
+                        true,
+                        FulltextAnalyzer::Chinese,
+                        true,
+                        FulltextBackend::Bloom,
+                        1000,
+                        0.01,
+                    ),
                 },
             })
             .unwrap();

@@ -92,7 +92,7 @@ DESC TABLE t1;
 
 DROP TABLE phy;
 
-CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "skipping", "index.granularity" = "8192");
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "skipping", "index.granularity" = "8192", "index.false_positive_rate" = "0.05");
 
 SHOW CREATE TABLE phy;
 
@@ -106,4 +106,4 @@ DROP TABLE t1;
 
 DROP TABLE phy;
 
-CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "hihi", "index.granularity" = "8192");
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "", "index.type" = "hihi", "index.granularity" = "8192", "index.false_positive_rate" = "0.01");
