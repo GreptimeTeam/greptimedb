@@ -23,6 +23,7 @@ use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::test_util::TestEnv as MitoTestEnv;
 use object_store::util::join_dir;
+use object_store::ObjectStore;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
@@ -72,6 +73,10 @@ impl TestEnv {
     pub fn data_home(&self) -> String {
         let env_root = self.mito_env.data_home().to_string_lossy().to_string();
         join_dir(&env_root, "data")
+    }
+
+    pub fn get_object_store(&self) -> Option<ObjectStore> {
+        self.mito_env.get_object_store()
     }
 
     /// Returns a reference to the engine.

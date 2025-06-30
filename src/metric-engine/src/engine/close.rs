@@ -59,7 +59,7 @@ impl MetricEngineInner {
         }
     }
 
-    async fn close_physical_region(&self, region_id: RegionId) -> Result<AffectedRows> {
+    pub(crate) async fn close_physical_region(&self, region_id: RegionId) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
 
