@@ -21,11 +21,10 @@
 //! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
 //!
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::StructArray;
-use arrow_schema::Fields;
 use datafusion_common::ScalarValue;
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{Accumulator, AggregateUDF, AggregateUDFImpl, Signature, TypeSignature};
@@ -55,7 +54,7 @@ pub struct StateMergeWrapper {
     original: AggregateUDF,
     /// The state functions of the aggregate function.
     /// Each state function corresponds to a state in the state field of the original aggregate function.
-    state_functions: Vec<StateWrapper>,
+    state_function: StateWrapper,
     /// The merge function of the aggregate function.
     /// It is used to merge the states of the state functions.
     merge_function: MergeWrapper,
@@ -89,17 +88,12 @@ impl<'a> From<WrapperArgs<'a>> for StateFieldsArgs<'a> {
 }
 
 impl StateMergeWrapper {
-    pub fn new<'a>(
-        original: AggregateUDF,
-        args: WrapperArgs<'a>,
-    ) -> datafusion_common::Result<Self> {
-        let state_functions = (0..original.state_fields(args.into())?.len())
-            .map(|i| StateWrapper::new(original.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
+    pub fn new(original: AggregateUDF) -> datafusion_common::Result<Self> {
+        let state_function = StateWrapper::new(original.clone())?;
         let merge_function = MergeWrapper::new(original.clone())?;
         Ok(Self {
             original,
-            state_functions,
+            state_function,
             merge_function,
         })
     }
@@ -108,8 +102,8 @@ impl StateMergeWrapper {
         &self.original
     }
 
-    pub fn state_functions(&self) -> &[StateWrapper] {
-        &self.state_functions
+    pub fn state_function(&self) -> &StateWrapper {
+        &self.state_function
     }
 
     pub fn merge_function(&self) -> &MergeWrapper {
@@ -189,7 +183,7 @@ impl AggregateUDFImpl for StateWrapper {
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         let old_return_type = self.inner.return_type(arg_types)?;
         let state_fields_args = StateFieldsArgs {
-            name: &self.inner().name(),
+            name: self.inner().name(),
             input_types: arg_types,
             return_type: &old_return_type,
             // TODO: how to get this?, probably ok?
@@ -275,64 +269,257 @@ impl Accumulator for StateAccumWrapper {
     }
 }
 
-struct StateTypeToInputType {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct StateToInputType {
     /// A mapping from state types to input types.
-    mapping: HashMap<Vec<DataType>, Vec<DataType>>,
+    mapping: BTreeMap<Vec<DataType>, Vec<DataType>>,
 }
 
-fn get_all_possible_input_types(
-    inner: &AggregateUDF,
-) -> datafusion_common::Result<StateTypeToInputType> {
-    let signature = inner.signature();
-    let mut mapping = HashMap::new();
-    match &signature.type_signature {
-        TypeSignature::Exact(input_types) => {
-            let ret_type = inner.return_type(input_types).unwrap();
-            let state_fields_args = StateFieldsArgs {
-                name: inner.name(),
-                input_types,
-                return_type: &ret_type,
-                ordering_fields: &[],
-                is_distinct: false,
-            };
-            let state_fields = inner.state_fields(state_fields_args).unwrap();
-            mapping.insert(
-                state_fields.iter().map(|f| f.data_type().clone()).collect(),
-                input_types.to_vec(),
-            );
+impl StateToInputType {
+    /// Returns the input types for the given state types.
+    ///
+    /// Also handle certain data types that have extra args, like `Decimal128/256`, assuming only one of
+    /// the `Decimal128/256` in the state types, and replace it with the same type in the returned input types.
+    pub fn get_input_types(
+        &self,
+        state_types: &[DataType],
+    ) -> datafusion_common::Result<Option<Vec<DataType>>> {
+        let is_decimal =
+            |ty: &DataType| matches!(ty, DataType::Decimal128(_, _) | DataType::Decimal256(_, _));
+        let need_change_ty = state_types.iter().any(is_decimal);
+        if !need_change_ty {
+            return Ok(self.mapping.get(state_types).cloned());
         }
-        TypeSignature::OneOf(type_sig) => {}
-        TypeSignature::UserDefined => todo!("special handling for user defined type signature"),
-        _ => (),
-    }
 
-    Ok(StateTypeToInputType { mapping })
-}
+        for (k, v) in self.mapping.iter() {
+            if k.len() != state_types.len() {
+                continue;
+            }
+            let mut is_equal_types = true;
+            for (k, s) in k.iter().zip(state_types.iter()) {
+                let is_equal = match (k, s) {
+                    (DataType::Decimal128(_, _), DataType::Decimal128(_, _)) => true,
+                    (DataType::Decimal256(_, _), DataType::Decimal256(_, _)) => true,
+                    (a, b) => a == b,
+                };
+                if !is_equal {
+                    is_equal_types = false;
+                    break;
+                }
+            }
 
-fn all_possible_sig(
-    inner: &AggregateUDF,
-    mapping: &mut HashMap<Fields, Vec<DataType>>,
-    type_sig: &TypeSignature,
-) {
-    match type_sig {
-        TypeSignature::Exact(input_types) => {
-            let ret_type = inner.return_type(input_types).unwrap();
-            let state_fields_args = StateFieldsArgs {
-                name: inner.name(),
-                input_types,
-                return_type: &ret_type,
-                ordering_fields: &[],
-                is_distinct: false,
-            };
-            let state_fields = inner.state_fields(state_fields_args).unwrap();
-            mapping.insert(state_fields.into(), input_types.to_vec());
-        }
-        TypeSignature::OneOf(type_sigs) => {
-            for sig in type_sigs {
-                all_possible_sig(inner, mapping, sig);
+            if is_equal_types {
+                // replace `Decimal` in input_types with same `Decimal` type in `state_types`
+                // expect only one of the `Decimal128/256` in the state_types
+                let mut input_types = v.clone();
+                let new_type = state_types
+                    .iter()
+                    .find(|ty| is_decimal(ty))
+                    .ok_or_else(|| {
+                        datafusion_common::DataFusionError::Internal(format!(
+                            "No Decimal type found in state types: {:?}",
+                            state_types
+                        ))
+                    })?;
+                let replace_type = |ty: &DataType| {
+                    if is_decimal(ty) {
+                        // replace with the first `Decimal256` in state_types
+                        new_type.clone()
+                    } else {
+                        ty.clone()
+                    }
+                };
+                input_types = input_types.iter().map(replace_type).collect::<Vec<_>>();
+                return Ok(Some(input_types));
             }
         }
-        _ => (),
+        Ok(None)
+    }
+}
+
+fn get_possible_state_to_input_types(
+    inner: &AggregateUDF,
+) -> datafusion_common::Result<StateToInputType> {
+    let mut mapping = BTreeMap::new();
+
+    fn update_input_types(
+        inner: &AggregateUDF,
+        mapping: &mut BTreeMap<Vec<DataType>, Vec<DataType>>,
+        input_types: &[DataType],
+    ) -> datafusion_common::Result<()> {
+        let ret_type = inner.return_type(input_types)?;
+        let state_fields_args = StateFieldsArgs {
+            name: inner.name(),
+            input_types,
+            return_type: &ret_type,
+            ordering_fields: &[],
+            is_distinct: false,
+        };
+        let state_fields = inner.state_fields(state_fields_args)?;
+        mapping.insert(
+            state_fields.iter().map(|f| f.data_type().clone()).collect(),
+            input_types.to_vec(),
+        );
+        Ok(())
+    }
+
+    fn parse_ty_sig(
+        inner: &AggregateUDF,
+        sig: &TypeSignature,
+        mapping: &mut BTreeMap<Vec<DataType>, Vec<DataType>>,
+    ) -> datafusion_common::Result<()> {
+        match &sig {
+            TypeSignature::Exact(input_types) => {
+                let _ = update_input_types(inner, mapping, input_types);
+            }
+            TypeSignature::OneOf(type_sig) => {
+                for sig in type_sig {
+                    parse_ty_sig(inner, sig, mapping)?;
+                }
+            }
+            TypeSignature::Numeric(len) => {
+                for ty in DataTypeIterator::all_flat().filter(|t| t.is_numeric()) {
+                    let input_types = vec![ty.clone(); *len];
+                    // ignore error as we are just collecting all possible input types
+                    let _ = update_input_types(inner, mapping, &input_types);
+                }
+            }
+            TypeSignature::Variadic(var) => {
+                for ty in var {
+                    // assuming one or more arguments produce the same state
+                    let input_types = vec![ty.clone()];
+                    // ignore error as we are just collecting all possible input types
+                    let _ = update_input_types(inner, mapping, &input_types);
+                }
+            }
+            TypeSignature::VariadicAny => {
+                for ty in DataTypeIterator::all_flat() {
+                    // assuming one or more arguments produce the same state
+                    let input_types = vec![ty.clone()];
+                    // ignore error as we are just collecting all possible input types
+                    let _ = update_input_types(inner, mapping, &input_types);
+                }
+            }
+            TypeSignature::Uniform(cnt, tys) => {
+                for ty in tys {
+                    let input_types = vec![ty.clone(); *cnt];
+                    // ignore error as we are just collecting all possible input types
+                    let _ = update_input_types(inner, mapping, &input_types);
+                }
+            }
+            TypeSignature::UserDefined => {
+                // first determine input length
+                let input_len = match inner.name() {
+                    "sum" | "count" | "avg" | "min" | "max" => 1,
+                    _ => {
+                        return Err(datafusion_common::DataFusionError::Internal(format!(
+                            "Unsupported aggregate function for step aggr pushdown: {}",
+                            inner.name()
+                        )));
+                    }
+                };
+                match input_len {
+                    1 => {
+                        for ty in DataTypeIterator::all_flat() {
+                            let input_types = vec![ty.clone(); input_len];
+                            // ignore error as we are just collecting all possible input types
+                            let _ = update_input_types(inner, mapping, &input_types);
+                        }
+                    }
+                    _ => {
+                        return Err(datafusion_common::DataFusionError::Internal(format!(
+                            "Unsupported input length for step aggr pushdown: {}",
+                            input_len
+                        )));
+                    }
+                }
+            }
+            TypeSignature::String(cnt) => {
+                for ty in DataTypeIterator::all_flat() {
+                    let input_types = vec![ty.clone(); *cnt];
+                    // ignore error as we are just collecting all possible input types
+                    let _ = update_input_types(inner, mapping, &input_types);
+                }
+            }
+            TypeSignature::Nullary => {
+                let input_types = vec![];
+                // ignore error as we are just collecting all possible input types
+                let _ = update_input_types(inner, mapping, &input_types);
+            }
+            _ => {
+                return Err(datafusion_common::DataFusionError::Internal(format!(
+                    "Unsupported type signature for step aggr pushdown: {:?}",
+                    sig
+                )))
+            }
+        }
+        Ok(())
+    }
+    parse_ty_sig(inner, &inner.signature().type_signature, &mut mapping)?;
+
+    Ok(StateToInputType { mapping })
+}
+
+pub struct DataTypeIterator {
+    inner: Vec<DataType>,
+}
+
+impl DataTypeIterator {
+    pub fn new(inner: Vec<DataType>) -> Self {
+        Self { inner }
+    }
+
+    pub fn all_flat() -> Self {
+        use arrow::datatypes::{IntervalUnit, TimeUnit};
+        use DataType::*;
+        let inner = vec![
+            Null,
+            Boolean,
+            Int8,
+            Int16,
+            Int32,
+            Int64,
+            UInt8,
+            UInt16,
+            UInt32,
+            UInt64,
+            Float32,
+            Float64,
+            Decimal128(38, 18),
+            Decimal256(76, 38),
+            Binary,
+            Date32,
+            Date64,
+            Timestamp(TimeUnit::Second, None),
+            Timestamp(TimeUnit::Millisecond, None),
+            Timestamp(TimeUnit::Microsecond, None),
+            Timestamp(TimeUnit::Nanosecond, None),
+            Time32(TimeUnit::Second),
+            Time32(TimeUnit::Millisecond),
+            Time64(TimeUnit::Microsecond),
+            Time64(TimeUnit::Nanosecond),
+            Duration(TimeUnit::Second),
+            Duration(TimeUnit::Millisecond),
+            Duration(TimeUnit::Microsecond),
+            Duration(TimeUnit::Nanosecond),
+            Interval(IntervalUnit::DayTime),
+            Interval(IntervalUnit::YearMonth),
+            Interval(IntervalUnit::MonthDayNano),
+            LargeBinary,
+            BinaryView,
+            Utf8,
+            LargeUtf8,
+            Utf8View,
+        ];
+        Self { inner }
+    }
+}
+
+impl Iterator for DataTypeIterator {
+    type Item = DataType;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.pop()
     }
 }
 
@@ -341,17 +528,21 @@ pub struct MergeWrapper {
     inner: AggregateUDF,
     name: String,
     merge_signature: Signature,
+    state_to_input_types: StateToInputType,
 }
 impl MergeWrapper {
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
         let name = aggr_merge_func_name(inner.name());
+        // the input type is actually struct type, which is the state fields of the original aggregate function.
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
         // TODO: a mapping of acceptable input types to state fields' data types for the original function
+        let state_to_input_types = get_possible_state_to_input_types(&inner)?;
 
         Ok(Self {
             inner,
             name,
             merge_signature,
+            state_to_input_types,
         })
     }
 
@@ -365,7 +556,46 @@ impl AggregateUDFImpl for MergeWrapper {
         &'a self,
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
-        let inner = self.inner.accumulator(acc_args)?;
+        let state_types = acc_args
+            .exprs
+            .iter()
+            .map(|e| e.data_type(acc_args.schema))
+            .collect::<datafusion_common::Result<Vec<_>>>()?;
+        let input_types = self
+            .state_to_input_types
+            .get_input_types(&state_types)?
+            .ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(format!(
+                    "No input types found for state fields: {:?}",
+                    state_types
+                ))
+            })?;
+        let input_schema = arrow_schema::Schema::new(
+            input_types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| Field::new(format!("original_input[{i}]"), t.clone(), true))
+                .collect::<Vec<_>>(),
+        );
+        let input_exprs = (0..input_types.len())
+            .map(|i| {
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    &format!("original_input[{i}]"),
+                    i,
+                )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+            })
+            .collect::<Vec<_>>();
+        let correct_acc_args = datafusion_expr::function::AccumulatorArgs {
+            return_type: &self.inner.return_type(&input_types)?,
+            schema: &input_schema,
+            ignore_nulls: acc_args.ignore_nulls,
+            ordering_req: acc_args.ordering_req,
+            is_reversed: acc_args.is_reversed,
+            name: acc_args.name,
+            is_distinct: acc_args.is_distinct,
+            exprs: &input_exprs,
+        };
+        let inner = self.inner.accumulator(correct_acc_args)?;
         Ok(Box::new(MergeAccum::new(inner)))
     }
 
@@ -378,16 +608,27 @@ impl AggregateUDFImpl for MergeWrapper {
 
     /// Notice here the `arg_types` is actually the `state_fields`'s data types,
     /// so return fixed return type instead of using `arg_types` to determine the return type.
-    fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         // The return type is the same as the original aggregate function's return type.
         // notice here return type is fixed, instead of using the input types to determine the return type.
         // as the input type now is actually `state_fields`'s data type, and can't be use to determine the output type
-        todo!()
+        let input_types = self
+            .state_to_input_types
+            .get_input_types(arg_types)?
+            .ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(format!(
+                    "No input types found for state fields: {:?}",
+                    arg_types
+                ))
+            })?;
+        let ret_type = self.inner.return_type(&input_types)?;
+        Ok(ret_type)
     }
     fn signature(&self) -> &Signature {
         &self.merge_signature
     }
 
+    /// Coerce types also do nothing, as optimzer should be able to already make struct types
     fn coerce_types(&self, arg_types: &[DataType]) -> datafusion_common::Result<Vec<DataType>> {
         Ok(arg_types.to_vec())
     }
@@ -431,8 +672,21 @@ impl Accumulator for MergeAccum {
     }
 
     fn update_batch(&mut self, values: &[arrow::array::ArrayRef]) -> datafusion_common::Result<()> {
+        let value = values.first().ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal("No values provided for merge".to_string())
+        })?;
         // The input values are states from other accumulators, so we merge them.
-        self.inner.merge_batch(values)
+        let struct_arr = value
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| {
+                datafusion_common::DataFusionError::Internal(format!(
+                    "Expected StructArray, got: {:?}",
+                    value.data_type()
+                ))
+            })?;
+        let state_columns = struct_arr.columns();
+        self.inner.merge_batch(state_columns)
     }
 
     fn size(&self) -> usize {
@@ -461,28 +715,32 @@ mod tests {
         let sum = datafusion::functions_aggregate::sum::sum_udaf();
         let sum = (*sum).clone();
 
-        let args = WrapperArgs {
-            name: sum.name(),
-            input_types: &[DataType::Int64],
-            return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
-            ordering_fields: &[],
-            is_distinct: false,
-        };
-
-        let wrapper = StateMergeWrapper::new(sum.clone(), args).unwrap();
+        let wrapper = StateMergeWrapper::new(sum.clone()).unwrap();
         let expected = StateMergeWrapper {
             original: sum.clone(),
-            state_functions: vec![StateWrapper {
+            state_function: StateWrapper {
                 inner: sum.clone(),
-                name: "__sum_state_udaf".to_string(),
-            }],
+                name: "__sum_state".to_string(),
+            },
             merge_function: MergeWrapper {
                 inner: sum.clone(),
-                name: "__sum_merge_udaf".to_string(),
-                merge_signature: Signature::exact(
-                    vec![DataType::Int64],
-                    datafusion_expr::Volatility::Immutable,
-                ),
+                name: "__sum_merge".to_string(),
+                merge_signature: Signature::user_defined(datafusion_expr::Volatility::Immutable),
+                state_to_input_types: StateToInputType {
+                    mapping: BTreeMap::from([
+                        (vec![DataType::Float64], vec![DataType::Float64]),
+                        (vec![DataType::Int64], vec![DataType::Int64]),
+                        (vec![DataType::UInt64], vec![DataType::UInt64]),
+                        (
+                            vec![DataType::Decimal128(38, 18)],
+                            vec![DataType::Decimal128(38, 18)],
+                        ),
+                        (
+                            vec![DataType::Decimal256(76, 38)],
+                            vec![DataType::Decimal256(76, 38)],
+                        ),
+                    ]),
+                },
             },
         };
         assert_eq!(wrapper, expected);
@@ -491,7 +749,7 @@ mod tests {
         let input = Int64Array::from(vec![Some(1), Some(2), None, Some(3)]);
         let values = vec![Arc::new(input) as arrow::array::ArrayRef];
 
-        let state_func = wrapper.state_functions().first().unwrap();
+        let state_func = wrapper.state_function();
         let accum_args = AccumulatorArgs {
             return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
             schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Int64, true)]),
@@ -512,11 +770,28 @@ mod tests {
         assert_eq!(state[0], ScalarValue::Int64(Some(6)));
 
         let eval_res = state_accum.evaluate().unwrap();
-        assert_eq!(eval_res, ScalarValue::Int64(Some(6)));
+        assert_eq!(
+            eval_res,
+            ScalarValue::Struct(Arc::new(
+                StructArray::try_new(
+                    vec![Field::new("col_0", DataType::Int64, true)].into(),
+                    vec![Arc::new(Int64Array::from(vec![Some(6)]))],
+                    None,
+                )
+                .unwrap(),
+            ))
+        );
 
         let merge_input = vec![
             Arc::new(Int64Array::from(vec![Some(6), Some(42), None])) as arrow::array::ArrayRef
         ];
+        let merge_input_struct_arr = StructArray::try_new(
+            vec![Field::new("state[0]", DataType::Int64, true)].into(),
+            merge_input,
+            None,
+        )
+        .unwrap();
+
         let merge_func = wrapper.merge_function();
         let merge_accum_args = AccumulatorArgs {
             return_type: &sum.return_type(&[DataType::Int64]).unwrap(),
@@ -535,7 +810,9 @@ mod tests {
             )],
         };
         let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
-        merge_accum.update_batch(&merge_input).unwrap();
+        merge_accum
+            .update_batch(&[Arc::new(merge_input_struct_arr)])
+            .unwrap();
         let merge_state = merge_accum.state().unwrap();
         assert_eq!(merge_state.len(), 1);
         assert_eq!(merge_state[0], ScalarValue::Int64(Some(48)));
@@ -549,35 +826,37 @@ mod tests {
         let avg = datafusion::functions_aggregate::average::avg_udaf();
         let avg = (*avg).clone();
 
-        let args = WrapperArgs {
-            name: avg.name(),
-            input_types: &[DataType::Float64],
-            return_type: &avg.return_type(&[DataType::Float64]).unwrap(),
-            ordering_fields: &[],
-            is_distinct: false,
-        };
-
-        let wrapper = StateMergeWrapper::new(avg.clone(), args).unwrap();
+        let wrapper = StateMergeWrapper::new(avg.clone()).unwrap();
 
         let expected = StateMergeWrapper {
             original: avg.clone(),
-            state_functions: vec![
-                StateWrapper {
-                    inner: avg.clone(),
-                    name: "__avg_state_col_0_udaf".to_string(),
-                },
-                StateWrapper {
-                    inner: avg.clone(),
-                    name: "__avg_state_col_1_udaf".to_string(),
-                },
-            ],
+            state_function: StateWrapper {
+                inner: avg.clone(),
+                name: "__avg_state".to_string(),
+            },
             merge_function: MergeWrapper {
                 inner: avg.clone(),
-                name: "__avg_merge_udaf".to_string(),
-                merge_signature: Signature::exact(
-                    vec![DataType::UInt64, DataType::Float64],
-                    datafusion_expr::Volatility::Immutable,
-                ),
+                name: "__avg_merge".to_string(),
+                merge_signature: Signature::user_defined(datafusion_expr::Volatility::Immutable),
+                state_to_input_types: StateToInputType {
+                    mapping: {
+                        use DataType::*;
+                        BTreeMap::from([
+                            (vec![UInt64, Int8], vec![Int8]),
+                            (vec![UInt64, Int16], vec![Int16]),
+                            (vec![UInt64, Int32], vec![Int32]),
+                            (vec![UInt64, Int64], vec![Int64]),
+                            (vec![UInt64, UInt8], vec![UInt8]),
+                            (vec![UInt64, UInt16], vec![UInt16]),
+                            (vec![UInt64, UInt32], vec![UInt32]),
+                            (vec![UInt64, UInt64], vec![UInt64]),
+                            (vec![UInt64, Float32], vec![Float32]),
+                            (vec![UInt64, Float64], vec![Float64]),
+                            (vec![UInt64, Decimal128(38, 18)], vec![Decimal128(38, 18)]),
+                            (vec![UInt64, Decimal256(76, 38)], vec![Decimal256(76, 38)]),
+                        ])
+                    },
+                },
             },
         };
         assert_eq!(wrapper, expected);
@@ -586,7 +865,7 @@ mod tests {
         let input = Float64Array::from(vec![Some(1.), Some(2.), None, Some(3.)]);
         let values = vec![Arc::new(input) as arrow::array::ArrayRef];
 
-        let state_func = wrapper.state_functions()[0].clone();
+        let state_func = wrapper.state_function();
         let accum_args = AccumulatorArgs {
             return_type: &DataType::UInt64,
             schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
@@ -608,38 +887,37 @@ mod tests {
         assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
 
         let eval_res = state_accum.evaluate().unwrap();
-        // state_index=0, hence we only return the count
-        assert_eq!(eval_res, ScalarValue::UInt64(Some(3)));
-
-        let state_func = wrapper.state_functions()[1].clone();
-        let accum_args = AccumulatorArgs {
-            return_type: &DataType::Float64,
-            schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
-            ignore_nulls: false,
-            ordering_req: LexOrdering::empty(),
-            is_reversed: false,
-            name: state_func.name(),
-            is_distinct: false,
-            exprs: &[Arc::new(
-                datafusion::physical_expr::expressions::Column::new("col", 0),
-            )],
-        };
-        let mut state_accum = state_func.accumulator(accum_args).unwrap();
-
-        state_accum.update_batch(&values).unwrap();
-        let state = state_accum.state().unwrap();
-        assert_eq!(state.len(), 2);
-        assert_eq!(state[0], ScalarValue::UInt64(Some(3)));
-        assert_eq!(state[1], ScalarValue::Float64(Some(6.)));
-
-        let eval_res = state_accum.evaluate().unwrap();
-        // state_index=0, hence we only return the count
-        assert_eq!(eval_res, ScalarValue::Float64(Some(6.)));
+        let expected = Arc::new(
+            StructArray::try_new(
+                vec![
+                    Field::new("col_0", DataType::UInt64, true),
+                    Field::new("col_1", DataType::Float64, true),
+                ]
+                .into(),
+                vec![
+                    Arc::new(UInt64Array::from(vec![Some(3)])),
+                    Arc::new(Float64Array::from(vec![Some(6.)])),
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(eval_res, ScalarValue::Struct(expected));
 
         let merge_input = vec![
             Arc::new(UInt64Array::from(vec![Some(3), Some(42), None])) as arrow::array::ArrayRef,
             Arc::new(Float64Array::from(vec![Some(48.), Some(84.), None])),
         ];
+        let merge_input_struct_arr = StructArray::try_new(
+            vec![
+                Field::new("state[0]", DataType::UInt64, true),
+                Field::new("state[1]", DataType::Float64, true),
+            ]
+            .into(),
+            merge_input,
+            None,
+        )
+        .unwrap();
         let merge_func = wrapper.merge_function();
         // this accum args is still the original aggregate function's args
         let merge_accum_args = AccumulatorArgs {
@@ -663,7 +941,9 @@ mod tests {
             ],
         };
         let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
-        merge_accum.update_batch(&merge_input).unwrap();
+        merge_accum
+            .update_batch(&[Arc::new(merge_input_struct_arr)])
+            .unwrap();
         let merge_state = merge_accum.state().unwrap();
         assert_eq!(merge_state.len(), 2);
         assert_eq!(merge_state[0], ScalarValue::UInt64(Some(45)));
