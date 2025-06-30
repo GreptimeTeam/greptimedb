@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INDEX_RESULT_TYPE"],"enum":["PredicateKey"],"struct":["BloomFilterKey","FulltextIndexKey","IndexResultCache","InvertedIndexKey"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_logical_table","create_physical_table","create_physical_table_metadata","test_create_logical_table_task","test_create_physical_table_task"],"mod":["alter_table","columns","create_table","datanode_handler","flownode_handler"]};

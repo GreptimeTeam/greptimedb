@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NORMALIZE_STEP","ZERO"],"enum":["GluonOp"],"struct":["AtomicExpr","Collider","NucleonExpr"]};

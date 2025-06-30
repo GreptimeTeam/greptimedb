@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_string_data_rows","matches","process","rewrite_sql","set_transaction_warning"],"static":["ABORT_TRANSACTION_PATTERN","COMMIT_TRANSACTION_PATTERN","SET_TRANSACTION_PATTERN","SHOW_PATTERN","START_TRANSACTION_PATTERN","VAR_VALUES"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["QUERY_PARALLELISM_HINT"],"mod":["error","planner"],"struct":["DatafusionQueryEngine","DfContextProviderAdapter"]};
