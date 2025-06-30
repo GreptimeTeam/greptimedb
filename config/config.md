@@ -598,3 +598,5 @@
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
+| `query` | -- | -- | -- |
+| `query.parallelism` | Integer | `1` | Parallelism of the query engine for query sent by flownode.<br/>Default to 1, so it won't use too much cpu or memory |
