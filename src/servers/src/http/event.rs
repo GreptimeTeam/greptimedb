@@ -902,7 +902,6 @@ pub struct LogState {
 
 #[cfg(test)]
 mod tests {
-    use pipeline::json_array_to_vrl_array;
 
     use super::*;
 
@@ -950,10 +949,7 @@ mod tests {
         let fail_rest =
             extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), true);
         assert!(fail_rest.is_ok());
-        assert_eq!(
-            fail_rest.unwrap(),
-            json_array_to_vrl_array(vec![json!({"a": 1})]).unwrap()
-        );
+        assert_eq!(fail_rest.unwrap(), vec![json!({"a": 1}).into()]);
 
         let fail_only_wrong =
             extract_pipeline_value_by_content_type(NDJSON_CONTENT_TYPE.clone(), payload, true);
