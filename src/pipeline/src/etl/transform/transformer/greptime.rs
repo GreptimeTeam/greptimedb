@@ -713,9 +713,7 @@ mod tests {
     use api::v1::SemanticType;
 
     use super::*;
-    use crate::{
-        identity_pipeline, json_array_to_vrl_array, serde_value_to_vrl_value, PipelineDefinition,
-    };
+    use crate::{identity_pipeline, PipelineDefinition};
 
     #[test]
     fn test_identify_pipeline() {
@@ -726,7 +724,7 @@ mod tests {
             Channel::Unknown,
         );
         {
-            let array = vec![
+            let array = [
                 serde_json::json!({
                     "woshinull": null,
                     "name": "Alice",
@@ -746,7 +744,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let array = json_array_to_vrl_array(array).unwrap();
+            let array = array.iter().map(|v| v.into()).collect();
             let rows = identity_pipeline(array, None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
@@ -755,7 +753,7 @@ mod tests {
             );
         }
         {
-            let array = vec![
+            let array = [
                 serde_json::json!({
                     "woshinull": null,
                     "name": "Alice",
@@ -775,7 +773,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let array = json_array_to_vrl_array(array).unwrap();
+            let array = array.iter().map(|v| v.into()).collect();
             let rows = identity_pipeline(array, None, &pipeline_ctx);
             assert!(rows.is_err());
             assert_eq!(
@@ -784,7 +782,7 @@ mod tests {
             );
         }
         {
-            let array = vec![
+            let array = [
                 serde_json::json!({
                     "woshinull": null,
                     "name": "Alice",
@@ -804,7 +802,7 @@ mod tests {
                     "gaga": "gaga"
                 }),
             ];
-            let array = json_array_to_vrl_array(array).unwrap();
+            let array = array.iter().map(|v| v.into()).collect();
             let rows = identity_pipeline(array, None, &pipeline_ctx);
             assert!(rows.is_ok());
             let mut rows = rows.unwrap();
@@ -816,7 +814,7 @@ mod tests {
             assert_eq!(8, rows.rows[1].values.len());
         }
         {
-            let array = vec![
+            let array = [
                 serde_json::json!({
                     "woshinull": null,
                     "name": "Alice",
@@ -839,7 +837,7 @@ mod tests {
             let tag_column_names = ["name".to_string(), "address".to_string()];
 
             let rows =
-                identity_pipeline_inner(json_array_to_vrl_array(array).unwrap(), &pipeline_ctx)
+                identity_pipeline_inner(array.iter().map(|v| v.into()).collect(), &pipeline_ctx)
                     .map(|(mut schema, mut rows)| {
                         for name in tag_column_names {
                             if let Some(index) = schema.index.get(&name) {
@@ -951,8 +949,8 @@ mod tests {
         ];
 
         for (input, max_depth, expected) in test_cases {
-            let input = serde_value_to_vrl_value(input).unwrap();
-            let expected = expected.map(|e| serde_value_to_vrl_value(e).unwrap());
+            let input = input.into();
+            let expected = expected.map(|e| e.into());
 
             let flattened_object = flatten_object(input, max_depth).ok();
             assert_eq!(flattened_object, expected);

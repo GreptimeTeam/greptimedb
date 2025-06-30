@@ -35,9 +35,7 @@ use lazy_static::lazy_static;
 use loki_proto::logproto::LabelPairAdapter;
 use loki_proto::prost_types::Timestamp as LokiTimestamp;
 use pipeline::util::to_pipeline_version;
-use pipeline::{
-    serde_value_to_vrl_value, ContextReq, PipelineContext, PipelineDefinition, SchemaInfo,
-};
+use pipeline::{ContextReq, PipelineContext, PipelineDefinition, SchemaInfo};
 use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
@@ -461,17 +459,10 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
 
         if let Some(serde_json::Value::Object(m)) = structured_metadata {
             for (k, v) in m {
-                match serde_value_to_vrl_value(v) {
-                    Ok(v) => {
-                        map.insert(
-                            KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k)),
-                            v,
-                        );
-                    }
-                    Err(e) => {
-                        warn!("not a valid value, {:?}", e);
-                    }
-                }
+                map.insert(
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k)),
+                    v.into(),
+                );
             }
         }
         if let Some(v) = labels {

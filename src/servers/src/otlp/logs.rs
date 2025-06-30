@@ -25,16 +25,14 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use pipeline::{
-    json_array_to_vrl_array, ContextReq, GreptimePipelineParams, PipelineContext, PipelineWay,
-    SchemaInfo, SelectInfo,
+    ContextReq, GreptimePipelineParams, PipelineContext, PipelineWay, SchemaInfo, SelectInfo,
 };
 use serde_json::{Map, Value};
 use session::context::QueryContextRef;
-use snafu::{ensure, ResultExt};
+use snafu::ensure;
 
 use crate::error::{
-    IncompatibleSchemaSnafu, NotSupportedSnafu, PipelineSnafu, Result,
-    UnsupportedJsonDataTypeForTagSnafu,
+    IncompatibleSchemaSnafu, NotSupportedSnafu, Result, UnsupportedJsonDataTypeForTagSnafu,
 };
 use crate::http::event::PipelineIngestRequest;
 use crate::otlp::trace::attributes::OtlpAnyValue;
@@ -71,7 +69,7 @@ pub async fn to_grpc_insert_requests(
         }
         PipelineWay::Pipeline(pipeline_def) => {
             let data = parse_export_logs_service_request(request);
-            let array = json_array_to_vrl_array(data).context(PipelineSnafu)?;
+            let array = data.into_iter().map(|v| v.into()).collect();
 
             let pipeline_ctx =
                 PipelineContext::new(&pipeline_def, &pipeline_params, query_ctx.channel());

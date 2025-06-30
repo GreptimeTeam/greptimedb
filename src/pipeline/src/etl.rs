@@ -19,8 +19,6 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use std::collections::BTreeMap;
-
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
@@ -28,14 +26,12 @@ use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
 use vrl::core::Value as VrlValue;
-use vrl::prelude::{Bytes, NotNan};
-use vrl::value::KeyString;
 use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, Error, FloatIsNanSnafu, IntermediateKeyIndexSnafu,
-    InvalidVersionNumberSnafu, Result, UnsupportedNumberTypeSnafu, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, Error, IntermediateKeyIndexSnafu, InvalidVersionNumberSnafu,
+    Result, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_row;
@@ -263,45 +259,6 @@ impl PipelineExecOutput {
     }
 }
 
-pub fn json_array_to_vrl_array(val: Vec<serde_json::Value>) -> Result<Vec<VrlValue>> {
-    val.into_iter()
-        .map(serde_value_to_vrl_value)
-        .collect::<Result<Vec<_>>>()
-}
-
-pub fn serde_value_to_vrl_value(val: serde_json::Value) -> Result<VrlValue> {
-    match val {
-        serde_json::Value::Null => Ok(VrlValue::Null),
-        serde_json::Value::Bool(b) => Ok(VrlValue::Boolean(b)),
-        serde_json::Value::Number(number) => {
-            if let Some(v) = number.as_i64() {
-                Ok(VrlValue::Integer(v))
-            } else if let Some(v) = number.as_u64() {
-                Ok(VrlValue::Integer(v as i64))
-            } else if let Some(v) = number.as_f64() {
-                NotNan::new(v).context(FloatIsNanSnafu).map(VrlValue::Float)
-            } else {
-                UnsupportedNumberTypeSnafu { value: number }.fail()
-            }
-        }
-        serde_json::Value::String(s) => Ok(VrlValue::Bytes(Bytes::from(s))),
-        serde_json::Value::Array(values) => {
-            let v = values
-                .into_iter()
-                .map(serde_value_to_vrl_value)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(VrlValue::Array(v))
-        }
-        serde_json::Value::Object(map) => {
-            let mut new_map = BTreeMap::new();
-            for (k, v) in map {
-                new_map.insert(KeyString::from(k), serde_value_to_vrl_value(v)?);
-            }
-            Ok(VrlValue::Object(new_map))
-        }
-    }
-}
-
 impl Pipeline {
     fn is_v1(&self) -> bool {
         self.doc_version == PipelineDocVersion::V1
@@ -416,11 +373,14 @@ macro_rules! setup_pipeline {
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
+    use vrl::prelude::Bytes;
+    use vrl::value::KeyString;
 
     use super::*;
 
@@ -461,7 +421,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = serde_value_to_vrl_value(input_value).unwrap();
+        let payload = input_value.into();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -621,7 +581,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = serde_value_to_vrl_value(input_value).unwrap();
+        let payload = input_value.into();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -674,7 +634,7 @@ transform:
             session::context::Channel::Unknown,
         );
         let schema = pipeline.schemas().unwrap().clone();
-        let result = serde_value_to_vrl_value(input_value).unwrap();
+        let result = input_value.into();
 
         let row = pipeline
             .exec_mut(result, &pipeline_ctx, &mut schema_info)

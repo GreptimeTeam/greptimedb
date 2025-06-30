@@ -25,7 +25,6 @@ use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, JSON_PATH_NAME, JSON_PATH_RESULT_INDEX_NAME,
 };
-use crate::{json_array_to_vrl_array, serde_value_to_vrl_value};
 
 pub(crate) const PROCESSOR_JSON_PATH: &str = "json_path";
 
@@ -103,7 +102,6 @@ impl Default for JsonPathProcessor {
 
 impl JsonPathProcessor {
     fn process_field(&self, val: &VrlValue) -> Result<VrlValue> {
-        // TODO(shuiyisong): this is very bad implementation
         let v = serde_json::to_value(val).context(JsonParseSnafu)?;
         let p = self.json_path.find(&v);
         match p {
@@ -112,14 +110,13 @@ impl JsonPathProcessor {
                     Ok(arr
                         .get(index)
                         .cloned()
-                        .map(serde_value_to_vrl_value)
-                        .transpose()?
+                        .map(|v| v.into())
                         .unwrap_or(VrlValue::Null))
                 } else {
-                    Ok(VrlValue::Array(json_array_to_vrl_array(arr)?))
+                    Ok(VrlValue::Array(arr.into_iter().map(|v| v.into()).collect()))
                 }
             }
-            v => serde_value_to_vrl_value(v),
+            v => Ok(v.into()),
         }
     }
 }
