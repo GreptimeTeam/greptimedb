@@ -19,9 +19,9 @@ use api::v1::Rows;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
-use store_api::path_utils::region_dir_from_table_dir;
+use crate::sst::location::region_dir_from_table_dir;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionDropRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
@@ -73,7 +73,7 @@ async fn test_engine_drop_region() {
 
     let region = engine.get_region(region_id).unwrap();
     let table_dir = region.access_layer.table_dir().to_string();
-    let region_dir = region_dir_from_table_dir(&table_dir, region_id);
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
     // no dropping marker file
     assert!(!env
         .get_object_store()

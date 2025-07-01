@@ -20,7 +20,6 @@ use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::path_utils::region_dir_from_table_dir;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
@@ -30,6 +29,7 @@ use crate::error::{
 };
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
@@ -50,7 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.object_store_manager.default_object_store()
         };
         // Check if this region is pending drop. And clean the entire dir if so.
-        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
+        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id, request.path_type);
         if !self.dropping_regions.is_region_exists(region_id)
             && object_store
                 .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))

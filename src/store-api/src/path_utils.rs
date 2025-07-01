@@ -45,22 +45,6 @@ pub fn region_dir(path: &str, region_id: RegionId) -> String {
     )
 }
 
-/// Generate region dir from table_dir and region_id
-pub fn region_dir_from_table_dir(table_dir: &str, region_id: RegionId) -> String {
-    if table_dir.ends_with('/') {
-        format!(
-            "{}{}/",
-            table_dir,
-            region_name(region_id.table_id(), region_id.region_sequence())
-        )
-    } else {
-        format!(
-            "{}/{}/",
-            table_dir,
-            region_name(region_id.table_id(), region_id.region_sequence())
-        )
-    }
-}
 
 /// get_storage_path returns the storage path from the region_dir.
 ///

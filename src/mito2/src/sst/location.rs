@@ -15,21 +15,25 @@
 use object_store::util;
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
+use store_api::storage::RegionId;
 
 use crate::sst::file::RegionFileId;
 
+/// Generate region dir from table_dir, region_id and path_type
+pub fn region_dir_from_table_dir(table_dir: &str, region_id: RegionId, path_type: PathType) -> String {
+    let region_name = region_name(region_id.table_id(), region_id.region_sequence());
+    let base_region_dir = util::join_dir(table_dir, &region_name);
+    
+    match path_type {
+        PathType::Bare => base_region_dir,
+        PathType::Data => util::join_dir(&base_region_dir, "data"),
+        PathType::Metadata => util::join_dir(&base_region_dir, "metadata"),
+    }
+}
+
 pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
-    let region_name = region_name(
-        region_file_id.region_id().table_id(),
-        region_file_id.region_id().region_sequence(),
-    );
-    let region_dir = util::join_dir(table_dir, &region_name);
-    let final_dir = match path_type {
-        PathType::Bare => region_dir,
-        PathType::Data => util::join_dir(&region_dir, "data"),
-        PathType::Metadata => util::join_dir(&region_dir, "metadata"),
-    };
-    util::join_path(&final_dir, &format!("{}.parquet", region_file_id.file_id()))
+    let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
+    util::join_path(&region_dir, &format!("{}.parquet", region_file_id.file_id()))
 }
 
 pub fn index_file_path(
@@ -37,17 +41,8 @@ pub fn index_file_path(
     region_file_id: RegionFileId,
     path_type: PathType,
 ) -> String {
-    let region_name = region_name(
-        region_file_id.region_id().table_id(),
-        region_file_id.region_id().region_sequence(),
-    );
-    let region_dir = util::join_dir(table_dir, &region_name);
-    let final_dir = match path_type {
-        PathType::Bare => region_dir,
-        PathType::Data => util::join_dir(&region_dir, "data"),
-        PathType::Metadata => util::join_dir(&region_dir, "metadata"),
-    };
-    let index_dir = util::join_dir(&final_dir, "index");
+    let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
+    let index_dir = util::join_dir(&region_dir, "index");
     util::join_path(&index_dir, &format!("{}.puffin", region_file_id.file_id()))
 }
 

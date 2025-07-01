@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::region_dir_from_table_dir;
-use store_api::region_request::{PathType, RegionCreateRequest, RegionOpenRequest};
+use store_api::path_utils::region_name;
+use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -51,7 +51,7 @@ impl FileRegion {
             options: request.options,
         };
 
-        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
+        let region_dir = object_store::util::join_dir(&request.table_dir, &region_name(region_id.table_id(), region_id.region_sequence()));
         let url = manifest.url()?;
         let file_options = manifest.file_options()?;
         let format = manifest.format()?;
@@ -75,7 +75,7 @@ impl FileRegion {
         request: RegionOpenRequest,
         object_store: &ObjectStore,
     ) -> Result<FileRegionRef> {
-        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
+        let region_dir = object_store::util::join_dir(&request.table_dir, &region_name(region_id.table_id(), region_id.region_sequence()));
         let manifest =
             FileRegionManifest::load(region_id, &region_dir, object_store).await?;
 
@@ -105,6 +105,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::{new_test_column_metadata, new_test_object_store, new_test_options};
+    use store_api::region_request::PathType;
 
     #[tokio::test]
     async fn test_create_region() {

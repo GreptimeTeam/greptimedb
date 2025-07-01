@@ -33,7 +33,6 @@ use store_api::logstore::LogStore;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::path_utils::region_dir_from_table_dir;
 use store_api::region_engine::RegionRole;
 use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
@@ -63,6 +62,7 @@ use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::location::region_dir_from_table_dir;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -133,7 +133,7 @@ impl RegionOpener {
 
     /// Computes the region directory from table_dir and region_id.
     fn region_dir(&self) -> String {
-        region_dir_from_table_dir(&self.table_dir, self.region_id)
+        region_dir_from_table_dir(&self.table_dir, self.region_id, self.path_type)
     }
 
     /// Builds the region metadata.
@@ -231,12 +231,8 @@ impl RegionOpener {
         let provider = self.provider::<S>(&options.wal_options)?;
         let metadata = Arc::new(metadata);
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_options = Self::manifest_options(
-            config,
-            &options,
-            &region_dir,
-            &self.object_store_manager,
-        )?;
+        let region_manifest_options =
+            Self::manifest_options(config, &options, &region_dir, &self.object_store_manager)?;
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             region_manifest_options,

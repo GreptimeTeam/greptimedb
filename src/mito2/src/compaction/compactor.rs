@@ -25,7 +25,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::region_dir_from_table_dir;
+use crate::sst::location::region_dir_from_table_dir;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
@@ -156,7 +156,7 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(&req.table_dir, req.region_id)),
+            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type)),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
@@ -170,7 +170,7 @@ pub async fn open_compaction_region(
         .await?
         .context(EmptyRegionDirSnafu {
             region_id: req.region_id,
-            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id),
+            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
         })?
     };
 
@@ -214,7 +214,7 @@ pub async fn open_compaction_region(
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),
-        region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id),
+        region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
         cache_manager: Arc::new(CacheManager::default()),
