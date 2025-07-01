@@ -97,39 +97,44 @@ impl<'a> PartitionChecker<'a> {
             }
             .fail();
         }
-        let matrix_generator = MatrixGenerator::new(matrix_fundation);
-        let batch = matrix_generator.all_points();
+
+        let mut matrix_generator = MatrixGenerator::new(matrix_fundation);
+
+        // Process data in batches using iterator
         let mut results = Vec::with_capacity(self.collider.atomic_exprs.len());
-        for expr in self.collider.atomic_exprs.iter() {
-            let physical_expr = expr.to_physical_expr(&batch.schema());
-            let columnar_result = physical_expr.evaluate(&batch).unwrap();
-            let array_result = columnar_result.into_array(batch.num_rows()).unwrap();
-            results.push(array_result);
-        }
-        let boolean_results = results
-            .iter()
-            .map(|result| result.as_any().downcast_ref::<BooleanArray>().unwrap())
-            .collect::<Vec<_>>();
-
-        // dot product and check results
-        for i in 0..batch.num_rows() {
-            let mut true_count = 0;
-            for result in boolean_results.iter() {
-                if result.value(i) {
-                    true_count += 1;
-                }
+        while let Some(batch) = matrix_generator.next() {
+            results.clear();
+            for expr in self.collider.atomic_exprs.iter() {
+                let physical_expr = expr.to_physical_expr(&batch.schema());
+                let columnar_result = physical_expr.evaluate(&batch).unwrap();
+                let array_result = columnar_result.into_array(batch.num_rows()).unwrap();
+                results.push(array_result);
             }
+            let boolean_results = results
+                .iter()
+                .map(|result| result.as_any().downcast_ref::<BooleanArray>().unwrap())
+                .collect::<Vec<_>>();
 
-            if true_count == 0 {
-                return CheckpointNotCoveredSnafu {
-                    checkpoint: self.remap_checkpoint(i, &batch),
+            // sum and check results for this batch
+            for i in 0..batch.num_rows() {
+                let mut true_count = 0;
+                for result in boolean_results.iter() {
+                    if result.value(i) {
+                        true_count += 1;
+                    }
                 }
-                .fail();
-            } else if true_count > 1 {
-                return CheckpointOverlappedSnafu {
-                    checkpoint: self.remap_checkpoint(i, &batch),
+
+                if true_count == 0 {
+                    return CheckpointNotCoveredSnafu {
+                        checkpoint: self.remap_checkpoint(i, &batch),
+                    }
+                    .fail();
+                } else if true_count > 1 {
+                    return CheckpointOverlappedSnafu {
+                        checkpoint: self.remap_checkpoint(i, &batch),
+                    }
+                    .fail();
                 }
-                .fail();
             }
         }
 
@@ -176,8 +181,6 @@ impl<'a> PartitionChecker<'a> {
                 } else {
                     let lower_index = (normalized_value / normalize_step).floor() as usize;
                     let upper_index = (normalized_value / normalize_step).ceil() as usize;
-
-                    println!("lower_index: {}, upper_index: {}", lower_index, upper_index);
 
                     // Handle edge cases: value is outside the valid range
                     if lower_index == upper_index && lower_index == 0 {
@@ -260,12 +263,6 @@ impl MatrixGenerator {
             schema,
             column_names,
         }
-    }
-
-    fn all_points(&self) -> RecordBatch {
-        // For backward compatibility, generate all points at once
-        // This method is now deprecated in favor of using the iterator
-        self.generate_batch(0, self.total_combinations)
     }
 
     fn generate_batch(&self, start_index: usize, batch_size: usize) -> RecordBatch {
@@ -354,8 +351,8 @@ mod tests {
             ],
         );
 
-        let generator = MatrixGenerator::new(matrix_fundation);
-        let batch = generator.all_points();
+        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let batch = generator.next().unwrap();
 
         assert_eq!(batch.num_rows(), 3);
         assert_eq!(batch.num_columns(), 1);
@@ -369,6 +366,9 @@ mod tests {
         assert_eq!(col1_array.value(0), 1.0);
         assert_eq!(col1_array.value(1), 2.0);
         assert_eq!(col1_array.value(2), 3.0);
+
+        // Should be no more batches for such a small dataset
+        assert!(generator.next().is_none());
     }
 
     #[test]
@@ -385,8 +385,8 @@ mod tests {
             ],
         );
 
-        let generator = MatrixGenerator::new(matrix_fundation);
-        let batch = generator.all_points();
+        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let batch = generator.next().unwrap();
 
         // Should have 2 * 2 * 3 = 12 combinations
         assert_eq!(batch.num_rows(), 12);
@@ -429,6 +429,9 @@ mod tests {
                 expected[i]
             );
         }
+
+        // Should be no more batches for such a small dataset
+        assert!(generator.next().is_none());
     }
 
     #[test]
@@ -468,13 +471,13 @@ mod tests {
         let mut matrix_fundation = HashMap::new();
         matrix_fundation.insert("col1", vec![]);
 
-        let generator = MatrixGenerator::new(matrix_fundation);
+        let mut generator = MatrixGenerator::new(matrix_fundation);
 
         // Should have 0 total combinations when any column is empty
         assert_eq!(generator.total_combinations, 0);
 
-        let batch = generator.all_points();
-        assert_eq!(batch.num_rows(), 0);
+        // Should have no batches when total combinations is 0
+        assert!(generator.next().is_none());
     }
 
     #[test]
