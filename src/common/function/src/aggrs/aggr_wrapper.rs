@@ -145,13 +145,13 @@ impl AggregateUDFImpl for StateWrapper {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
-        self.inner.inner().as_any()
+        self
     }
     fn name(&self) -> &str {
         self.name.as_str()
     }
 
-    /// Return state_field[idx] as the output type.
+    /// Return state_fields as the output struct type.
     ///
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
         let old_return_type = self.inner.return_type(arg_types)?;
@@ -159,7 +159,7 @@ impl AggregateUDFImpl for StateWrapper {
             name: self.inner().name(),
             input_types: arg_types,
             return_type: &old_return_type,
-            // TODO: how to get this?, probably ok?
+            // TODO(discord9): how to get this?, probably ok?
             ordering_fields: &[],
             is_distinct: false,
         };
@@ -283,26 +283,31 @@ impl StateToInputType {
 
             if is_equal_types {
                 // replace `Decimal` in input_types with same `Decimal` type in `state_types`
-                // expect only one of the `Decimal128/256` in the state_types
+                // Expect only one of the `Decimal128/256` in the state_types.
+                // If there are multiple, this logic might need to be revisited.
                 let mut input_types = v.clone();
-                let new_type = state_types
-                    .iter()
-                    .find(|ty| is_decimal(ty))
-                    .ok_or_else(|| {
-                        datafusion_common::DataFusionError::Internal(format!(
-                            "No Decimal type found in state types: {:?}",
-                            state_types
-                        ))
-                    })?;
-                let replace_type = |ty: &DataType| {
-                    if is_decimal(ty) {
-                        // replace with the first `Decimal256` in state_types
-                        new_type.clone()
-                    } else {
-                        ty.clone()
-                    }
-                };
-                input_types = input_types.iter().map(replace_type).collect::<Vec<_>>();
+                let decimal_types_in_state: Vec<&DataType> =
+                    state_types.iter().filter(|ty| is_decimal(ty)).collect();
+
+                if decimal_types_in_state.len() > 1 {
+                    return Err(datafusion_common::DataFusionError::Internal(format!(
+                        "Multiple Decimal types found in state types, expected at most one: {:?}",
+                        state_types
+                    )));
+                }
+
+                if let Some(new_decimal_type) = decimal_types_in_state.first() {
+                    input_types = input_types
+                        .into_iter()
+                        .map(|ty| {
+                            if is_decimal(&ty) {
+                                (*new_decimal_type).clone()
+                            } else {
+                                ty
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                }
                 return Ok(Some(input_types));
             }
         }
