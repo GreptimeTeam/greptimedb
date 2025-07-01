@@ -27,9 +27,11 @@ use crate::rpc::store::{BatchDeleteRequest, BatchGetRequest};
 /// - logically delete values
 /// - restore the deleted values
 pub struct TombstoneManager {
-    max_txn_ops: usize,
     kv_backend: KvBackendRef,
     tombstone_prefix: String,
+    // Only used for testing.
+    #[cfg(test)]
+    max_txn_ops: Option<usize>,
 }
 
 const TOMBSTONE_PREFIX: &str = "__tombstone/";
@@ -43,9 +45,10 @@ impl TombstoneManager {
     /// Returns [TombstoneManager] with a custom tombstone prefix.
     pub fn new_with_prefix(kv_backend: KvBackendRef, prefix: &str) -> Self {
         Self {
-            max_txn_ops: kv_backend.max_txn_ops(),
             kv_backend,
             tombstone_prefix: prefix.to_string(),
+            #[cfg(test)]
+            max_txn_ops: None,
         }
     }
 
@@ -55,7 +58,7 @@ impl TombstoneManager {
 
     #[cfg(test)]
     pub fn set_max_txn_ops(&mut self, max_txn_ops: usize) {
-        self.max_txn_ops = max_txn_ops;
+        self.max_txn_ops = Some(max_txn_ops);
     }
 
     /// Moves value to `dest_key`.
@@ -145,6 +148,14 @@ impl TombstoneManager {
         .fail()
     }
 
+    fn max_txn_ops(&self) -> usize {
+        #[cfg(test)]
+        if let Some(max_txn_ops) = self.max_txn_ops {
+            return max_txn_ops;
+        }
+        self.kv_backend.max_txn_ops()
+    }
+
     /// Moves values to `dest_key`.
     ///
     /// Returns the number of keys that were moved.
@@ -162,7 +173,7 @@ impl TombstoneManager {
         if keys.is_empty() {
             return Ok(0);
         }
-        let chunk_size = self.max_txn_ops / 2;
+        let chunk_size = self.max_txn_ops() / 2;
         if keys.len() > chunk_size {
             debug!(
                 "Moving values with multiple chunks, keys len: {}, chunk_size: {}",
