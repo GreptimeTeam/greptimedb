@@ -77,7 +77,7 @@ impl<'a> PartitionChecker<'a> {
         // TODO(ruihang): merge atomic exprs to improve checker's performance
 
         // matrix test
-        let mut matrix_fundation = HashMap::new();
+        let mut matrix_foundation = HashMap::new();
         for (col, values) in self.collider.normalized_values.iter() {
             if values.is_empty() {
                 continue;
@@ -89,20 +89,20 @@ impl<'a> PartitionChecker<'a> {
                 cornerstones.push(value.1);
                 cornerstones.push(value.1 + CHECK_STEP);
             }
-            matrix_fundation.insert(col.as_str(), cornerstones);
+            matrix_foundation.insert(col.as_str(), cornerstones);
         }
-        if matrix_fundation.is_empty() {
+        if matrix_foundation.is_empty() {
             return UnexpectedSnafu {
                 err_msg: "no valid values for partition".to_string(),
             }
             .fail();
         }
 
-        let mut matrix_generator = MatrixGenerator::new(matrix_fundation);
+        let matrix_generator = MatrixGenerator::new(matrix_foundation);
 
         // Process data in batches using iterator
         let mut results = Vec::with_capacity(self.collider.atomic_exprs.len());
-        while let Some(batch) = matrix_generator.next() {
+        for batch in matrix_generator {
             results.clear();
             for expr in self.collider.atomic_exprs.iter() {
                 let physical_expr = expr.to_physical_expr(&batch.schema());
@@ -221,20 +221,20 @@ impl<'a> PartitionChecker<'a> {
     }
 }
 
-/// Generates a point matrix that contains premutations of `matrix_fundation`'s values
+/// Generates a point matrix that contains premutations of `matrix_foundation`'s values
 struct MatrixGenerator {
-    matrix_fundation: HashMap<String, Vec<OrderedF64>>,
+    matrix_foundation: HashMap<String, Vec<OrderedF64>>,
     // Iterator state
     current_index: usize,
     schema: Schema,
     column_names: Vec<String>,
     // Preprocessed attributes
-    /// Total number of combinations of `matrix_fundation`'s values
+    /// Total number of combinations of `matrix_foundation`'s values
     total_combinations: usize,
-    /// Biased suffix product of `matrix_fundation`'s values
+    /// Biased suffix product of `matrix_foundation`'s values
     ///
     /// The i-th element is the product of the sizes of all columns after the i-th column.
-    /// For example, if `matrix_fundation` is `{"a": [1, 2, 3], "b": [4, 5, 6]}`,
+    /// For example, if `matrix_foundation` is `{"a": [1, 2, 3], "b": [4, 5, 6]}`,
     /// then `biased_suffix_product` is `[3, 1]`.
     biased_suffix_product: Vec<usize>,
 }
@@ -242,14 +242,14 @@ struct MatrixGenerator {
 const MAX_BATCH_SIZE: usize = 8192;
 
 impl MatrixGenerator {
-    fn new(matrix_fundation: HashMap<&str, Vec<OrderedF64>>) -> Self {
+    fn new(matrix_foundation: HashMap<&str, Vec<OrderedF64>>) -> Self {
         // Convert to owned HashMap to avoid lifetime issues
-        let owned_matrix_fundation: HashMap<String, Vec<OrderedF64>> = matrix_fundation
+        let owned_matrix_foundation: HashMap<String, Vec<OrderedF64>> = matrix_foundation
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
 
-        let mut fields = owned_matrix_fundation
+        let mut fields = owned_matrix_foundation
             .keys()
             .map(|k| Field::new(k.clone(), DataType::Float64, false))
             .collect::<Vec<_>>();
@@ -264,14 +264,14 @@ impl MatrixGenerator {
         let mut product = 1;
         biased_suffix_product.push(product);
         for col_name in column_names.iter().rev() {
-            product *= owned_matrix_fundation[col_name].len();
+            product *= owned_matrix_foundation[col_name].len();
             biased_suffix_product.push(product);
         }
         biased_suffix_product.pop();
         biased_suffix_product.reverse();
 
         Self {
-            matrix_fundation: owned_matrix_fundation,
+            matrix_foundation: owned_matrix_foundation,
             current_index: 0,
             schema,
             column_names,
@@ -295,7 +295,7 @@ impl MatrixGenerator {
 
             // For each column, determine which value to use for this combination
             for (col_idx, col_name) in self.column_names.iter().enumerate() {
-                let values = &self.matrix_fundation[col_name];
+                let values = &self.matrix_foundation[col_name];
                 let stride = self.biased_suffix_product[col_idx];
                 let value_index = (combination_index / stride) % values.len();
                 let value = *values[value_index].as_ref();
@@ -345,8 +345,8 @@ mod tests {
 
     #[test]
     fn test_matrix_generator_single_column() {
-        let mut matrix_fundation = HashMap::new();
-        matrix_fundation.insert(
+        let mut matrix_foundation = HashMap::new();
+        matrix_foundation.insert(
             "col1",
             vec![
                 OrderedF64::from(1.0),
@@ -355,7 +355,7 @@ mod tests {
             ],
         );
 
-        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let mut generator = MatrixGenerator::new(matrix_foundation);
         let batch = generator.next().unwrap();
 
         assert_eq!(batch.num_rows(), 3);
@@ -377,10 +377,10 @@ mod tests {
 
     #[test]
     fn test_matrix_generator_three_columns_cartesian_product() {
-        let mut matrix_fundation = HashMap::new();
-        matrix_fundation.insert("a", vec![OrderedF64::from(1.0), OrderedF64::from(2.0)]);
-        matrix_fundation.insert("b", vec![OrderedF64::from(10.0), OrderedF64::from(20.0)]);
-        matrix_fundation.insert(
+        let mut matrix_foundation = HashMap::new();
+        matrix_foundation.insert("a", vec![OrderedF64::from(1.0), OrderedF64::from(2.0)]);
+        matrix_foundation.insert("b", vec![OrderedF64::from(10.0), OrderedF64::from(20.0)]);
+        matrix_foundation.insert(
             "c",
             vec![
                 OrderedF64::from(100.0),
@@ -389,7 +389,7 @@ mod tests {
             ],
         );
 
-        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let mut generator = MatrixGenerator::new(matrix_foundation);
         let batch = generator.next().unwrap();
 
         // Should have 2 * 2 * 3 = 12 combinations
@@ -427,6 +427,7 @@ mod tests {
             (2.0, 20.0, 200.0),
             (2.0, 20.0, 300.0),
         ];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..batch.num_rows() {
             assert_eq!(
                 (a_array.value(i), b_array.value(i), c_array.value(i)),
@@ -440,9 +441,9 @@ mod tests {
 
     #[test]
     fn test_matrix_generator_iterator_small_batches() {
-        let mut matrix_fundation = HashMap::new();
-        matrix_fundation.insert("col1", vec![OrderedF64::from(1.0), OrderedF64::from(2.0)]);
-        matrix_fundation.insert(
+        let mut matrix_foundation = HashMap::new();
+        matrix_foundation.insert("col1", vec![OrderedF64::from(1.0), OrderedF64::from(2.0)]);
+        matrix_foundation.insert(
             "col2",
             vec![
                 OrderedF64::from(10.0),
@@ -451,14 +452,14 @@ mod tests {
             ],
         );
 
-        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let generator = MatrixGenerator::new(matrix_foundation);
 
         // Total combinations should be 2 * 3 = 6
         assert_eq!(generator.total_combinations, 6);
 
         let mut total_rows = 0;
 
-        while let Some(batch) = generator.next() {
+        for batch in generator {
             total_rows += batch.num_rows();
             assert_eq!(batch.num_columns(), 2);
 
@@ -472,10 +473,10 @@ mod tests {
 
     #[test]
     fn test_matrix_generator_empty_column_values() {
-        let mut matrix_fundation = HashMap::new();
-        matrix_fundation.insert("col1", vec![]);
+        let mut matrix_foundation = HashMap::new();
+        matrix_foundation.insert("col1", vec![]);
 
-        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let mut generator = MatrixGenerator::new(matrix_foundation);
 
         // Should have 0 total combinations when any column is empty
         assert_eq!(generator.total_combinations, 0);
@@ -488,7 +489,7 @@ mod tests {
     fn test_matrix_generator_large_dataset_batching() {
         // Create a dataset that will exceed MAX_BATCH_SIZE (8192)
         // 20 * 20 * 21 = 8400 > 8192
-        let mut matrix_fundation = HashMap::new();
+        let mut matrix_foundation = HashMap::new();
 
         let values1: Vec<OrderedF64> = (0..20).map(|i| OrderedF64::from(i as f64)).collect();
         let values2: Vec<OrderedF64> = (0..20)
@@ -498,11 +499,11 @@ mod tests {
             .map(|i| OrderedF64::from(i as f64 + 1000.0))
             .collect();
 
-        matrix_fundation.insert("col1", values1);
-        matrix_fundation.insert("col2", values2);
-        matrix_fundation.insert("col3", values3);
+        matrix_foundation.insert("col1", values1);
+        matrix_foundation.insert("col2", values2);
+        matrix_foundation.insert("col3", values3);
 
-        let mut generator = MatrixGenerator::new(matrix_fundation);
+        let generator = MatrixGenerator::new(matrix_foundation);
 
         assert_eq!(generator.total_combinations, 8400);
 
@@ -510,7 +511,7 @@ mod tests {
         let mut batch_count = 0;
         let mut first_batch_size = None;
 
-        while let Some(batch) = generator.next() {
+        for batch in generator {
             batch_count += 1;
             let batch_size = batch.num_rows();
             total_rows += batch_size;

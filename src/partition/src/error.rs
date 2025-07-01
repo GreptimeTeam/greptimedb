@@ -140,13 +140,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Conjunct expr with non-expr is invalid"))]
-    ConjunctExprWithNonExpr {
-        expr: PartitionExpr,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid partition expr: {:?}", expr))]
     InvalidExpr {
         expr: PartitionExpr,
@@ -256,8 +249,7 @@ impl ErrorExt for Error {
             Error::GetCache { .. } => StatusCode::StorageUnavailable,
             Error::FindLeader { .. } => StatusCode::TableUnavailable,
 
-            Error::ConjunctExprWithNonExpr { .. }
-            | Error::InvalidExpr { .. }
+            Error::InvalidExpr { .. }
             | Error::NoExprOperand { .. }
             | Error::UndefinedColumn { .. }
             | Error::DuplicateExpr { .. }

@@ -459,7 +459,7 @@ mod tests {
         );
 
         // check rule
-        assert_matches!(rule.unwrap_err(), Error::ConjunctExprWithNonExpr { .. });
+        assert_matches!(rule.unwrap_err(), Error::InvalidExpr { .. });
     }
 
     /// ```ignore

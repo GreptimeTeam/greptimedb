@@ -45,7 +45,7 @@ pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
-#[derive(Debug, Clone, PartialEq, Eq, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AtomicExpr {
     /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
     pub(crate) nucleons: Vec<NucleonExpr>,
