@@ -150,6 +150,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.intermediate_manager.clone(),
                 self.time_provider.clone(),
             )
+            .path_type(region.access_layer.path_type())
             .cache(Some(self.cache_manager.clone()))
             .options(region.version().options.clone())?
             .skip_wal_replay(true)
