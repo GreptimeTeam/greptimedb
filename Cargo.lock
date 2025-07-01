@@ -4702,6 +4702,7 @@ version = "0.15.0"
 dependencies = [
  "api",
  "arc-swap",
+ "async-stream",
  "async-trait",
  "auth",
  "bytes",
