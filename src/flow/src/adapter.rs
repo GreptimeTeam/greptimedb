@@ -905,7 +905,7 @@ impl StreamingEngine {
         let rows_send = self.run_available(true).await?;
         let row = self.send_writeback_requests().await?;
         debug!(
-            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sent and {} output rows flushed",
             flow_id, flushed_input_rows, rows_send, row
         );
         Ok(row)
