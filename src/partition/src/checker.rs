@@ -22,6 +22,7 @@ use datatypes::value::OrderedF64;
 use crate::collider::{Collider, CHECK_STEP, NORMALIZE_STEP};
 use crate::error::{
     CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
+    UnexpectedSnafu,
 };
 use crate::expr::{PartitionExpr, RestrictedOp};
 use crate::multi_dim::MultiDimPartitionRule;
@@ -91,7 +92,10 @@ impl<'a> PartitionChecker<'a> {
             matrix_fundation.insert(col.as_str(), cornerstones);
         }
         if matrix_fundation.is_empty() {
-            todo!("error: matrix fundation is empty");
+            return UnexpectedSnafu {
+                err_msg: "no valid values for partition".to_string(),
+            }
+            .fail();
         }
         let matrix_generator = MatrixGenerator::new(matrix_fundation);
         let batch = matrix_generator.all_points();
@@ -173,22 +177,36 @@ impl<'a> PartitionChecker<'a> {
                     let lower_index = (normalized_value / normalize_step).floor() as usize;
                     let upper_index = (normalized_value / normalize_step).ceil() as usize;
 
-                    let lower_original = if lower_index < values.len() {
-                        values[lower_index].0.to_string()
-                    } else {
-                        "unknown".to_string()
-                    };
+                    println!("lower_index: {}, upper_index: {}", lower_index, upper_index);
 
-                    let upper_original = if upper_index < values.len() {
-                        values[upper_index].0.to_string()
+                    // Handle edge cases: value is outside the valid range
+                    if lower_index == upper_index && lower_index == 0 {
+                        // Value is less than the first value
+                        let first_original = &values[0].0;
+                        check_point.push_str(&format!("{}<{}", col_name, first_original));
+                    } else if upper_index == values.len() {
+                        // Value is greater than the last value
+                        let last_original = &values[values.len() - 1].0;
+                        check_point.push_str(&format!("{}>{}", col_name, last_original));
                     } else {
-                        "unknown".to_string()
-                    };
+                        // Normal case: value is between two valid values
+                        let lower_original = if lower_index < values.len() {
+                            values[lower_index].0.to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
 
-                    check_point.push_str(&format!(
-                        "{}<{}<{}",
-                        lower_original, col_name, upper_original
-                    ));
+                        let upper_original = if upper_index < values.len() {
+                            values[upper_index].0.to_string()
+                        } else {
+                            "unknown".to_string()
+                        };
+
+                        check_point.push_str(&format!(
+                            "{}<{}<{}",
+                            lower_original, col_name, upper_original
+                        ));
+                    }
                 }
             } else {
                 // Fallback if column not found in normalized values
@@ -318,7 +336,11 @@ impl Iterator for MatrixGenerator {
 mod tests {
     use std::collections::HashMap;
 
+    use datatypes::value::Value;
+
     use super::*;
+    use crate::expr::col;
+    use crate::multi_dim::MultiDimPartitionRule;
 
     #[test]
     fn test_matrix_generator_single_column() {
@@ -457,11 +479,10 @@ mod tests {
 
     #[test]
     fn test_matrix_generator_large_dataset_batching() {
-        // Create a dataset that will exceed MAX_BATCH_SIZE when all combinations are generated
+        // Create a dataset that will exceed MAX_BATCH_SIZE (8192)
+        // 20 * 20 * 21 = 8400 > 8192
         let mut matrix_fundation = HashMap::new();
 
-        // Create enough values to exceed MAX_BATCH_SIZE (8192)
-        // 20 * 20 * 21 = 8400 > 8192
         let values1: Vec<OrderedF64> = (0..20).map(|i| OrderedF64::from(i as f64)).collect();
         let values2: Vec<OrderedF64> = (0..20)
             .map(|i| OrderedF64::from(i as f64 + 100.0))
@@ -499,5 +520,46 @@ mod tests {
         assert_eq!(total_rows, 8400);
         assert!(batch_count > 1);
         assert_eq!(first_batch_size.unwrap(), MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_remap_checkpoint_single_column_exact_values() {
+        // Create rule with single column
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![1, 2, 3],
+            vec![
+                col("host").eq(Value::Int64(0)),
+                col("value").eq(Value::Int64(0)),
+                col("host").eq(Value::Int64(1)),
+                col("value").eq(Value::Int64(1)),
+                col("host").eq(Value::Int64(2)),
+                col("value").eq(Value::Int64(2)),
+                col("host").eq(Value::Int64(3)),
+                col("value").eq(Value::Int64(3)),
+            ],
+        )
+        .unwrap();
+        let checker = PartitionChecker::try_new(&rule).unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Float64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let host_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+        let value_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
+            .unwrap();
+
+        let checkpoint = checker.remap_checkpoint(0, &batch);
+        assert_eq!(checkpoint, "host<0, value<0");
+        let checkpoint = checker.remap_checkpoint(1, &batch);
+        assert_eq!(checkpoint, "host=0, value=0");
+        let checkpoint = checker.remap_checkpoint(6, &batch);
+        assert_eq!(checkpoint, "2<host<3, 2<value<3");
+        let checkpoint = checker.remap_checkpoint(7, &batch);
+        assert_eq!(checkpoint, "host=3, value=3");
+        let checkpoint = checker.remap_checkpoint(8, &batch);
+        assert_eq!(checkpoint, "host>3, value>3");
     }
 }
