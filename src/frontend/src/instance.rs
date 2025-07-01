@@ -230,10 +230,10 @@ impl Instance {
                     self.exec_statement(stmt, query_ctx, query_interceptor),
                 )
                 .await
-                .context(StatementTimeoutSnafu)?;
+                .map_err(|_| StatementTimeoutSnafu.build())??;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
-                Ok(attach_timeout(output?, remaining_timeout))
+                attach_timeout(output, remaining_timeout)
             }
             None => {
                 self.exec_statement(stmt, query_ctx, query_interceptor)
@@ -323,16 +323,24 @@ fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Durat
     }
 }
 
-fn attach_timeout(output: Output, mut timeout: Duration) -> Output {
-    match output.data {
+fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
+    if timeout.is_zero() {
+        return StatementTimeoutSnafu.fail();
+    }
+
+    let output = match output.data {
         OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
         OutputData::Stream(mut stream) => {
             let schema = stream.schema();
             let s = Box::pin(stream! {
                 let start = tokio::time::Instant::now();
-                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.context(StreamTimeoutSnafu)? {
+                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
                     yield item;
                     timeout = timeout.checked_sub(tokio::time::Instant::now() - start).unwrap_or(Duration::ZERO);
+                    // tokio::time::timeout may not return an error immediately when timeout is 0.
+                    if timeout.is_zero() {
+                        StreamTimeoutSnafu.fail()?;
+                    }
                 }
             }) as Pin<Box<dyn Stream<Item = _> + Send>>;
             let stream = RecordBatchStreamWrapper {
@@ -343,7 +351,9 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Output {
             };
             Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
         }
-    }
+    };
+
+    Ok(output)
 }
 
 #[async_trait]

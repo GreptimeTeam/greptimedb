@@ -24,7 +24,6 @@ use datafusion::error::DataFusionError;
 use session::ReadPreference;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
-use tokio::time::error::Elapsed;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -369,8 +368,6 @@ pub enum Error {
     StatementTimeout {
         #[snafu(implicit)]
         location: Location,
-        #[snafu(source)]
-        error: Elapsed,
     },
 }
 
