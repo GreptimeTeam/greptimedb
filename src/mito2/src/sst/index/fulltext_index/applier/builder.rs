@@ -20,6 +20,7 @@ use datafusion_expr::{BinaryExpr, Expr, Operator};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
+use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, ConcreteDataType};
 
 use crate::cache::file_cache::FileCacheRef;
@@ -81,6 +82,7 @@ pub struct FulltextTerm {
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
 pub struct FulltextIndexApplierBuilder<'a> {
     region_dir: String,
+    path_type: PathType,
     store: ObjectStore,
     puffin_manager_factory: PuffinManagerFactory,
     metadata: &'a RegionMetadata,
@@ -99,6 +101,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
     ) -> Self {
         Self {
             region_dir,
+            path_type: PathType::Bare, // Default to Bare
             store,
             puffin_manager_factory,
             metadata,
@@ -106,6 +109,12 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             puffin_metadata_cache: None,
             bloom_filter_cache: None,
         }
+    }
+
+    /// Sets the path type to be used by the `FulltextIndexApplier`.
+    pub fn with_path_type(mut self, path_type: PathType) -> Self {
+        self.path_type = path_type;
+        self
     }
 
     /// Sets the file cache to be used by the `FulltextIndexApplier`.
@@ -147,6 +156,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
                 self.region_dir,
+                self.path_type,
                 self.store,
                 requests,
                 self.puffin_manager_factory,

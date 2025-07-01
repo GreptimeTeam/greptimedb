@@ -307,7 +307,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine

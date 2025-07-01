@@ -154,6 +154,7 @@ mod tests {
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
+    use store_api::region_request::PathType;
 
     #[tokio::test]
     async fn test_file_purge() {
@@ -164,7 +165,6 @@ mod tests {
         let builder = Fs::default().root(&dir_path);
         let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
         let sst_dir = "table1";
-        let path = location::sst_file_path(sst_dir, sst_file_id);
 
         let index_aux_path = dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
@@ -175,15 +175,18 @@ mod tests {
             .unwrap();
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        object_store.write(&path, vec![0; 4096]).await.unwrap();
-
-        let scheduler = Arc::new(LocalScheduler::new(3));
+        
         let layer = Arc::new(AccessLayer::new(
             sst_dir,
+            PathType::Bare,
             object_store.clone(),
             puffin_mgr,
             intm_mgr,
         ));
+        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
+        object_store.write(&path, vec![0; 4096]).await.unwrap();
+
+        let scheduler = Arc::new(LocalScheduler::new(3));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
@@ -230,23 +233,25 @@ mod tests {
             .await
             .unwrap();
 
-        let path = location::sst_file_path(sst_dir, sst_file_id);
         let object_store = ObjectStore::new(builder).unwrap().finish();
+        
+        let layer = Arc::new(AccessLayer::new(
+            sst_dir,
+            PathType::Bare,
+            object_store.clone(),
+            puffin_mgr,
+            intm_mgr,
+        ));
+        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let index_path = location::index_file_path(sst_dir, sst_file_id);
+        let index_path = location::index_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store
             .write(&index_path, vec![0; 4096])
             .await
             .unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(
-            sst_dir,
-            object_store.clone(),
-            puffin_mgr,
-            intm_mgr,
-        ));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 

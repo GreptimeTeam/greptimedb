@@ -20,6 +20,7 @@ use object_store::{ErrorKind, ObjectStore, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DI
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -45,6 +46,8 @@ pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     table_dir: String,
+    /// Path type for generating file paths.
+    path_type: PathType,
     /// Target object store.
     object_store: ObjectStore,
     /// Puffin manager factory for index.
@@ -65,12 +68,14 @@ impl AccessLayer {
     /// Returns a new [AccessLayer] for specific `table_dir`.
     pub fn new(
         table_dir: impl Into<String>,
+        path_type: PathType,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         intermediate_manager: IntermediateManager,
     ) -> AccessLayer {
         AccessLayer {
             table_dir: table_dir.into(),
+            path_type,
             object_store,
             puffin_manager_factory,
             intermediate_manager,
@@ -87,6 +92,11 @@ impl AccessLayer {
         &self.object_store
     }
 
+    /// Returns the path type of the layer.
+    pub fn path_type(&self) -> PathType {
+        self.path_type
+    }
+
     /// Returns the puffin manager factory.
     pub fn puffin_manager_factory(&self) -> &PuffinManagerFactory {
         &self.puffin_manager_factory
@@ -94,7 +104,7 @@ impl AccessLayer {
 
     /// Deletes a SST file (and its index file if it has one) with given file id.
     pub(crate) async fn delete_sst(&self, file_meta: &FileMeta) -> Result<()> {
-        let path = location::sst_file_path(&self.table_dir, file_meta.file_id());
+        let path = location::sst_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
         self.object_store
             .delete(&path)
             .await
@@ -102,7 +112,7 @@ impl AccessLayer {
                 file_id: file_meta.file_id,
             })?;
 
-        let path = location::index_file_path(&self.table_dir, file_meta.file_id());
+        let path = location::index_file_path(&self.table_dir, file_meta.file_id(), self.path_type);
         self.object_store
             .delete(&path)
             .await
@@ -115,7 +125,7 @@ impl AccessLayer {
 
     /// Returns a reader builder for specific `file`.
     pub(crate) fn read_sst(&self, file: FileHandle) -> ParquetReaderBuilder {
-        ParquetReaderBuilder::new(self.table_dir.clone(), file, self.object_store.clone())
+        ParquetReaderBuilder::new(self.table_dir.clone(), self.path_type, file, self.object_store.clone())
     }
 
     /// Writes a SST with specific `file_id` and `metadata` to the layer.
@@ -137,6 +147,7 @@ impl AccessLayer {
                     SstUploadRequest {
                         dest_path_provider: RegionFilePathFactory {
                             table_dir: self.table_dir.clone(),
+                            path_type: self.path_type,
                         },
                         remote_store: self.object_store.clone(),
                     },
@@ -146,7 +157,7 @@ impl AccessLayer {
         } else {
             // Write cache is disabled.
             let store = self.object_store.clone();
-            let path_provider = RegionFilePathFactory::new(self.table_dir.clone());
+            let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let indexer_builder = IndexerBuilderImpl {
                 op_type: request.op_type,
                 metadata: request.metadata.clone(),
@@ -355,21 +366,22 @@ impl FilePathProvider for WriteCachePathProvider {
 #[derive(Clone, Debug)]
 pub(crate) struct RegionFilePathFactory {
     pub(crate) table_dir: String,
+    pub(crate) path_type: PathType,
 }
 
 impl RegionFilePathFactory {
     /// Creates a new `RegionFilePathFactory` instance.
-    pub fn new(table_dir: String) -> Self {
-        Self { table_dir }
+    pub fn new(table_dir: String, path_type: PathType) -> Self {
+        Self { table_dir, path_type }
     }
 }
 
 impl FilePathProvider for RegionFilePathFactory {
     fn build_index_file_path(&self, file_id: RegionFileId) -> String {
-        location::index_file_path(&self.table_dir, file_id)
+        location::index_file_path(&self.table_dir, file_id, self.path_type)
     }
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
-        location::sst_file_path(&self.table_dir, file_id)
+        location::sst_file_path(&self.table_dir, file_id, self.path_type)
     }
 }

@@ -33,7 +33,9 @@ use store_api::logstore::LogStore;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
+use store_api::path_utils::region_dir_from_table_dir;
 use store_api::region_engine::RegionRole;
+use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
@@ -71,7 +73,8 @@ pub(crate) struct RegionOpener {
     metadata_builder: Option<RegionMetadataBuilder>,
     memtable_builder_provider: MemtableBuilderProvider,
     object_store_manager: ObjectStoreManagerRef,
-    region_dir: String,
+    table_dir: String,
+    path_type: PathType,
     purge_scheduler: SchedulerRef,
     options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
@@ -89,7 +92,7 @@ impl RegionOpener {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         region_id: RegionId,
-        region_dir: &str,
+        table_dir: &str,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
@@ -102,7 +105,8 @@ impl RegionOpener {
             metadata_builder: None,
             memtable_builder_provider,
             object_store_manager,
-            region_dir: normalize_dir(region_dir),
+            table_dir: normalize_dir(table_dir),
+            path_type: PathType::Bare, // Default to Bare
             purge_scheduler,
             options: None,
             cache_manager: None,
@@ -119,6 +123,17 @@ impl RegionOpener {
     pub(crate) fn metadata_builder(mut self, builder: RegionMetadataBuilder) -> Self {
         self.metadata_builder = Some(builder);
         self
+    }
+
+    /// Sets the path type for the region.
+    pub(crate) fn path_type(mut self, path_type: PathType) -> Self {
+        self.path_type = path_type;
+        self
+    }
+
+    /// Computes the region directory from table_dir and region_id.
+    fn region_dir(&self) -> String {
+        region_dir_from_table_dir(&self.table_dir, self.region_id)
     }
 
     /// Builds the region metadata.
@@ -179,6 +194,7 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
         let region_id = self.region_id;
+        let region_dir = self.region_dir();
         let metadata = self.build_metadata()?;
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
@@ -199,13 +215,13 @@ impl RegionOpener {
             Ok(None) => {
                 debug!(
                     "No data under directory {}, region_id: {}",
-                    self.region_dir, self.region_id
+                    region_dir, self.region_id
                 );
             }
             Err(e) => {
                 warn!(e;
                     "Failed to open region {} before creating it, region_dir: {}",
-                    self.region_id, self.region_dir
+                    self.region_id, region_dir
                 );
             }
         }
@@ -218,7 +234,7 @@ impl RegionOpener {
         let region_manifest_options = Self::manifest_options(
             config,
             &options,
-            &self.region_dir,
+            &region_dir,
             &self.object_store_manager,
         )?;
         let manifest_manager = RegionManifestManager::new(
@@ -250,7 +266,8 @@ impl RegionOpener {
             .build();
         let version_control = Arc::new(VersionControl::new(version));
         let access_layer = Arc::new(AccessLayer::new(
-            self.region_dir,
+            region_dir,
+            self.path_type,
             object_store,
             self.puffin_manager_factory,
             self.intermediate_manager,
@@ -290,12 +307,13 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
         let region_id = self.region_id;
+        let region_dir = self.region_dir();
         let region = self
             .maybe_open(config, wal)
             .await?
             .context(EmptyRegionDirSnafu {
                 region_id,
-                region_dir: self.region_dir,
+                region_dir: &region_dir,
             })?;
 
         ensure!(
@@ -345,11 +363,12 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
         let region_options = self.options.as_ref().unwrap().clone();
+        let region_dir = self.region_dir();
 
         let region_manifest_options = Self::manifest_options(
             config,
             &region_options,
-            &self.region_dir,
+            &region_dir,
             &self.object_store_manager,
         )?;
         let Some(manifest_manager) = RegionManifestManager::open(
@@ -377,7 +396,8 @@ impl RegionOpener {
         debug!("Open region {} with options: {:?}", region_id, self.options);
 
         let access_layer = Arc::new(AccessLayer::new(
-            self.region_dir.clone(),
+            region_dir.clone(),
+            self.path_type,
             object_store,
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),

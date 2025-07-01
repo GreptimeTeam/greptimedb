@@ -36,6 +36,7 @@ use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use store_api::region_request::PathType;
 use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
@@ -64,6 +65,7 @@ impl SchedulerEnv {
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let access_layer = Arc::new(AccessLayer::new(
             "",
+            PathType::Bare,
             object_store.clone(),
             puffin_mgr,
             intm_mgr,

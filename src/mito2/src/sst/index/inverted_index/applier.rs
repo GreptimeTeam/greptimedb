@@ -28,6 +28,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
@@ -48,6 +49,9 @@ use crate::sst::index::TYPE_INVERTED_INDEX;
 pub(crate) struct InvertedIndexApplier {
     /// The root directory of the region.
     region_dir: String,
+
+    /// Path type for generating file paths.
+    path_type: PathType,
 
     /// Store responsible for accessing remote index files.
     store: ObjectStore,
@@ -78,6 +82,7 @@ impl InvertedIndexApplier {
     /// Creates a new `InvertedIndexApplier`.
     pub fn new(
         region_dir: String,
+        path_type: PathType,
         store: ObjectStore,
         index_applier: Box<dyn IndexApplier>,
         puffin_manager_factory: PuffinManagerFactory,
@@ -87,6 +92,7 @@ impl InvertedIndexApplier {
 
         Self {
             region_dir,
+            path_type,
             store,
             file_cache: None,
             index_applier,
@@ -209,7 +215,7 @@ impl InvertedIndexApplier {
             .puffin_manager_factory
             .build(
                 self.store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
+                RegionFilePathFactory::new(self.region_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 

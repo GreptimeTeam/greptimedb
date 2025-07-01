@@ -18,8 +18,8 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::path_utils::{region_name, table_dir};
-use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
+use store_api::path_utils::region_dir_from_table_dir;
+use store_api::region_request::{PathType, RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -51,7 +51,7 @@ impl FileRegion {
             options: request.options,
         };
 
-        let region_dir = request.region_dir;
+        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
         let url = manifest.url()?;
         let file_options = manifest.file_options()?;
         let format = manifest.format()?;
@@ -75,11 +75,12 @@ impl FileRegion {
         request: RegionOpenRequest,
         object_store: &ObjectStore,
     ) -> Result<FileRegionRef> {
+        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
         let manifest =
-            FileRegionManifest::load(region_id, &request.region_dir, object_store).await?;
+            FileRegionManifest::load(region_id, &region_dir, object_store).await?;
 
         Ok(Arc::new(Self {
-            region_dir: request.region_dir,
+            region_dir,
             url: manifest.url()?,
             file_options: manifest.file_options()?,
             format: manifest.format()?,
@@ -114,7 +115,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: "create_region_dir/".to_string(),
+            table_dir: "create_region_dir/".to_string(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -152,7 +154,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: region_dir.clone(),
+            table_dir: region_dir.clone(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -162,7 +165,8 @@ mod tests {
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),
-            region_dir,
+            table_dir: region_dir,
+            path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
         };
@@ -190,7 +194,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: region_dir.clone(),
+            table_dir: region_dir.clone(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -211,7 +216,8 @@ mod tests {
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),
-            region_dir,
+            table_dir: region_dir,
+            path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
         };

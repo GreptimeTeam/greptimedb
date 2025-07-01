@@ -113,7 +113,7 @@ async fn test_merge_mode_compaction() {
         .insert_option("compaction.type", "twcs")
         .insert_option("merge_mode", "last_non_null")
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let region_opts = request.options.clone();
     let delete_schema = delete_rows_schema(&request);
     let column_schemas = rows_schema(&request);

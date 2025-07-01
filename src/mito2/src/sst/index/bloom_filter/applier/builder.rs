@@ -28,6 +28,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
@@ -38,6 +39,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 pub struct BloomFilterIndexApplierBuilder<'a> {
     region_dir: String,
+    path_type: PathType,
     object_store: ObjectStore,
     metadata: &'a RegionMetadata,
     puffin_manager_factory: PuffinManagerFactory,
@@ -56,6 +58,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     ) -> Self {
         Self {
             region_dir,
+            path_type: PathType::Bare, // Default to Bare
             object_store,
             metadata,
             puffin_manager_factory,
@@ -64,6 +67,11 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             bloom_filter_index_cache: None,
             predicates: BTreeMap::default(),
         }
+    }
+
+    pub fn with_path_type(mut self, path_type: PathType) -> Self {
+        self.path_type = path_type;
+        self
     }
 
     pub fn with_file_cache(mut self, file_cache: Option<FileCacheRef>) -> Self {
@@ -99,6 +107,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
         let applier = BloomFilterIndexApplier::new(
             self.region_dir,
+            self.path_type,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,

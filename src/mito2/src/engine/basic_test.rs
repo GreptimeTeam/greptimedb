@@ -28,7 +28,7 @@ use datatypes::schema::ColumnSchema;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::{RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
+use store_api::region_request::{PathType, RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
 use super::*;
@@ -108,7 +108,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
         .kafka_topic(topic.clone())
         .build();
 
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -391,7 +391,7 @@ async fn test_delete_not_null_fields() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().all_not_null(true).build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
@@ -677,7 +677,8 @@ async fn test_cache_null_primary_key() {
         column_metadatas,
         primary_key: vec![1, 2],
         options: HashMap::new(),
-        region_dir: "test".to_string(),
+        table_dir: "test".to_string(),
+        path_type: PathType::Bare,
     };
 
     let column_schemas = rows_schema(&request);

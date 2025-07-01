@@ -33,6 +33,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
@@ -47,6 +48,9 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 pub(crate) struct InvertedIndexApplierBuilder<'a> {
     /// Directory of the region, required argument for constructing [`InvertedIndexApplier`].
     region_dir: String,
+
+    /// Path type for generating file paths.
+    path_type: PathType,
 
     /// Object store, required argument for constructing [`InvertedIndexApplier`].
     object_store: ObjectStore,
@@ -84,6 +88,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     ) -> Self {
         Self {
             region_dir,
+            path_type: PathType::Bare, // Default to Bare
             object_store,
             metadata,
             indexed_column_ids,
@@ -93,6 +98,12 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             inverted_index_cache: None,
             puffin_metadata_cache: None,
         }
+    }
+
+    /// Sets the path type.
+    pub fn with_path_type(mut self, path_type: PathType) -> Self {
+        self.path_type = path_type;
+        self
     }
 
     /// Sets the file cache.
@@ -140,6 +151,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
         Ok(Some(
             InvertedIndexApplier::new(
                 self.region_dir,
+                self.path_type,
                 self.object_store,
                 Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,

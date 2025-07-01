@@ -54,14 +54,20 @@ use crate::mito_engine_options::{
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
-// TODO: This should be properly imported from mito2 crate
+/// The type of path to generate.
 #[derive(Debug, Clone, Copy)]
 pub enum PathType {
     /// A bare path - the original path of an engine.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/`.
     Bare,
     /// A path for the data region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/data/`.
     Data,
     /// A path for the metadata region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/metadata/`.
     Metadata,
 }
 

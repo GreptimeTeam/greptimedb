@@ -133,7 +133,7 @@ async fn test_alter_region() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -228,7 +228,7 @@ async fn test_put_after_alter() {
         .await;
 
     let mut column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -499,7 +499,7 @@ async fn test_alter_column_fulltext_options() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -618,7 +618,7 @@ async fn test_alter_column_set_inverted_index() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await

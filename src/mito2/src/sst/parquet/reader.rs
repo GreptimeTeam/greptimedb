@@ -34,6 +34,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
@@ -90,6 +91,8 @@ macro_rules! handle_index_error {
 pub struct ParquetReaderBuilder {
     /// SST directory.
     file_dir: String,
+    /// Path type for generating file paths.
+    path_type: PathType,
     file_handle: FileHandle,
     object_store: ObjectStore,
     /// Predicate to push down.
@@ -115,11 +118,13 @@ impl ParquetReaderBuilder {
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
     pub fn new(
         file_dir: String,
+        path_type: PathType,
         file_handle: FileHandle,
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
             file_dir,
+            path_type,
             file_handle,
             object_store,
             predicate: None,
@@ -211,7 +216,7 @@ impl ParquetReaderBuilder {
     ) -> Result<(FileRangeContext, RowGroupSelection)> {
         let start = Instant::now();
 
-        let file_path = self.file_handle.file_path(&self.file_dir);
+        let file_path = self.file_handle.file_path(&self.file_dir, self.path_type);
         let file_size = self.file_handle.meta_ref().file_size;
 
         // Loads parquet metadata of the file.

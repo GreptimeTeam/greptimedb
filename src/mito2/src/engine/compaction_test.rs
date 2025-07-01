@@ -705,7 +705,7 @@ async fn test_change_region_compaction_window() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let column_schemas = request
         .column_metadatas
         .iter()
@@ -830,7 +830,7 @@ async fn test_open_overwrite_compaction_window() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let column_schemas = request
         .column_metadatas
         .iter()

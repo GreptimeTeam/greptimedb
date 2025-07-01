@@ -45,7 +45,7 @@ async fn test_engine_open_empty() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir: "empty".to_string(),
+                table_dir: "empty".to_string(),
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -68,7 +68,7 @@ async fn test_engine_open_existing() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -95,7 +95,7 @@ async fn test_engine_reopen_region() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -112,7 +112,7 @@ async fn test_engine_open_readonly() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -155,7 +155,7 @@ async fn test_engine_region_open_with_options() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -198,7 +198,7 @@ async fn test_engine_region_open_with_custom_store() {
     let request = CreateRequestBuilder::new()
         .insert_option("storage", "Gcs")
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     // Create a custom region.
     engine
@@ -260,7 +260,7 @@ async fn test_open_region_skip_wal_replay() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -289,7 +289,7 @@ async fn test_open_region_skip_wal_replay() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir: region_dir.to_string(),
+                table_dir: region_dir.to_string(),
                 options: Default::default(),
                 skip_wal_replay: true,
             }),
@@ -359,7 +359,7 @@ async fn test_open_region_wait_for_opening_region_ok() {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: String::new(),
-                    region_dir: "empty".to_string(),
+                    table_dir: "empty".to_string(),
                     options: HashMap::default(),
                     skip_wal_replay: false,
                 }),
@@ -398,7 +398,7 @@ async fn test_open_region_wait_for_opening_region_err() {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: String::new(),
-                    region_dir: "empty".to_string(),
+                    table_dir: "empty".to_string(),
                     options: HashMap::default(),
                     skip_wal_replay: false,
                 }),
@@ -449,7 +449,7 @@ async fn test_open_compaction_region() {
         )
         .await;
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -465,7 +465,7 @@ async fn test_open_compaction_region() {
 
     let req = OpenCompactionRegionRequest {
         region_id,
-        region_dir: region_dir.clone(),
+        table_dir: region_dir.clone(),
         region_options: RegionOptions::default(),
         max_parallelism: 1,
     };

@@ -26,6 +26,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
@@ -51,6 +52,9 @@ pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 pub struct BloomFilterIndexApplier {
     /// Directory of the region.
     region_dir: String,
+
+    /// Path type for generating file paths.
+    path_type: PathType,
 
     /// Object store to read the index file.
     object_store: ObjectStore,
@@ -81,6 +85,7 @@ impl BloomFilterIndexApplier {
     /// For each column, the value will be retained only if it contains __all__ predicates.
     pub fn new(
         region_dir: String,
+        path_type: PathType,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
@@ -88,6 +93,7 @@ impl BloomFilterIndexApplier {
         let predicates = Arc::new(predicates);
         Self {
             region_dir,
+            path_type,
             object_store,
             file_cache: None,
             puffin_manager_factory,
@@ -287,7 +293,7 @@ impl BloomFilterIndexApplier {
             .puffin_manager_factory
             .build(
                 self.object_store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
+                RegionFilePathFactory::new(self.region_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 

@@ -112,7 +112,7 @@ async fn test_append_mode_compaction() {
         .insert_option("compaction.type", "twcs")
         .insert_option("append_mode", "true")
         .build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let region_opts = request.options.clone();
 
     let column_schemas = rows_schema(&request);

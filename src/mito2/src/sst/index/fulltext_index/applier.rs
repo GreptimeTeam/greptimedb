@@ -27,6 +27,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
@@ -71,12 +72,13 @@ impl FulltextIndexApplier {
     /// Creates a new `FulltextIndexApplier`.
     pub fn new(
         region_dir: String,
+        path_type: PathType,
         store: ObjectStore,
         requests: BTreeMap<ColumnId, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         let requests = Arc::new(requests);
-        let index_source = IndexSource::new(region_dir, puffin_manager_factory, store);
+        let index_source = IndexSource::new(region_dir, path_type, puffin_manager_factory, store);
 
         Self {
             predicate_key: PredicateKey::new_fulltext(requests.clone()),
@@ -422,6 +424,9 @@ impl FulltextIndexApplier {
 struct IndexSource {
     region_dir: String,
 
+    /// Path type for generating file paths.
+    path_type: PathType,
+
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
 
@@ -438,11 +443,13 @@ struct IndexSource {
 impl IndexSource {
     fn new(
         region_dir: String,
+        path_type: PathType,
         puffin_manager_factory: PuffinManagerFactory,
         remote_store: ObjectStore,
     ) -> Self {
         Self {
             region_dir,
+            path_type,
             puffin_manager_factory,
             remote_store,
             file_cache: None,
@@ -572,7 +579,7 @@ impl IndexSource {
             .puffin_manager_factory
             .build(
                 self.remote_store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
+                RegionFilePathFactory::new(self.region_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 

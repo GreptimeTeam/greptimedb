@@ -22,7 +22,7 @@ use common_wal::options::{KafkaWalOptions, WalOptions, WAL_OPTIONS_KEY};
 use rstest::rstest;
 use rstest_reuse::apply;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use super::MitoEngine;
@@ -121,9 +121,10 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
                 region_id,
                 RegionOpenRequest {
                     engine: String::new(),
-                    region_dir: region_dir(region_id),
+                    table_dir: region_dir(region_id),
                     options: options.clone(),
                     skip_wal_replay: false,
+                    path_type: PathType::Bare,
                 },
             )
         })
@@ -132,9 +133,10 @@ async fn test_batch_open(factory: Option<LogStoreFactory>) {
         RegionId::new(1, 4),
         RegionOpenRequest {
             engine: String::new(),
-            region_dir: "no-exists".to_string(),
+            table_dir: "no-exists".to_string(),
             options: options.clone(),
             skip_wal_replay: false,
+            path_type: PathType::Bare,
         },
     ));
 
@@ -184,9 +186,10 @@ async fn test_batch_open_err(factory: Option<LogStoreFactory>) {
                 RegionId::new(1, id),
                 RegionOpenRequest {
                     engine: String::new(),
-                    region_dir: region_dir.to_string(),
+                    table_dir: region_dir.to_string(),
                     options: options.clone(),
                     skip_wal_replay: false,
+                    path_type: PathType::Bare,
                 },
             )
         })

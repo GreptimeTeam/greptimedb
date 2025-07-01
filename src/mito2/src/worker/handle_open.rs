@@ -20,6 +20,7 @@ use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::path_utils::region_dir_from_table_dir;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
@@ -49,13 +50,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.object_store_manager.default_object_store()
         };
         // Check if this region is pending drop. And clean the entire dir if so.
+        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id);
         if !self.dropping_regions.is_region_exists(region_id)
             && object_store
-                .exists(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
+                .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
-            let result = remove_region_dir_once(&request.region_dir, object_store, true).await;
+            let result = remove_region_dir_once(&region_dir, object_store, true).await;
             info!(
                 "Region {} is dropped, worker: {}, result: {:?}",
                 region_id, self.id, result
@@ -92,7 +94,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Open region from specific region dir.
         let opener = match RegionOpener::new(
             region_id,
-            &request.region_dir,
+            &request.table_dir,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),
@@ -100,6 +102,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
         )
+        .path_type(request.path_type)
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))

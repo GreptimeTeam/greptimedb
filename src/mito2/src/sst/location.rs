@@ -14,24 +14,9 @@
 
 use object_store::util;
 use store_api::path_utils::region_name;
+use store_api::region_request::PathType;
 
 use crate::sst::file::RegionFileId;
-
-/// The type of path to generate.
-pub enum PathType {
-    /// A bare path - the original path of an engine.
-    ///
-    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/`.
-    Bare,
-    /// A path for the data region of a metric engine table.
-    ///
-    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/data/`.
-    Data,
-    /// A path for the metadata region of a metric engine table.
-    ///
-    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/metadata/`.
-    Metadata,
-}
 
 pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
     let region_name = region_name(

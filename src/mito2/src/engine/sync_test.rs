@@ -86,7 +86,7 @@ async fn test_sync_after_flush_region() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -181,7 +181,7 @@ async fn test_sync_after_alter_region() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await

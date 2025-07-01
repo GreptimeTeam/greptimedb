@@ -47,6 +47,7 @@ use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use store_api::region_request::PathType;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -144,6 +145,7 @@ pub async fn open_compaction_region(
 
         Arc::new(AccessLayer::new(
             req.region_dir.as_str(),
+            PathType::Bare,
             object_store.clone(),
             puffin_manager_factory,
             intermediate_manager,

@@ -229,7 +229,7 @@ async fn test_engine_truncate_reopen() {
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -296,7 +296,7 @@ async fn test_engine_truncate_during_flush() {
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let region_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine

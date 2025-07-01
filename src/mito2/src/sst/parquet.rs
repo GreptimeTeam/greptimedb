@@ -106,6 +106,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::{FilePathProvider, OperationType, RegionFilePathFactory};
+    use store_api::region_request::PathType;
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::BatchReader;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
@@ -134,11 +135,11 @@ mod tests {
 
     impl FilePathProvider for FixedPathProvider {
         fn build_index_file_path(&self, _file_id: RegionFileId) -> String {
-            location::index_file_path(FILE_DIR, self.region_file_id)
+            location::index_file_path(FILE_DIR, self.region_file_id, PathType::Bare)
         }
 
         fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
-            location::sst_file_path(FILE_DIR, self.region_file_id)
+            location::sst_file_path(FILE_DIR, self.region_file_id, PathType::Bare)
         }
     }
 
