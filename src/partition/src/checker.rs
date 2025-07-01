@@ -529,20 +529,43 @@ mod tests {
     }
 
     #[test]
-    fn test_remap_checkpoint_single_column_exact_values() {
+    fn test_remap_checkpoint_values() {
         // Create rule with single column
         let rule = MultiDimPartitionRule::try_new(
             vec!["host".to_string(), "value".to_string()],
             vec![1, 2, 3],
             vec![
-                col("host").eq(Value::Int64(0)),
-                col("value").eq(Value::Int64(0)),
-                col("host").eq(Value::Int64(1)),
-                col("value").eq(Value::Int64(1)),
-                col("host").eq(Value::Int64(2)),
-                col("value").eq(Value::Int64(2)),
-                col("host").eq(Value::Int64(3)),
-                col("value").eq(Value::Int64(3)),
+                col("host")
+                    .lt(Value::Int64(0))
+                    .and(col("value").lt(Value::Int64(0))),
+                col("host")
+                    .lt(Value::Int64(0))
+                    .and(col("value").gt_eq(Value::Int64(0))),
+                col("host")
+                    .gt_eq(Value::Int64(0))
+                    .and(col("host").lt(Value::Int64(1)))
+                    .and(col("value").lt(Value::Int64(1))),
+                col("host")
+                    .gt_eq(Value::Int64(0))
+                    .and(col("host").lt(Value::Int64(1)))
+                    .and(col("value").gt_eq(Value::Int64(1))),
+                col("host")
+                    .gt_eq(Value::Int64(1))
+                    .and(col("host").lt(Value::Int64(2)))
+                    .and(col("value").lt(Value::Int64(2))),
+                col("host")
+                    .gt_eq(Value::Int64(1))
+                    .and(col("host").lt(Value::Int64(2)))
+                    .and(col("value").gt_eq(Value::Int64(2))),
+                col("host")
+                    .gt_eq(Value::Int64(2))
+                    .and(col("host").lt(Value::Int64(3)))
+                    .and(col("value").lt(Value::Int64(3))),
+                col("host")
+                    .gt_eq(Value::Int64(2))
+                    .and(col("host").lt(Value::Int64(3)))
+                    .and(col("value").gt_eq(Value::Int64(3))),
+                col("host").gt_eq(Value::Int64(3)),
             ],
         )
         .unwrap();
