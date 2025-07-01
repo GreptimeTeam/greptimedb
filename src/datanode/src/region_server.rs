@@ -64,7 +64,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, BatchRegionDdlRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, BatchRegionDdlRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -1347,7 +1347,8 @@ mod tests {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: engine_name.to_string(),
-                    region_dir: String::new(),
+                    table_dir: String::new(),
+                    path_type: PathType::Bare,
                     options: Default::default(),
                     skip_wal_replay: false,
                 }),

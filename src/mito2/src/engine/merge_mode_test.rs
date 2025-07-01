@@ -113,7 +113,7 @@ async fn test_merge_mode_compaction() {
         .insert_option("compaction.type", "twcs")
         .insert_option("merge_mode", "last_non_null")
         .build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     let region_opts = request.options.clone();
     let delete_schema = delete_rows_schema(&request);
     let column_schemas = rows_schema(&request);
@@ -209,7 +209,7 @@ async fn test_merge_mode_compaction() {
         )
         .await;
     // Reopens the region.
-    reopen_region(&engine, region_id, region_dir, false, region_opts).await;
+    reopen_region(&engine, region_id, table_dir, false, region_opts).await;
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await

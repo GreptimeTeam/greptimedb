@@ -24,7 +24,7 @@ use datatypes::vectors::TimestampMillisecondVector;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
-    RegionAlterRequest, RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest,
+    PathType, RegionAlterRequest, RegionCompactRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
@@ -705,7 +705,7 @@ async fn test_change_region_compaction_window() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     let column_schemas = request
         .column_metadatas
         .iter()
@@ -788,7 +788,8 @@ async fn test_change_region_compaction_window() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: false,
             }),
@@ -830,7 +831,7 @@ async fn test_open_overwrite_compaction_window() {
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
         .build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     let column_schemas = request
         .column_metadatas
         .iter()
@@ -870,7 +871,8 @@ async fn test_open_overwrite_compaction_window() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),

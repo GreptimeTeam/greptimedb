@@ -19,6 +19,7 @@ use api::v1::Rows;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
+use store_api::path_utils::region_dir_from_table_dir;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -71,7 +72,8 @@ async fn test_engine_drop_region() {
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    let region_dir = region.access_layer.table_dir().to_string();
+    let table_dir = region.access_layer.table_dir().to_string();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id);
     // no dropping marker file
     assert!(!env
         .get_object_store()
@@ -116,7 +118,7 @@ async fn test_engine_drop_region_for_custom_store() {
     ) {
         let request = CreateRequestBuilder::new()
             .insert_option("storage", storage_name)
-            .region_dir(storage_name)
+            .table_dir(storage_name)
             .build();
         let column_schema = rows_schema(&request);
         engine

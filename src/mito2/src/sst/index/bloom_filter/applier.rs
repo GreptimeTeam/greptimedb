@@ -442,7 +442,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
         );
 
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();

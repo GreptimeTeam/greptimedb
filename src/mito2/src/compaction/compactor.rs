@@ -25,6 +25,8 @@ use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::path_utils::region_dir_from_table_dir;
+use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
@@ -47,7 +49,6 @@ use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use store_api::region_request::PathType;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -106,7 +107,8 @@ pub struct CompactionRegion {
 #[derive(Debug, Clone)]
 pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
-    pub region_dir: String,
+    pub table_dir: String,
+    pub path_type: PathType,
     pub region_options: RegionOptions,
     pub max_parallelism: usize,
 }
@@ -144,8 +146,8 @@ pub async fn open_compaction_region(
             IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
 
         Arc::new(AccessLayer::new(
-            req.region_dir.as_str(),
-            PathType::Bare,
+            req.table_dir.as_str(),
+            req.path_type,
             object_store.clone(),
             puffin_manager_factory,
             intermediate_manager,
@@ -154,7 +156,7 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(req.region_dir.as_str()),
+            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(&req.table_dir, req.region_id)),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
@@ -168,7 +170,7 @@ pub async fn open_compaction_region(
         .await?
         .context(EmptyRegionDirSnafu {
             region_id: req.region_id,
-            region_dir: req.region_dir.as_str(),
+            region_dir: &region_dir_from_table_dir(&req.table_dir, req.region_id),
         })?
     };
 
@@ -212,7 +214,7 @@ pub async fn open_compaction_region(
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),
-        region_dir: req.region_dir.clone(),
+        region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
         cache_manager: Arc::new(CacheManager::default()),

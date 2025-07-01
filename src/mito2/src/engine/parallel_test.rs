@@ -90,7 +90,7 @@ async fn test_parallel_scan() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
@@ -133,15 +133,15 @@ async fn test_parallel_scan() {
 
     engine.stop().await.unwrap();
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 0, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 0, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 1, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 1, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 2, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 8).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 2, 8).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 4, 8).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 4, 8).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 8, 2).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 8, 2).await;
 }

@@ -108,7 +108,7 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
         .kafka_topic(topic.clone())
         .build();
 
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -146,7 +146,8 @@ async fn test_region_replay(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),
@@ -391,7 +392,7 @@ async fn test_delete_not_null_fields() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().all_not_null(true).build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
@@ -426,7 +427,7 @@ async fn test_delete_not_null_fields() {
     assert_eq!(expected, batches.pretty_print().unwrap());
 
     // Reopen and scan again.
-    reopen_region(&engine, region_id, region_dir, false, HashMap::new()).await;
+    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();

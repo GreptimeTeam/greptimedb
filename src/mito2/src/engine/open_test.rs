@@ -21,7 +21,7 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+    PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::oneshot;
@@ -46,6 +46,7 @@ async fn test_engine_open_empty() {
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 table_dir: "empty".to_string(),
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -68,7 +69,7 @@ async fn test_engine_open_existing() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -79,7 +80,8 @@ async fn test_engine_open_existing() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -95,13 +97,13 @@ async fn test_engine_reopen_region() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
-    reopen_region(&engine, region_id, region_dir, false, Default::default()).await;
+    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
     assert!(engine.is_region_exists(region_id));
 }
 
@@ -112,14 +114,14 @@ async fn test_engine_open_readonly() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
-    reopen_region(&engine, region_id, region_dir, false, Default::default()).await;
+    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
 
     // Region is readonly.
     let rows = Rows {
@@ -155,7 +157,7 @@ async fn test_engine_region_open_with_options() {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -173,7 +175,8 @@ async fn test_engine_region_open_with_options() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
                 skip_wal_replay: false,
             }),
@@ -198,7 +201,7 @@ async fn test_engine_region_open_with_custom_store() {
     let request = CreateRequestBuilder::new()
         .insert_option("storage", "Gcs")
         .build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     // Create a custom region.
     engine
@@ -218,7 +221,8 @@ async fn test_engine_region_open_with_custom_store() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
                 skip_wal_replay: false,
             }),
@@ -260,7 +264,7 @@ async fn test_open_region_skip_wal_replay() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -289,7 +293,8 @@ async fn test_open_region_skip_wal_replay() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                table_dir: region_dir.to_string(),
+                table_dir: table_dir.to_string(),
+                path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: true,
             }),
@@ -318,7 +323,8 @@ async fn test_open_region_skip_wal_replay() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: Default::default(),
                 skip_wal_replay: false,
             }),
@@ -360,6 +366,7 @@ async fn test_open_region_wait_for_opening_region_ok() {
                 RegionRequest::Open(RegionOpenRequest {
                     engine: String::new(),
                     table_dir: "empty".to_string(),
+                    path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
                 }),
@@ -399,6 +406,7 @@ async fn test_open_region_wait_for_opening_region_err() {
                 RegionRequest::Open(RegionOpenRequest {
                     engine: String::new(),
                     table_dir: "empty".to_string(),
+                    path_type: PathType::Bare,
                     options: HashMap::default(),
                     skip_wal_replay: false,
                 }),
@@ -449,7 +457,7 @@ async fn test_open_compaction_region() {
         )
         .await;
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.table_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -465,7 +473,8 @@ async fn test_open_compaction_region() {
 
     let req = OpenCompactionRegionRequest {
         region_id,
-        table_dir: region_dir.clone(),
+        table_dir: table_dir.clone(),
+        path_type: PathType::Bare,
         region_options: RegionOptions::default(),
         max_parallelism: 1,
     };

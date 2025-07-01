@@ -22,6 +22,7 @@ use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
+use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
@@ -453,7 +454,7 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new().await;
         let mock_store = env.init_object_store_manager();
-        let path_provider = RegionFilePathFactory::new("test".to_string());
+        let path_provider = RegionFilePathFactory::new("test".to_string(), PathType::Bare);
 
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
@@ -586,7 +587,7 @@ mod tests {
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
             remote_store: mock_store.clone(),
         };
 
@@ -599,7 +600,7 @@ mod tests {
 
         // Read metadata from write cache
         let handle = sst_file_handle_with_file_id(sst_info.file_id, 0, 1000);
-        let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
+        let builder = ParquetReaderBuilder::new(data_home, PathType::Bare, handle.clone(), mock_store.clone())
             .cache(CacheStrategy::EnableAll(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
@@ -660,7 +661,7 @@ mod tests {
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
             remote_store: mock_store.clone(),
         };
 

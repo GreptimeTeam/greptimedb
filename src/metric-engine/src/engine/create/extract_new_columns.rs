@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use api::v1::SemanticType;
 use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::RegionCreateRequest;
+use store_api::region_request::{PathType, RegionCreateRequest};
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::error::{AddingFieldColumnSnafu, Result};
@@ -94,7 +94,8 @@ mod tests {
                     engine: "test".to_string(),
                     primary_key: vec![],
                     options: HashMap::new(),
-                    region_dir: "test".to_string(),
+                    table_dir: "test".to_string(),
+                    path_type: PathType::Bare,
                 },
             ),
             (
@@ -113,7 +114,8 @@ mod tests {
                     engine: "test".to_string(),
                     primary_key: vec![],
                     options: HashMap::new(),
-                    region_dir: "test".to_string(),
+                    table_dir: "test".to_string(),
+                    path_type: PathType::Bare,
                 },
             ),
         ];
@@ -153,7 +155,8 @@ mod tests {
                 engine: "test".to_string(),
                 primary_key: vec![],
                 options: HashMap::new(),
-                region_dir: "test".to_string(),
+                table_dir: "test".to_string(),
+                path_type: PathType::Bare,
             },
         )];
 

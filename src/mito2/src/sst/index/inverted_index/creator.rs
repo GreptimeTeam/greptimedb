@@ -27,6 +27,7 @@ use mito_codec::row_converter::SortField;
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -470,7 +471,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
         );
 
         let sst_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);

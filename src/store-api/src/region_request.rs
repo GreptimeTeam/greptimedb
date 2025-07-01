@@ -55,7 +55,7 @@ use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 /// The type of path to generate.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PathType {
     /// A bare path - the original path of an engine.
     ///

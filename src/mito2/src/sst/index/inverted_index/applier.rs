@@ -265,7 +265,7 @@ mod tests {
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
@@ -291,6 +291,7 @@ mod tests {
 
         let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
+            PathType::Bare,
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,
@@ -318,7 +319,7 @@ mod tests {
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
@@ -338,6 +339,7 @@ mod tests {
 
         let sst_index_applier = InvertedIndexApplier::new(
             region_dir.clone(),
+            PathType::Bare,
             object_store,
             Box::new(mock_index_applier),
             puffin_manager_factory,

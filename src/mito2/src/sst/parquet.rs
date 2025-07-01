@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::region_request::PathType;
 
 use crate::sst::file::{FileId, FileTimeRange};
 use crate::sst::index::IndexOutput;
@@ -195,7 +196,7 @@ mod tests {
             info.time_range
         );
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
@@ -249,7 +250,7 @@ mod tests {
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
         ));
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {
             let mut reader = builder.build().await.unwrap();
@@ -319,7 +320,7 @@ mod tests {
         let writer_metadata = sst_info.file_metadata.unwrap();
 
         // read the sst file metadata
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store);
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
 
@@ -365,7 +366,7 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store)
             .predicate(predicate);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
@@ -410,7 +411,7 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
     }
@@ -455,7 +456,7 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store)
             .predicate(predicate);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
@@ -466,7 +467,7 @@ mod tests {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
+        let file_path = handle.file_path(FILE_DIR, PathType::Bare);
 
         let write_opts = WriteOptions {
             row_group_size: 50,
@@ -538,7 +539,7 @@ mod tests {
         writer.write(&result).await.unwrap();
         writer.close().await.unwrap();
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
@@ -575,6 +576,7 @@ mod tests {
 
         let path_provider = RegionFilePathFactory {
             table_dir: "test".to_string(),
+            path_type: PathType::Bare,
         };
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
@@ -595,7 +597,7 @@ mod tests {
                 f.time_range.1.value(),
             );
             let builder =
-                ParquetReaderBuilder::new("test".to_string(), file_handle, object_store.clone());
+                ParquetReaderBuilder::new("test".to_string(), PathType::Bare, file_handle, object_store.clone());
             let mut reader = builder.build().await.unwrap();
             while let Some(batch) = reader.next_batch().await.unwrap() {
                 rows_read += batch.num_rows();
@@ -608,7 +610,7 @@ mod tests {
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
-        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string());
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
         let metadata = Arc::new(sst_region_metadata());
         let row_group_size = 50;
 
@@ -757,7 +759,7 @@ mod tests {
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
         let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store.clone())
                 .predicate(Some(Predicate::new(preds)))
                 .inverted_index_applier(inverted_index_applier.clone())
                 .bloom_filter_index_applier(bloom_filter_applier.clone())
@@ -809,7 +811,7 @@ mod tests {
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
         let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store.clone())
                 .predicate(Some(Predicate::new(preds)))
                 .inverted_index_applier(inverted_index_applier.clone())
                 .bloom_filter_index_applier(bloom_filter_applier.clone())
@@ -862,7 +864,7 @@ mod tests {
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
         let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle.clone(), object_store.clone())
                 .predicate(Some(Predicate::new(preds)))
                 .inverted_index_applier(inverted_index_applier.clone())
                 .bloom_filter_index_applier(bloom_filter_applier.clone())
