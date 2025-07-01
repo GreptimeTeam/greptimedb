@@ -85,7 +85,6 @@ impl From<VersionRef> for CompactionVersion {
 pub struct CompactionRegion {
     pub region_id: RegionId,
     pub region_options: RegionOptions,
-    pub region_dir: String,
 
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) region_metadata: RegionMetadataRef,
@@ -146,7 +145,7 @@ pub async fn open_compaction_region(
             IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
 
         Arc::new(AccessLayer::new(
-            req.table_dir.as_str(),
+            &req.table_dir,
             req.path_type,
             object_store.clone(),
             puffin_manager_factory,
@@ -218,7 +217,6 @@ pub async fn open_compaction_region(
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),
-        region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
         cache_manager: Arc::new(CacheManager::default()),
