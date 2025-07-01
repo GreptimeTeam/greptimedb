@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use object_store::util;
+use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
@@ -20,20 +21,27 @@ use store_api::storage::RegionId;
 use crate::sst::file::RegionFileId;
 
 /// Generate region dir from table_dir, region_id and path_type
-pub fn region_dir_from_table_dir(table_dir: &str, region_id: RegionId, path_type: PathType) -> String {
+pub fn region_dir_from_table_dir(
+    table_dir: &str,
+    region_id: RegionId,
+    path_type: PathType,
+) -> String {
     let region_name = region_name(region_id.table_id(), region_id.region_sequence());
     let base_region_dir = util::join_dir(table_dir, &region_name);
-    
+
     match path_type {
         PathType::Bare => base_region_dir,
-        PathType::Data => util::join_dir(&base_region_dir, "data"),
-        PathType::Metadata => util::join_dir(&base_region_dir, "metadata"),
+        PathType::Data => util::join_dir(&base_region_dir, DATA_REGION_SUBDIR),
+        PathType::Metadata => util::join_dir(&base_region_dir, METADATA_REGION_SUBDIR),
     }
 }
 
 pub fn sst_file_path(table_dir: &str, region_file_id: RegionFileId, path_type: PathType) -> String {
     let region_dir = region_dir_from_table_dir(table_dir, region_file_id.region_id(), path_type);
-    util::join_path(&region_dir, &format!("{}.parquet", region_file_id.file_id()))
+    util::join_path(
+        &region_dir,
+        &format!("{}.parquet", region_file_id.file_id()),
+    )
 }
 
 pub fn index_file_path(

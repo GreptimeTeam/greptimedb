@@ -22,7 +22,6 @@ use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
@@ -433,6 +432,7 @@ impl UploadTracker {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::ATOMIC_WRITE_DIR;
+    use store_api::region_request::PathType;
 
     use super::*;
     use crate::access_layer::OperationType;
@@ -600,8 +600,13 @@ mod tests {
 
         // Read metadata from write cache
         let handle = sst_file_handle_with_file_id(sst_info.file_id, 0, 1000);
-        let builder = ParquetReaderBuilder::new(data_home, PathType::Bare, handle.clone(), mock_store.clone())
-            .cache(CacheStrategy::EnableAll(cache_manager.clone()));
+        let builder = ParquetReaderBuilder::new(
+            data_home,
+            PathType::Bare,
+            handle.clone(),
+            mock_store.clone(),
+        )
+        .cache(CacheStrategy::EnableAll(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata

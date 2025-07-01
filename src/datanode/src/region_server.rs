@@ -64,7 +64,7 @@ use store_api::region_engine::{
     SettableRegionRoleState,
 };
 use store_api::region_request::{
-    AffectedRows, BatchRegionDdlRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, BatchRegionDdlRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{Semaphore, SemaphorePermit};
@@ -1302,7 +1302,9 @@ mod tests {
     use mito2::test_util::CreateRequestBuilder;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{RegionDropRequest, RegionOpenRequest, RegionTruncateRequest};
+    use store_api::region_request::{
+        PathType, RegionDropRequest, RegionOpenRequest, RegionTruncateRequest,
+    };
     use store_api::storage::RegionId;
 
     use super::*;

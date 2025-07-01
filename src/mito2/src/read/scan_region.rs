@@ -512,6 +512,7 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
@@ -538,6 +539,7 @@ impl ScanRegion {
             self.version.metadata.as_ref(),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
@@ -563,6 +565,7 @@ impl ScanRegion {
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .with_bloom_filter_cache(bloom_filter_index_cache)

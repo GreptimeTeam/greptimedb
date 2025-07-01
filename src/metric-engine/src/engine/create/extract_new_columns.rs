@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use api::v1::SemanticType;
 use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::{PathType, RegionCreateRequest};
+use store_api::region_request::RegionCreateRequest;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::error::{AddingFieldColumnSnafu, Result};
@@ -59,7 +59,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::RegionCreateRequest;
+    use store_api::region_request::{PathType, RegionCreateRequest};
     use store_api::storage::RegionId;
 
     use super::*;

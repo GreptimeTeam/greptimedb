@@ -26,7 +26,6 @@ use puffin::blob_metadata::CompressionCodec;
 use puffin::puffin_manager::PutOptions;
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, ConcreteDataType, RegionId};
 
 use crate::error::{
@@ -372,6 +371,7 @@ mod tests {
     use object_store::ObjectStore;
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_request::PathType;
     use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
@@ -603,7 +603,13 @@ mod tests {
                     .extend(fulltext_terms);
             }
 
-            let applier = FulltextIndexApplier::new(region_dir, PathType::Bare, object_store, requests, factory);
+            let applier = FulltextIndexApplier::new(
+                region_dir,
+                PathType::Bare,
+                object_store,
+                requests,
+                factory,
+            );
 
             let backend = backend.clone();
             async move {

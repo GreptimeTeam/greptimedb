@@ -46,7 +46,7 @@ use store_api::region_engine::{
     RegionStatistic, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
     SettableRegionRoleState, SyncManifestResponse,
 };
-use store_api::region_request::{BatchRegionDdlRequest, PathType, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{BatchRegionDdlRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::config::EngineConfig;
