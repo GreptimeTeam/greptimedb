@@ -908,6 +908,14 @@ pub enum Error {
         #[snafu(source)]
         source: client::error::Error,
     },
+
+    #[snafu(display("Failed to send event"))]
+    SendEvent {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
 }
 
 impl Error {
@@ -962,6 +970,7 @@ impl ErrorExt for Error {
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
             | Error::InsertEvents { .. }
+            | Error::SendEvent { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,

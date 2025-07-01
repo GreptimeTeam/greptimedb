@@ -42,10 +42,10 @@ pub const REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp
 /// RegionMigrationEvent is the event of region migration.
 #[derive(Debug)]
 pub struct RegionMigrationEvent {
-    task: RegionMigrationProcedureTask,
-    procedure_id: ProcedureId,
-    status: RegionMigrationStatus,
-    timestamp: i64,
+    pub(crate) task: RegionMigrationProcedureTask,
+    pub(crate) procedure_id: ProcedureId,
+    pub(crate) status: RegionMigrationStatus,
+    pub(crate) timestamp: i64,
 }
 
 /// RegionMigrationStatus is the status of the whole region migration procedure.
