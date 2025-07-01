@@ -229,12 +229,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get timestamp"))]
-    DateFailedToGetTimestamp {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid Pattern: '{s}'. {detail}"))]
     DissectInvalidPattern {
         s: String,
@@ -372,13 +366,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Url decoding error"))]
-    UrlEncodingDecode {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
     #[snafu(display("Invalid transform on_failure value: {value}"))]
     TransformOnFailureInvalidValue {
         value: String,
@@ -430,17 +417,6 @@ pub enum Error {
     #[snafu(display("Invalid Pipeline doc version number: {}", version))]
     InvalidVersionNumber {
         version: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display("Null type not supported"))]
-    CoerceUnsupportedNullType {
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display("Null type not supported when to coerce '{ty}' type"))]
-    CoerceUnsupportedNullTypeTo {
-        ty: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -556,12 +532,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-    #[snafu(display("Input value must be an object"))]
-    InputValueMustBeObject {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Column options error"))]
     ColumnOptions {
         #[snafu(source)]
@@ -572,12 +542,6 @@ pub enum Error {
     #[snafu(display("Unsupported index type: {value}"))]
     UnsupportedIndexType {
         value: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-    #[snafu(display("Unsupported number type: {value:?}"))]
-    UnsupportedNumberType {
-        value: serde_json::Number,
         #[snafu(implicit)]
         location: Location,
     },
@@ -694,14 +658,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Float is not a number: {}", input_float))]
-    FloatNaN {
-        input_float: f64,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid timestamp value: {}", input))]
     InvalidTimestamp {
         input: String,
@@ -716,15 +672,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to convert bytes to utf8"))]
-    BytesToUtf8 {
-        #[snafu(source)]
-        error: std::string::FromUtf8Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Please don't use regex in Vrl script"))]
     VrlRegexValue {
         #[snafu(implicit)]
@@ -881,7 +828,6 @@ impl ErrorExt for Error {
             | DateParseTimezone { .. }
             | DateParse { .. }
             | DateFailedToGetLocalTimezone { .. }
-            | DateFailedToGetTimestamp { .. }
             | DissectInvalidPattern { .. }
             | DissectEmptyPattern { .. }
             | DissectSplitExceedsInput { .. }
@@ -904,7 +850,6 @@ impl ErrorExt for Error {
             | RegexNoValidPattern { .. }
             | UrlEncodingInvalidMethod { .. }
             | DigestPatternInvalid { .. }
-            | UrlEncodingDecode { .. }
             | TransformOnFailureInvalidValue { .. }
             | TransformElementMustBeMap { .. }
             | TransformFieldMustBeSet { .. }
@@ -914,8 +859,6 @@ impl ErrorExt for Error {
             | TransformTimestampIndexCount { .. }
             | AutoTransformOneTimestamp { .. }
             | InvalidVersionNumber { .. }
-            | CoerceUnsupportedNullType { .. }
-            | CoerceUnsupportedNullTypeTo { .. }
             | CoerceUnsupportedEpochType { .. }
             | CoerceStringToType { .. }
             | CoerceJsonTypeTo { .. }
@@ -931,10 +874,8 @@ impl ErrorExt for Error {
             | ValueYamlKeyMustBeString { .. }
             | YamlLoad { .. }
             | YamlParse { .. }
-            | InputValueMustBeObject { .. }
             | ColumnOptions { .. }
             | UnsupportedIndexType { .. }
-            | UnsupportedNumberType { .. }
             | IdentifyPipelineColumnTypeMismatch { .. }
             | JsonParse { .. }
             | JsonPathParse { .. }
@@ -947,8 +888,6 @@ impl ErrorExt for Error {
             | InvalidTableSuffixTemplate { .. }
             | CompileVrl { .. }
             | ExecuteVrl { .. }
-            | FloatNaN { .. }
-            | BytesToUtf8 { .. }
             | InvalidTimestamp { .. }
             | VrlRegexValue { .. }
             | VrlReturnValue { .. }
