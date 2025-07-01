@@ -50,6 +50,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::Instance as FeInstance;
+use frontend::server::Services;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
@@ -58,7 +59,7 @@ use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
-use servers::grpc::GrpcOptions;
+use servers::grpc::{GrpcOptions, DEFAULT_GRPC_ADDR_PORT};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
@@ -177,6 +178,7 @@ impl GreptimeDbClusterBuilder {
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
+        start_frontend_servers: bool,
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
@@ -218,7 +220,9 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let mut frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
+        let mut frontend = self
+            .build_frontend(metasrv.clone(), datanode_clients, start_frontend_servers)
+            .await;
 
         test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
@@ -234,10 +238,11 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    pub async fn build(&self) -> GreptimeDbCluster {
+    pub async fn build(&self, start_frontend_servers: bool) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
         let (datanode_options, guards) = self.build_datanode_options_and_guards(datanodes).await;
-        self.build_with(datanode_options, guards).await
+        self.build_with(datanode_options, start_frontend_servers, guards)
+            .await
     }
 
     async fn build_datanode_options_and_guards(
@@ -352,6 +357,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
+        start_servers: bool,
     ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
@@ -394,33 +400,45 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
         ]);
 
-        let options = FrontendOptions::default();
+        let mut fe_opts = FrontendOptions::default();
+        // Setup the server addr for local test.
+        fe_opts.grpc.server_addr = format!("127.0.0.1:{}", DEFAULT_GRPC_ADDR_PORT);
+
         let heartbeat_task = HeartbeatTask::new(
-            &options,
+            &fe_opts,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
         );
 
-        let server_addr = options.grpc.server_addr.clone();
         let instance = FrontendBuilder::new(
-            options,
+            fe_opts.clone(),
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
             datanode_clients,
             meta_client,
-            Arc::new(ProcessManager::new(server_addr, None)),
+            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
         .unwrap();
+
         let instance = Arc::new(instance);
+
+        // Build the servers for the frontend.
+        let servers = if start_servers {
+            Services::new(fe_opts, instance.clone(), Plugins::default())
+                .build()
+                .unwrap()
+        } else {
+            ServerHandlers::default()
+        };
 
         Frontend {
             instance,
-            servers: ServerHandlers::default(),
+            servers,
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }

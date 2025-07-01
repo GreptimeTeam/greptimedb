@@ -74,10 +74,10 @@ impl Display for RegionMigrationStatus {
 
 impl Event for RegionMigrationEvent {
     fn name(&self) -> &str {
-        "region_migration"
+        "region_migration_event"
     }
 
-    fn build_row_inserts(&self) -> RowInsertRequests {
+    fn to_row_inserts(&self) -> RowInsertRequests {
         let insert = RowInsertRequest {
             table_name: REGION_MIGRATION_EVENTS_TABLE_NAME.to_string(),
             rows: Some(Rows {
@@ -93,7 +93,7 @@ impl Event for RegionMigrationEvent {
                         ValueData::StringValue(self.task.trigger_reason.to_string()).into(),
                         ValueData::U64Value(self.task.timeout.as_millis() as u64).into(),
                         ValueData::StringValue(self.status.to_string()).into(),
-                        ValueData::TimestampMillisecondValue(self.timestamp).into(),
+                        ValueData::TimestampNanosecondValue(self.timestamp).into(),
                     ],
                 }],
             }),
@@ -119,7 +119,7 @@ impl RegionMigrationEvent {
             task,
             procedure_id,
             status,
-            timestamp: Utc::now().timestamp_millis(),
+            timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
         }
     }
 
@@ -182,7 +182,7 @@ impl RegionMigrationEvent {
             },
             ColumnSchema {
                 column_name: REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::TimestampMillisecond.into(),
+                datatype: ColumnDataType::TimestampNanosecond.into(),
                 semantic_type: SemanticType::Timestamp.into(),
                 ..Default::default()
             },

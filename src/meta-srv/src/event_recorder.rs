@@ -25,7 +25,7 @@ use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::rpc::store::RangeRequest;
 use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
-use store_api::mito_engine_options::TTL_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 
@@ -41,13 +41,13 @@ const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
 
-/// Event trait defines the interface for events that can be recorded and persisted to system tables.
+/// Event trait defines the interface for events that can be recorded and persisted as the system table.
 pub trait Event: Send + Sync + Debug + 'static {
     /// Returns the name of the event.
     fn name(&self) -> &str;
 
-    /// Builds the row inserts request based on the event. The request will be sent to the frontend.
-    fn build_row_inserts(&self) -> RowInsertRequests;
+    /// Generates the row inserts request based on the event. The request will be sent to the frontend by the event handler.
+    fn to_row_inserts(&self) -> RowInsertRequests;
 
     /// Returns the event as any type.
     fn as_any(&self) -> &dyn Any;
@@ -55,17 +55,17 @@ pub trait Event: Send + Sync + Debug + 'static {
 
 /// EventRecorder trait defines the interface for recording events.
 pub trait EventRecorder: Send + Sync + 'static {
-    /// Records the event.
-    fn record(&self, event: Box<dyn Event>);
+    /// Records an event for persistence and processing by [EventHandler].
+    fn record(&self, event: Box<dyn Event>) -> Result<()>;
 
-    /// Builds the event handler.
+    /// Constructs and returns an [EventHandler] instance responsible for processing received event.
     fn build_event_handler(&self) -> Box<dyn EventHandler>;
 }
 
 /// EventHandler trait defines the interface for how to handle the event.
 #[async_trait]
 pub trait EventHandler: Send + Sync + 'static {
-    /// Handles the event.
+    /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
     async fn handle(&self, event: Box<dyn Event>) -> Result<()>;
 }
 
@@ -78,10 +78,12 @@ pub struct EventRecorderImpl {
 
 impl EventRecorder for EventRecorderImpl {
     /// Accepts an event and send it to the background handler.
-    fn record(&self, event: Box<dyn Event>) {
+    fn record(&self, event: Box<dyn Event>) -> Result<()> {
         if let Err(e) = self.tx.try_send(event) {
+            // The event recorder operates asynchronously in the background, therefore the default behavior is to log the errors instead of propagating them.
             error!(e; "Failed to send event");
         }
+        Ok(())
     }
 
     fn build_event_handler(&self) -> Box<dyn EventHandler> {
@@ -124,12 +126,18 @@ struct DefaultEventHandlerImpl {
 impl EventHandler for DefaultEventHandlerImpl {
     async fn handle(&self, event: Box<dyn Event>) -> Result<()> {
         let database_client = self.build_database_client().await?;
-        let row_inserts = event.build_row_inserts();
+        let row_inserts = event.to_row_inserts();
 
         debug!("Inserting event: {:?}", row_inserts);
 
         database_client
-            .row_inserts_with_hints(row_inserts, &[(TTL_KEY, DEFAULT_EVENTS_TABLE_TTL)])
+            .row_inserts_with_hints(
+                row_inserts,
+                &[
+                    (TTL_KEY, DEFAULT_EVENTS_TABLE_TTL),
+                    (APPEND_MODE_KEY, "true"),
+                ],
+            )
             .await
             .context(InsertEventsSnafu)?;
 
