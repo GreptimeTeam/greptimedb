@@ -333,10 +333,13 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
         OutputData::Stream(mut stream) => {
             let schema = stream.schema();
             let s = Box::pin(stream! {
-                let start = tokio::time::Instant::now();
+                let mut start = tokio::time::Instant::now();
                 while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
                     yield item;
-                    timeout = timeout.checked_sub(tokio::time::Instant::now() - start).unwrap_or(Duration::ZERO);
+
+                    let now = tokio::time::Instant::now();
+                    timeout = timeout.checked_sub(now - start).unwrap_or(Duration::ZERO);
+                    start = now;
                     // tokio::time::timeout may not return an error immediately when timeout is 0.
                     if timeout.is_zero() {
                         StreamTimeoutSnafu.fail()?;
