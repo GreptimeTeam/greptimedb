@@ -20,13 +20,12 @@ use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{PathType, RegionDropRequest, RegionRequest};
+use store_api::region_request::{RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::listener::DropListener;
 use crate::engine::MitoEngine;
-use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
     build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
@@ -72,8 +71,7 @@ async fn test_engine_drop_region() {
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
-    let table_dir = region.access_layer.table_dir().to_string();
-    let region_dir = region_dir_from_table_dir(&table_dir, region_id, PathType::Bare);
+    let region_dir = region.access_layer.build_region_dir(region_id);
     // no dropping marker file
     assert!(!env
         .get_object_store()
@@ -179,10 +177,14 @@ async fn test_engine_drop_region_for_custom_store() {
     .await;
 
     let global_region = engine.get_region(global_region_id).unwrap();
-    let global_region_dir = global_region.access_layer.table_dir().to_string();
+    let global_region_dir = global_region
+        .access_layer
+        .build_region_dir(global_region_id);
 
     let custom_region = engine.get_region(custom_region_id).unwrap();
-    let custom_region_dir = custom_region.access_layer.table_dir().to_string();
+    let custom_region_dir = custom_region
+        .access_layer
+        .build_region_dir(custom_region_id);
 
     // Both these regions should exist before dropping the custom region.
     assert!(object_store_manager

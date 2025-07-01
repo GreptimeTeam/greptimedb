@@ -29,7 +29,6 @@ use tokio::time::sleep;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
-use crate::sst::location::region_dir_from_table_dir;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -51,11 +50,7 @@ where
         region.set_dropping()?;
         // Writes dropping marker
         // We rarely drop a region so we still operate in the worker loop.
-        let region_dir = region_dir_from_table_dir(
-            region.access_layer.table_dir(),
-            region_id,
-            region.access_layer.path_type(),
-        );
+        let region_dir = region.access_layer.build_region_dir(region_id);
         let marker_path = join_path(&region_dir, DROPPING_MARKER_FILE);
         region
             .access_layer

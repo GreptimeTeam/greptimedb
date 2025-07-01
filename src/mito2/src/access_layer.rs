@@ -34,7 +34,7 @@ use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
-use crate::sst::location;
+use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
@@ -121,6 +121,11 @@ impl AccessLayer {
             })?;
 
         Ok(())
+    }
+
+    /// Returns the directory of the region in the table.
+    pub fn build_region_dir(&self, region_id: RegionId) -> String {
+        region_dir_from_table_dir(&self.table_dir, region_id, self.path_type)
     }
 
     /// Returns a reader builder for specific `file`.
