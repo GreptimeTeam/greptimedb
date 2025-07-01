@@ -145,6 +145,7 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStore;
     use smallvec::SmallVec;
+    use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -154,7 +155,6 @@ mod tests {
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
-    use store_api::region_request::PathType;
 
     #[tokio::test]
     async fn test_file_purge() {
@@ -175,7 +175,7 @@ mod tests {
             .unwrap();
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        
+
         let layer = Arc::new(AccessLayer::new(
             sst_dir,
             PathType::Bare,
@@ -234,7 +234,7 @@ mod tests {
             .unwrap();
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        
+
         let layer = Arc::new(AccessLayer::new(
             sst_dir,
             PathType::Bare,

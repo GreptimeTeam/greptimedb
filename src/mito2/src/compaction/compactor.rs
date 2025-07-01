@@ -25,7 +25,6 @@ use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use crate::sst::location::region_dir_from_table_dir;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 
@@ -49,6 +48,7 @@ use crate::sst::file::FileMeta;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::WriteOptions;
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -156,7 +156,11 @@ pub async fn open_compaction_region(
 
     let manifest_manager = {
         let region_manifest_options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type)),
+            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
+                &req.table_dir,
+                req.region_id,
+                req.path_type,
+            )),
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,

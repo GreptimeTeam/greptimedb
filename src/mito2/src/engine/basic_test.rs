@@ -28,7 +28,9 @@ use datatypes::schema::ColumnSchema;
 use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_request::{PathType, RegionCreateRequest, RegionOpenRequest, RegionPutRequest};
+use store_api::region_request::{
+    PathType, RegionCreateRequest, RegionOpenRequest, RegionPutRequest,
+};
 use store_api::storage::RegionId;
 
 use super::*;

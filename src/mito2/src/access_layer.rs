@@ -125,7 +125,12 @@ impl AccessLayer {
 
     /// Returns a reader builder for specific `file`.
     pub(crate) fn read_sst(&self, file: FileHandle) -> ParquetReaderBuilder {
-        ParquetReaderBuilder::new(self.table_dir.clone(), self.path_type, file, self.object_store.clone())
+        ParquetReaderBuilder::new(
+            self.table_dir.clone(),
+            self.path_type,
+            file,
+            self.object_store.clone(),
+        )
     }
 
     /// Writes a SST with specific `file_id` and `metadata` to the layer.
@@ -372,7 +377,10 @@ pub(crate) struct RegionFilePathFactory {
 impl RegionFilePathFactory {
     /// Creates a new `RegionFilePathFactory` instance.
     pub fn new(table_dir: String, path_type: PathType) -> Self {
-        Self { table_dir, path_type }
+        Self {
+            table_dir,
+            path_type,
+        }
     }
 }
 

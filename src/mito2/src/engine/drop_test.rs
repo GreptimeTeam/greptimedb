@@ -19,7 +19,6 @@ use api::v1::Rows;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
-use crate::sst::location::region_dir_from_table_dir;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{PathType, RegionDropRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -27,6 +26,7 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::engine::listener::DropListener;
 use crate::engine::MitoEngine;
+use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
     build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };

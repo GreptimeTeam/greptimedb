@@ -29,7 +29,8 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
 

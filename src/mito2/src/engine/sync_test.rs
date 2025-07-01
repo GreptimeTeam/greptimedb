@@ -22,7 +22,8 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionManifestInfo};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 

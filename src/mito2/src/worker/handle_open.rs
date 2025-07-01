@@ -50,7 +50,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.object_store_manager.default_object_store()
         };
         // Check if this region is pending drop. And clean the entire dir if so.
-        let region_dir = region_dir_from_table_dir(&request.table_dir, region_id, request.path_type);
+        let region_dir =
+            region_dir_from_table_dir(&request.table_dir, region_id, request.path_type);
         if !self.dropping_regions.is_region_exists(region_id)
             && object_store
                 .exists(&join_path(&region_dir, DROPPING_MARKER_FILE))

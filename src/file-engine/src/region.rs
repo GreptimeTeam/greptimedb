@@ -51,7 +51,10 @@ impl FileRegion {
             options: request.options,
         };
 
-        let region_dir = object_store::util::join_dir(&request.table_dir, &region_name(region_id.table_id(), region_id.region_sequence()));
+        let region_dir = object_store::util::join_dir(
+            &request.table_dir,
+            &region_name(region_id.table_id(), region_id.region_sequence()),
+        );
         let url = manifest.url()?;
         let file_options = manifest.file_options()?;
         let format = manifest.format()?;
@@ -75,9 +78,11 @@ impl FileRegion {
         request: RegionOpenRequest,
         object_store: &ObjectStore,
     ) -> Result<FileRegionRef> {
-        let region_dir = object_store::util::join_dir(&request.table_dir, &region_name(region_id.table_id(), region_id.region_sequence()));
-        let manifest =
-            FileRegionManifest::load(region_id, &region_dir, object_store).await?;
+        let region_dir = object_store::util::join_dir(
+            &request.table_dir,
+            &region_name(region_id.table_id(), region_id.region_sequence()),
+        );
+        let manifest = FileRegionManifest::load(region_id, &region_dir, object_store).await?;
 
         Ok(Arc::new(Self {
             region_dir,
@@ -102,10 +107,11 @@ impl FileRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use store_api::region_request::PathType;
+
     use super::*;
     use crate::error::Error;
     use crate::test_util::{new_test_column_metadata, new_test_object_store, new_test_options};
-    use store_api::region_request::PathType;
 
     #[tokio::test]
     async fn test_create_region() {

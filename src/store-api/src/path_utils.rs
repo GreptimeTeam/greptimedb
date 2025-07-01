@@ -45,7 +45,6 @@ pub fn region_dir(path: &str, region_id: RegionId) -> String {
     )
 }
 
-
 /// get_storage_path returns the storage path from the region_dir.
 ///
 /// It will always return the storage path if the region_dir is valid, otherwise None.

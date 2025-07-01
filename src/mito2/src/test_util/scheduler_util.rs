@@ -22,6 +22,7 @@ use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
@@ -36,7 +37,6 @@ use crate::request::WorkerRequest;
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
-use store_api::region_request::PathType;
 use crate::worker::WorkerListener;
 
 /// Scheduler mocker.
