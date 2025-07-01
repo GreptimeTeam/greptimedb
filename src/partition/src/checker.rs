@@ -225,9 +225,17 @@ struct MatrixGenerator {
     matrix_fundation: HashMap<String, Vec<OrderedF64>>,
     // Iterator state
     current_index: usize,
-    total_combinations: usize,
     schema: Schema,
     column_names: Vec<String>,
+    // Preprocessed attributes
+    /// Total number of combinations of `matrix_fundation`'s values
+    total_combinations: usize,
+    /// Biased suffix product of `matrix_fundation`'s values
+    ///
+    /// The i-th element is the product of the sizes of all columns after the i-th column.
+    /// For example, if `matrix_fundation` is `{"a": [1, 2, 3], "b": [4, 5, 6]}`,
+    /// then `biased_suffix_product` is `[3, 1]`.
+    biased_suffix_product: Vec<usize>,
 }
 
 const MAX_BATCH_SIZE: usize = 8192;
@@ -250,18 +258,24 @@ impl MatrixGenerator {
         // Store column names in the same order as fields
         let column_names: Vec<String> = fields.iter().map(|field| field.name().clone()).collect();
 
-        // Calculate total number of combinations
-        let total_combinations: usize = column_names
-            .iter()
-            .map(|col_name| owned_matrix_fundation[col_name].len())
-            .product();
+        // Calculate total number of combinations and suffix product
+        let mut biased_suffix_product = Vec::with_capacity(column_names.len() + 1);
+        let mut product = 1;
+        biased_suffix_product.push(product);
+        for col_name in column_names.iter().rev() {
+            product *= owned_matrix_fundation[col_name].len();
+            biased_suffix_product.push(product);
+        }
+        biased_suffix_product.pop();
+        biased_suffix_product.reverse();
 
         Self {
             matrix_fundation: owned_matrix_fundation,
             current_index: 0,
-            total_combinations,
             schema,
             column_names,
+            total_combinations: product,
+            biased_suffix_product,
         }
     }
 
@@ -274,13 +288,6 @@ impl MatrixGenerator {
             array_builders.push(Float64Builder::with_capacity(actual_batch_size));
         }
 
-        // Pre-calculate the sizes for each column
-        let column_sizes: Vec<usize> = self
-            .column_names
-            .iter()
-            .map(|col_name| self.matrix_fundation[col_name].len())
-            .collect();
-
         // Generate combinations for this batch
         for combination_offset in 0..actual_batch_size {
             let combination_index = start_index + combination_offset;
@@ -288,14 +295,10 @@ impl MatrixGenerator {
             // For each column, determine which value to use for this combination
             for (col_idx, col_name) in self.column_names.iter().enumerate() {
                 let values = &self.matrix_fundation[col_name];
-
-                // Calculate the "stride" - product of sizes of all columns after this one
-                let stride: usize = column_sizes[col_idx + 1..].iter().product();
-
-                // Calculate which value to use for this column
+                let stride = self.biased_suffix_product[col_idx];
                 let value_index = (combination_index / stride) % values.len();
-
                 let value = *values[value_index].as_ref();
+
                 array_builders[col_idx].append_value(value);
             }
         }
