@@ -482,6 +482,7 @@ impl BatchingEngine {
         debug!("Try flush flow {flow_id}");
         // need to wait a bit to ensure previous mirror insert is handled
         // this is only useful for the case when we are flushing the flow right after inserting data into it
+        // TODO(discord9): find a better way to ensure the data is ready, maybe inform flownode from frontend?
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let task = self.tasks.read().await.get(&flow_id).cloned();
         let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
