@@ -221,6 +221,7 @@ impl<'a> PartitionChecker<'a> {
     }
 }
 
+/// Generates a point matrix that contains premutations of `matrix_fundation`'s values
 struct MatrixGenerator {
     matrix_fundation: HashMap<String, Vec<OrderedF64>>,
     // Iterator state

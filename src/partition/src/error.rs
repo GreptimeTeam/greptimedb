@@ -147,14 +147,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unclosed value {} on column {}", value, column))]
-    UnclosedValue {
-        value: String,
-        column: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid partition expr: {:?}", expr))]
     InvalidExpr {
         expr: PartitionExpr,
@@ -265,7 +257,6 @@ impl ErrorExt for Error {
             Error::FindLeader { .. } => StatusCode::TableUnavailable,
 
             Error::ConjunctExprWithNonExpr { .. }
-            | Error::UnclosedValue { .. }
             | Error::InvalidExpr { .. }
             | Error::NoExprOperand { .. }
             | Error::UndefinedColumn { .. }
