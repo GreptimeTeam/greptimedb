@@ -262,7 +262,7 @@ impl RegionOpener {
             .build();
         let version_control = Arc::new(VersionControl::new(version));
         let access_layer = Arc::new(AccessLayer::new(
-            region_dir,
+            self.table_dir.clone(),
             self.path_type,
             object_store,
             self.puffin_manager_factory,
@@ -359,12 +359,11 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
         let region_options = self.options.as_ref().unwrap().clone();
-        let region_dir = self.region_dir();
 
         let region_manifest_options = Self::manifest_options(
             config,
             &region_options,
-            &region_dir,
+            &self.region_dir(),
             &self.object_store_manager,
         )?;
         let Some(manifest_manager) = RegionManifestManager::open(
@@ -389,10 +388,13 @@ impl RegionOpener {
         let on_region_opened = wal.on_region_opened();
         let object_store = get_object_store(&region_options.storage, &self.object_store_manager)?;
 
-        debug!("Open region {} with options: {:?}", region_id, self.options);
+        debug!(
+            "Open region {} at {} with options: {:?}",
+            region_id, self.table_dir, self.options
+        );
 
         let access_layer = Arc::new(AccessLayer::new(
-            region_dir.clone(),
+            self.table_dir.clone(),
             self.path_type,
             object_store,
             self.puffin_manager_factory.clone(),
