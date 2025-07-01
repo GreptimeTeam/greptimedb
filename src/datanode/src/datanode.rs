@@ -609,7 +609,7 @@ async fn open_all_regions(
             RegionOpenRequest {
                 engine,
                 table_dir,
-                path_type: PathType::Bare, // Default to Bare for mito tables
+                path_type: PathType::Bare,
                 options,
                 skip_wal_replay: false,
             },
@@ -654,7 +654,7 @@ async fn open_all_regions(
                 RegionOpenRequest {
                     engine,
                     table_dir,
-                    path_type: PathType::Bare, // Default to Bare for mito tables
+                    path_type: PathType::Bare,
                     options,
                     skip_wal_replay: true,
                 },

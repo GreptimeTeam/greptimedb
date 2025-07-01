@@ -37,7 +37,7 @@ impl HandlerContext {
             let request = RegionRequest::Open(RegionOpenRequest {
                 engine: region_ident.engine,
                 table_dir: table_dir(&region_storage_path, region_id.table_id()),
-                path_type: PathType::Bare, // Default to Bare for mito tables
+                path_type: PathType::Bare,
                 options: region_options,
                 skip_wal_replay,
             });

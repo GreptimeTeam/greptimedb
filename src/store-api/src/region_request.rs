@@ -234,7 +234,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             primary_key: create.primary_key,
             options: create.options,
             table_dir,
-            path_type: PathType::Bare, // Default to Bare for mito tables
+            path_type: PathType::Bare,
         },
     ))
 }
@@ -283,7 +283,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
         RegionRequest::Open(RegionOpenRequest {
             engine: open.engine,
             table_dir,
-            path_type: PathType::Bare, // Default to Bare for mito tables
+            path_type: PathType::Bare,
             options: open.options,
             skip_wal_replay: false,
         }),
