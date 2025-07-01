@@ -1858,6 +1858,15 @@ SELECT device_model,
 | STM51        | 1                | 1            | 0.5                     | 1                       | 0                         | 1             | 1.0            | 0.1                  | 0.1                  | 1.0               | 1970-01-01T00:00:00 |
 +--------------+------------------+--------------+-------------------------+-------------------------+---------------------------+---------------+----------------+----------------------+----------------------+-------------------+---------------------+
 
+-- Create a flow with same source and sink table
+CREATE FLOW same_source_and_sink_table SINK TO live_connection_log AS
+SELECT
+    *
+FROM
+    live_connection_log;
+
+Error: 1001(Unsupported), Unsupported operation Creating flow with source and sink table being the same: greptime.public.live_connection_log
+
 DROP FLOW live_connection_aggregation_detail;
 
 Affected Rows: 0
