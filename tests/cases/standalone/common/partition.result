@@ -171,7 +171,7 @@ DROP TABLE my_table;
 
 Affected Rows: 0
 
--- incorrect partition rule
+-- incorrect partition rules
 CREATE TABLE invalid_rule (
   a INT PRIMARY KEY,
   b STRING,
@@ -183,7 +183,52 @@ PARTITION ON COLUMNS (a) (
   a >= 20
 );
 
-Error: 1004(InvalidArguments), Unclosed value Int32(10) on column a
+Error: 1004(InvalidArguments), Checkpoint `a=10` is not covered
+
+CREATE TABLE invalid_rule2 (
+  a INT,
+  b STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (b) (
+  b < 'abc',
+  b >= 'abca' AND b < 'o',
+  b >= 'o',
+);
+
+Error: 1004(InvalidArguments), Checkpoint `b=abc` is not covered
+
+CREATE TABLE invalid_rule3 (
+  a INT,
+  b STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (b) (
+  b >= 'a',
+  b <= 'o',
+);
+
+Error: 1004(InvalidArguments), Checkpoint `b=a` is overlapped
+
+CREATE TABLE valid_rule (
+  a INT,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (a, b)
+)
+PARTITION ON COLUMNS (a, b) (
+  a < 10,
+  a = 10 AND b < 'a',
+  a = 10 AND b >= 'a' AND b < 'o',
+  a = 10 AND b >= 'o',
+  a > 10,
+);
+
+Affected Rows: 0
+
+DROP TABLE valid_rule;
+
+Affected Rows: 0
 
 -- Issue https://github.com/GreptimeTeam/greptimedb/issues/4247
 -- Partition rule with unary operator

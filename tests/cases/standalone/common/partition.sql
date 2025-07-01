@@ -74,7 +74,7 @@ SELECT * FROM my_table;
 
 DROP TABLE my_table;
 
--- incorrect partition rule
+-- incorrect partition rules
 CREATE TABLE invalid_rule (
   a INT PRIMARY KEY,
   b STRING,
@@ -85,6 +85,43 @@ PARTITION ON COLUMNS (a) (
   a > 10 AND a < 20,
   a >= 20
 );
+
+CREATE TABLE invalid_rule2 (
+  a INT,
+  b STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (b) (
+  b < 'abc',
+  b >= 'abca' AND b < 'o',
+  b >= 'o',
+);
+
+CREATE TABLE invalid_rule3 (
+  a INT,
+  b STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (b) (
+  b >= 'a',
+  b <= 'o',
+);
+
+CREATE TABLE valid_rule (
+  a INT,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (a, b)
+)
+PARTITION ON COLUMNS (a, b) (
+  a < 10,
+  a = 10 AND b < 'a',
+  a = 10 AND b >= 'a' AND b < 'o',
+  a = 10 AND b >= 'o',
+  a > 10,
+);
+
+DROP TABLE valid_rule;
 
 -- Issue https://github.com/GreptimeTeam/greptimedb/issues/4247
 -- Partition rule with unary operator

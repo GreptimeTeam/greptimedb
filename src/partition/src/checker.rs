@@ -22,7 +22,6 @@ use datatypes::value::OrderedF64;
 use crate::collider::{Collider, CHECK_STEP, NORMALIZE_STEP};
 use crate::error::{
     CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
-    UnexpectedSnafu,
 };
 use crate::expr::{PartitionExpr, RestrictedOp};
 use crate::multi_dim::MultiDimPartitionRule;
@@ -91,11 +90,10 @@ impl<'a> PartitionChecker<'a> {
             }
             matrix_foundation.insert(col.as_str(), cornerstones);
         }
+
+        // If there are no values, the rule is empty and valid.
         if matrix_foundation.is_empty() {
-            return UnexpectedSnafu {
-                err_msg: "no valid values for partition".to_string(),
-            }
-            .fail();
+            return Ok(());
         }
 
         let matrix_generator = MatrixGenerator::new(matrix_foundation);
