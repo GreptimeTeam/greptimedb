@@ -60,33 +60,6 @@ pub struct StateMergeWrapper {
     merge_function: MergeWrapper,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct WrapperArgs<'a> {
-    /// The name of the aggregate function.
-    pub name: &'a str,
-    /// The input types of the aggregate function.
-    pub input_types: &'a [DataType],
-    /// The return type of the aggregate function.
-    pub return_type: &'a DataType,
-    /// The ordering fields of the aggregate function.
-    pub ordering_fields: &'a [Field],
-
-    /// Whether the aggregate function is distinct.
-    pub is_distinct: bool,
-}
-
-impl<'a> From<WrapperArgs<'a>> for StateFieldsArgs<'a> {
-    fn from(args: WrapperArgs<'a>) -> Self {
-        Self {
-            name: args.name,
-            input_types: args.input_types,
-            return_type: args.return_type,
-            ordering_fields: args.ordering_fields,
-            is_distinct: args.is_distinct,
-        }
-    }
-}
-
 impl StateMergeWrapper {
     pub fn new(original: AggregateUDF) -> datafusion_common::Result<Self> {
         let state_function = StateWrapper::new(original.clone())?;
