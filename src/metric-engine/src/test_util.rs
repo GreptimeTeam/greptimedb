@@ -102,7 +102,7 @@ impl TestEnv {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: METRIC_ENGINE_NAME.to_string(),
-                    table_dir: self.default_table_dir(),
+                    table_dir: Self::default_table_dir(),
                     path_type: PathType::Bare, // Use Bare path type for engine regions
                     options: physical_region_option,
                     skip_wal_replay: true,
@@ -146,7 +146,7 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            table_dir: self.default_table_dir(),
+            table_dir: Self::default_table_dir(),
             path_type: PathType::Bare, // Use Bare path type for engine regions
         };
 
@@ -188,8 +188,8 @@ impl TestEnv {
     }
 
     /// Default table dir `test_metric_table`
-    pub fn default_table_dir(&self) -> String {
-        "test_metric_table".to_string()
+    pub fn default_table_dir() -> String {
+        "test_metric_region".to_string()
     }
 }
 
@@ -348,14 +348,15 @@ mod test {
         let builder = Fs::default().root(&env.data_home());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let region_dir = "test_metric_region";
+        let table_dir = TestEnv::default_table_dir();
+        let region_dir = join_dir(&table_dir, "1_0000000002");
         // assert metadata region's dir
-        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
         let exist = object_store.exists(&metadata_region_dir).await.unwrap();
         assert!(exist);
 
         // assert data region's dir
-        let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
+        let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
         let exist = object_store.exists(&data_region_dir).await.unwrap();
         assert!(exist);
 

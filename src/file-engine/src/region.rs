@@ -131,7 +131,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(region.region_dir, "create_region_dir/");
+        assert_eq!(region.region_dir, "create_region_dir/1_0000000000/");
         assert_eq!(region.url, "test");
         assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(region.metadata.primary_key, vec![1]);
 
         assert!(object_store
-            .exists("create_region_dir/manifest/_file_manifest")
+            .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 
@@ -182,7 +182,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(region.region_dir, "open_region_dir/");
+        assert_eq!(region.region_dir, "open_region_dir/1_0000000000/");
         assert_eq!(region.url, "test");
         assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
@@ -211,13 +211,13 @@ mod tests {
             .unwrap();
 
         assert!(object_store
-            .exists("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 
         FileRegion::drop(&region, &object_store).await.unwrap();
         assert!(!object_store
-            .exists("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 

@@ -505,7 +505,7 @@ mod test {
             .collect();
         let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            table_dir: env.default_table_dir(),
+            table_dir: TestEnv::default_table_dir(),
             path_type: PathType::Bare, // Use Bare path type for engine regions
             options: physical_region_option,
             skip_wal_replay: false,
@@ -528,7 +528,7 @@ mod test {
         // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            table_dir: env.default_table_dir(),
+            table_dir: TestEnv::default_table_dir(),
             path_type: PathType::Bare, // Use Bare path type for engine regions
             options: HashMap::new(),
             skip_wal_replay: false,

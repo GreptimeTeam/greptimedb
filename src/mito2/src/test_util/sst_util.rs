@@ -30,7 +30,7 @@ use store_api::metadata::{
 use store_api::storage::RegionId;
 
 use crate::read::{Batch, BatchBuilder, Source};
-use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
+use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 
 /// Test region id.
