@@ -1481,10 +1481,6 @@ impl PromPlanner {
         // TODO(ruihang): set this according to in-param list
         let field_column_pos = 0;
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
-        // Whether to update fields in context
-        // For label functions such as `label_join`, `label_replace`, etc.,
-        // we keep the fields unchanged.
-        let mut update_fields = true;
         // New labels after executing the function, e.g. `label_replace` etc.
         let mut new_tags = vec![];
         let scalar_func = match func.name {
@@ -1621,7 +1617,6 @@ impl PromPlanner {
 
                 // Remove it from tag columns if exists
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-                update_fields = false;
                 new_tags.push(dst_label);
                 // Add the new label expr to evaluate
                 exprs.push(concat_expr);
@@ -1642,7 +1637,6 @@ impl PromPlanner {
 
                 // Remove it from tag columns if exists
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-                update_fields = false;
                 new_tags.push(dst_label);
                 // Add the new label expr to evaluate
                 exprs.push(replace_expr);
@@ -1746,8 +1740,10 @@ impl PromPlanner {
             }
         }
 
-        // update value columns' name, and alias them to remove qualifiers
-        if update_fields {
+        // Update value columns' name, and alias them to remove qualifiers
+        // For label functions such as `label_join`, `label_replace`, etc.,
+        // we keep the fields unchanged.
+        if !matches!(func.name, "label_join" | "label_replace") {
             let mut new_field_columns = Vec::with_capacity(exprs.len());
 
             exprs = exprs
