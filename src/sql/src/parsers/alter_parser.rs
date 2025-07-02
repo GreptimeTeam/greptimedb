@@ -1029,7 +1029,7 @@ mod tests {
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(
-                            FulltextOptions::new(
+                            FulltextOptions::new_unchecked(
                                 true,
                                 FulltextAnalyzer::English,
                                 false,

@@ -34,7 +34,7 @@ use table::requests::{
 };
 
 use crate::error::{
-    InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu,
+    InvalidColumnDefSnafu, InvalidIndexOptionSnafu, InvalidSetFulltextOptionRequestSnafu,
     InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
     InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
     MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
@@ -139,7 +139,8 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                             ),
                             f.granularity as u32,
                             f.false_positive_rate,
-                        ),
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
                 api::v1::set_index::Options::Inverted(i) => AlterKind::SetIndex {
@@ -157,7 +158,8 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                                 PbSkippingIndexType::try_from(s.skipping_index_type)
                                     .context(InvalidSetSkippingIndexOptionRequestSnafu)?,
                             ),
-                        ),
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
             },

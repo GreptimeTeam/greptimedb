@@ -84,7 +84,7 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
-                options: FulltextOptions::new(
+                options: FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::English,
                     false,
@@ -555,7 +555,7 @@ async fn test_alter_column_fulltext_options() {
     // Wait for the write job.
     alter_job.await.unwrap();
 
-    let expect_fulltext_options = FulltextOptions::new(
+    let expect_fulltext_options = FulltextOptions::new_unchecked(
         true,
         FulltextAnalyzer::English,
         false,

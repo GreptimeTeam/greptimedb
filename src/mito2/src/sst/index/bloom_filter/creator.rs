@@ -409,7 +409,7 @@ pub(crate) mod tests {
                     ConcreteDataType::string_datatype(),
                     false,
                 )
-                .with_skipping_options(SkippingIndexOptions::new(
+                .with_skipping_options(SkippingIndexOptions::new_unchecked(
                     2,
                     0.01,
                     SkippingIndexType::BloomFilter,
@@ -433,7 +433,7 @@ pub(crate) mod tests {
                     ConcreteDataType::uint64_datatype(),
                     false,
                 )
-                .with_skipping_options(SkippingIndexOptions::new(
+                .with_skipping_options(SkippingIndexOptions::new_unchecked(
                     4,
                     0.01,
                     SkippingIndexType::BloomFilter,

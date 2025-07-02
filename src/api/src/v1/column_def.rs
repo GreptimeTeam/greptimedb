@@ -226,7 +226,7 @@ mod tests {
         assert!(options.is_none());
 
         let mut schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
-            .with_fulltext_options(FulltextOptions::new(
+            .with_fulltext_options(FulltextOptions::new_unchecked(
                 true,
                 FulltextAnalyzer::English,
                 false,
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_options_with_fulltext() {
-        let fulltext = FulltextOptions::new(
+        let fulltext = FulltextOptions::new_unchecked(
             true,
             FulltextAnalyzer::English,
             false,

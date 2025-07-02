@@ -42,8 +42,8 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidIndexOptionSnafu,
+    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
     InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -775,7 +775,8 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                             ),
                             x.granularity as u32,
                             x.false_positive_rate,
-                        ),
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
                 set_index::Options::Inverted(i) => AlterKind::SetIndex {
@@ -793,7 +794,8 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                                 PbSkippingIndexType::try_from(s.skipping_index_type)
                                     .context(DecodeProtoSnafu)?,
                             ),
-                        ),
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
             },
@@ -1651,7 +1653,7 @@ mod tests {
         let kind = AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
-                options: FulltextOptions::new(
+                options: FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::Chinese,
                     false,

@@ -150,11 +150,14 @@ impl DataRegion {
                         false_positive_rate,
                     } => {
                         c.column_schema
-                            .set_skipping_options(&SkippingIndexOptions::new(
-                                granularity,
-                                false_positive_rate,
-                                SkippingIndexType::BloomFilter,
-                            ))
+                            .set_skipping_options(
+                                &SkippingIndexOptions::new(
+                                    granularity,
+                                    false_positive_rate,
+                                    SkippingIndexType::BloomFilter,
+                                )
+                                .context(SetSkippingIndexOptionSnafu)?,
+                            )
                             .context(SetSkippingIndexOptionSnafu)?;
                     }
                 }

@@ -540,6 +540,7 @@ fn fulltext_options_default_false_positive_rate_in_10000() -> u32 {
 }
 
 impl FulltextOptions {
+    /// Creates a new fulltext options.
     pub fn new(
         enable: bool,
         analyzer: FulltextAnalyzer,
@@ -547,17 +548,40 @@ impl FulltextOptions {
         backend: FulltextBackend,
         granularity: u32,
         false_positive_rate: f64,
+    ) -> Result<Self> {
+        ensure!(
+            0.0 < false_positive_rate && false_positive_rate <= 1.0,
+            error::InvalidFulltextOptionSnafu {
+                msg: format!(
+                    "Invalid false positive rate: {false_positive_rate}, expected: 0.0 < rate <= 1.0"
+                ),
+            }
+        );
+        ensure!(
+            granularity > 0,
+            error::InvalidFulltextOptionSnafu {
+                msg: format!("Invalid granularity: {granularity}, expected: positive integer"),
+            }
+        );
+        Ok(Self::new_unchecked(
+            enable,
+            analyzer,
+            case_sensitive,
+            backend,
+            granularity,
+            false_positive_rate,
+        ))
+    }
+
+    /// Creates a new fulltext options without checking `false_positive_rate` and `granularity`.
+    pub fn new_unchecked(
+        enable: bool,
+        analyzer: FulltextAnalyzer,
+        case_sensitive: bool,
+        backend: FulltextBackend,
+        granularity: u32,
+        false_positive_rate: f64,
     ) -> Self {
-        let false_positive_rate = if 0.0 < false_positive_rate && false_positive_rate <= 1.0 {
-            false_positive_rate
-        } else {
-            DEFAULT_FALSE_POSITIVE_RATE
-        };
-        let granularity = if granularity > 0 {
-            granularity
-        } else {
-            DEFAULT_GRANULARITY
-        };
         Self {
             enable,
             analyzer,
@@ -567,6 +591,8 @@ impl FulltextOptions {
             false_positive_rate_in_10000: (false_positive_rate * 10000.0) as u32,
         }
     }
+
+    /// Gets the false positive rate.
     pub fn false_positive_rate(&self) -> f64 {
         self.false_positive_rate_in_10000 as f64 / 10000.0
     }
@@ -574,7 +600,7 @@ impl FulltextOptions {
 
 impl Default for FulltextOptions {
     fn default() -> Self {
-        Self::new(
+        Self::new_unchecked(
             false,
             FulltextAnalyzer::default(),
             false,
@@ -754,23 +780,42 @@ pub struct SkippingIndexOptions {
 }
 
 impl SkippingIndexOptions {
-    /// Creates a new skipping index options.
-    pub fn new(granularity: u32, false_positive_rate: f64, index_type: SkippingIndexType) -> Self {
-        let granularity = if granularity > 0 {
-            granularity
-        } else {
-            DEFAULT_GRANULARITY
-        };
-        let false_positive_rate = if 0.0 < false_positive_rate && false_positive_rate <= 1.0 {
-            false_positive_rate
-        } else {
-            DEFAULT_FALSE_POSITIVE_RATE
-        };
+    /// Creates a new skipping index options without checking `false_positive_rate` and `granularity`.
+    pub fn new_unchecked(
+        granularity: u32,
+        false_positive_rate: f64,
+        index_type: SkippingIndexType,
+    ) -> Self {
         Self {
             granularity,
             false_positive_rate_in_10000: (false_positive_rate * 10000.0) as u32,
             index_type,
         }
+    }
+
+    /// Creates a new skipping index options.
+    pub fn new(
+        granularity: u32,
+        false_positive_rate: f64,
+        index_type: SkippingIndexType,
+    ) -> Result<Self> {
+        ensure!(
+            0.0 < false_positive_rate && false_positive_rate <= 1.0,
+            error::InvalidSkippingIndexOptionSnafu {
+                msg: format!("Invalid false positive rate: {false_positive_rate}, expected: 0.0 < rate <= 1.0"),
+            }
+        );
+        ensure!(
+            granularity > 0,
+            error::InvalidSkippingIndexOptionSnafu {
+                msg: format!("Invalid granularity: {granularity}, expected: positive integer"),
+            }
+        );
+        Ok(Self::new_unchecked(
+            granularity,
+            false_positive_rate,
+            index_type,
+        ))
     }
 
     /// Gets the false positive rate.
@@ -781,7 +826,7 @@ impl SkippingIndexOptions {
 
 impl Default for SkippingIndexOptions {
     fn default() -> Self {
-        Self::new(
+        Self::new_unchecked(
             DEFAULT_GRANULARITY,
             DEFAULT_FALSE_POSITIVE_RATE,
             SkippingIndexType::default(),
@@ -864,7 +909,7 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
             None => SkippingIndexType::default(),
         };
 
-        Ok(SkippingIndexOptions::new(
+        Ok(SkippingIndexOptions::new_unchecked(
             granularity,
             false_positive_rate,
             index_type,

@@ -452,7 +452,7 @@ mod tests {
         if with_skipping_bloom {
             let column_schema =
                 ColumnSchema::new("bloom", ConcreteDataType::string_datatype(), false)
-                    .with_skipping_options(SkippingIndexOptions::new(
+                    .with_skipping_options(SkippingIndexOptions::new_unchecked(
                         42,
                         0.01,
                         SkippingIndexType::BloomFilter,

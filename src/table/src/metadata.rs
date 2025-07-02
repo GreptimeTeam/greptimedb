@@ -1876,7 +1876,7 @@ mod tests {
         let alter_kind = AlterKind::SetIndex {
             options: SetIndexOptions::Fulltext {
                 column_name: "my_tag_first".to_string(),
-                options: FulltextOptions::new(
+                options: FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::Chinese,
                     true,

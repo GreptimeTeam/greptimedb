@@ -543,7 +543,7 @@ impl MetricEngineInner {
                 ConcreteDataType::uint32_datatype(),
                 false,
             )
-            .with_skipping_options(SkippingIndexOptions::new(
+            .with_skipping_options(SkippingIndexOptions::new_unchecked(
                 DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY,
                 DEFAULT_TABLE_ID_SKIPPING_INDEX_FALSE_POSITIVE_RATE,
                 datatypes::schema::SkippingIndexType::BloomFilter,

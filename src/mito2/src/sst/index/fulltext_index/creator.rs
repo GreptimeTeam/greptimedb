@@ -400,7 +400,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions::new(
+                .with_fulltext_options(FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::English,
                     true,
@@ -418,7 +418,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions::new(
+                .with_fulltext_options(FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::English,
                     false,
@@ -436,7 +436,7 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions::new(
+                .with_fulltext_options(FulltextOptions::new_unchecked(
                     true,
                     FulltextAnalyzer::Chinese,
                     false,
