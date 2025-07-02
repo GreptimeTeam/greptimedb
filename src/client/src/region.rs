@@ -21,7 +21,7 @@ use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::BoxedError;
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
@@ -107,24 +107,18 @@ impl RegionRequester {
             .mut_inner()
             .do_get(ticket)
             .await
-            .map_err(|e| {
+            .or_else(|e| {
                 let tonic_code = e.code();
                 let e: error::Error = e.into();
-                let code = e.status_code();
-                let msg = e.to_string();
-                let error = ServerSnafu { code, msg }
-                    .fail::<()>()
-                    .map_err(BoxedError::new)
-                    .with_context(|_| FlightGetSnafu {
-                        tonic_code,
-                        addr: flight_client.addr().to_string(),
-                    })
-                    .unwrap_err();
                 error!(
                     e; "Failed to do Flight get, addr: {}, code: {}",
                     flight_client.addr(),
                     tonic_code
                 );
+                let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+                    addr: flight_client.addr().to_string(),
+                    tonic_code,
+                });
                 error
             })?;
 

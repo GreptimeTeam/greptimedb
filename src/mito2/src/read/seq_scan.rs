@@ -43,7 +43,7 @@ use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
+use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -149,7 +149,8 @@ impl SeqScan {
                 part_metrics,
                 range_builder_list.clone(),
                 &mut sources,
-            );
+            )
+            .await?;
         }
 
         common_telemetry::debug!(
@@ -270,7 +271,7 @@ impl SeqScan {
                     &part_metrics,
                     range_builder_list.clone(),
                     &mut sources,
-                );
+                ).await?;
 
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
@@ -426,14 +427,14 @@ impl fmt::Debug for SeqScan {
 }
 
 /// Builds sources for the partition range and push them to the `sources` vector.
-pub(crate) fn build_sources(
+pub(crate) async fn build_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
     compaction: bool,
     part_metrics: &PartitionMetrics,
     range_builder_list: Arc<RangeBuilderList>,
     sources: &mut Vec<Source>,
-) {
+) -> Result<()> {
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -460,7 +461,7 @@ pub(crate) fn build_sources(
                 range_meta.time_range,
             );
             Box::pin(stream) as _
-        } else {
+        } else if stream_ctx.is_file_range_index(*index) {
             let read_type = if compaction {
                 "compaction"
             } else {
@@ -472,11 +473,15 @@ pub(crate) fn build_sources(
                 *index,
                 read_type,
                 range_builder_list.clone(),
-            );
+            )
+            .await?;
             Box::pin(stream) as _
+        } else {
+            scan_util::maybe_scan_other_ranges(stream_ctx, *index, part_metrics).await?
         };
         sources.push(Source::Stream(stream));
     }
+    Ok(())
 }
 
 #[cfg(test)]

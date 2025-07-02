@@ -31,7 +31,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
@@ -48,7 +48,7 @@ use tonic::transport::Channel;
 
 use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
-    InvalidTonicMetadataValueSnafu, ServerSnafu,
+    InvalidTonicMetadataValueSnafu,
 };
 use crate::{error, from_grpc_response, Client, Result};
 
@@ -196,12 +196,22 @@ impl Database {
 
     /// Retry if connection fails, max_retries is the max number of retries, so the total wait time
     /// is `max_retries * GRPC_CONN_TIMEOUT`
-    pub async fn handle_with_retry(&self, request: Request, max_retries: u32) -> Result<u32> {
+    pub async fn handle_with_retry(
+        &self,
+        request: Request,
+        max_retries: u32,
+        hints: &[(&str, &str)],
+    ) -> Result<u32> {
         let mut client = make_database_client(&self.client)?.inner;
         let mut retries = 0;
+
         let request = self.to_rpc_request(request);
+
         loop {
-            let raw_response = client.handle(request.clone()).await;
+            let mut tonic_request = tonic::Request::new(request.clone());
+            let metadata = tonic_request.metadata_mut();
+            Self::put_hints(metadata, hints)?;
+            let raw_response = client.handle(tonic_request).await;
             match (raw_response, retries < max_retries) {
                 (Ok(resp), _) => return from_grpc_response(resp.into_inner()),
                 (Err(err), true) => {
@@ -292,21 +302,16 @@ impl Database {
         let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
             let e: Error = e.into();
-            let code = e.status_code();
-            let msg = e.to_string();
-            let error =
-                Err(BoxedError::new(ServerSnafu { code, msg }.build())).with_context(|_| {
-                    FlightGetSnafu {
-                        addr: client.addr().to_string(),
-                        tonic_code,
-                    }
-                });
             error!(
                 "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),
                 tonic_code,
-                error
+                e
             );
+            let error = Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
+                addr: client.addr().to_string(),
+                tonic_code,
+            });
             error
         })?;
 
@@ -436,8 +441,11 @@ mod tests {
 
     use api::v1::auth_header::AuthScheme;
     use api::v1::{AuthHeader, Basic};
+    use common_error::status_code::StatusCode;
+    use tonic::{Code, Status};
 
     use super::*;
+    use crate::error::TonicSnafu;
 
     #[test]
     fn test_flight_ctx() {
@@ -459,5 +467,20 @@ mod tests {
                 auth_scheme: Some(AuthScheme::Basic(_)),
             })
         )
+    }
+
+    #[test]
+    fn test_from_tonic_status() {
+        let expected = TonicSnafu {
+            code: StatusCode::Internal,
+            msg: "blabla".to_string(),
+            tonic_code: Code::Internal,
+        }
+        .build();
+
+        let status = Status::new(Code::Internal, "blabla");
+        let actual: Error = status.into();
+
+        assert_eq!(expected.to_string(), actual.to_string());
     }
 }

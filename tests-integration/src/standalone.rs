@@ -172,7 +172,7 @@ impl GreptimeDbStandaloneBuilder {
         );
 
         let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler();
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             plugins.clone(),

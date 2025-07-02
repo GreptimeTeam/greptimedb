@@ -14,6 +14,7 @@
 
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
@@ -29,6 +30,8 @@ use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
 use meta_client::client::MetaClient;
+use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::options::QueryOptions;
 use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -84,27 +87,34 @@ pub enum FrontendClient {
         meta_client: Arc<MetaClient>,
         chnl_mgr: ChannelManager,
         auth: Option<FlowAuthHeader>,
+        query: QueryOptions,
     },
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
         /// notice the client here should all be lazy, so that can wait after frontend is booted then make conn
         database_client: HandlerMutable,
+        query: QueryOptions,
     },
 }
 
 impl FrontendClient {
     /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
-    pub fn from_empty_grpc_handler() -> (Self, HandlerMutable) {
+    pub fn from_empty_grpc_handler(query: QueryOptions) -> (Self, HandlerMutable) {
         let handler = Arc::new(std::sync::Mutex::new(None));
         (
             Self::Standalone {
                 database_client: handler.clone(),
+                query,
             },
             handler,
         )
     }
 
-    pub fn from_meta_client(meta_client: Arc<MetaClient>, auth: Option<FlowAuthHeader>) -> Self {
+    pub fn from_meta_client(
+        meta_client: Arc<MetaClient>,
+        auth: Option<FlowAuthHeader>,
+        query: QueryOptions,
+    ) -> Self {
         common_telemetry::info!("Frontend client build with auth={:?}", auth);
         Self::Distributed {
             meta_client,
@@ -115,12 +125,17 @@ impl FrontendClient {
                 ChannelManager::with_config(cfg)
             },
             auth,
+            query,
         }
     }
 
-    pub fn from_grpc_handler(grpc_handler: Weak<dyn GrpcQueryHandlerWithBoxedError>) -> Self {
+    pub fn from_grpc_handler(
+        grpc_handler: Weak<dyn GrpcQueryHandlerWithBoxedError>,
+        query: QueryOptions,
+    ) -> Self {
         Self::Standalone {
             database_client: Arc::new(std::sync::Mutex::new(Some(grpc_handler))),
+            query,
         }
     }
 }
@@ -193,6 +208,7 @@ impl FrontendClient {
             meta_client: _,
             chnl_mgr,
             auth,
+            query: _,
         } = self
         else {
             return UnexpectedSnafu {
@@ -281,7 +297,9 @@ impl FrontendClient {
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
             }
-            FrontendClient::Standalone { database_client } => {
+            FrontendClient::Standalone {
+                database_client, ..
+            } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
@@ -328,7 +346,7 @@ impl FrontendClient {
         peer_desc: &mut Option<PeerDesc>,
     ) -> Result<u32, Error> {
         match self {
-            FrontendClient::Distributed { .. } => {
+            FrontendClient::Distributed { query, .. } => {
                 let db = self.get_random_active_frontend(catalog, schema).await?;
 
                 *peer_desc = Some(PeerDesc::Dist {
@@ -336,16 +354,27 @@ impl FrontendClient {
                 });
 
                 db.database
-                    .handle_with_retry(req.clone(), GRPC_MAX_RETRIES)
+                    .handle_with_retry(
+                        req.clone(),
+                        GRPC_MAX_RETRIES,
+                        &[(QUERY_PARALLELISM_HINT, &query.parallelism.to_string())],
+                    )
                     .await
                     .with_context(|_| InvalidRequestSnafu {
                         context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
                     })
             }
-            FrontendClient::Standalone { database_client } => {
+            FrontendClient::Standalone {
+                database_client,
+                query,
+            } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
+                    .extensions(HashMap::from([(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    )]))
                     .build();
                 let ctx = Arc::new(ctx);
                 {

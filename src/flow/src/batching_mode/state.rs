@@ -76,38 +76,43 @@ impl TaskState {
 
     /// Compute the next query delay based on the time window size or the last query duration.
     /// Aiming to avoid too frequent queries. But also not too long delay.
-    /// The delay is computed as follows:
-    /// - If `time_window_size` is set, the delay is half the time window size, constrained to be
-    ///   at least `last_query_duration` and at most `max_timeout`.
-    /// - If `time_window_size` is not set, the delay defaults to `last_query_duration`, constrained
-    ///   to be at least `MIN_REFRESH_DURATION` and at most `max_timeout`.
     ///
-    /// If there are dirty time windows, the function returns an immediate execution time to clean them.
-    /// TODO: Make this behavior configurable.
+    /// next wait time is calculated as:
+    /// last query duration, capped by [max(min_run_interval, time_window_size), max_timeout],
+    /// note at most wait for `max_timeout`.
+    ///
+    /// if current the dirty time range is longer than one query can handle,
+    /// execute immediately to faster clean up dirty time windows.
+    ///
     pub fn get_next_start_query_time(
         &self,
         flow_id: FlowId,
         time_window_size: &Option<Duration>,
         max_timeout: Option<Duration>,
     ) -> Instant {
-        let last_duration = max_timeout
-            .unwrap_or(self.last_query_duration)
-            .min(self.last_query_duration)
-            .max(MIN_REFRESH_DURATION);
+        // = last query duration, capped by [max(min_run_interval, time_window_size), max_timeout], note at most `max_timeout`
+        let lower = time_window_size.unwrap_or(MIN_REFRESH_DURATION);
+        let next_duration = self.last_query_duration.max(lower);
+        let next_duration = if let Some(max_timeout) = max_timeout {
+            next_duration.min(max_timeout)
+        } else {
+            next_duration
+        };
 
-        let next_duration = time_window_size
-            .map(|t| {
-                let half = t / 2;
-                half.max(last_duration)
-            })
-            .unwrap_or(last_duration);
-
-        // if have dirty time window, execute immediately to clean dirty time window
-        if self.dirty_time_windows.windows.is_empty() {
+        let cur_dirty_window_size = self.dirty_time_windows.window_size();
+        // compute how much time range can be handled in one query
+        let max_query_update_range = (*time_window_size)
+            .unwrap_or_default()
+            .mul_f64(DirtyTimeWindows::MAX_FILTER_NUM as f64);
+        // if dirty time range is more than one query can handle, execute immediately
+        // to faster clean up dirty time windows
+        if cur_dirty_window_size < max_query_update_range {
             self.last_update_time + next_duration
         } else {
+            // if dirty time windows can't be clean up in one query, execute immediately to faster
+            // clean up dirty time windows
             debug!(
-                "Flow id = {}, still have {} dirty time window({:?}), execute immediately",
+                "Flow id = {}, still have too many {} dirty time window({:?}), execute immediately",
                 flow_id,
                 self.dirty_time_windows.windows.len(),
                 self.dirty_time_windows.windows
@@ -145,6 +150,18 @@ impl DirtyTimeWindows {
             let entry = self.windows.entry(lower_bound);
             entry.or_insert(None);
         }
+    }
+
+    pub fn window_size(&self) -> Duration {
+        let mut ret = Duration::from_secs(0);
+        for (start, end) in &self.windows {
+            if let Some(end) = end {
+                if let Some(duration) = end.sub(start) {
+                    ret += duration.to_std().unwrap_or_default();
+                }
+            }
+        }
+        ret
     }
 
     pub fn add_window(&mut self, start: Timestamp, end: Option<Timestamp>) {

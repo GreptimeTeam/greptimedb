@@ -30,6 +30,7 @@ use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
 use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
+use query::options::QueryOptions;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
@@ -216,12 +217,15 @@ fn test_load_flownode_example_config() {
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
             tracing: Default::default(),
             heartbeat: Default::default(),
-            query: Default::default(),
+            // flownode deliberately use a slower query parallelism
+            // to avoid overwhelming the frontend with too many queries
+            query: QueryOptions { parallelism: 1 },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),

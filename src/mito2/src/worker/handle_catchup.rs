@@ -90,10 +90,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 ensure!(
                     // The replayed last entry id may be greater than the `expected_last_entry_id`.
                     last_entry_id >= expected_last_entry_id,
-                    error::UnexpectedReplaySnafu {
-                        region_id,
-                        expected_last_entry_id,
-                        replayed_last_entry_id: last_entry_id,
+                    error::UnexpectedSnafu {
+                        reason: format!(
+                            "failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}", 
+                            region_id, expected_last_entry_id, last_entry_id,
+                        ),
                     }
                 )
             }

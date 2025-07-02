@@ -71,11 +71,13 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints]
+clippy.print_stdout = "warn"
+clippy.print_stderr = "warn"
 clippy.dbg_macro = "warn"
 clippy.implicit_clone = "warn"
 clippy.result_large_err = "allow"

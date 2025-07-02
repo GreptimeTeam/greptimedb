@@ -121,7 +121,9 @@ impl Default for FlownodeOptions {
             logging: LoggingOptions::default(),
             tracing: TracingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
-            query: QueryOptions::default(),
+            // flownode's query option is set to 1 to throttle flow's query so
+            // that it won't use too much cpu or memory
+            query: QueryOptions { parallelism: 1 },
             user_provider: None,
         }
     }
@@ -903,7 +905,7 @@ impl StreamingEngine {
         let rows_send = self.run_available(true).await?;
         let row = self.send_writeback_requests().await?;
         debug!(
-            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sended and {} output rows flushed",
+            "Done to flush flow_id={:?} with {} input rows flushed, {} rows sent and {} output rows flushed",
             flow_id, flushed_input_rows, rows_send, row
         );
         Ok(row)

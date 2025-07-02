@@ -34,6 +34,7 @@ excludes = [
     "src/sql/src/statements/drop/trigger.rs",
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
+    "src/mito2/src/extension.rs",
 ]
 
 [properties]

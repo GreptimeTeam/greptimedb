@@ -36,7 +36,7 @@ use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
-use crate::read::{Batch, ScannerMetrics};
+use crate::read::{scan_util, Batch, ScannerMetrics};
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -94,7 +94,7 @@ impl UnorderedScan {
         part_metrics: PartitionMetrics,
         range_builder_list: Arc<RangeBuilderList>,
     ) -> impl Stream<Item = Result<Batch>> {
-        stream! {
+        try_stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
             for index in &range_meta.row_group_indices {
@@ -106,18 +106,27 @@ impl UnorderedScan {
                         range_meta.time_range,
                     );
                     for await batch in stream {
-                        yield batch;
+                        yield batch?;
                     }
-                } else {
+                } else if stream_ctx.is_file_range_index(*index) {
                     let stream = scan_file_ranges(
                         stream_ctx.clone(),
                         part_metrics.clone(),
                         *index,
                         "unordered_scan_files",
                         range_builder_list.clone(),
-                    );
+                    ).await?;
                     for await batch in stream {
-                        yield batch;
+                        yield batch?;
+                    }
+                } else {
+                    let stream = scan_util::maybe_scan_other_ranges(
+                        &stream_ctx,
+                        *index,
+                        &part_metrics,
+                    ).await?;
+                    for await batch in stream {
+                        yield batch?;
                     }
                 }
             }

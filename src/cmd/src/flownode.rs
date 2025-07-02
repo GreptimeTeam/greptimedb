@@ -371,8 +371,11 @@ impl StartCommand {
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
         let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
-        let frontend_client =
-            FrontendClient::from_meta_client(meta_client.clone(), flow_auth_header);
+        let frontend_client = FrontendClient::from_meta_client(
+            meta_client.clone(),
+            flow_auth_header,
+            opts.query.clone(),
+        );
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
             opts.clone(),
