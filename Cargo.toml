@@ -135,8 +135,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-# Wait for https://github.com/GreptimeTeam/greptime-proto/pull/249 to merge
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", branch = "zhongzc/bloom-filter-add-options" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ceb1af4fa9309ce65bda0367db7b384df2bb4d4f" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
