@@ -28,21 +28,27 @@ mod utils;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchingModeOptions {
     /// The default batching engine query timeout is 10 minutes
+    #[serde(with = "humantime_serde")]
     pub query_timeout: Duration,
     /// will output a warn log for any query that runs for more that this threshold
+    #[serde(with = "humantime_serde")]
     pub slow_query_threshold: Duration,
     /// The minimum duration between two queries execution by batching mode task
+    #[serde(with = "humantime_serde")]
     pub min_refresh_duration: Duration,
     /// Grpc connection timeout
+    #[serde(with = "humantime_serde")]
     pub grpc_conn_timeout: Duration,
     /// Grpc max retry number
     pub grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
     /// if failed to find available frontend after frontend_scan_timeout elapsed, return error
     /// which prevent flownode from starting
+    #[serde(with = "humantime_serde")]
     pub frontend_scan_timeout: Duration,
     /// Frontend activity timeout
     /// if frontend is down(not sending heartbeat) for more than frontend_activity_timeout, it will be removed from the list that flownode use to connect
+    #[serde(with = "humantime_serde")]
     pub frontend_activity_timeout: Duration,
 }
 
