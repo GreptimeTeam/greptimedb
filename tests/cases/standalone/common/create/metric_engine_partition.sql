@@ -1,9 +1,12 @@
 create table metric_engine_partition (
     ts timestamp time index,
-    host string primary key,
+    host string,
     cpu double,
+    `one_partition_key` string,
+    `another_partition_key` string,
+    primary key(host, `one_partition_key`, `another_partition_key`)
 )
-partition on columns (host) (
+partition on columns (host, `one_partition_key`, `another_partition_key`) (
     host <= 'host1',
     host > 'host1' and host <= 'host2',
     host > 'host2'
