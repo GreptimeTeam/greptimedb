@@ -240,6 +240,48 @@ impl fmt::Display for StatusCode {
 }
 
 #[macro_export]
+macro_rules! define_from_tonic_status {
+    ($Error: ty, $Variant: ident) => {
+        impl From<tonic::Status> for $Error {
+            fn from(e: tonic::Status) -> Self {
+                use snafu::location;
+
+                fn metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
+                    e.metadata()
+                        .get(key)
+                        .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
+                }
+
+                let code = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_CODE)
+                    .and_then(|s| {
+                        if let Ok(code) = s.parse::<u32>() {
+                            StatusCode::from_u32(code)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| match e.code() {
+                        tonic::Code::Cancelled => StatusCode::Cancelled,
+                        tonic::Code::DeadlineExceeded => StatusCode::DeadlineExceeded,
+                        _ => StatusCode::Internal,
+                    });
+
+                let msg = metadata_value(&e, $crate::GREPTIME_DB_HEADER_ERROR_MSG)
+                    .unwrap_or_else(|| e.message().to_string());
+
+                // TODO(LFC): Make the error variant defined automatically.
+                Self::$Variant {
+                    code,
+                    msg,
+                    tonic_code: e.code(),
+                    location: location!(),
+                }
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! define_into_tonic_status {
     ($Error: ty) => {
         impl From<$Error> for tonic::Status {
@@ -312,15 +354,6 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         StatusCode::AccessDenied | StatusCode::PermissionDenied | StatusCode::RegionReadonly => {
             Code::PermissionDenied
         }
-    }
-}
-
-/// Converts tonic [Code] to [StatusCode].
-pub fn convert_tonic_code_to_status_code(code: Code) -> StatusCode {
-    match code {
-        Code::Cancelled => StatusCode::Cancelled,
-        Code::DeadlineExceeded => StatusCode::DeadlineExceeded,
-        _ => StatusCode::Internal,
     }
 }
 
