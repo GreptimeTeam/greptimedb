@@ -786,7 +786,7 @@ impl PromPlanner {
                 ),
             })
         };
-        let mut func_exprs =
+        let (mut func_exprs, new_tags) =
             self.create_function_expr(func, args.literals.clone(), session_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -821,6 +821,12 @@ impl PromPlanner {
 
             _ => builder,
         };
+
+        // Update context tags after building plan
+        // We can't push them before planning, because they won't exist until projection.
+        for tag in new_tags {
+            self.ctx.tag_columns.push(tag);
+        }
 
         builder.build().context(DataFusionPlanningSnafu)
     }
@@ -1458,21 +1464,29 @@ impl PromPlanner {
         Ok(result)
     }
 
+    /// Creates function expressions for projection and returns the expressions and new tags.
+    ///
     /// # Side Effects
     ///
-    /// This method will update [PromPlannerContext]'s value fields.
+    /// This method will update [PromPlannerContext]'s fields/tags if needed.
     fn create_function_expr(
         &mut self,
         func: &Function,
         other_input_exprs: Vec<DfExpr>,
         session_state: &SessionState,
-    ) -> Result<Vec<DfExpr>> {
+    ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
 
         // TODO(ruihang): set this according to in-param list
         let field_column_pos = 0;
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
+        // Whether to update fields in context
+        // For label functions such as `label_join`, `label_replace`, etc.,
+        // we keep the fields unchanged.
+        let mut update_fields = true;
+        // New labels after executing the function, e.g. `label_replace` etc.
+        let mut new_tags = vec![];
         let scalar_func = match func.name {
             "increase" => ScalarFunc::ExtrapolateUdf(
                 Arc::new(Increase::scalar_udf()),
@@ -1605,10 +1619,11 @@ impl PromPlanner {
                     }
                 }
 
-                // Remove it from tag columns
+                // Remove it from tag columns if exists
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-
-                // Add the new label expr
+                update_fields = false;
+                new_tags.push(dst_label);
+                // Add the new label expr to evaluate
                 exprs.push(concat_expr);
 
                 ScalarFunc::GeneratedExpr
@@ -1625,10 +1640,11 @@ impl PromPlanner {
                     }
                 }
 
-                // Remove it from tag columns
+                // Remove it from tag columns if exists
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-
-                // Add the new label expr
+                update_fields = false;
+                new_tags.push(dst_label);
+                // Add the new label expr to evaluate
                 exprs.push(replace_expr);
 
                 ScalarFunc::GeneratedExpr
@@ -1731,21 +1747,23 @@ impl PromPlanner {
         }
 
         // update value columns' name, and alias them to remove qualifiers
-        let mut new_field_columns = Vec::with_capacity(exprs.len());
+        if update_fields {
+            let mut new_field_columns = Vec::with_capacity(exprs.len());
 
-        exprs = exprs
-            .into_iter()
-            .map(|expr| {
-                let display_name = expr.schema_name().to_string();
-                new_field_columns.push(display_name.clone());
-                Ok(expr.alias(display_name))
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context(DataFusionPlanningSnafu)?;
+            exprs = exprs
+                .into_iter()
+                .map(|expr| {
+                    let display_name = expr.schema_name().to_string();
+                    new_field_columns.push(display_name.clone());
+                    Ok(expr.alias(display_name))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(DataFusionPlanningSnafu)?;
 
-        self.ctx.field_columns = new_field_columns;
+            self.ctx.field_columns = new_field_columns;
+        }
 
-        Ok(exprs)
+        Ok((exprs, new_tags))
     }
 
     /// Build expr for `label_replace` function
@@ -1782,6 +1800,9 @@ impl PromPlanner {
             }
             .fail()?,
         };
+        // Preprocess the regex:
+        // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
+        let regex = format!("^(?s:{regex})$");
 
         let func = session_state
             .scalar_functions()
@@ -4339,15 +4360,17 @@ mod test {
             .await
             .unwrap();
 
-        let expected = "Filter: field_0 IS NOT NULL AND foo IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]\
-        \n  Projection: up.timestamp, up.field_0 AS field_0, concat_ws(Utf8(\",\"), up.tag_1, up.tag_2, up.tag_3) AS foo AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]\
-        \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n      PromSeriesDivide: tags=[\"tag_0\", \"tag_1\", \"tag_2\", \"tag_3\"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n        Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n          Filter: up.tag_0 = Utf8(\"api-server\") AND up.timestamp >= TimestampMillisecond(-1000, None) AND up.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n            TableScan: up [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]";
+        let expected = r#"
+Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), up.tag_1, up.tag_2, up.tag_3) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+      PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+        Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+          Filter: up.tag_0 = Utf8("api-server") AND up.timestamp >= TimestampMillisecond(-1000, None) AND up.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+            TableScan: up [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"#;
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        let ret = plan.display_indent_schema().to_string();
+        assert_eq!(format!("\n{ret}"), expected, "\n{}", ret);
     }
 
     #[tokio::test]
@@ -4373,15 +4396,17 @@ mod test {
             .await
             .unwrap();
 
-        let expected = "Filter: field_0 IS NOT NULL AND foo IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]\
-        \n  Projection: up.timestamp, up.field_0 AS field_0, regexp_replace(up.tag_0, Utf8(\"(.*):.*\"), Utf8(\"$1\")) AS foo AS foo, up.tag_0 [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]\
-        \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n        Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n          Filter: up.tag_0 = Utf8(\"a:c\") AND up.timestamp >= TimestampMillisecond(-1000, None) AND up.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
-        \n            TableScan: up [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]";
+        let expected = r#"
+Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0 [timestamp:Timestamp(Millisecond, None), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+      PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+        Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+          Filter: up.tag_0 = Utf8("a:c") AND up.timestamp >= TimestampMillisecond(-1000, None) AND up.timestamp <= TimestampMillisecond(100001000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]
+            TableScan: up [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"#;
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        let ret = plan.display_indent_schema().to_string();
+        assert_eq!(format!("\n{ret}"), expected, "\n{}", ret);
     }
 
     #[tokio::test]
