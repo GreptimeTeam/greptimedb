@@ -1064,6 +1064,14 @@ pub enum MetadataError {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid index option"))]
+    InvalidIndexOption {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for MetadataError {
@@ -1620,12 +1628,14 @@ mod test {
             .alter(AlterKind::SetIndex {
                 options: ApiSetIndexOptions::Fulltext {
                     column_name: "b".to_string(),
-                    options: FulltextOptions {
-                        enable: true,
-                        analyzer: FulltextAnalyzer::Chinese,
-                        case_sensitive: true,
-                        backend: FulltextBackend::Bloom,
-                    },
+                    options: FulltextOptions::new_unchecked(
+                        true,
+                        FulltextAnalyzer::Chinese,
+                        true,
+                        FulltextBackend::Bloom,
+                        1000,
+                        0.01,
+                    ),
                 },
             })
             .unwrap();
