@@ -61,6 +61,7 @@ prost.workspace = true
 query.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
+sea-query.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
