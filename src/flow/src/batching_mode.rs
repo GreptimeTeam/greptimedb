@@ -29,7 +29,7 @@ mod utils;
 pub struct BatchingModeOptions {
     /// The default batching engine query timeout is 10 minutes
     pub query_timeout: Duration,
-    /// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
+    /// will output a warn log for any query that runs for more that this threshold
     pub slow_query_threshold: Duration,
     /// The minimum duration between two queries execution by batching mode task
     pub min_refresh_duration: Duration,
@@ -38,11 +38,11 @@ pub struct BatchingModeOptions {
     /// Grpc max retry number
     pub grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
-    /// if failed to find available frontend after FRONTEND_SCAN_TIMEOUT elapsed, return error
-    /// which should prevent flownode from starting
+    /// if failed to find available frontend after frontend_scan_timeout elapsed, return error
+    /// which prevent flownode from starting
     pub frontend_scan_timeout: Duration,
     /// Frontend activity timeout
-    /// if frontend is down(not sending heartbeat) for more than FRONTEND_ACTIVITY_TIMEOUT, it will be removed from the list that flownode use to connect
+    /// if frontend is down(not sending heartbeat) for more than frontend_activity_timeout, it will be removed from the list that flownode use to connect
     pub frontend_activity_timeout: Duration,
 }
 
