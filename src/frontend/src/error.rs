@@ -363,6 +363,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Canceling statement due to statement timeout"))]
+    StatementTimeout {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -443,6 +449,8 @@ impl ErrorExt for Error {
             Error::DataFusion { error, .. } => datafusion_status_code::<Self>(error, None),
 
             Error::Cancelled { .. } => StatusCode::Cancelled,
+
+            Error::StatementTimeout { .. } => StatusCode::Cancelled,
         }
     }
 
