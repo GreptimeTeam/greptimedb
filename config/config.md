@@ -562,6 +562,14 @@
 | `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
 | `flow` | -- | -- | flow engine options. |
 | `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
+| `flow.batching_mode` | -- | -- | -- |
+| `flow.batching_mode.query_timeout` | String | `600s` | The default batching engine query timeout is 10 minutes |
+| `flow.batching_mode.slow_query_threshold` | String | `60s` | will output a warn log for any query that runs for more that this threshold |
+| `flow.batching_mode.min_refresh_duration` | String | `5s` | The minimum duration between two queries execution by batching mode task |
+| `flow.batching_mode.grpc_conn_timeout` | String | `5s` | Grpc connection timeout |
+| `flow.batching_mode.grpc_max_retries` | Integer | `3` | Grpc max retry number |
+| `flow.batching_mode.frontend_scan_timeout` | String | `30s` | Flow wait for available frontend timeout,<br/>if failed to find available frontend after frontend_scan_timeout elapsed, return error<br/>which prevent flownode from starting |
+| `flow.batching_mode.frontend_activity_timeout` | String | `60s` | Frontend activity timeout<br/>if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,<br/>it will be removed from the list that flownode use to connect |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:6800` | The address advertised to the metasrv,<br/>and used for connections from outside the host |
