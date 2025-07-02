@@ -218,6 +218,7 @@ mod tests {
         let mut writer = Cursor::new(Vec::new());
         let mut creator = BloomFilterCreator::new(
             4,
+            0.01,
             Arc::new(MockExternalTempFileProvider::new()),
             Arc::new(AtomicUsize::new(0)),
             None,

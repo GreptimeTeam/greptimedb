@@ -42,8 +42,8 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidRawRegionRequestSnafu,
-    InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
+    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidIndexOptionSnafu,
+    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
     InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
@@ -760,16 +760,19 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 set_index::Options::Fulltext(x) => AlterKind::SetIndex {
                     options: ApiSetIndexOptions::Fulltext {
                         column_name: x.column_name.clone(),
-                        options: FulltextOptions {
-                            enable: x.enable,
-                            analyzer: as_fulltext_option_analyzer(
+                        options: FulltextOptions::new(
+                            x.enable,
+                            as_fulltext_option_analyzer(
                                 Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
                             ),
-                            case_sensitive: x.case_sensitive,
-                            backend: as_fulltext_option_backend(
+                            x.case_sensitive,
+                            as_fulltext_option_backend(
                                 PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
                             ),
-                        },
+                            x.granularity as u32,
+                            x.false_positive_rate,
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
                 set_index::Options::Inverted(i) => AlterKind::SetIndex {
@@ -780,13 +783,15 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                 set_index::Options::Skipping(s) => AlterKind::SetIndex {
                     options: ApiSetIndexOptions::Skipping {
                         column_name: s.column_name,
-                        options: SkippingIndexOptions {
-                            index_type: as_skipping_index_type(
+                        options: SkippingIndexOptions::new(
+                            s.granularity as u32,
+                            s.false_positive_rate,
+                            as_skipping_index_type(
                                 PbSkippingIndexType::try_from(s.skipping_index_type)
                                     .context(DecodeProtoSnafu)?,
                             ),
-                            granularity: s.granularity as u32,
-                        },
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
             },
@@ -1644,12 +1649,14 @@ mod tests {
         let kind = AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
-                options: FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::Chinese,
-                    case_sensitive: false,
-                    backend: FulltextBackend::Bloom,
-                },
+                options: FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::Chinese,
+                    false,
+                    FulltextBackend::Bloom,
+                    1000,
+                    0.01,
+                ),
             },
         };
         let request = RegionAlterRequest { kind };

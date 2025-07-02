@@ -4,7 +4,11 @@ create table
         `id` string skipping index,
         `name` string skipping index
         with
-            (granularity = 8192),
+            (
+                granularity = 8192,
+                false_positive_rate = 0.05,
+                type = 'BLOOM',
+            ),
     );
 
 Affected Rows: 0
@@ -13,19 +17,19 @@ show
 create table
     skipping_table;
 
-+----------------+---------------------------------------------------------------------------------+
-| Table          | Create Table                                                                    |
-+----------------+---------------------------------------------------------------------------------+
-| skipping_table | CREATE TABLE IF NOT EXISTS "skipping_table" (                                   |
-|                |   "ts" TIMESTAMP(3) NOT NULL,                                                   |
-|                |   "id" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),  |
-|                |   "name" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'), |
-|                |   TIME INDEX ("ts")                                                             |
-|                | )                                                                               |
-|                |                                                                                 |
-|                | ENGINE=mito                                                                     |
-|                |                                                                                 |
-+----------------+---------------------------------------------------------------------------------+
++----------------+---------------------------------------------------------------------------------------------------------------+
+| Table          | Create Table                                                                                                  |
++----------------+---------------------------------------------------------------------------------------------------------------+
+| skipping_table | CREATE TABLE IF NOT EXISTS "skipping_table" (                                                                 |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                                                                                 |
+|                |   "id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),  |
+|                |   "name" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.05', granularity = '8192', type = 'BLOOM'), |
+|                |   TIME INDEX ("ts")                                                                                           |
+|                | )                                                                                                             |
+|                |                                                                                                               |
+|                | ENGINE=mito                                                                                                   |
+|                |                                                                                                               |
++----------------+---------------------------------------------------------------------------------------------------------------+
 
 drop table skipping_table;
 
