@@ -60,7 +60,6 @@ impl FulltextIndexer {
         intermediate_manager: &IntermediateManager,
         metadata: &RegionMetadataRef,
         compress: bool,
-        bloom_row_granularity: usize,
         mem_limit: usize,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
@@ -106,7 +105,8 @@ impl FulltextIndexer {
                     let global_memory_usage = Arc::new(AtomicUsize::new(0));
                     let creator = BloomFilterFulltextIndexCreator::new(
                         config,
-                        bloom_row_granularity,
+                        options.granularity as _,
+                        options.false_positive_rate(),
                         temp_file_provider,
                         global_memory_usage,
                         Some(mem_limit),
@@ -400,12 +400,14 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::English,
-                    case_sensitive: true,
-                    backend: backend.clone(),
-                })
+                .with_fulltext_options(FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::English,
+                    true,
+                    backend.clone(),
+                    1,
+                    0.01,
+                ))
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 1,
@@ -416,12 +418,14 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::English,
-                    case_sensitive: false,
-                    backend: backend.clone(),
-                })
+                .with_fulltext_options(FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::English,
+                    false,
+                    backend.clone(),
+                    1,
+                    0.01,
+                ))
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 2,
@@ -432,12 +436,14 @@ mod tests {
                     ConcreteDataType::string_datatype(),
                     true,
                 )
-                .with_fulltext_options(FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::Chinese,
-                    case_sensitive: false,
-                    backend: backend.clone(),
-                })
+                .with_fulltext_options(FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::Chinese,
+                    false,
+                    backend.clone(),
+                    1,
+                    0.01,
+                ))
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 3,
@@ -547,7 +553,6 @@ mod tests {
             &intm_mgr,
             &region_metadata,
             true,
-            1,
             1024,
         )
         .await

@@ -34,7 +34,7 @@ use table::requests::{
 };
 
 use crate::error::{
-    InvalidColumnDefSnafu, InvalidSetFulltextOptionRequestSnafu,
+    InvalidColumnDefSnafu, InvalidIndexOptionSnafu, InvalidSetFulltextOptionRequestSnafu,
     InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
     InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
     MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
@@ -126,18 +126,21 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                 api::v1::set_index::Options::Fulltext(f) => AlterKind::SetIndex {
                     options: SetIndexOptions::Fulltext {
                         column_name: f.column_name.clone(),
-                        options: FulltextOptions {
-                            enable: f.enable,
-                            analyzer: as_fulltext_option_analyzer(
+                        options: FulltextOptions::new(
+                            f.enable,
+                            as_fulltext_option_analyzer(
                                 Analyzer::try_from(f.analyzer)
                                     .context(InvalidSetFulltextOptionRequestSnafu)?,
                             ),
-                            case_sensitive: f.case_sensitive,
-                            backend: as_fulltext_option_backend(
+                            f.case_sensitive,
+                            as_fulltext_option_backend(
                                 PbFulltextBackend::try_from(f.backend)
                                     .context(InvalidSetFulltextOptionRequestSnafu)?,
                             ),
-                        },
+                            f.granularity as u32,
+                            f.false_positive_rate,
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
                 api::v1::set_index::Options::Inverted(i) => AlterKind::SetIndex {
@@ -148,13 +151,15 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                 api::v1::set_index::Options::Skipping(s) => AlterKind::SetIndex {
                     options: SetIndexOptions::Skipping {
                         column_name: s.column_name,
-                        options: SkippingIndexOptions {
-                            granularity: s.granularity as u32,
-                            index_type: as_skipping_index_type(
+                        options: SkippingIndexOptions::new(
+                            s.granularity as u32,
+                            s.false_positive_rate,
+                            as_skipping_index_type(
                                 PbSkippingIndexType::try_from(s.skipping_index_type)
                                     .context(InvalidSetSkippingIndexOptionRequestSnafu)?,
                             ),
-                        },
+                        )
+                        .context(InvalidIndexOptionSnafu)?,
                     },
                 },
             },

@@ -593,6 +593,8 @@ pub(crate) fn to_alter_table_expr(
                         FulltextBackend::Bloom => PbFulltextBackend::Bloom.into(),
                         FulltextBackend::Tantivy => PbFulltextBackend::Tantivy.into(),
                     },
+                    granularity: options.granularity as u64,
+                    false_positive_rate: options.false_positive_rate(),
                 })),
             },
             sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
@@ -608,6 +610,7 @@ pub(crate) fn to_alter_table_expr(
                     column_name: column_name.value,
                     enable: true,
                     granularity: options.granularity as u64,
+                    false_positive_rate: options.false_positive_rate(),
                     skipping_index_type: match options.index_type {
                         SkippingIndexType::BloomFilter => PbSkippingIndexType::BloomFilter.into(),
                     },
