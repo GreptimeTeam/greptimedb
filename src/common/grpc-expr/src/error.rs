@@ -153,6 +153,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("SQLCommon error: {}", source))]
+    SQLCommon {
+        source: sql_common::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -181,6 +188,7 @@ impl ErrorExt for Error {
             | Error::InvalidSetFulltextOptionRequest { .. }
             | Error::InvalidSetSkippingIndexOptionRequest { .. }
             | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
+            Error::SQLCommon { source, .. } => source.status_code(),
         }
     }
 
