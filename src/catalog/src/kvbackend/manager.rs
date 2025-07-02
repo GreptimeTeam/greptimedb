@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
 use async_stream::try_stream;
@@ -166,32 +166,39 @@ impl KvBackendCatalogManager {
                 .context(TableMetadataManagerSnafu)?
         {
             let mut new_table_info = (*table.table_info()).clone();
-            // Gather all column names from the logical table
-            let logical_column_names: HashSet<_> = new_table_info
-                .meta
-                .schema
-                .column_schemas()
-                .iter()
-                .map(|col| &col.name)
-                .collect();
 
-            // Only preserve partition key indices where the corresponding columns exist in logical table
+            // Create a mapping from column name to index in the logical table
+            let logical_column_name_to_index: std::collections::HashMap<&str, usize> =
+                new_table_info
+                    .meta
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, col)| (col.name.as_str(), index))
+                    .collect();
+
+            // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
                 .meta
                 .partition_key_indices
                 .iter()
-                .filter(|&&index| {
+                .filter_map(|&physical_index| {
+                    // Get the column name from the physical table using the physical index
                     physical_table_info_value
                         .table_info
                         .meta
                         .schema
                         .column_schemas
-                        .get(index)
-                        .map(|physical_column| logical_column_names.contains(&physical_column.name))
-                        .unwrap_or(false)
+                        .get(physical_index)
+                        .and_then(|physical_column| {
+                            // Find the corresponding index in the logical table schema
+                            logical_column_name_to_index
+                                .get(physical_column.name.as_str())
+                                .copied()
+                        })
                 })
-                .cloned()
                 .collect();
 
             let new_table = DistTable::table(Arc::new(new_table_info));
