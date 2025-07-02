@@ -167,17 +167,6 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
 
-            // Create a mapping from column name to index in the logical table
-            let logical_column_name_to_index: std::collections::HashMap<&str, usize> =
-                new_table_info
-                    .meta
-                    .schema
-                    .column_schemas()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, col)| (col.name.as_str(), index))
-                    .collect();
-
             // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
@@ -194,9 +183,10 @@ impl KvBackendCatalogManager {
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
-                            logical_column_name_to_index
-                                .get(physical_column.name.as_str())
-                                .copied()
+                            new_table_info
+                                .meta
+                                .schema
+                                .column_index_by_name(physical_column.name.as_str())
                         })
                 })
                 .collect();
