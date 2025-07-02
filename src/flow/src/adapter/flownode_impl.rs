@@ -41,7 +41,6 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::adapter::{CreateFlowArgs, StreamingEngine};
 use crate::batching_mode::engine::BatchingEngine;
-use crate::batching_mode::{FRONTEND_SCAN_TIMEOUT, MIN_REFRESH_DURATION};
 use crate::engine::FlowEngine;
 use crate::error::{
     CreateFlowSnafu, ExternalSnafu, FlowNotFoundSnafu, FlowNotRecoveredSnafu,
@@ -440,13 +439,15 @@ struct ConsistentCheckTask {
 impl ConsistentCheckTask {
     async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
         let engine = engine.clone();
+        let min_refresh_duration = engine.batching_engine().batch_opts.min_refresh_duration;
+        let frontend_scan_timeout = engine.batching_engine().batch_opts.frontend_scan_timeout;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
             // first check if available frontend is found
             if let Err(err) = engine
-                .wait_for_available_frontend(FRONTEND_SCAN_TIMEOUT)
+                .wait_for_available_frontend(frontend_scan_timeout)
                 .await
             {
                 warn!("No frontend is available yet:\n {err:?}");
@@ -459,9 +460,9 @@ impl ConsistentCheckTask {
                 error!(
                     "Failed to recover flows:\n {err:?}, retry {} in {}s",
                     recover_retry,
-                    MIN_REFRESH_DURATION.as_secs()
+                    min_refresh_duration.as_secs()
                 );
-                tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                tokio::time::sleep(min_refresh_duration).await;
             }
 
             engine.set_done_recovering();

@@ -38,10 +38,7 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
-use crate::batching_mode::{
-    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, FRONTEND_ACTIVITY_TIMEOUT, GRPC_CONN_TIMEOUT,
-    GRPC_MAX_RETRIES,
-};
+use crate::batching_mode::BatchingModeOptions;
 use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
 use crate::{Error, FlowAuthHeader};
 
@@ -88,6 +85,7 @@ pub enum FrontendClient {
         chnl_mgr: ChannelManager,
         auth: Option<FlowAuthHeader>,
         query: QueryOptions,
+        batch_opts: BatchingModeOptions,
     },
     Standalone {
         /// for the sake of simplicity still use grpc even in standalone mode
@@ -114,18 +112,20 @@ impl FrontendClient {
         meta_client: Arc<MetaClient>,
         auth: Option<FlowAuthHeader>,
         query: QueryOptions,
+        batch_opts: BatchingModeOptions,
     ) -> Self {
         common_telemetry::info!("Frontend client build with auth={:?}", auth);
         Self::Distributed {
             meta_client,
             chnl_mgr: {
                 let cfg = ChannelConfig::new()
-                    .connect_timeout(GRPC_CONN_TIMEOUT)
-                    .timeout(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT);
+                    .connect_timeout(batch_opts.grpc_conn_timeout)
+                    .timeout(batch_opts.query_timeout);
                 ChannelManager::with_config(cfg)
             },
             auth,
             query,
+            batch_opts,
         }
     }
 
@@ -209,6 +209,7 @@ impl FrontendClient {
             chnl_mgr,
             auth,
             query: _,
+            batch_opts,
         } = self
         else {
             return UnexpectedSnafu {
@@ -217,9 +218,9 @@ impl FrontendClient {
             .fail();
         };
 
-        let mut interval = tokio::time::interval(GRPC_CONN_TIMEOUT);
+        let mut interval = tokio::time::interval(batch_opts.grpc_conn_timeout);
         interval.tick().await;
-        for retry in 0..GRPC_MAX_RETRIES {
+        for retry in 0..batch_opts.grpc_max_retries {
             let mut frontends = self.scan_for_frontend().await?;
             let now_in_ms = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -233,7 +234,8 @@ impl FrontendClient {
                 .iter()
                 // filter out frontend that have been down for more than 1 min
                 .filter(|(_, node_info)| {
-                    node_info.last_activity_ts + FRONTEND_ACTIVITY_TIMEOUT.as_millis() as i64
+                    node_info.last_activity_ts
+                        + batch_opts.frontend_activity_timeout.as_millis() as i64
                         > now_in_ms
                 })
             {
@@ -263,7 +265,7 @@ impl FrontendClient {
         }
 
         NoAvailableFrontendSnafu {
-            timeout: GRPC_CONN_TIMEOUT,
+            timeout: batch_opts.grpc_conn_timeout,
             context: "No available frontend found that is able to process query",
         }
         .fail()
@@ -346,7 +348,9 @@ impl FrontendClient {
         peer_desc: &mut Option<PeerDesc>,
     ) -> Result<u32, Error> {
         match self {
-            FrontendClient::Distributed { query, .. } => {
+            FrontendClient::Distributed {
+                query, batch_opts, ..
+            } => {
                 let db = self.get_random_active_frontend(catalog, schema).await?;
 
                 *peer_desc = Some(PeerDesc::Dist {
@@ -356,7 +360,7 @@ impl FrontendClient {
                 db.database
                     .handle_with_retry(
                         req.clone(),
-                        GRPC_MAX_RETRIES,
+                        batch_opts.grpc_max_retries,
                         &[(QUERY_PARALLELISM_HINT, &query.parallelism.to_string())],
                     )
                     .await

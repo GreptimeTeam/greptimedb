@@ -28,7 +28,6 @@ use tokio::time::Instant;
 
 use crate::batching_mode::task::BatchingTask;
 use crate::batching_mode::time_window::TimeWindowExpr;
-use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE,
@@ -89,10 +88,11 @@ impl TaskState {
         &self,
         flow_id: FlowId,
         time_window_size: &Option<Duration>,
+        min_refresh_duration: Duration,
         max_timeout: Option<Duration>,
     ) -> Instant {
         // = last query duration, capped by [max(min_run_interval, time_window_size), max_timeout], note at most `max_timeout`
-        let lower = time_window_size.unwrap_or(MIN_REFRESH_DURATION);
+        let lower = time_window_size.unwrap_or(min_refresh_duration);
         let next_duration = self.last_query_duration.max(lower);
         let next_duration = if let Some(max_timeout) = max_timeout {
             next_duration.min(max_timeout)

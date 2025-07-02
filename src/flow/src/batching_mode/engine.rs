@@ -34,9 +34,10 @@ use store_api::storage::{RegionId, TableId};
 use tokio::sync::{oneshot, RwLock};
 
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::task::BatchingTask;
+use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
+use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
     ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
@@ -57,6 +58,9 @@ pub struct BatchingEngine {
     table_meta: TableMetadataManagerRef,
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
+    /// Batching mode options for control how batching mode query works
+    ///
+    pub(crate) batch_opts: Arc<BatchingModeOptions>,
 }
 
 impl BatchingEngine {
@@ -66,6 +70,7 @@ impl BatchingEngine {
         flow_metadata_manager: FlowMetadataManagerRef,
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
+        batch_opts: BatchingModeOptions,
     ) -> Self {
         Self {
             tasks: Default::default(),
@@ -75,6 +80,7 @@ impl BatchingEngine {
             table_meta,
             catalog_manager,
             query_engine,
+            batch_opts: Arc::new(batch_opts),
         }
     }
 
@@ -424,18 +430,21 @@ impl BatchingEngine {
                 .unwrap_or("None".to_string())
         );
 
-        let task = BatchingTask::try_new(
+        let task_args = TaskArgs {
             flow_id,
-            &sql,
+            query: &sql,
             plan,
-            phy_expr,
+            time_window_expr: phy_expr,
             expire_after,
             sink_table_name,
             source_table_names,
             query_ctx,
-            self.catalog_manager.clone(),
-            rx,
-        )?;
+            catalog_manager: self.catalog_manager.clone(),
+            shutdown_rx: rx,
+            batch_opts: self.batch_opts.clone(),
+        };
+
+        let task = BatchingTask::try_new(task_args)?;
 
         let task_inner = task.clone();
         let engine = self.query_engine.clone();

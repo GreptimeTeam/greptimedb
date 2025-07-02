@@ -52,9 +52,7 @@ use crate::batching_mode::utils::{
     get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
     FindGroupByFinalName,
 };
-use crate::batching_mode::{
-    DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT, MIN_REFRESH_DURATION, SLOW_QUERY_THRESHOLD,
-};
+use crate::batching_mode::BatchingModeOptions;
 use crate::df_optimizer::apply_df_optimizer;
 use crate::error::{
     ConvertColumnSchemaSnafu, DatafusionSnafu, ExternalSnafu, InvalidQuerySnafu,
@@ -81,6 +79,7 @@ pub struct TaskConfig {
     pub source_table_names: HashSet<[String; 3]>,
     catalog_manager: CatalogManagerRef,
     query_type: QueryType,
+    batch_opts: Arc<BatchingModeOptions>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -116,19 +115,37 @@ pub struct BatchingTask {
     pub state: Arc<RwLock<TaskState>>,
 }
 
+/// Arguments for creating batching task
+pub struct TaskArgs<'a> {
+    pub flow_id: FlowId,
+    pub query: &'a str,
+    pub plan: LogicalPlan,
+    pub time_window_expr: Option<TimeWindowExpr>,
+    pub expire_after: Option<i64>,
+    pub sink_table_name: [String; 3],
+    pub source_table_names: Vec<[String; 3]>,
+    pub query_ctx: QueryContextRef,
+    pub catalog_manager: CatalogManagerRef,
+    pub shutdown_rx: oneshot::Receiver<()>,
+    pub batch_opts: Arc<BatchingModeOptions>,
+}
+
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
-        flow_id: FlowId,
-        query: &str,
-        plan: LogicalPlan,
-        time_window_expr: Option<TimeWindowExpr>,
-        expire_after: Option<i64>,
-        sink_table_name: [String; 3],
-        source_table_names: Vec<[String; 3]>,
-        query_ctx: QueryContextRef,
-        catalog_manager: CatalogManagerRef,
-        shutdown_rx: oneshot::Receiver<()>,
+        TaskArgs {
+            flow_id,
+            query,
+            plan,
+            time_window_expr,
+            expire_after,
+            sink_table_name,
+            source_table_names,
+            query_ctx,
+            catalog_manager,
+            shutdown_rx,
+            batch_opts,
+        }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         Ok(Self {
             config: Arc::new(TaskConfig {
@@ -141,6 +158,7 @@ impl BatchingTask {
                 catalog_manager,
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
+                batch_opts,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         })
@@ -386,7 +404,7 @@ impl BatchingTask {
         }
 
         // record slow query
-        if elapsed >= SLOW_QUERY_THRESHOLD {
+        if elapsed >= self.config.batch_opts.slow_query_threshold {
             warn!(
                 "Flow {flow_id} on frontend {:?} executed for {:?} before complete, query: {}",
                 peer_desc, elapsed, &plan
@@ -439,12 +457,14 @@ impl BatchingTask {
                 .with_label_values(&[&flow_id_str])
                 .inc();
 
+            let min_refresh = self.config.batch_opts.min_refresh_duration;
+
             let new_query = match self.gen_insert_plan(&engine, None).await {
                 Ok(new_query) => new_query,
                 Err(err) => {
                     common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
                     // also sleep for a little while before try again to prevent flooding logs
-                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    tokio::time::sleep(min_refresh).await;
                     continue;
                 }
             };
@@ -468,7 +488,8 @@ impl BatchingTask {
                                 .time_window_expr
                                 .as_ref()
                                 .and_then(|t| *t.time_window_size()),
-                            Some(DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT),
+                            min_refresh,
+                            Some(self.config.batch_opts.query_timeout),
                         )
                     };
                     tokio::time::sleep_until(sleep_until).await;
@@ -477,9 +498,9 @@ impl BatchingTask {
                 Ok(None) => {
                     debug!(
                         "Flow id = {:?} found no new data, sleep for {:?} then continue",
-                        self.config.flow_id, MIN_REFRESH_DURATION
+                        self.config.flow_id, min_refresh
                     );
-                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    tokio::time::sleep(min_refresh).await;
                     continue;
                 }
                 // TODO(discord9): this error should have better place to go, but for now just print error, also more context is needed
@@ -496,7 +517,7 @@ impl BatchingTask {
                         }
                     }
                     // also sleep for a little while before try again to prevent flooding logs
-                    tokio::time::sleep(MIN_REFRESH_DURATION).await;
+                    tokio::time::sleep(min_refresh).await;
                 }
             }
         }
