@@ -54,13 +54,13 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "", "", "");
 
 -- Issue 5726 --
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 15, '5s') label_replace(vector(1), "host", "host1", "", "");
+TQL EVAL(0, 15, '5s') label_replace(vector(1), "host", "host1", "", "");
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host1", "", "");
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host1", "", "");
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 15, '5s') {__name__="test",host="host1"} + label_replace(vector(1), "host", "host1", "", "");
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} + label_replace(vector(1), "host", "host1", "", "");
 
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1
