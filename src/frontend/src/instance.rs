@@ -25,9 +25,11 @@ mod promql;
 mod region_query;
 pub mod standalone;
 
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
+use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::process_manager::ProcessManagerRef;
@@ -45,8 +47,11 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
+use common_recordbatch::error::StreamTimeoutSnafu;
+use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
+use futures::{Stream, StreamExt};
 use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
@@ -66,20 +71,21 @@ use servers::interceptor::{
 };
 use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    TableOperationSnafu,
+    StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
 use crate::slow_query_recorder::SlowQueryRecorder;
@@ -191,56 +197,7 @@ impl Instance {
             Some(query_ctx.process_id()),
         );
 
-        let query_fut = async {
-            match stmt {
-                Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                    // TODO: remove this when format is supported in datafusion
-                    if let Statement::Explain(explain) = &stmt {
-                        if let Some(format) = explain.format() {
-                            query_ctx.set_explain_format(format.to_string());
-                        }
-                    }
-
-                    let stmt = QueryStatement::Sql(stmt);
-                    let plan = self
-                        .statement_executor
-                        .plan(&stmt, query_ctx.clone())
-                        .await?;
-
-                    let QueryStatement::Sql(stmt) = stmt else {
-                        unreachable!()
-                    };
-                    query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
-                    self.statement_executor
-                        .exec_plan(plan, query_ctx)
-                        .await
-                        .context(TableOperationSnafu)
-                }
-                Statement::Tql(tql) => {
-                    let plan = self
-                        .statement_executor
-                        .plan_tql(tql.clone(), &query_ctx)
-                        .await?;
-
-                    query_interceptor.pre_execute(
-                        &Statement::Tql(tql),
-                        Some(&plan),
-                        query_ctx.clone(),
-                    )?;
-                    self.statement_executor
-                        .exec_plan(plan, query_ctx)
-                        .await
-                        .context(TableOperationSnafu)
-                }
-                _ => {
-                    query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
-                    self.statement_executor
-                        .execute_sql(stmt, query_ctx)
-                        .await
-                        .context(TableOperationSnafu)
-                }
-            }
-        };
+        let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
 
         CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
@@ -257,6 +214,149 @@ impl Instance {
                 Output { data, meta }
             })
     }
+
+    async fn exec_statement_with_timeout(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+        query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+    ) -> Result<Output> {
+        let timeout = derive_timeout(&stmt, &query_ctx);
+        match timeout {
+            Some(timeout) => {
+                let start = tokio::time::Instant::now();
+                let output = tokio::time::timeout(
+                    timeout,
+                    self.exec_statement(stmt, query_ctx, query_interceptor),
+                )
+                .await
+                .map_err(|_| StatementTimeoutSnafu.build())??;
+                // compute remaining timeout
+                let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
+                attach_timeout(output, remaining_timeout)
+            }
+            None => {
+                self.exec_statement(stmt, query_ctx, query_interceptor)
+                    .await
+            }
+        }
+    }
+
+    async fn exec_statement(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+        query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+    ) -> Result<Output> {
+        match stmt {
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
+                // TODO: remove this when format is supported in datafusion
+                if let Statement::Explain(explain) = &stmt {
+                    if let Some(format) = explain.format() {
+                        query_ctx.set_explain_format(format.to_string());
+                    }
+                }
+
+                self.plan_and_exec_sql(stmt, &query_ctx, query_interceptor)
+                    .await
+            }
+            Statement::Tql(tql) => {
+                self.plan_and_exec_tql(&query_ctx, query_interceptor, tql)
+                    .await
+            }
+            _ => {
+                query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+                self.statement_executor
+                    .execute_sql(stmt, query_ctx)
+                    .await
+                    .context(TableOperationSnafu)
+            }
+        }
+    }
+
+    async fn plan_and_exec_sql(
+        &self,
+        stmt: Statement,
+        query_ctx: &QueryContextRef,
+        query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+    ) -> Result<Output> {
+        let stmt = QueryStatement::Sql(stmt);
+        let plan = self
+            .statement_executor
+            .plan(&stmt, query_ctx.clone())
+            .await?;
+        let QueryStatement::Sql(stmt) = stmt else {
+            unreachable!()
+        };
+        query_interceptor.pre_execute(&stmt, Some(&plan), query_ctx.clone())?;
+        self.statement_executor
+            .exec_plan(plan, query_ctx.clone())
+            .await
+            .context(TableOperationSnafu)
+    }
+
+    async fn plan_and_exec_tql(
+        &self,
+        query_ctx: &QueryContextRef,
+        query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
+        tql: Tql,
+    ) -> Result<Output> {
+        let plan = self
+            .statement_executor
+            .plan_tql(tql.clone(), query_ctx)
+            .await?;
+        query_interceptor.pre_execute(&Statement::Tql(tql), Some(&plan), query_ctx.clone())?;
+        self.statement_executor
+            .exec_plan(plan, query_ctx.clone())
+            .await
+            .context(TableOperationSnafu)
+    }
+}
+
+/// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
+/// For MySQL, it applies only to read-only statements.
+fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Duration> {
+    let query_timeout = query_ctx.query_timeout()?;
+    match (query_ctx.channel(), stmt) {
+        (Channel::Mysql, Statement::Query(_)) | (Channel::Postgres, _) => Some(query_timeout),
+        (_, _) => None,
+    }
+}
+
+fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
+    if timeout.is_zero() {
+        return StatementTimeoutSnafu.fail();
+    }
+
+    let output = match output.data {
+        OutputData::AffectedRows(_) | OutputData::RecordBatches(_) => output,
+        OutputData::Stream(mut stream) => {
+            let schema = stream.schema();
+            let s = Box::pin(stream! {
+                let mut start = tokio::time::Instant::now();
+                while let Some(item) = tokio::time::timeout(timeout, stream.next()).await.map_err(|_| StreamTimeoutSnafu.build())? {
+                    yield item;
+
+                    let now = tokio::time::Instant::now();
+                    timeout = timeout.checked_sub(now - start).unwrap_or(Duration::ZERO);
+                    start = now;
+                    // tokio::time::timeout may not return an error immediately when timeout is 0.
+                    if timeout.is_zero() {
+                        StreamTimeoutSnafu.fail()?;
+                    }
+                }
+            }) as Pin<Box<dyn Stream<Item = _> + Send>>;
+            let stream = RecordBatchStreamWrapper {
+                schema,
+                stream: s,
+                output_ordering: None,
+                metrics: Default::default(),
+            };
+            Output::new(OutputData::Stream(Box::pin(stream)), output.meta)
+        }
+    };
+
+    Ok(output)
 }
 
 #[async_trait]

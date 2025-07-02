@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
+async-stream.workspace = true
 async-trait.workspace = true
 auth.workspace = true
 bytes.workspace = true
