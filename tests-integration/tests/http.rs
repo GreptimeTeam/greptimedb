@@ -1119,6 +1119,15 @@ max_running_procedures = 128
 
 [flow]
 
+[flow.batching_mode]
+query_timeout = "10m"
+slow_query_threshold = "1m"
+min_refresh_duration = "5s"
+grpc_conn_timeout = "5s"
+grpc_max_retries = 3
+frontend_scan_timeout = "30s"
+frontend_activity_timeout = "1m"
+
 [logging]
 max_log_files = 720
 append_stdout = true
