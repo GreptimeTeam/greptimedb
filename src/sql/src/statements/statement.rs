@@ -143,6 +143,67 @@ pub enum Statement {
     Kill(Kill),
 }
 
+impl Statement {
+    pub fn is_readonly(&self) -> bool {
+        match self {
+            // Read-only operations
+            Statement::Query(_)
+            | Statement::ShowDatabases(_)
+            | Statement::ShowTables(_)
+            | Statement::ShowTableStatus(_)
+            | Statement::ShowColumns(_)
+            | Statement::ShowCharset(_)
+            | Statement::ShowCollation(_)
+            | Statement::ShowIndex(_)
+            | Statement::ShowRegion(_)
+            | Statement::ShowCreateDatabase(_)
+            | Statement::ShowCreateTable(_)
+            | Statement::ShowCreateFlow(_)
+            | Statement::ShowFlows(_)
+            | Statement::ShowCreateView(_)
+            | Statement::ShowStatus(_)
+            | Statement::ShowSearchPath(_)
+            | Statement::ShowViews(_)
+            | Statement::DescribeTable(_)
+            | Statement::Explain(_)
+            | Statement::ShowVariables(_)
+            | Statement::ShowProcesslist(_)
+            | Statement::FetchCursor(_)
+            | Statement::Tql(_) => true,
+
+            #[cfg(feature = "enterprise")]
+            Statement::ShowTriggers(_) => true,
+
+            // Write operations
+            Statement::Insert(_)
+            | Statement::Delete(_)
+            | Statement::CreateTable(_)
+            | Statement::CreateExternalTable(_)
+            | Statement::CreateTableLike(_)
+            | Statement::CreateFlow(_)
+            | Statement::CreateView(_)
+            | Statement::DropTable(_)
+            | Statement::DropDatabase(_)
+            | Statement::DropFlow(_)
+            | Statement::DropView(_)
+            | Statement::CreateDatabase(_)
+            | Statement::AlterTable(_)
+            | Statement::AlterDatabase(_)
+            | Statement::Copy(_)
+            | Statement::TruncateTable(_)
+            | Statement::SetVariables(_)
+            | Statement::Use(_)
+            | Statement::DeclareCursor(_)
+            | Statement::CloseCursor(_)
+            | Statement::Kill(_)
+            | Statement::Admin(_) => false,
+
+            #[cfg(feature = "enterprise")]
+            Statement::CreateTrigger(_) | Statement::DropTrigger(_) => false,
+        }
+    }
+}
+
 impl Display for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
