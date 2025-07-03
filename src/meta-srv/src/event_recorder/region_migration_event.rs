@@ -19,9 +19,9 @@ use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
-use chrono::Utc;
 use common_procedure::error::Error;
 use common_procedure::ProcedureId;
+use common_time::timestamp::{TimeUnit, Timestamp};
 
 use crate::event_recorder::Event;
 use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
@@ -29,6 +29,7 @@ use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
 pub const REGION_MIGRATION_EVENTS_TABLE_NAME: &str = "region_migration_events";
 
 pub const REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME: &str = "procedure_id";
+pub const REGION_MIGRATION_EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
 pub const REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME: &str = "region_id";
 pub const REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME: &str = "from_datanode_id";
 pub const REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ADDR_COLUMN_NAME: &str = "from_datanode_addr";
@@ -45,7 +46,7 @@ pub struct RegionMigrationEvent {
     pub(crate) task: RegionMigrationProcedureTask,
     pub(crate) procedure_id: ProcedureId,
     pub(crate) status: RegionMigrationStatus,
-    pub(crate) timestamp: i64,
+    pub(crate) timestamp: Timestamp,
 }
 
 /// RegionMigrationStatus is the status of the whole region migration procedure.
@@ -104,7 +105,7 @@ impl RegionMigrationEvent {
             task,
             procedure_id,
             status,
-            timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            timestamp: Timestamp::current_time(TimeUnit::Nanosecond),
         }
     }
 
@@ -123,6 +124,12 @@ impl RegionMigrationEvent {
             ColumnSchema {
                 column_name: REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::Uint64.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: REGION_MIGRATION_EVENTS_TABLE_TABLE_ID_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::Uint32.into(),
                 semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             },
@@ -183,6 +190,7 @@ impl RegionMigrationEvent {
             values: vec![
                 ValueData::StringValue(self.procedure_id.to_string()).into(),
                 ValueData::U64Value(self.task.region_id.as_u64()).into(),
+                ValueData::U32Value(self.task.region_id.table_id() as u32).into(),
                 ValueData::U64Value(self.task.from_peer.id).into(),
                 ValueData::StringValue(self.task.from_peer.addr.to_string()).into(),
                 ValueData::U64Value(self.task.to_peer.id).into(),
@@ -190,7 +198,7 @@ impl RegionMigrationEvent {
                 ValueData::StringValue(self.task.trigger_reason.to_string()).into(),
                 ValueData::U64Value(self.task.timeout.as_millis() as u64).into(),
                 ValueData::StringValue(self.status.to_string()).into(),
-                ValueData::TimestampNanosecondValue(self.timestamp).into(),
+                ValueData::TimestampNanosecondValue(self.timestamp.value()).into(),
             ],
         }
     }
