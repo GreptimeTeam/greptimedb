@@ -167,7 +167,6 @@ impl Statement {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::ShowVariables(_)
-            | Statement::ShowProcesslist(_)
             | Statement::FetchCursor(_)
             | Statement::Tql(_) => true,
 
@@ -199,7 +198,7 @@ impl Statement {
             | Statement::Admin(_) => false,
 
             #[cfg(feature = "enterprise")]
-            Statement::CreateTrigger(_) | Statement::DropTrigger(_) => false,
+            Statement::CreateTrigger(_) => false,
         }
     }
 }
