@@ -1569,7 +1569,7 @@ fn parse_partitions(
             }
         }
     }
-    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs)
+    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs, true)
         .context(InvalidPartitionSnafu)?;
 
     Ok((
