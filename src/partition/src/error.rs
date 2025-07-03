@@ -140,21 +140,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Conjunct expr with non-expr is invalid"))]
-    ConjunctExprWithNonExpr {
-        expr: PartitionExpr,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unclosed value {} on column {}", value, column))]
-    UnclosedValue {
-        value: String,
-        column: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid partition expr: {:?}", expr))]
     InvalidExpr {
         expr: PartitionExpr,
@@ -235,6 +220,27 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Duplicate expr: {:?}", expr))]
+    DuplicateExpr {
+        expr: PartitionExpr,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Checkpoint `{}` is not covered", checkpoint))]
+    CheckpointNotCovered {
+        checkpoint: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Checkpoint `{}` is overlapped", checkpoint))]
+    CheckpointOverlapped {
+        checkpoint: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -243,11 +249,12 @@ impl ErrorExt for Error {
             Error::GetCache { .. } => StatusCode::StorageUnavailable,
             Error::FindLeader { .. } => StatusCode::TableUnavailable,
 
-            Error::ConjunctExprWithNonExpr { .. }
-            | Error::UnclosedValue { .. }
-            | Error::InvalidExpr { .. }
+            Error::InvalidExpr { .. }
             | Error::NoExprOperand { .. }
-            | Error::UndefinedColumn { .. } => StatusCode::InvalidArguments,
+            | Error::UndefinedColumn { .. }
+            | Error::DuplicateExpr { .. }
+            | Error::CheckpointNotCovered { .. }
+            | Error::CheckpointOverlapped { .. } => StatusCode::InvalidArguments,
 
             Error::RegionKeysSize { .. }
             | Error::InvalidInsertRequest { .. }
