@@ -40,6 +40,7 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
+use crate::cluster::MetaPeerClientBuilder;
 use crate::error::{self, Error, Result};
 use crate::event_recorder::{EventRecorderImpl, EventRecorderRef};
 use crate::metasrv::MetasrvInfo;
@@ -99,7 +100,15 @@ impl TestingEnv {
             None,
         ));
 
-        let event_recorder = Arc::new(EventRecorderImpl::new(kv_backend.clone()));
+        let event_recorder = Arc::new(EventRecorderImpl::new(
+            MetaPeerClientBuilder::default()
+                .election(None)
+                .in_memory(kv_backend.clone())
+                .build()
+                .map(Arc::new)
+                // Safety: all required fields set at initialization
+                .unwrap(),
+        ));
 
         Self {
             table_metadata_manager,

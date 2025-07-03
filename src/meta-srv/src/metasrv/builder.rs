@@ -184,9 +184,6 @@ impl MetasrvBuilder {
             Some(_) => State::follower(options.grpc.server_addr.to_string()),
         }));
 
-        // Builds the event recorder to record important events and persist them as the system table.
-        let event_recorder = Arc::new(EventRecorderImpl::new(in_memory.clone()));
-
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
             state.clone(),
             kv_backend.clone(),
@@ -194,6 +191,10 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+
+        // Builds the event recorder to record important events and persist them as the system table.
+        let event_recorder = Arc::new(EventRecorderImpl::new(meta_peer_client.clone()));
+
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);

@@ -24,6 +24,9 @@ use crate::{DatanodeId, FlownodeId};
 pub trait PeerLookupService {
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>, Error>;
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
+
+    /// Get all available frontends from the memory backend.
+    async fn frontends(&self) -> Result<Vec<Peer>, Error>;
 }
 
 pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;

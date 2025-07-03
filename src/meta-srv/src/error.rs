@@ -916,6 +916,12 @@ pub enum Error {
         #[snafu(source)]
         source: BoxedError,
     },
+
+    #[snafu(display("No available frontend"))]
+    NoAvailableFrontend {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -970,6 +976,7 @@ impl ErrorExt for Error {
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
             | Error::InsertEvents { .. }
+            | Error::NoAvailableFrontend { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,

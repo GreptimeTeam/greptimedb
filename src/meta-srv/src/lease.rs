@@ -20,8 +20,10 @@ use std::task::{Context, Poll};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
+use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
+use common_meta::rpc::store::RangeRequest;
 use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use common_workload::DatanodeWorkloadType;
@@ -203,6 +205,29 @@ pub async fn lookup_flownode_peer(
     }
 }
 
+/// Lookup all alive frontends from the memory backend, only return if it's alive under given `lease_secs`.
+pub async fn lookup_frontends(
+    meta_peer_client: &MetaPeerClientRef,
+    lease_secs: u64,
+) -> Result<Vec<Peer>> {
+    let range_request =
+        RangeRequest::new().with_prefix(NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend));
+
+    let response = meta_peer_client.range(range_request).await?;
+
+    let mut peers = Vec::with_capacity(response.kvs.len());
+    for kv in response.kvs {
+        let node_info = NodeInfo::try_from(kv.value).context(KvBackendSnafu)?;
+        let is_alive = ((time_util::current_time_millis() - node_info.last_activity_ts) as u64)
+            < lease_secs.saturating_mul(1000);
+        if is_alive {
+            peers.push(node_info.peer);
+        }
+    }
+
+    Ok(peers)
+}
+
 /// Find all alive flownodes
 pub fn alive_flownodes(
     meta_peer_client: &MetaPeerClientRef,
@@ -266,6 +291,12 @@ impl PeerLookupService for MetaPeerLookupService {
     }
     async fn flownode(&self, id: FlownodeId) -> common_meta::error::Result<Option<Peer>> {
         lookup_flownode_peer(id, &self.meta_peer_client, u64::MAX)
+            .await
+            .map_err(BoxedError::new)
+            .context(common_meta::error::ExternalSnafu)
+    }
+    async fn frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
+        lookup_frontends(&self.meta_peer_client, u64::MAX)
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)

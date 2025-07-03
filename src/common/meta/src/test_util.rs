@@ -213,6 +213,10 @@ impl PeerLookupService for NoopPeerLookupService {
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>> {
         Ok(Some(Peer::empty(id)))
     }
+
+    async fn frontends(&self) -> Result<Vec<Peer>> {
+        Ok(vec![])
+    }
 }
 
 /// Create a kafka topic pool for testing.

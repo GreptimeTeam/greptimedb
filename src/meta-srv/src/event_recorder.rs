@@ -23,16 +23,18 @@ use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
-use common_meta::kv_backend::ResettableKvBackendRef;
-use common_meta::rpc::store::RangeRequest;
+use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 
-use crate::error::{InsertEventsSnafu, KvBackendSnafu, Result, SendEventSnafu};
+use crate::cluster::MetaPeerClientRef;
+use crate::error::{
+    InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result, SendEventSnafu,
+};
+use crate::lease::MetaPeerLookupService;
 
 mod region_migration_event;
 
@@ -80,8 +82,8 @@ pub trait EventHandler: Send + Sync + 'static {
 pub struct EventRecorderImpl {
     // The channel to send the events to the background processor.
     tx: Sender<Box<dyn Event>>,
-    // The in-memory key-value backend to fetch the available frontend addresses.
-    in_memory_key: ResettableKvBackendRef,
+    // The peer lookup service to fetch the available frontend addresses.
+    peer_lookup_service: PeerLookupServiceRef,
     // The background processor to process the events.
     _handle: Option<Arc<JoinHandle<()>>>,
 }
@@ -98,19 +100,20 @@ impl EventRecorder for EventRecorderImpl {
     // The default event handler implementation sends the received events to the frontend instances.
     fn build_event_handler(&self) -> Box<dyn EventHandler> {
         Box::new(DefaultEventHandlerImpl {
-            in_memory_key: self.in_memory_key.clone(),
+            peer_lookup_service: self.peer_lookup_service.clone(),
         })
     }
 }
 
 impl EventRecorderImpl {
     /// Creates a new event recorder to record important events and persist them to the database.
-    pub fn new(in_memory_key: ResettableKvBackendRef) -> Self {
+    pub fn new(meta_peer_client: MetaPeerClientRef) -> Self {
         let (tx, rx) = channel(DEFAULT_EVENTS_CHANNEL_SIZE);
+        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client));
 
         let mut recorder = Self {
             tx,
-            in_memory_key,
+            peer_lookup_service,
             _handle: None,
         };
 
@@ -129,7 +132,7 @@ impl EventRecorderImpl {
 
 // DefaultEventHandlerImpl is the default event handler implementation. It sends the received events to the frontend instances.
 struct DefaultEventHandlerImpl {
-    in_memory_key: ResettableKvBackendRef,
+    peer_lookup_service: PeerLookupServiceRef,
 }
 
 #[async_trait]
@@ -159,20 +162,20 @@ impl EventHandler for DefaultEventHandlerImpl {
 
 impl DefaultEventHandlerImpl {
     async fn build_database_client(&self) -> Result<Database> {
-        // Build a range request to get all available frontend addresses.
-        let range_request = RangeRequest::new()
-            .with_prefix(NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend));
-        let response = self
-            .in_memory_key
-            .range(range_request)
+        let frontends = self
+            .peer_lookup_service
+            .frontends()
             .await
             .context(KvBackendSnafu)?;
 
-        let mut urls = Vec::with_capacity(response.kvs.len());
-        for kv in response.kvs {
-            let node_info = NodeInfo::try_from(kv.value).context(KvBackendSnafu)?;
-            urls.push(node_info.peer.addr);
+        if frontends.is_empty() {
+            return NoAvailableFrontendSnafu.fail();
         }
+
+        let urls = frontends
+            .into_iter()
+            .map(|peer| peer.addr)
+            .collect::<Vec<_>>();
 
         debug!("Available frontend addresses: {:?}", urls);
 
