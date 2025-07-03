@@ -450,6 +450,7 @@ mod tests {
     use crate::parser::{ParseOptions, ParserContext};
     use crate::parsers::with_tql_parser::CteContent;
     use crate::statements::statement::Statement;
+    use crate::statements::tql::Tql;
 
     #[test]
     fn test_tql_detection() {
@@ -495,16 +496,14 @@ mod tests {
         ));
 
         // Check that the query includes the parentheses (spaces are added by tokenizer)
-        if let CteContent::Tql(tql) = &hybrid_cte.cte_tables[0].content {
-            if let crate::statements::tql::Tql::Eval(eval) = tql {
-                // Verify that complex nested parentheses are preserved correctly
-                assert!(eval
-                    .query
-                    .contains("sum ( rate ( http_requests_total [ 1 m ] ) )"));
-                assert!(eval.query.contains("( max ( cpu_usage ) * ( 1 + 0.5 ) )"));
-                // Most importantly, verify the parentheses counting didn't break the parsing
-                assert!(eval.query.contains("+ ( max"));
-            }
+        if let CteContent::Tql(Tql::Eval(eval)) = &hybrid_cte.cte_tables[0].content {
+            // Verify that complex nested parentheses are preserved correctly
+            assert!(eval
+                .query
+                .contains("sum ( rate ( http_requests_total [ 1 m ] ) )"));
+            assert!(eval.query.contains("( max ( cpu_usage ) * ( 1 + 0.5 ) )"));
+            // Most importantly, verify the parentheses counting didn't break the parsing
+            assert!(eval.query.contains("+ ( max"));
         }
     }
 
