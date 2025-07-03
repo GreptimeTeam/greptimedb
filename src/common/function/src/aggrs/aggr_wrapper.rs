@@ -61,9 +61,12 @@ pub struct StateMergeWrapper {
 }
 
 impl StateMergeWrapper {
-    pub fn new(original: AggregateUDF) -> datafusion_common::Result<Self> {
+    pub fn new(
+        original: AggregateUDF,
+        state_to_input_types: StateTypeLookup,
+    ) -> datafusion_common::Result<Self> {
         let state_function = StateWrapper::new(original.clone())?;
-        let merge_function = MergeWrapper::new(original.clone())?;
+        let merge_function = MergeWrapper::new(original.clone(), state_to_input_types)?;
         Ok(Self {
             original,
             state_function,
@@ -141,7 +144,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
-        Ok(Box::new(StateAccumWrapper::new(inner)))
+        Ok(Box::new(StateAccum::new(inner)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -193,17 +196,17 @@ impl AggregateUDFImpl for StateWrapper {
 /// The wrapper's input is the same as the original aggregate function's input,
 /// and the output is the state function's output.
 #[derive(Debug)]
-pub struct StateAccumWrapper {
+pub struct StateAccum {
     inner: Box<dyn Accumulator>,
 }
 
-impl StateAccumWrapper {
+impl StateAccum {
     pub fn new(inner: Box<dyn Accumulator>) -> Self {
         Self { inner }
     }
 }
 
-impl Accumulator for StateAccumWrapper {
+impl Accumulator for StateAccum {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
         let fields = state
@@ -242,13 +245,16 @@ impl Accumulator for StateAccumWrapper {
     }
 }
 
+/// Find a valid input types from given state types.
+///
+/// Useful for merge functions that need to merge to use correct accumulator to merge states.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct StateToInputType {
+pub struct StateTypeLookup {
     /// A mapping from state types to input types.
-    mapping: BTreeMap<Vec<DataType>, Vec<DataType>>,
+    pub mapping: BTreeMap<Vec<DataType>, Vec<DataType>>,
 }
 
-impl StateToInputType {
+impl StateTypeLookup {
     /// Returns the input types for the given state types.
     ///
     /// Also handle certain data types that have extra args, like `Decimal128/256`, assuming only one of
@@ -315,9 +321,11 @@ impl StateToInputType {
     }
 }
 
+/// TODO(discord9): put this into a separate file or register side by side with  `AggregateUDF` impl directly
+#[allow(unused)]
 fn get_possible_state_to_input_types(
     inner: &AggregateUDF,
-) -> datafusion_common::Result<StateToInputType> {
+) -> datafusion_common::Result<StateTypeLookup> {
     let mut mapping = BTreeMap::new();
 
     fn update_input_types(
@@ -435,7 +443,7 @@ fn get_possible_state_to_input_types(
     }
     parse_ty_sig(inner, &inner.signature().type_signature, &mut mapping)?;
 
-    Ok(StateToInputType { mapping })
+    Ok(StateTypeLookup { mapping })
 }
 
 pub struct DataTypeIterator {
@@ -506,15 +514,16 @@ pub struct MergeWrapper {
     inner: AggregateUDF,
     name: String,
     merge_signature: Signature,
-    state_to_input_types: StateToInputType,
+    state_to_input_types: StateTypeLookup,
 }
 impl MergeWrapper {
-    pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
+    pub fn new(
+        inner: AggregateUDF,
+        state_to_input_types: StateTypeLookup,
+    ) -> datafusion_common::Result<Self> {
         let name = aggr_merge_func_name(inner.name());
         // the input type is actually struct type, which is the state fields of the original aggregate function.
         let merge_signature = Signature::user_defined(datafusion_expr::Volatility::Immutable);
-        // TODO: a mapping of acceptable input types to state fields' data types for the original function
-        let state_to_input_types = get_possible_state_to_input_types(&inner)?;
 
         Ok(Self {
             inner,
@@ -629,6 +638,9 @@ impl AggregateUDFImpl for MergeWrapper {
     }
 }
 
+/// The merge accumulator, which modify `update_batch`'s behavior to accept one struct array which
+/// include the state fields of original aggregate function, and merge said states into original accumulator
+/// the output is the same as original aggregate function
 #[derive(Debug)]
 pub struct MergeAccum {
     inner: Box<dyn Accumulator>,
@@ -693,7 +705,23 @@ mod tests {
         let sum = datafusion::functions_aggregate::sum::sum_udaf();
         let sum = (*sum).clone();
 
-        let wrapper = StateMergeWrapper::new(sum.clone()).unwrap();
+        let sum_state_to_input = StateTypeLookup {
+            mapping: BTreeMap::from([
+                (vec![DataType::Float64], vec![DataType::Float64]),
+                (vec![DataType::Int64], vec![DataType::Int64]),
+                (vec![DataType::UInt64], vec![DataType::UInt64]),
+                (
+                    vec![DataType::Decimal128(38, 18)],
+                    vec![DataType::Decimal128(38, 18)],
+                ),
+                (
+                    vec![DataType::Decimal256(76, 38)],
+                    vec![DataType::Decimal256(76, 38)],
+                ),
+            ]),
+        };
+
+        let wrapper = StateMergeWrapper::new(sum.clone(), sum_state_to_input.clone()).unwrap();
         let expected = StateMergeWrapper {
             original: sum.clone(),
             state_function: StateWrapper {
@@ -704,21 +732,7 @@ mod tests {
                 inner: sum.clone(),
                 name: "__sum_merge".to_string(),
                 merge_signature: Signature::user_defined(datafusion_expr::Volatility::Immutable),
-                state_to_input_types: StateToInputType {
-                    mapping: BTreeMap::from([
-                        (vec![DataType::Float64], vec![DataType::Float64]),
-                        (vec![DataType::Int64], vec![DataType::Int64]),
-                        (vec![DataType::UInt64], vec![DataType::UInt64]),
-                        (
-                            vec![DataType::Decimal128(38, 18)],
-                            vec![DataType::Decimal128(38, 18)],
-                        ),
-                        (
-                            vec![DataType::Decimal256(76, 38)],
-                            vec![DataType::Decimal256(76, 38)],
-                        ),
-                    ]),
-                },
+                state_to_input_types: sum_state_to_input.clone(),
             },
         };
         assert_eq!(wrapper, expected);
@@ -804,7 +818,27 @@ mod tests {
         let avg = datafusion::functions_aggregate::average::avg_udaf();
         let avg = (*avg).clone();
 
-        let wrapper = StateMergeWrapper::new(avg.clone()).unwrap();
+        let avg_type = StateTypeLookup {
+            mapping: {
+                use DataType::*;
+                BTreeMap::from([
+                    (vec![UInt64, Int8], vec![Int8]),
+                    (vec![UInt64, Int16], vec![Int16]),
+                    (vec![UInt64, Int32], vec![Int32]),
+                    (vec![UInt64, Int64], vec![Int64]),
+                    (vec![UInt64, UInt8], vec![UInt8]),
+                    (vec![UInt64, UInt16], vec![UInt16]),
+                    (vec![UInt64, UInt32], vec![UInt32]),
+                    (vec![UInt64, UInt64], vec![UInt64]),
+                    (vec![UInt64, Float32], vec![Float32]),
+                    (vec![UInt64, Float64], vec![Float64]),
+                    (vec![UInt64, Decimal128(38, 18)], vec![Decimal128(38, 18)]),
+                    (vec![UInt64, Decimal256(76, 38)], vec![Decimal256(76, 38)]),
+                ])
+            },
+        };
+
+        let wrapper = StateMergeWrapper::new(avg.clone(), avg_type.clone()).unwrap();
 
         let expected = StateMergeWrapper {
             original: avg.clone(),
@@ -816,25 +850,7 @@ mod tests {
                 inner: avg.clone(),
                 name: "__avg_merge".to_string(),
                 merge_signature: Signature::user_defined(datafusion_expr::Volatility::Immutable),
-                state_to_input_types: StateToInputType {
-                    mapping: {
-                        use DataType::*;
-                        BTreeMap::from([
-                            (vec![UInt64, Int8], vec![Int8]),
-                            (vec![UInt64, Int16], vec![Int16]),
-                            (vec![UInt64, Int32], vec![Int32]),
-                            (vec![UInt64, Int64], vec![Int64]),
-                            (vec![UInt64, UInt8], vec![UInt8]),
-                            (vec![UInt64, UInt16], vec![UInt16]),
-                            (vec![UInt64, UInt32], vec![UInt32]),
-                            (vec![UInt64, UInt64], vec![UInt64]),
-                            (vec![UInt64, Float32], vec![Float32]),
-                            (vec![UInt64, Float64], vec![Float64]),
-                            (vec![UInt64, Decimal128(38, 18)], vec![Decimal128(38, 18)]),
-                            (vec![UInt64, Decimal256(76, 38)], vec![Decimal256(76, 38)]),
-                        ])
-                    },
-                },
+                state_to_input_types: avg_type.clone(),
             },
         };
         assert_eq!(wrapper, expected);
