@@ -167,7 +167,8 @@ impl PartitionRuleManager {
             })
             .collect::<Vec<_>>();
 
-        let rule = MultiDimPartitionRule::try_new(partition_columns.clone(), regions, exprs)?;
+        let rule =
+            MultiDimPartitionRule::try_new(partition_columns.clone(), regions, exprs, false)?;
         Ok(Arc::new(rule) as _)
     }
 
