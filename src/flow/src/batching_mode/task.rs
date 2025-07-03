@@ -46,7 +46,7 @@ use tokio::time::Instant;
 
 use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::state::{DirtyTimeWindows, TaskState};
+use crate::batching_mode::state::TaskState;
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
     get_table_info_df_schema, sql_to_df_plan, AddAutoColumnRewriter, AddFilterRewriter,
@@ -481,15 +481,18 @@ impl BatchingTask {
                     let sleep_until = {
                         let state = self.state.write().unwrap();
 
+                        let time_window_size = self
+                            .config
+                            .time_window_expr
+                            .as_ref()
+                            .and_then(|t| *t.time_window_size());
+
                         state.get_next_start_query_time(
                             self.config.flow_id,
-                            &self
-                                .config
-                                .time_window_expr
-                                .as_ref()
-                                .and_then(|t| *t.time_window_size()),
+                            &time_window_size,
                             min_refresh,
                             Some(self.config.batch_opts.query_timeout),
+                            self.config.batch_opts.max_filter_num_per_query,
                         )
                     };
                     tokio::time::sleep_until(sleep_until).await;
@@ -625,7 +628,7 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
-                max_window_cnt.unwrap_or(DirtyTimeWindows::MAX_FILTER_NUM),
+                self.config.batch_opts.max_filter_num_per_query,
                 self.config.flow_id,
                 Some(self),
             )?;

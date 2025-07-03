@@ -570,6 +570,8 @@
 | `flow.batching_mode.grpc_max_retries` | Integer | `3` | Grpc max retry number |
 | `flow.batching_mode.frontend_scan_timeout` | String | `30s` | Flow wait for available frontend timeout,<br/>if failed to find available frontend after frontend_scan_timeout elapsed, return error<br/>which prevent flownode from starting |
 | `flow.batching_mode.frontend_activity_timeout` | String | `60s` | Frontend activity timeout<br/>if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,<br/>it will be removed from the list that flownode use to connect |
+| `flow.batching_mode.max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
+| `flow.batching_mode.time_window_merge_threshold` | Integer | `3` | Time window merge distance |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:6800` | The address advertised to the metasrv,<br/>and used for connections from outside the host |

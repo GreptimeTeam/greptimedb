@@ -90,6 +90,7 @@ impl TaskState {
         time_window_size: &Option<Duration>,
         min_refresh_duration: Duration,
         max_timeout: Option<Duration>,
+        max_filter_num_per_query: usize,
     ) -> Instant {
         // = last query duration, capped by [max(min_run_interval, time_window_size), max_timeout], note at most `max_timeout`
         let lower = time_window_size.unwrap_or(min_refresh_duration);
@@ -104,7 +105,7 @@ impl TaskState {
         // compute how much time range can be handled in one query
         let max_query_update_range = (*time_window_size)
             .unwrap_or_default()
-            .mul_f64(DirtyTimeWindows::MAX_FILTER_NUM as f64);
+            .mul_f64(max_filter_num_per_query as f64);
         // if dirty time range is more than one query can handle, execute immediately
         // to faster clean up dirty time windows
         if cur_dirty_window_size < max_query_update_range {
@@ -125,11 +126,36 @@ impl TaskState {
 
 /// For keep recording of dirty time windows, which is time window that have new data inserted
 /// since last query.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DirtyTimeWindows {
     /// windows's `start -> end` and non-overlapping
     /// `end` is exclusive(and optional)
     windows: BTreeMap<Timestamp, Option<Timestamp>>,
+    /// Maximum number of filters allowed in a single query
+    max_filter_num_per_query: usize,
+    /// Time window merge distance
+    ///
+    time_window_merge_threshold: usize,
+}
+
+impl DirtyTimeWindows {
+    pub fn new(max_filter_num_per_query: usize, time_window_merge_threshold: usize) -> Self {
+        Self {
+            windows: BTreeMap::new(),
+            max_filter_num_per_query,
+            time_window_merge_threshold,
+        }
+    }
+}
+
+impl Default for DirtyTimeWindows {
+    fn default() -> Self {
+        Self {
+            windows: BTreeMap::new(),
+            max_filter_num_per_query: 20,
+            time_window_merge_threshold: 3,
+        }
+    }
 }
 
 impl DirtyTimeWindows {
@@ -137,9 +163,6 @@ impl DirtyTimeWindows {
     ///
     /// TODO(discord9): make those configurable
     pub const MERGE_DIST: i32 = 3;
-
-    /// Maximum number of filters allowed in a single query
-    pub const MAX_FILTER_NUM: usize = 20;
 
     /// Add lower bounds to the dirty time windows. Upper bounds are ignored.
     ///
@@ -234,7 +257,7 @@ impl DirtyTimeWindows {
         );
         self.merge_dirty_time_windows(window_size, expire_lower_bound)?;
 
-        if self.windows.len() > Self::MAX_FILTER_NUM {
+        if self.windows.len() > self.max_filter_num_per_query {
             let first_time_window = self.windows.first_key_value();
             let last_time_window = self.windows.last_key_value();
 
@@ -243,7 +266,7 @@ impl DirtyTimeWindows {
                 "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                 task_ctx.config.flow_id,
                 self.windows.len(),
-                Self::MAX_FILTER_NUM,
+                self.max_filter_num_per_query,
                 task_ctx.config.time_window_expr,
                 task_ctx.config.expire_after,
                 first_time_window,
@@ -254,7 +277,7 @@ impl DirtyTimeWindows {
                 warn!("Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                 flow_id,
                 self.windows.len(),
-                Self::MAX_FILTER_NUM,
+                self.max_filter_num_per_query,
                 first_time_window,
                 last_time_window
                 )
@@ -460,7 +483,7 @@ impl DirtyTimeWindows {
 
             if lower_bound
                 .sub(&prev_upper)
-                .map(|dist| dist <= window_size * Self::MERGE_DIST)
+                .map(|dist| dist <= window_size * self.time_window_merge_threshold as i32)
                 .unwrap_or(false)
             {
                 prev_tw.1 = Some(cur_upper);
@@ -508,18 +531,19 @@ mod test {
 
     #[test]
     fn test_merge_dirty_time_windows() {
+        let merge_dist = DirtyTimeWindows::default().time_window_merge_threshold;
         let testcases = vec![
             // just enough to merge
             (
                 vec![
                     Timestamp::new_second(0),
-                    Timestamp::new_second((1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                    Timestamp::new_second((1 + merge_dist as i64) * 5 * 60),
                 ],
                 (chrono::Duration::seconds(5 * 60), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
                     Some(Timestamp::new_second(
-                        (2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                        (2 + merge_dist as i64) * 5 * 60,
                     )),
                 )]),
                 Some(
@@ -530,7 +554,7 @@ mod test {
             (
                 vec![
                     Timestamp::new_second(0),
-                    Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                    Timestamp::new_second((2 + merge_dist as i64) * 5 * 60),
                 ],
                 (chrono::Duration::seconds(5 * 60), None),
                 BTreeMap::from([
@@ -539,9 +563,9 @@ mod test {
                         Some(Timestamp::new_second(5 * 60)),
                     ),
                     (
-                        Timestamp::new_second((2 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                        Timestamp::new_second((2 + merge_dist as i64) * 5 * 60),
                         Some(Timestamp::new_second(
-                            (3 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                            (3 + merge_dist as i64) * 5 * 60,
                         )),
                     ),
                 ]),
@@ -553,13 +577,13 @@ mod test {
             (
                 vec![
                     Timestamp::new_second(0),
-                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                    Timestamp::new_second((merge_dist as i64) * 5 * 60),
                 ],
                 (chrono::Duration::seconds(5 * 60), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
                     Some(Timestamp::new_second(
-                        (1 + DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60,
+                        (1 + merge_dist as i64) * 5 * 60,
                     )),
                 )]),
                 Some(
@@ -570,14 +594,14 @@ mod test {
             (
                 vec![
                     Timestamp::new_second(0),
-                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 3),
-                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 3 * 2),
+                    Timestamp::new_second((merge_dist as i64) * 3),
+                    Timestamp::new_second((merge_dist as i64) * 3 * 2),
                 ],
                 (chrono::Duration::seconds(3), None),
                 BTreeMap::from([(
                     Timestamp::new_second(0),
                     Some(Timestamp::new_second(
-                        (DirtyTimeWindows::MERGE_DIST as i64) * 7
+                        (merge_dist as i64) * 7
                     )),
                 )]),
                 Some(
@@ -646,12 +670,12 @@ mod test {
             (
                 vec![
                     Timestamp::new_second(0),
-                    Timestamp::new_second((DirtyTimeWindows::MERGE_DIST as i64) * 5 * 60),
+                    Timestamp::new_second((merge_dist as i64) * 5 * 60),
                 ],
                 (
                     chrono::Duration::seconds(5 * 60),
                     Some(Timestamp::new_second(
-                        (DirtyTimeWindows::MERGE_DIST as i64) * 6 * 60,
+                        (merge_dist as i64) * 6 * 60,
                     )),
                 ),
                 BTreeMap::from([]),
@@ -674,7 +698,7 @@ mod test {
                     "ts",
                     expire_lower_bound,
                     window_size,
-                    DirtyTimeWindows::MAX_FILTER_NUM,
+                    dirty.max_filter_num_per_query,
                     0,
                     None,
                 )
