@@ -58,6 +58,7 @@ use crate::error::{
     ToJsonSnafu,
 };
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
+use crate::http::otlp::OtlpState;
 use crate::http::prom_store::PromStoreState;
 use crate::http::prometheus::{
     build_info_query, format_query, instant_query, label_values_query, labels_query, parse_query,
@@ -631,11 +632,15 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_otlp_handler(self, handler: OpenTelemetryProtocolHandlerRef) -> Self {
+    pub fn with_otlp_handler(
+        self,
+        handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+    ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(handler),
+                HttpServer::route_otlp(handler, with_metric_engine),
             ),
             ..self
         }
@@ -1100,7 +1105,10 @@ impl HttpServer {
             .with_state(opentsdb_handler)
     }
 
-    fn route_otlp<S>(otlp_handler: OpenTelemetryProtocolHandlerRef) -> Router<S> {
+    fn route_otlp<S>(
+        otlp_handler: OpenTelemetryProtocolHandlerRef,
+        with_metric_engine: bool,
+    ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
@@ -1109,7 +1117,10 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
             )
-            .with_state(otlp_handler)
+            .with_state(OtlpState {
+                with_metric_engine,
+                handler: otlp_handler,
+            })
     }
 
     fn route_config<S>(state: GreptimeOptionsConfigState) -> Router<S> {

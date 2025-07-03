@@ -64,7 +64,7 @@ mod test {
         .unwrap()
         .is_ok());
 
-        let resp = instance.metrics(req, ctx.clone()).await;
+        let resp = instance.metrics(req, true, ctx.clone()).await;
         assert!(resp.is_ok());
 
         let mut output = instance

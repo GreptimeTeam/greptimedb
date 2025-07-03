@@ -3617,7 +3617,7 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // select metrics data
-    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
+    let expected = "[[1736489291872,0.0],[1736489291919,1.0]]";
     validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
 
     // drop table
