@@ -96,6 +96,14 @@ pub enum Error {
         error: serde_json::Error,
     },
 
+    #[snafu(display("Failed to serialize column metadata"))]
+    SerializeColumnMetadata {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
     InvalidScanIndex {
         start: ManifestVersion,
@@ -1051,7 +1059,8 @@ impl ErrorExt for Error {
             | NoCheckpoint { .. }
             | NoManifests { .. }
             | InstallManifestTo { .. }
-            | Unexpected { .. } => StatusCode::Unexpected,
+            | Unexpected { .. }
+            | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
