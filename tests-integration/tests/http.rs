@@ -1127,6 +1127,8 @@ grpc_conn_timeout = "5s"
 grpc_max_retries = 3
 frontend_scan_timeout = "30s"
 frontend_activity_timeout = "1m"
+max_filter_num_per_query = 20
+time_window_merge_threshold = 3
 
 [logging]
 max_log_files = 720

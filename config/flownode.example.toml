@@ -26,6 +26,10 @@ node_id = 14
 ## if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,
 ## it will be removed from the list that flownode use to connect
 #+frontend_activity_timeout="60s"
+## Maximum number of filters allowed in a single query
+#+max_filter_num_per_query=20
+## Time window merge distance
+#+time_window_merge_threshold=3
 
 ## The gRPC server options.
 [grpc]
