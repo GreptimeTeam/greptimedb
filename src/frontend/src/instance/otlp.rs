@@ -16,12 +16,14 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
 use common_error::ext::BoxedError;
+use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::tracing;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
+use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
@@ -37,6 +39,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
+        with_metric_engine: bool,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         self.plugins
@@ -63,10 +66,21 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        self.handle_row_inserts(requests, ctx, false, false)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::ExecuteGrpcQuerySnafu)
+        if with_metric_engine {
+            let physical_table = ctx
+                .extension(PHYSICAL_TABLE_PARAM)
+                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                .to_string();
+            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table.to_string())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
+            self.handle_row_inserts(requests, ctx.clone(), true, true)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]

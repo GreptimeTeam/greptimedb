@@ -100,6 +100,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
+        with_metric_engine: bool,
         ctx: QueryContextRef,
     ) -> Result<Output>;
 

@@ -41,12 +41,17 @@ use crate::http::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
 
+#[derive(Clone)]
+pub struct OtlpState {
+    pub with_metric_engine: bool,
+    pub handler: OpenTelemetryProtocolHandlerRef,
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
 pub async fn metrics(
-    State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    State(state): State<OtlpState>,
     Extension(mut query_ctx): Extension<QueryContext>,
-
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
     let db = query_ctx.get_db_string();
@@ -58,8 +63,13 @@ pub async fn metrics(
     let request =
         ExportMetricsServiceRequest::decode(bytes).context(error::DecodeOtlpRequestSnafu)?;
 
+    let OtlpState {
+        with_metric_engine,
+        handler,
+    } = state;
+
     handler
-        .metrics(request, query_ctx)
+        .metrics(request, with_metric_engine, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportMetricsServiceResponse {
@@ -72,7 +82,7 @@ pub async fn metrics(
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "traces"))]
 pub async fn traces(
-    State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    State(state): State<OtlpState>,
     TraceTableName(table_name): TraceTableName,
     pipeline_info: PipelineInfo,
     Extension(mut query_ctx): Extension<QueryContext>,
@@ -100,6 +110,8 @@ pub async fn traces(
 
     let pipeline_params = pipeline_info.pipeline_params;
 
+    let OtlpState { handler, .. } = state;
+
     // here we use nightly feature `trait_upcasting` to convert handler to
     // pipeline_handler
     let pipeline_handler: Arc<dyn PipelineHandler + Send + Sync> = handler.clone();
@@ -125,7 +137,7 @@ pub async fn traces(
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "logs"))]
 pub async fn logs(
-    State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    State(state): State<OtlpState>,
     Extension(mut query_ctx): Extension<QueryContext>,
     pipeline_info: PipelineInfo,
     LogTableName(tablename): LogTableName,
@@ -148,6 +160,8 @@ pub async fn logs(
     )
     .context(PipelineSnafu)?;
     let pipeline_params = pipeline_info.pipeline_params;
+
+    let OtlpState { handler, .. } = state;
 
     // here we use nightly feature `trait_upcasting` to convert handler to
     // pipeline_handler
