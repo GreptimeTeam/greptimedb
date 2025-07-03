@@ -875,7 +875,10 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.delete(table_metadata_keys).await
+        self.tombstone_manager
+            .delete(table_metadata_keys)
+            .await
+            .map(|_| ())
     }
 
     /// Restores metadata for table.
