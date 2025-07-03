@@ -106,7 +106,8 @@ where
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(self.instance.clone());
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
