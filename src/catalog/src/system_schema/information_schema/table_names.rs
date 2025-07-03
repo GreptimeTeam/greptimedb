@@ -48,3 +48,4 @@ pub const FLOWS: &str = "flows";
 pub const PROCEDURE_INFO: &str = "procedure_info";
 pub const REGION_STATISTICS: &str = "region_statistics";
 pub const PROCESS_LIST: &str = "process_list";
+pub const TRIGGER_LIST: &str = "trigger_list";

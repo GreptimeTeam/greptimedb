@@ -30,13 +30,13 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use moka::sync::Cache;
-use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
+use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -52,6 +52,8 @@ use crate::error::{
     CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
     ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
+#[cfg(feature = "enterprise")]
+use crate::information_schema::InformationSchemaTableFactoryRef;
 use crate::information_schema::{InformationExtensionRef, InformationSchemaProvider};
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
@@ -67,60 +69,22 @@ use crate::CatalogManager;
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
     /// Provides the extension methods for the `information_schema` tables
-    information_extension: InformationExtensionRef,
+    pub(super) information_extension: InformationExtensionRef,
     /// Manages partition rules.
-    partition_manager: PartitionRuleManagerRef,
+    pub(super) partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
-    table_metadata_manager: TableMetadataManagerRef,
+    pub(super) table_metadata_manager: TableMetadataManagerRef,
     /// A sub-CatalogManager that handles system tables
-    system_catalog: SystemCatalog,
+    pub(super) system_catalog: SystemCatalog,
     /// Cache registry for all caches.
-    cache_registry: LayeredCacheRegistryRef,
+    pub(super) cache_registry: LayeredCacheRegistryRef,
     /// Only available in `Standalone` mode.
-    procedure_manager: Option<ProcedureManagerRef>,
+    pub(super) procedure_manager: Option<ProcedureManagerRef>,
 }
 
-const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
+pub(super) const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
 
 impl KvBackendCatalogManager {
-    pub fn new(
-        information_extension: InformationExtensionRef,
-        backend: KvBackendRef,
-        cache_registry: LayeredCacheRegistryRef,
-        procedure_manager: Option<ProcedureManagerRef>,
-        process_manager: Option<ProcessManagerRef>,
-    ) -> Arc<Self> {
-        Arc::new_cyclic(|me| Self {
-            information_extension,
-            partition_manager: Arc::new(PartitionRuleManager::new(
-                backend.clone(),
-                cache_registry
-                    .get()
-                    .expect("Failed to get table_route_cache"),
-            )),
-            table_metadata_manager: Arc::new(TableMetadataManager::new(backend.clone())),
-            system_catalog: SystemCatalog {
-                catalog_manager: me.clone(),
-                catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
-                pg_catalog_cache: Cache::new(CATALOG_CACHE_MAX_CAPACITY),
-                information_schema_provider: Arc::new(InformationSchemaProvider::new(
-                    DEFAULT_CATALOG_NAME.to_string(),
-                    me.clone(),
-                    Arc::new(FlowMetadataManager::new(backend.clone())),
-                    process_manager.clone(),
-                )),
-                pg_catalog_provider: Arc::new(PGCatalogProvider::new(
-                    DEFAULT_CATALOG_NAME.to_string(),
-                    me.clone(),
-                )),
-                backend,
-                process_manager,
-            },
-            cache_registry,
-            procedure_manager,
-        })
-    }
-
     pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
         self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "view_info_cache",
@@ -507,16 +471,19 @@ fn build_table(table_info_value: TableInfoValue) -> Result<TableRef> {
 /// - information_schema.{tables}
 /// - pg_catalog.{tables}
 #[derive(Clone)]
-struct SystemCatalog {
-    catalog_manager: Weak<KvBackendCatalogManager>,
-    catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
-    pg_catalog_cache: Cache<String, Arc<PGCatalogProvider>>,
+pub(super) struct SystemCatalog {
+    pub(super) catalog_manager: Weak<KvBackendCatalogManager>,
+    pub(super) catalog_cache: Cache<String, Arc<InformationSchemaProvider>>,
+    pub(super) pg_catalog_cache: Cache<String, Arc<PGCatalogProvider>>,
 
     // system_schema_provider for default catalog
-    information_schema_provider: Arc<InformationSchemaProvider>,
-    pg_catalog_provider: Arc<PGCatalogProvider>,
-    backend: KvBackendRef,
-    process_manager: Option<ProcessManagerRef>,
+    pub(super) information_schema_provider: Arc<InformationSchemaProvider>,
+    pub(super) pg_catalog_provider: Arc<PGCatalogProvider>,
+    pub(super) backend: KvBackendRef,
+    pub(super) process_manager: Option<ProcessManagerRef>,
+    #[cfg(feature = "enterprise")]
+    pub(super) extra_information_table_factories:
+        std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
 }
 
 impl SystemCatalog {
@@ -580,12 +547,17 @@ impl SystemCatalog {
         if schema == INFORMATION_SCHEMA_NAME {
             let information_schema_provider =
                 self.catalog_cache.get_with_by_ref(catalog, move || {
-                    Arc::new(InformationSchemaProvider::new(
+                    let provider = InformationSchemaProvider::new(
                         catalog.to_string(),
                         self.catalog_manager.clone(),
                         Arc::new(FlowMetadataManager::new(self.backend.clone())),
                         self.process_manager.clone(),
-                    ))
+                        self.backend.clone(),
+                    );
+                    #[cfg(feature = "enterprise")]
+                    let provider = provider
+                        .with_extra_table_factories(self.extra_information_table_factories.clone());
+                    Arc::new(provider)
                 });
             information_schema_provider.table(table_name)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {

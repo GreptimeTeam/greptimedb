@@ -207,6 +207,7 @@ mod tests {
     use session::context::QueryContext;
 
     use super::*;
+    use crate::kvbackend::KvBackendCatalogManagerBuilder;
     use crate::memory::MemoryCatalogManager;
 
     #[test]
@@ -323,13 +324,13 @@ mod tests {
             .build(),
         );
 
-        let catalog_manager = KvBackendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
             Arc::new(NoopInformationExtension),
             backend.clone(),
             layered_cache_registry,
-            None,
-            None,
-        );
+        )
+        .build();
+
         let table_metadata_manager = TableMetadataManager::new(backend);
         let mut view_info = common_meta::key::test_utils::new_test_table_info(1024, vec![]);
         view_info.table_type = TableType::View;

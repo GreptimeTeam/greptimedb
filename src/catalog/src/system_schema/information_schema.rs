@@ -38,6 +38,7 @@ use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
@@ -112,6 +113,25 @@ macro_rules! setup_memory_table {
     };
 }
 
+#[cfg(feature = "enterprise")]
+pub struct MakeInformationTableRequest {
+    pub catalog_name: String,
+    pub catalog_manager: Weak<dyn CatalogManager>,
+    pub kv_backend: KvBackendRef,
+}
+
+/// A factory trait for making information schema tables.
+///
+/// This trait allows for extensibility of the information schema by providing
+/// a way to dynamically create custom information schema tables.
+#[cfg(feature = "enterprise")]
+pub trait InformationSchemaTableFactory {
+    fn make_information_table(&self, req: MakeInformationTableRequest) -> SystemTableRef;
+}
+
+#[cfg(feature = "enterprise")]
+pub type InformationSchemaTableFactoryRef = Arc<dyn InformationSchemaTableFactory + Send + Sync>;
+
 /// The `information_schema` tables info provider.
 pub struct InformationSchemaProvider {
     catalog_name: String,
@@ -119,6 +139,10 @@ pub struct InformationSchemaProvider {
     process_manager: Option<ProcessManagerRef>,
     flow_metadata_manager: Arc<FlowMetadataManager>,
     tables: HashMap<String, TableRef>,
+    #[allow(dead_code)]
+    kv_backend: KvBackendRef,
+    #[cfg(feature = "enterprise")]
+    extra_table_factories: HashMap<String, InformationSchemaTableFactoryRef>,
 }
 
 impl SystemSchemaProvider for InformationSchemaProvider {
@@ -128,6 +152,7 @@ impl SystemSchemaProvider for InformationSchemaProvider {
         &self.tables
     }
 }
+
 impl SystemSchemaProviderInner for InformationSchemaProvider {
     fn catalog_name(&self) -> &str {
         &self.catalog_name
@@ -215,7 +240,22 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 .process_manager
                 .as_ref()
                 .map(|p| Arc::new(InformationSchemaProcessList::new(p.clone())) as _),
-            _ => None,
+            table_name => {
+                #[cfg(feature = "enterprise")]
+                return self.extra_table_factories.get(table_name).map(|factory| {
+                    let req = MakeInformationTableRequest {
+                        catalog_name: self.catalog_name.clone(),
+                        catalog_manager: self.catalog_manager.clone(),
+                        kv_backend: self.kv_backend.clone(),
+                    };
+                    factory.make_information_table(req)
+                });
+                #[cfg(not(feature = "enterprise"))]
+                {
+                    let _ = table_name;
+                    None
+                }
+            }
         }
     }
 }
@@ -226,6 +266,7 @@ impl InformationSchemaProvider {
         catalog_manager: Weak<dyn CatalogManager>,
         flow_metadata_manager: Arc<FlowMetadataManager>,
         process_manager: Option<ProcessManagerRef>,
+        kv_backend: KvBackendRef,
     ) -> Self {
         let mut provider = Self {
             catalog_name,
@@ -233,11 +274,24 @@ impl InformationSchemaProvider {
             flow_metadata_manager,
             process_manager,
             tables: HashMap::new(),
+            kv_backend,
+            #[cfg(feature = "enterprise")]
+            extra_table_factories: HashMap::new(),
         };
 
         provider.build_tables();
 
         provider
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn with_extra_table_factories(
+        mut self,
+        factories: HashMap<String, InformationSchemaTableFactoryRef>,
+    ) -> Self {
+        self.extra_table_factories = factories;
+        self.build_tables();
+        self
     }
 
     fn build_tables(&mut self) {
@@ -290,16 +344,19 @@ impl InformationSchemaProvider {
         if let Some(process_list) = self.build_table(PROCESS_LIST) {
             tables.insert(PROCESS_LIST.to_string(), process_list);
         }
+        #[cfg(feature = "enterprise")]
+        for name in self.extra_table_factories.keys() {
+            tables.insert(name.to_string(), self.build_table(name).expect(name));
+        }
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
             tables.insert((*name).to_string(), self.build_table(name).expect(name));
         }
-
         self.tables = tables;
     }
 }
 
-trait InformationTable {
+pub trait InformationTable {
     fn table_id(&self) -> TableId;
 
     fn table_name(&self) -> &'static str;

@@ -24,7 +24,7 @@ use cache::{
     with_default_composite_cache_registry,
 };
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use catalog::process_manager::ProcessManager;
 use client::client_manager::NodeClients;
 use client::Client;
@@ -381,13 +381,12 @@ impl GreptimeDbClusterBuilder {
 
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
-        let catalog_manager = KvBackendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
             cache_registry.clone(),
-            None,
-            None,
-        );
+        )
+        .build();
 
         let handlers_executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),

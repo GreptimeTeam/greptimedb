@@ -20,7 +20,7 @@ use std::{fs, path};
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_schema::InformationExtension;
-use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::api::v1::meta::RegionRole;
@@ -544,13 +544,20 @@ impl StartCommand {
         ));
 
         let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
-        let catalog_manager = KvBackendCatalogManager::new(
+        let builder = KvBackendCatalogManagerBuilder::new(
             information_extension.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
-            Some(procedure_manager.clone()),
-            Some(process_manager.clone()),
-        );
+        )
+        .with_procedure_manager(procedure_manager.clone())
+        .with_process_manager(process_manager.clone());
+        #[cfg(feature = "enterprise")]
+        let builder = if let Some(factories) = plugins.get() {
+            builder.with_extra_information_table_factories(factories)
+        } else {
+            builder
+        };
+        let catalog_manager = builder.build();
 
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;

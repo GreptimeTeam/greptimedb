@@ -78,7 +78,7 @@ pub const INFORMATION_SCHEMA_ROUTINES_TABLE_ID: u32 = 21;
 pub const INFORMATION_SCHEMA_SCHEMA_PRIVILEGES_TABLE_ID: u32 = 22;
 /// id for information_schema.TABLE_PRIVILEGES
 pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
-/// id for information_schema.TRIGGERS
+/// id for information_schema.TRIGGERS (for mysql)
 pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
 /// id for information_schema.GLOBAL_STATUS
 pub const INFORMATION_SCHEMA_GLOBAL_STATUS_TABLE_ID: u32 = 25;
@@ -104,6 +104,8 @@ pub const INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID: u32 = 34;
 pub const INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID: u32 = 35;
 /// id for information_schema.process_list
 pub const INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID: u32 = 36;
+/// id for information_schema.trigger_list (for greptimedb trigger)
+pub const INFORMATION_SCHEMA_TRIGGER_TABLE_ID: u32 = 37;
 
 // ----- End of information_schema tables -----
 
