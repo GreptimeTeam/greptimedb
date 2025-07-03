@@ -50,7 +50,7 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.
 -- test the empty source label --
 -- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "", "", "");
+TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
 -- Issue 5726 --
 -- SQLNESS SORT_RESULT 3 1
@@ -61,6 +61,26 @@ TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), 
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} + label_replace(vector(1), "host", "host1", "", "");
+
+-- Empty regex with existing source label--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "host2", "host", "");
+
+-- Empty regex with not existing source label
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "host2", "instance", "");
+
+-- Empty regex with not existing source label, but replacement is empty--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "", "instance", "");
+
+
+-- Empty regex with not existing source label--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host2", "host", "");
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "addr", "host1", "instance", "");
 
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1

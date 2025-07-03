@@ -76,7 +76,7 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
     ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
     MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
-    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, TableNameNotFoundSnafu,
+    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
     TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
     UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
     ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
@@ -1468,7 +1468,7 @@ impl PromPlanner {
     ///
     /// # Side Effects
     ///
-    /// This method will update [PromPlannerContext]'s fields/tags if needed.
+    /// This method will update [PromPlannerContext]'s fields and tags if needed.
     fn create_function_expr(
         &mut self,
         func: &Function,
@@ -1615,7 +1615,7 @@ impl PromPlanner {
                     }
                 }
 
-                // Remove it from tag columns if exists
+                // Remove it from tag columns if exists to avoid duplicated column names
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
                 new_tags.push(dst_label);
                 // Add the new label expr to evaluate
@@ -1624,22 +1624,31 @@ impl PromPlanner {
                 ScalarFunc::GeneratedExpr
             }
             "label_replace" => {
-                let (replace_expr, dst_label) =
-                    Self::build_regexp_replace_label_expr(&mut other_input_exprs, session_state)?;
+                if let Some((replace_expr, dst_label)) =
+                    self.build_regexp_replace_label_expr(&mut other_input_exprs, session_state)?
+                {
+                    // Reserve the current field columns except the `dst_label`.
+                    for value in &self.ctx.field_columns {
+                        if *value != dst_label {
+                            let expr = DfExpr::Column(Column::from_name(value));
+                            exprs.push(expr);
+                        }
+                    }
 
-                // Reserve the current field columns except the `dst_label`.
-                for value in &self.ctx.field_columns {
-                    if *value != dst_label {
+                    ensure!(
+                        !self.ctx.tag_columns.contains(&dst_label),
+                        SameLabelSetSnafu
+                    );
+                    new_tags.push(dst_label);
+                    // Add the new label expr to evaluate
+                    exprs.push(replace_expr);
+                } else {
+                    // Keep the current field columns
+                    for value in &self.ctx.field_columns {
                         let expr = DfExpr::Column(Column::from_name(value));
                         exprs.push(expr);
                     }
                 }
-
-                // Remove it from tag columns if exists
-                self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-                new_tags.push(dst_label);
-                // Add the new label expr to evaluate
-                exprs.push(replace_expr);
 
                 ScalarFunc::GeneratedExpr
             }
@@ -1764,9 +1773,10 @@ impl PromPlanner {
 
     /// Build expr for `label_replace` function
     fn build_regexp_replace_label_expr(
+        &self,
         other_input_exprs: &mut VecDeque<DfExpr>,
         session_state: &SessionState,
-    ) -> Result<(DfExpr, String)> {
+    ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
@@ -1789,6 +1799,7 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
         let regex = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
             other => UnexpectedPlanExprSnafu {
@@ -1796,6 +1807,27 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
+        // If the src_label exists and regex is empty, keep everything unchanged.
+        if self.ctx.tag_columns.contains(&src_label) && regex.is_empty() {
+            return Ok(None);
+        }
+
+        // If the src_label doesn't exists, and
+        if !self.ctx.tag_columns.contains(&src_label) {
+            if replacement.is_empty() {
+                // the replacement is empty, keep everything unchanged.
+                return Ok(None);
+            } else {
+                // the replacement is not empty, always adds dst_label with replacement value.
+                return Ok(Some((
+                    // alias literal `replacement` as dst_label
+                    DfExpr::Literal(ScalarValue::Utf8(Some(replacement))).alias(&dst_label),
+                    dst_label,
+                )));
+            }
+        }
+
         // Preprocess the regex:
         // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
         let regex = format!("^(?s:{regex})$");
@@ -1818,14 +1850,14 @@ impl PromPlanner {
             DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
         ];
 
-        Ok((
+        Ok(Some((
             DfExpr::ScalarFunction(ScalarFunction {
                 func: func.clone(),
                 args,
             })
             .alias(&dst_label),
             dst_label,
-        ))
+        )))
     }
 
     /// Build expr for `label_join` function

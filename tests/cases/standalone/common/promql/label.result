@@ -158,40 +158,27 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "new_idc", "$2", "idc",
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.*):(.*)");
 
-+---------------------+-----+------+-------+
-| ts                  | val | idc  | host  |
-+---------------------+-----+------+-------+
-| 1970-01-01T00:00:00 | 2   | idc1 | host2 |
-| 1970-01-01T00:00:05 | 2   | idc1 | host2 |
-| 1970-01-01T00:00:05 | 4   | idc2 | host2 |
-| 1970-01-01T00:00:10 | 2   | idc1 | host2 |
-| 1970-01-01T00:00:10 | 4   | idc2 | host2 |
-| 1970-01-01T00:00:10 | 6   | idc3 | host2 |
-| 1970-01-01T00:00:15 | 2   | idc1 | host2 |
-| 1970-01-01T00:00:15 | 4   | idc2 | host2 |
-| 1970-01-01T00:00:15 | 6   | idc3 | host2 |
-| 1970-01-01T00:00:15 | 8   | idc4 | host2 |
-+---------------------+-----+------+-------+
+Error: 1004(InvalidArguments), vector cannot contain metrics with the same labelset
 
 -- test the empty source label --
 -- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "", "", "");
+TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
-+---------------------+-----+-----+-------+
-| ts                  | val | idc | host  |
-+---------------------+-----+-----+-------+
-| 1970-01-01T00:00:00 | 2   |     | host2 |
-| 1970-01-01T00:00:05 | 2   |     | host2 |
-| 1970-01-01T00:00:05 | 4   |     | host2 |
-| 1970-01-01T00:00:10 | 2   |     | host2 |
-| 1970-01-01T00:00:10 | 4   |     | host2 |
-| 1970-01-01T00:00:10 | 6   |     | host2 |
-| 1970-01-01T00:00:15 | 2   |     | host2 |
-| 1970-01-01T00:00:15 | 4   |     | host2 |
-| 1970-01-01T00:00:15 | 6   |     | host2 |
-| 1970-01-01T00:00:15 | 8   |     | host2 |
-+---------------------+-----+-----+-------+
++---------------------+-----+-------+------+
+| ts                  | val | host  | idc  |
++---------------------+-----+-------+------+
+| 1970-01-01T00:00:00 | 2   | host2 | idc1 |
+| 1970-01-01T00:00:05 | 2   | host2 | idc1 |
+| 1970-01-01T00:00:05 | 4   | host2 | idc2 |
+| 1970-01-01T00:00:10 | 2   | host2 | idc1 |
+| 1970-01-01T00:00:10 | 4   | host2 | idc2 |
+| 1970-01-01T00:00:10 | 6   | host2 | idc3 |
+| 1970-01-01T00:00:15 | 2   | host2 | idc1 |
+| 1970-01-01T00:00:15 | 4   | host2 | idc2 |
+| 1970-01-01T00:00:15 | 6   | host2 | idc3 |
+| 1970-01-01T00:00:15 | 8   | host2 | idc4 |
++---------------------+-----+-------+------+
 
 -- Issue 5726 --
 -- SQLNESS SORT_RESULT 3 1
@@ -241,6 +228,105 @@ TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} + label_replace(vector(1), 
 | host1 | 1970-01-01T00:00:15 | 6.0                        |
 | host1 | 1970-01-01T00:00:15 | 8.0                        |
 +-------+---------------------+----------------------------+
+
+-- Empty regex with existing source label--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "host2", "host", "");
+
++---------------------+-----+-------+------------+
+| ts                  | val | host  | idc        |
++---------------------+-----+-------+------------+
+| 1970-01-01T00:00:00 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:00 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:05 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:05 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:05 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:05 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:10 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:10 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:10 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:10 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:10 | 5   | host1 | idc3:zone2 |
+| 1970-01-01T00:00:10 | 6   | host2 | idc3       |
+| 1970-01-01T00:00:15 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:15 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:15 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:15 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:15 | 5   | host1 | idc3:zone2 |
+| 1970-01-01T00:00:15 | 6   | host2 | idc3       |
+| 1970-01-01T00:00:15 | 7   | host1 | idc4:zone3 |
+| 1970-01-01T00:00:15 | 8   | host2 | idc4       |
++---------------------+-----+-------+------------+
+
+-- Empty regex with not existing source label
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "host2", "instance", "");
+
++---------------------+-----+-------+-------+------------+
+| ts                  | val | host2 | host  | idc        |
++---------------------+-----+-------+-------+------------+
+| 1970-01-01T00:00:00 | 1   | host2 | host1 | idc1       |
+| 1970-01-01T00:00:00 | 2   | host2 | host2 | idc1       |
+| 1970-01-01T00:00:05 | 1   | host2 | host1 | idc1       |
+| 1970-01-01T00:00:05 | 2   | host2 | host2 | idc1       |
+| 1970-01-01T00:00:05 | 3   | host2 | host1 | idc2:zone1 |
+| 1970-01-01T00:00:05 | 4   | host2 | host2 | idc2       |
+| 1970-01-01T00:00:10 | 1   | host2 | host1 | idc1       |
+| 1970-01-01T00:00:10 | 2   | host2 | host2 | idc1       |
+| 1970-01-01T00:00:10 | 3   | host2 | host1 | idc2:zone1 |
+| 1970-01-01T00:00:10 | 4   | host2 | host2 | idc2       |
+| 1970-01-01T00:00:10 | 5   | host2 | host1 | idc3:zone2 |
+| 1970-01-01T00:00:10 | 6   | host2 | host2 | idc3       |
+| 1970-01-01T00:00:15 | 1   | host2 | host1 | idc1       |
+| 1970-01-01T00:00:15 | 2   | host2 | host2 | idc1       |
+| 1970-01-01T00:00:15 | 3   | host2 | host1 | idc2:zone1 |
+| 1970-01-01T00:00:15 | 4   | host2 | host2 | idc2       |
+| 1970-01-01T00:00:15 | 5   | host2 | host1 | idc3:zone2 |
+| 1970-01-01T00:00:15 | 6   | host2 | host2 | idc3       |
+| 1970-01-01T00:00:15 | 7   | host2 | host1 | idc4:zone3 |
+| 1970-01-01T00:00:15 | 8   | host2 | host2 | idc4       |
++---------------------+-----+-------+-------+------------+
+
+-- Empty regex with not existing source label, but replacement is empty--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') label_replace(test, "host2", "", "instance", "");
+
++---------------------+-----+-------+------------+
+| ts                  | val | host  | idc        |
++---------------------+-----+-------+------------+
+| 1970-01-01T00:00:00 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:00 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:05 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:05 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:05 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:05 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:10 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:10 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:10 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:10 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:10 | 5   | host1 | idc3:zone2 |
+| 1970-01-01T00:00:10 | 6   | host2 | idc3       |
+| 1970-01-01T00:00:15 | 1   | host1 | idc1       |
+| 1970-01-01T00:00:15 | 2   | host2 | idc1       |
+| 1970-01-01T00:00:15 | 3   | host1 | idc2:zone1 |
+| 1970-01-01T00:00:15 | 4   | host2 | idc2       |
+| 1970-01-01T00:00:15 | 5   | host1 | idc3:zone2 |
+| 1970-01-01T00:00:15 | 6   | host2 | idc3       |
+| 1970-01-01T00:00:15 | 7   | host1 | idc4:zone3 |
+| 1970-01-01T00:00:15 | 8   | host2 | idc4       |
++---------------------+-----+-------+------------+
+
+-- Empty regex with not existing source label--
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host2", "host", "");
+
+++
+++
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "addr", "host1", "instance", "");
+
+Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named addr. Valid fields are test.ts, test.host, test.idc, test.val.
 
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1
