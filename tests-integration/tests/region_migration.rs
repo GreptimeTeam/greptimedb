@@ -1325,6 +1325,17 @@ async fn check_region_migration_events_system_table(
     from_datanode_id: u64,
     to_datanode_id: u64,
 ) {
+    // Sleep for while to ensure the event is recorded.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // The query is equivalent to the following SQL:
+    //   SELECT trigger_reason, status FROM region_migration_events WHERE
+    //       procedure_id = '${procedure_id}' AND
+    //       table_id = ${table_id} AND
+    //       region_id = ${region_id} AND
+    //       from_datanode_id = ${from_datanode_id} AND
+    //       to_datanode_id = ${to_datanode_id}
+    //       ORDER BY timestamp ASC
     let query = Query::select()
         .column(RegionMigrationEvents::TriggerReason)
         .column(RegionMigrationEvents::Status)

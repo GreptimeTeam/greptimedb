@@ -16,9 +16,7 @@ use std::any::Any;
 use std::fmt::Display;
 
 use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-};
+use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType};
 use common_procedure::error::Error;
 use common_procedure::ProcedureId;
 use common_time::timestamp::{TimeUnit, Timestamp};
@@ -78,15 +76,13 @@ impl Event for RegionMigrationEvent {
         "region_migration_event"
     }
 
-    fn to_row_inserts(&self) -> RowInsertRequests {
-        RowInsertRequests {
-            inserts: vec![RowInsertRequest {
-                table_name: self.table_name().to_string(),
-                rows: Some(Rows {
-                    schema: self.schema(),
-                    rows: vec![self.to_row()],
-                }),
-            }],
+    fn to_row_insert(&self) -> RowInsertRequest {
+        RowInsertRequest {
+            table_name: self.table_name().to_string(),
+            rows: Some(Rows {
+                schema: self.schema(),
+                rows: vec![self.to_row()],
+            }),
         }
     }
 
@@ -190,7 +186,7 @@ impl RegionMigrationEvent {
             values: vec![
                 ValueData::StringValue(self.procedure_id.to_string()).into(),
                 ValueData::U64Value(self.task.region_id.as_u64()).into(),
-                ValueData::U32Value(self.task.region_id.table_id() as u32).into(),
+                ValueData::U32Value(self.task.region_id.table_id()).into(),
                 ValueData::U64Value(self.task.from_peer.id).into(),
                 ValueData::StringValue(self.task.from_peer.addr.to_string()).into(),
                 ValueData::U64Value(self.task.to_peer.id).into(),

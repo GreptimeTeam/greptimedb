@@ -15,8 +15,9 @@
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Duration;
 
-use api::v1::RowInsertRequests;
+use api::v1::{RowInsertRequest, RowInsertRequests};
 use async_trait::async_trait;
 use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
@@ -37,8 +38,11 @@ mod region_migration_event;
 
 pub use region_migration_event::*;
 
+// TODO(zyy17): Make these constants configurable.
 const DEFAULT_EVENTS_CHANNEL_SIZE: usize = 2048;
+const DEFAULT_EVENTS_BATCH_SIZE: usize = 100;
 const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
+const DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS: u64 = 1;
 
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
@@ -49,7 +53,7 @@ pub trait Event: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
 
     /// Generates the row inserts request based on the event. The request will be sent to the frontend by the event handler.
-    fn to_row_inserts(&self) -> RowInsertRequests;
+    fn to_row_insert(&self) -> RowInsertRequest;
 
     /// Returns the event as any type.
     fn as_any(&self) -> &dyn Any;
@@ -68,7 +72,7 @@ pub trait EventRecorder: Send + Sync + 'static {
 #[async_trait]
 pub trait EventHandler: Send + Sync + 'static {
     /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
-    async fn handle(&self, event: Box<dyn Event>) -> Result<()>;
+    async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()>;
 }
 
 /// Implementation of [EventRecorder] that records the events and forwards them to frontend instances for persistence as system tables.
@@ -130,11 +134,13 @@ struct DefaultEventHandlerImpl {
 
 #[async_trait]
 impl EventHandler for DefaultEventHandlerImpl {
-    async fn handle(&self, event: Box<dyn Event>) -> Result<()> {
+    async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()> {
+        debug!("Received {} events: {:?}", events.len(), events);
         let database_client = self.build_database_client().await?;
-        let row_inserts = event.to_row_inserts();
-
-        debug!("Inserting event: {:?}", row_inserts);
+        let row_inserts = RowInsertRequests {
+            inserts: events.into_iter().map(|e| e.to_row_insert()).collect(),
+        };
+        debug!("Inserting events: {:?}", row_inserts);
 
         database_client
             .row_inserts_with_hints(
@@ -190,10 +196,41 @@ impl EventProcessor {
 
     async fn process(mut self) {
         info!("Start the background processor in event recorder to handle the received events.");
-        while let Some(event) = self.rx.recv().await {
-            debug!("Received event: {:?}", event);
-            if let Err(e) = self.event_handler.handle(event).await {
-                error!(e; "Failed to handle event");
+
+        let mut buffer = Vec::with_capacity(DEFAULT_EVENTS_BATCH_SIZE);
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS));
+
+        loop {
+            tokio::select! {
+                maybe_event = self.rx.recv() => {
+                    if let Some(maybe_event) = maybe_event {
+                        debug!("Received event: {:?}", maybe_event);
+                        // Push the event to the buffer, the buffer will be flushed when the interval is triggered.
+                        buffer.push(maybe_event);
+                    } else {
+                        // When received a closed signal, flush the buffer and exit the loop.
+                        if !buffer.is_empty() {
+                            if let Err(e) = self
+                                .event_handler
+                                .handle(std::mem::take(&mut buffer))
+                                .await
+                            {
+                                error!(e; "Failed to handle events");
+                            }
+                        }
+                        break;
+                    }
+                }
+                // When the interval is triggered, flush the buffer and send the events to the event handler.
+                _ = interval.tick() => {
+                    if !buffer.is_empty() {
+                        debug!("Flushing buffer by trigger with {} events", buffer.len());
+                        if let Err(e) = self.event_handler.handle(std::mem::take(&mut buffer)).await {
+                            error!(e; "Failed to handle events");
+                        }
+                    }
+                }
             }
         }
     }
@@ -257,8 +294,10 @@ mod tests {
 
     #[async_trait]
     impl EventHandler for TestEventHandlerImpl {
-        async fn handle(&self, event: Box<dyn Event>) -> Result<()> {
-            let event = event
+        async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()> {
+            let event = events
+                .first()
+                .unwrap()
                 .as_any()
                 .downcast_ref::<RegionMigrationEvent>()
                 .unwrap();
@@ -287,7 +326,7 @@ mod tests {
 
         async fn process(mut self) {
             while let Some(event) = self.rx.recv().await {
-                self.event_handler.handle(event).await.unwrap()
+                self.event_handler.handle(vec![event]).await.unwrap()
             }
         }
     }
