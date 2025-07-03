@@ -82,10 +82,6 @@ impl MultiDimPartitionRule {
             physical_expr_cache: RwLock::new(None),
         };
 
-        // let mut checker = RuleChecker::new(&rule);
-        // #[allow(deprecated)]
-        // checker.check()?;
-
         let checker = PartitionChecker::try_new(&rule)?;
         checker.check()?;
 

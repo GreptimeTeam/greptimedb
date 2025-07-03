@@ -100,10 +100,15 @@ impl<'a> PartitionChecker<'a> {
 
         // Process data in batches using iterator
         let mut results = Vec::with_capacity(self.collider.atomic_exprs.len());
+        let physical_exprs = self
+            .collider
+            .atomic_exprs
+            .iter()
+            .map(|expr| expr.to_physical_expr(matrix_generator.schema()))
+            .collect::<Vec<_>>();
         for batch in matrix_generator {
             results.clear();
-            for expr in self.collider.atomic_exprs.iter() {
-                let physical_expr = expr.to_physical_expr(&batch.schema());
+            for physical_expr in &physical_exprs {
                 let columnar_result = physical_expr.evaluate(&batch).unwrap();
                 let array_result = columnar_result.into_array(batch.num_rows()).unwrap();
                 results.push(array_result);
@@ -219,7 +224,7 @@ impl<'a> PartitionChecker<'a> {
     }
 }
 
-/// Generates a point matrix that contains premutations of `matrix_foundation`'s values
+/// Generates a point matrix that contains permutations of `matrix_foundation`'s values
 struct MatrixGenerator {
     matrix_foundation: HashMap<String, Vec<OrderedF64>>,
     // Iterator state
@@ -240,7 +245,7 @@ struct MatrixGenerator {
 const MAX_BATCH_SIZE: usize = 8192;
 
 impl MatrixGenerator {
-    fn new(matrix_foundation: HashMap<&str, Vec<OrderedF64>>) -> Self {
+    pub fn new(matrix_foundation: HashMap<&str, Vec<OrderedF64>>) -> Self {
         // Convert to owned HashMap to avoid lifetime issues
         let owned_matrix_foundation: HashMap<String, Vec<OrderedF64>> = matrix_foundation
             .into_iter()
@@ -276,6 +281,10 @@ impl MatrixGenerator {
             total_combinations: product,
             biased_suffix_product,
         }
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
     }
 
     fn generate_batch(&self, start_index: usize, batch_size: usize) -> RecordBatch {
