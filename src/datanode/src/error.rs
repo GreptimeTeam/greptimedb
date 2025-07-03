@@ -402,6 +402,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Not yet implemented: {what}"))]
+    NotYetImplemented { what: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -456,7 +459,7 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }

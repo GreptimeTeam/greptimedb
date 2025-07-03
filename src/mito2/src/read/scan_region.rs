@@ -1040,13 +1040,15 @@ impl StreamContext {
 
     /// Format the context for explain.
     pub(crate) fn format_for_explain(&self, verbose: bool, f: &mut fmt::Formatter) -> fmt::Result {
-        let (mut num_mem_ranges, mut num_file_ranges) = (0, 0);
+        let (mut num_mem_ranges, mut num_file_ranges, mut num_other_ranges) = (0, 0, 0);
         for range_meta in &self.ranges {
             for idx in &range_meta.row_group_indices {
                 if self.is_mem_range_index(*idx) {
                     num_mem_ranges += 1;
-                } else {
+                } else if self.is_file_range_index(*idx) {
                     num_file_ranges += 1;
+                } else {
+                    num_other_ranges += 1;
                 }
             }
         }
@@ -1055,12 +1057,17 @@ impl StreamContext {
         }
         write!(
             f,
-            "\"partition_count\":{{\"count\":{}, \"mem_ranges\":{}, \"files\":{}, \"file_ranges\":{}}}",
+            r#"partition_count:{{count:{}, mem_ranges:{}, files:{}, file_ranges:{}"#,
             self.ranges.len(),
             num_mem_ranges,
             self.input.num_files(),
             num_file_ranges,
         )?;
+        if num_other_ranges > 0 {
+            write!(f, r#"", other_ranges":{}"#, num_other_ranges)?;
+        }
+        write!(f, "}}")?;
+
         if let Some(selector) = &self.input.series_row_selector {
             write!(f, ", \"selector\":\"{}\"", selector)?;
         }
@@ -1102,6 +1109,24 @@ impl StreamContext {
             input: &'a ScanInput,
         }
 
+        #[cfg(feature = "enterprise")]
+        impl InputWrapper<'_> {
+            fn format_extension_ranges(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                if self.input.extension_ranges.is_empty() {
+                    return Ok(());
+                }
+
+                let mut delimiter = "";
+                write!(f, ", extension_ranges: [")?;
+                for range in self.input.extension_ranges() {
+                    write!(f, "{}{}", delimiter, range)?;
+                    delimiter = ", ";
+                }
+                write!(f, "]")?;
+                Ok(())
+            }
+        }
+
         impl fmt::Debug for InputWrapper<'_> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 let output_schema = self.input.mapper.output_schema();
@@ -1126,6 +1151,9 @@ impl StreamContext {
                         .entries(self.input.files.iter().map(|file| FileWrapper { file }))
                         .finish()?;
                 }
+
+                #[cfg(feature = "enterprise")]
+                self.format_extension_ranges(f)?;
 
                 Ok(())
             }
