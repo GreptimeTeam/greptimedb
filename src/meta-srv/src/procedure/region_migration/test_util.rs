@@ -205,6 +205,31 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
     }
 }
 
+/// Generates a [DefaultContextFactory].
+pub fn new_default_context_factory() -> DefaultContextFactory {
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+    let mailbox_sequence =
+        SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
+    let mailbox_ctx = MailboxContext::new(mailbox_sequence);
+    let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+    let server_addr = "localhost".to_string();
+
+    DefaultContextFactory {
+        table_metadata_manager,
+        opening_region_keeper,
+        volatile_ctx: Default::default(),
+        in_memory_key: Arc::new(MemoryKvBackend::default()),
+        mailbox: mailbox_ctx.mailbox().clone(),
+        server_addr: server_addr.clone(),
+        region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+        cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+            mailbox_ctx.mailbox().clone(),
+            MetasrvInfo { server_addr },
+        )),
+    }
+}
+
 /// The test suite for region migration procedure.
 pub(crate) struct ProcedureMigrationTestSuite {
     pub(crate) env: TestingEnv,

@@ -770,13 +770,12 @@ mod tests {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
-    #[tokio::test]
-    async fn test_lock_key() {
+    #[test]
+    fn test_lock_key() {
         let persistent_context = new_persistent_context();
         let expected_keys = persistent_context.lock_key();
 
-        let env = TestingEnv::new();
-        let context = env.context_factory();
+        let context = new_default_context_factory();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
@@ -788,12 +787,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_data_serialization() {
+    #[test]
+    fn test_data_serialization() {
         let persistent_context = new_persistent_context();
 
-        let env = TestingEnv::new();
-        let context = env.context_factory();
+        let context = new_default_context_factory();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
