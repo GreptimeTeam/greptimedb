@@ -67,7 +67,7 @@ impl Display for RegionMigrationStatus {
             Self::Starting => write!(f, "Starting"),
             Self::Running => write!(f, "Running"),
             Self::Finished => write!(f, "Finished"),
-            Self::Failed(e) => write!(f, "Failed: {}", e),
+            Self::Failed(e) => write!(f, "Failed: {:?}", e),
         }
     }
 }
@@ -78,29 +78,14 @@ impl Event for RegionMigrationEvent {
     }
 
     fn to_row_inserts(&self) -> RowInsertRequests {
-        let insert = RowInsertRequest {
-            table_name: REGION_MIGRATION_EVENTS_TABLE_NAME.to_string(),
-            rows: Some(Rows {
-                schema: self.build_schema(),
-                rows: vec![Row {
-                    values: vec![
-                        ValueData::StringValue(self.procedure_id.to_string()).into(),
-                        ValueData::U64Value(self.task.region_id.as_u64()).into(),
-                        ValueData::U64Value(self.task.from_peer.id).into(),
-                        ValueData::StringValue(self.task.from_peer.addr.to_string()).into(),
-                        ValueData::U64Value(self.task.to_peer.id).into(),
-                        ValueData::StringValue(self.task.to_peer.addr.to_string()).into(),
-                        ValueData::StringValue(self.task.trigger_reason.to_string()).into(),
-                        ValueData::U64Value(self.task.timeout.as_millis() as u64).into(),
-                        ValueData::StringValue(self.status.to_string()).into(),
-                        ValueData::TimestampNanosecondValue(self.timestamp).into(),
-                    ],
-                }],
-            }),
-        };
-
         RowInsertRequests {
-            inserts: vec![insert],
+            inserts: vec![RowInsertRequest {
+                table_name: self.table_name().to_string(),
+                rows: Some(Rows {
+                    schema: self.schema(),
+                    rows: vec![self.to_row()],
+                }),
+            }],
         }
     }
 
@@ -123,7 +108,11 @@ impl RegionMigrationEvent {
         }
     }
 
-    fn build_schema(&self) -> Vec<ColumnSchema> {
+    fn table_name(&self) -> &str {
+        REGION_MIGRATION_EVENTS_TABLE_NAME
+    }
+
+    fn schema(&self) -> Vec<ColumnSchema> {
         vec![
             ColumnSchema {
                 column_name: REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME.to_string(),
@@ -187,5 +176,22 @@ impl RegionMigrationEvent {
                 ..Default::default()
             },
         ]
+    }
+
+    fn to_row(&self) -> Row {
+        Row {
+            values: vec![
+                ValueData::StringValue(self.procedure_id.to_string()).into(),
+                ValueData::U64Value(self.task.region_id.as_u64()).into(),
+                ValueData::U64Value(self.task.from_peer.id).into(),
+                ValueData::StringValue(self.task.from_peer.addr.to_string()).into(),
+                ValueData::U64Value(self.task.to_peer.id).into(),
+                ValueData::StringValue(self.task.to_peer.addr.to_string()).into(),
+                ValueData::StringValue(self.task.trigger_reason.to_string()).into(),
+                ValueData::U64Value(self.task.timeout.as_millis() as u64).into(),
+                ValueData::StringValue(self.status.to_string()).into(),
+                ValueData::TimestampNanosecondValue(self.timestamp).into(),
+            ],
+        }
     }
 }

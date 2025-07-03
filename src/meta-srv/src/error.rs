@@ -970,7 +970,6 @@ impl ErrorExt for Error {
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
             | Error::InsertEvents { .. }
-            | Error::SendEvent { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
@@ -1020,6 +1019,7 @@ impl ErrorExt for Error {
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }
+            Error::SendEvent { source, .. } => source.status_code(),
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
 
