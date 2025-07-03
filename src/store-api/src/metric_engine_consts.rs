@@ -74,6 +74,10 @@ pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";
 
 /// HashMap key to be used in the region server's extension response.
+/// Represent the column metadata of a table.
+pub const TABLE_COLUMN_METADATA_EXTENSION_KEY: &str = "TABLE_COLUMN_METADATA";
+
+/// HashMap key to be used in the region server's extension response.
 /// Represent the manifest info of a region.
 pub const MANIFEST_INFO_EXTENSION_KEY: &str = "MANIFEST_INFO";
 
