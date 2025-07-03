@@ -89,6 +89,27 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("TQL CTE schema incompatible with SQL context: {}", reason))]
+    TqlSchemaIncompatible {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("TQL CTE parsing error: {}", reason))]
+    TqlCteParsingError {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("TQL CTE not supported: {}", tql_type))]
+    TqlCteNotSupported {
+        tql_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Missing time index constraint"))]
     MissingTimeIndex {},
 
@@ -469,6 +490,10 @@ impl ErrorExt for Error {
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
             SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
+
+            TqlSchemaIncompatible { .. }
+            | TqlCteParsingError { .. }
+            | TqlCteNotSupported { .. } => StatusCode::InvalidArguments,
         }
     }
 
