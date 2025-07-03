@@ -578,7 +578,7 @@ impl AggregateUDFImpl for MergeWrapper {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
-        self.inner.inner().as_any()
+        self
     }
     fn name(&self) -> &str {
         self.name.as_str()
