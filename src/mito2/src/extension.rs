@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,7 +20,7 @@ pub type InclusiveTimeRange = (Timestamp, Timestamp);
 /// memtable range and sst file range, but resides on the outside.
 /// It can be scanned side by side as other ranges to produce the final result, so it's very useful
 /// to extend the source of data in GreptimeDB.
-pub trait ExtensionRange: Send + Sync {
+pub trait ExtensionRange: Display + Send + Sync {
     /// The number of rows in this range.
     fn num_rows(&self) -> u64;
 
@@ -31,6 +32,11 @@ pub trait ExtensionRange: Send + Sync {
 
     /// Create the reader for reading this range.
     fn reader(&self, context: &StreamContext) -> BoxedExtensionRangeReader;
+
+    /// Get the metrics for the extension range, if there's one.
+    fn metrics(&self) -> Option<BoxedExtensionRangeMetrics> {
+        None
+    }
 }
 
 pub type BoxedExtensionRange = Box<dyn ExtensionRange>;
@@ -73,3 +79,8 @@ pub trait ExtensionRangeProviderFactory: Send + Sync {
 }
 
 pub type BoxedExtensionRangeProviderFactory = Box<dyn ExtensionRangeProviderFactory>;
+
+/// The type for the metrics for an extension range.
+pub trait ExtensionRangeMetrics: Display + Send + Sync {}
+
+pub type BoxedExtensionRangeMetrics = Box<dyn ExtensionRangeMetrics>;

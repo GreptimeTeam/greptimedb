@@ -27,6 +27,7 @@ use smallvec::SmallVec;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::extension::BoxedExtensionRangeMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_RETURN, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
@@ -343,6 +344,9 @@ struct PartitionMetricsInner {
     yield_cost: Time,
     /// Duration to convert [`Batch`]es.
     convert_cost: Time,
+
+    #[cfg(feature = "enterprise")]
+    extension_range_metrics_list: Mutex<Vec<BoxedExtensionRangeMetrics>>,
 }
 
 impl PartitionMetricsInner {
@@ -423,6 +427,8 @@ impl PartitionMetrics {
             scan_cost: MetricBuilder::new(metrics_set).subset_time("scan_cost", partition),
             yield_cost: MetricBuilder::new(metrics_set).subset_time("yield_cost", partition),
             convert_cost: MetricBuilder::new(metrics_set).subset_time("convert_cost", partition),
+            #[cfg(feature = "enterprise")]
+            extension_range_metrics_list: Mutex::new(vec![]),
         };
         Self(Arc::new(inner))
     }
@@ -484,6 +490,12 @@ impl PartitionMetrics {
         let mut metrics_set = self.0.metrics.lock().unwrap();
         metrics_set.set_distributor_metrics(metrics);
     }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn add_extension_range_metrics(&self, metrics: BoxedExtensionRangeMetrics) {
+        let mut list = self.0.extension_range_metrics_list.lock().unwrap();
+        list.push(metrics);
+    }
 }
 
 impl fmt::Debug for PartitionMetrics {
@@ -491,9 +503,25 @@ impl fmt::Debug for PartitionMetrics {
         let metrics = self.0.metrics.lock().unwrap();
         write!(
             f,
-            r#"{{"partition":{}, "metrics":{:?}}}"#,
+            r#"{{"partition":{}, "metrics":{:?}"#,
             self.0.partition, metrics
-        )
+        )?;
+
+        #[cfg(feature = "enterprise")]
+        {
+            let list = self.0.extension_range_metrics_list.lock().unwrap();
+            if !list.is_empty() {
+                write!(f, ", extension_ranges: [")?;
+                let mut delimiter = "";
+                for metrics in list.iter() {
+                    write!(f, "{}{}", delimiter, metrics)?;
+                    delimiter = ", ";
+                }
+                write!(f, "]")?;
+            }
+        }
+
+        write!(f, "}}")
     }
 }
 
@@ -598,16 +626,21 @@ pub fn build_file_range_scan_stream(
 pub(crate) async fn scan_extension_range(
     context: Arc<StreamContext>,
     index: RowGroupIndex,
-    metrics: PartitionMetrics,
+    partition_metrics: PartitionMetrics,
 ) -> Result<BoxedBatchStream> {
     use snafu::ResultExt;
 
     let range = context.input.extension_range(index.index);
     let reader = range.reader(context.as_ref());
-    reader
-        .read(context, metrics, index)
+    let stream = reader
+        .read(context.clone(), partition_metrics.clone(), index)
         .await
-        .context(crate::error::ScanExternalRangeSnafu)
+        .context(crate::error::ScanExternalRangeSnafu)?;
+
+    if let Some(metrics) = range.metrics() {
+        partition_metrics.add_extension_range_metrics(metrics);
+    }
+    Ok(stream)
 }
 
 pub(crate) async fn maybe_scan_other_ranges(
