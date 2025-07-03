@@ -112,7 +112,7 @@ fn create_test_rule(num_columns: usize) -> MultiDimPartitionRule {
     };
 
     let regions = (0..exprs.len()).map(|v| v as u32).collect();
-    MultiDimPartitionRule::try_new(columns, regions, exprs).unwrap()
+    MultiDimPartitionRule::try_new(columns, regions, exprs, true).unwrap()
 }
 
 fn create_test_batch(size: usize) -> RecordBatch {

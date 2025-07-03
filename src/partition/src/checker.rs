@@ -576,6 +576,7 @@ mod tests {
                     .and(col("value").gt_eq(Value::Int64(3))),
                 col("host").gt_eq(Value::Int64(3)),
             ],
+            true,
         )
         .unwrap();
         let checker = PartitionChecker::try_new(&rule).unwrap();
