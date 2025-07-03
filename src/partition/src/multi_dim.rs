@@ -63,10 +63,15 @@ pub struct MultiDimPartitionRule {
 }
 
 impl MultiDimPartitionRule {
+    /// Create a new [`MultiDimPartitionRule`].
+    ///
+    /// If `check_exprs` is true, the function will check if the expressions are valid. This is
+    /// required when constructing a new partition rule like `CREATE TABLE` or `ALTER TABLE`.
     pub fn try_new(
         partition_columns: Vec<String>,
         regions: Vec<RegionNumber>,
         exprs: Vec<PartitionExpr>,
+        check_exprs: bool,
     ) -> Result<Self> {
         let name_to_index = partition_columns
             .iter()
@@ -82,8 +87,10 @@ impl MultiDimPartitionRule {
             physical_expr_cache: RwLock::new(None),
         };
 
-        let checker = PartitionChecker::try_new(&rule)?;
-        checker.check()?;
+        if check_exprs {
+            let checker = PartitionChecker::try_new(&rule)?;
+            checker.check()?;
+        }
 
         Ok(rule)
     }
@@ -386,6 +393,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("sh".into())),
                 ),
             ],
+            true,
         )
         .unwrap();
         assert_matches!(
@@ -429,6 +437,7 @@ mod tests {
                     )),
                 )),
             )],
+            true,
         );
 
         // check rule
@@ -452,6 +461,7 @@ mod tests {
                 RestrictedOp::And,
                 Operand::Value(datatypes::value::Value::String("sh".into())),
             )],
+            true,
         );
 
         // check rule
@@ -487,6 +497,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("s".into())),
                 ),
             ],
+            true,
         );
 
         // check rule
@@ -630,6 +641,7 @@ mod tests {
                     )),
                 ),
             ],
+            true,
         );
 
         // check rule
@@ -657,6 +669,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::Int64(10)),
                 ),
             ],
+            true,
         );
 
         // check rule
@@ -690,6 +703,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::Int64(20)),
                 ),
             ],
+            true,
         );
 
         // check rule
@@ -720,6 +734,7 @@ mod tests {
                     .and(col("value").gt_eq(Value::Int64(10))),
                 col("host").gt_eq(Value::String("server10".into())),
             ],
+            true,
         )
         .unwrap();
     }
@@ -768,6 +783,7 @@ mod test_split_record_batch {
                 col("host").lt(Value::String("server1".into())),
                 col("host").gt_eq(Value::String("server1".into())),
             ],
+            true,
         )
         .unwrap();
 
@@ -796,6 +812,7 @@ mod test_split_record_batch {
                 col("host").lt(Value::String("server1".into())),
                 col("host").gt_eq(Value::String("server1".into())),
             ],
+            true,
         )
         .unwrap();
 
@@ -828,6 +845,7 @@ mod test_split_record_batch {
                     .gt_eq(Value::String("server10".into()))
                     .and(col("value").gt_eq(Value::Int64(10))),
             ],
+            true,
         )
         .unwrap();
 
@@ -850,6 +868,7 @@ mod test_split_record_batch {
                 col("value").lt(Value::Int64(30)),
                 col("value").gt_eq(Value::Int64(30)),
             ],
+            true,
         )
         .unwrap();
 
