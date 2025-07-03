@@ -314,9 +314,13 @@ impl Instance {
 /// For MySQL, it applies only to read-only statements.
 fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Duration> {
     let query_timeout = query_ctx.query_timeout()?;
-    match (query_ctx.channel(), stmt) {
-        (Channel::Mysql, Statement::Query(_)) | (Channel::Postgres, _) => Some(query_timeout),
-        (_, _) => None,
+    if query_timeout.is_zero() {
+        return None;
+    }
+    match query_ctx.channel() {
+        Channel::Mysql if stmt.is_readonly() => Some(query_timeout),
+        Channel::Postgres => Some(query_timeout),
+        _ => None,
     }
 }
 
