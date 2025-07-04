@@ -19,13 +19,16 @@ pub use api::v1::meta::Peer;
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
 
-/// can query peer given a node id
+/// PeerLookupService is a service that can lookup peers.
 #[async_trait::async_trait]
 pub trait PeerLookupService {
+    /// Returns the datanode with the given id. It may return inactive peers.
     async fn datanode(&self, id: DatanodeId) -> Result<Option<Peer>, Error>;
+
+    /// Returns the flownode with the given id. It may return inactive peers.
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
 
-    /// Get all available frontends from the memory backend.
+    /// Returns all active frontends from the memory backend.
     async fn frontends(&self) -> Result<Vec<Peer>, Error>;
 }
 

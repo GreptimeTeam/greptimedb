@@ -21,6 +21,7 @@ use std::task::{Context, Poll};
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
 use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
+use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
 use common_meta::rpc::store::RangeRequest;
@@ -296,10 +297,13 @@ impl PeerLookupService for MetaPeerLookupService {
             .context(common_meta::error::ExternalSnafu)
     }
     async fn frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
-        lookup_frontends(&self.meta_peer_client, u64::MAX)
-            .await
-            .map_err(BoxedError::new)
-            .context(common_meta::error::ExternalSnafu)
+        lookup_frontends(
+            &self.meta_peer_client,
+            FRONTEND_HEARTBEAT_INTERVAL_MILLIS / 2000,
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu)
     }
 }
 

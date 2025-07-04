@@ -139,6 +139,7 @@ struct DefaultEventHandlerImpl {
 impl EventHandler for DefaultEventHandlerImpl {
     async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()> {
         debug!("Received {} events: {:?}", events.len(), events);
+        // TODO(zyy17): Avoid to create a new database client when handling the events.
         let database_client = self.build_database_client().await?;
         let row_inserts = RowInsertRequests {
             inserts: events.into_iter().map(|e| e.to_row_insert()).collect(),

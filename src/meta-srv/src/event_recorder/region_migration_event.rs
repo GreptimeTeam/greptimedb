@@ -27,8 +27,9 @@ use crate::procedure::region_migration::manager::RegionMigrationProcedureTask;
 pub const REGION_MIGRATION_EVENTS_TABLE_NAME: &str = "region_migration_events";
 
 pub const REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME: &str = "procedure_id";
-pub const REGION_MIGRATION_EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
 pub const REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME: &str = "region_id";
+pub const REGION_MIGRATION_EVENTS_TABLE_TABLE_ID_COLUMN_NAME: &str = "table_id";
+pub const REGION_MIGRATION_EVENTS_TABLE_REGION_NUMBER_COLUMN_NAME: &str = "region_number";
 pub const REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME: &str = "from_datanode_id";
 pub const REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ADDR_COLUMN_NAME: &str = "from_datanode_addr";
 pub const REGION_MIGRATION_EVENTS_TABLE_TO_DATANODE_ID_COLUMN_NAME: &str = "to_datanode_id";
@@ -130,6 +131,12 @@ impl RegionMigrationEvent {
                 ..Default::default()
             },
             ColumnSchema {
+                column_name: REGION_MIGRATION_EVENTS_TABLE_REGION_NUMBER_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::Uint32.into(),
+                semantic_type: SemanticType::Field.into(),
+                ..Default::default()
+            },
+            ColumnSchema {
                 column_name: REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::Uint64.into(),
                 semantic_type: SemanticType::Field.into(),
@@ -187,6 +194,7 @@ impl RegionMigrationEvent {
                 ValueData::StringValue(self.procedure_id.to_string()).into(),
                 ValueData::U64Value(self.task.region_id.as_u64()).into(),
                 ValueData::U32Value(self.task.region_id.table_id()).into(),
+                ValueData::U32Value(self.task.region_id.region_number()).into(),
                 ValueData::U64Value(self.task.from_peer.id).into(),
                 ValueData::StringValue(self.task.from_peer.addr.to_string()).into(),
                 ValueData::U64Value(self.task.to_peer.id).into(),
