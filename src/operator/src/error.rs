@@ -829,13 +829,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "enterprise")]
-    #[snafu(display("Trigger related operations are not currently supported"))]
-    UnsupportedTrigger {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid time index type: {}", ty))]
     InvalidTimeIndexType {
         ty: arrow::datatypes::DataType,
@@ -902,8 +895,6 @@ impl ErrorExt for Error {
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
             | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
-            #[cfg(feature = "enterprise")]
-            Error::UnsupportedTrigger { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
