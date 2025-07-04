@@ -352,11 +352,13 @@ impl MemoryCatalogManager {
     }
 
     fn create_catalog_entry(self: &Arc<Self>, catalog: String) -> SchemaEntries {
+        let backend = Arc::new(MemoryKvBackend::new());
         let information_schema_provider = InformationSchemaProvider::new(
             catalog,
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
-            Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new()))),
+            Arc::new(FlowMetadataManager::new(backend.clone())),
             None, // we don't need ProcessManager on regions server.
+            backend,
         );
         let information_schema = information_schema_provider.tables().clone();
 

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use clap::Parser;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -342,13 +342,12 @@ impl StartCommand {
 
         let information_extension =
             Arc::new(DistributedInformationExtension::new(meta_client.clone()));
-        let catalog_manager = KvBackendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
-            None,
-            None,
-        );
+        )
+        .build();
 
         let table_metadata_manager =
             Arc::new(TableMetadataManager::new(cached_meta_backend.clone()));
