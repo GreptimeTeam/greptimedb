@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "enterprise")]
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -40,7 +38,8 @@ pub struct KvBackendCatalogManagerBuilder {
     procedure_manager: Option<ProcedureManagerRef>,
     process_manager: Option<ProcessManagerRef>,
     #[cfg(feature = "enterprise")]
-    extra_information_table_factories: HashMap<String, InformationSchemaTableFactoryRef>,
+    extra_information_table_factories:
+        std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
 }
 
 impl KvBackendCatalogManagerBuilder {
@@ -56,7 +55,7 @@ impl KvBackendCatalogManagerBuilder {
             procedure_manager: None,
             process_manager: None,
             #[cfg(feature = "enterprise")]
-            extra_information_table_factories: HashMap::new(),
+            extra_information_table_factories: std::collections::HashMap::new(),
         }
     }
 
@@ -74,7 +73,7 @@ impl KvBackendCatalogManagerBuilder {
     #[cfg(feature = "enterprise")]
     pub fn with_extra_information_table_factories(
         mut self,
-        factories: HashMap<String, InformationSchemaTableFactoryRef>,
+        factories: std::collections::HashMap<String, InformationSchemaTableFactoryRef>,
     ) -> Self {
         self.extra_information_table_factories = factories;
         self
