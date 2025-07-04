@@ -130,6 +130,7 @@ impl MetasrvInstance {
             let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
                 addr: &self.opts.http.addr,
             })?;
+            info!("starting http server at {}", addr);
             server.start(addr).await.context(error::StartHttpSnafu)?;
 
             self.http_server = Either::Right(server);
