@@ -29,19 +29,22 @@ use common_procedure::{
     Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
     PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use futures::future::{self};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
+use crate::ddl::physical_table_metadata::update_table_info_column_ids;
 use crate::ddl::utils::{
-    add_peer_context_if_needed, handle_multiple_results, map_to_procedure_error,
-    sync_follower_regions, MultipleResults,
+    add_peer_context_if_needed, extract_column_metadatas, handle_multiple_results,
+    map_to_procedure_error, sync_follower_regions, MultipleResults,
 };
 use crate::ddl::DdlContext;
 use crate::error::{AbortProcedureSnafu, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu};
@@ -202,9 +205,9 @@ impl AlterTableProcedure {
                 })
             }
             MultipleResults::Ok(results) => {
-                self.submit_sync_region_requests(results, &physical_table_route.region_routes)
+                self.submit_sync_region_requests(&results, &physical_table_route.region_routes)
                     .await;
-                self.data.state = AlterTableState::UpdateMetadata;
+                self.handle_alter_region_response(results)?;
                 Ok(Status::executing_with_clean_poisons(true))
             }
             MultipleResults::AllNonRetryable(error) => {
@@ -220,9 +223,22 @@ impl AlterTableProcedure {
         }
     }
 
+    fn handle_alter_region_response(&mut self, mut results: Vec<RegionResponse>) -> Result<()> {
+        self.data.state = AlterTableState::UpdateMetadata;
+        if let Some(column_metadatas) =
+            extract_column_metadatas(&mut results, TABLE_COLUMN_METADATA_EXTENSION_KEY)?
+        {
+            self.data.column_metadatas = column_metadatas;
+        } else {
+            warn!("altering table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
+        }
+
+        Ok(())
+    }
+
     async fn submit_sync_region_requests(
         &mut self,
-        results: Vec<RegionResponse>,
+        results: &[RegionResponse],
         region_routes: &[RegionRoute],
     ) {
         // Safety: filled in `prepare` step.
@@ -268,10 +284,14 @@ impl AlterTableProcedure {
             self.on_update_metadata_for_rename(new_table_name.to_string(), table_info_value)
                 .await?;
         } else {
+            let mut raw_table_info = new_info.into();
+            if !self.data.column_metadatas.is_empty() {
+                update_table_info_column_ids(&mut raw_table_info, &self.data.column_metadatas);
+            }
             // region distribution is set in submit_alter_region_requests
             let region_distribution = self.data.region_distribution.as_ref().unwrap().clone();
             self.on_update_metadata_for_alter(
-                new_info.into(),
+                raw_table_info,
                 region_distribution,
                 table_info_value,
             )
@@ -317,6 +337,16 @@ impl AlterTableProcedure {
         }
 
         lock_key
+    }
+
+    #[cfg(test)]
+    pub(crate) fn data(&self) -> &AlterTableData {
+        &self.data
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mut_data(&mut self) -> &mut AlterTableData {
+        &mut self.data
     }
 }
 
@@ -380,6 +410,8 @@ pub struct AlterTableData {
     state: AlterTableState,
     task: AlterTableTask,
     table_id: TableId,
+    #[serde(default)]
+    column_metadatas: Vec<ColumnMetadata>,
     /// Table info value before alteration.
     table_info_value: Option<DeserializedValueWithBytes<TableInfoValue>>,
     /// Region distribution for table in case we need to update region options.
@@ -392,6 +424,7 @@ impl AlterTableData {
             state: AlterTableState::Prepare,
             task,
             table_id,
+            column_metadatas: vec![],
             table_info_value: None,
             region_distribution: None,
         }
@@ -409,5 +442,15 @@ impl AlterTableData {
         self.table_info_value
             .as_ref()
             .map(|value| &value.table_info)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn column_metadatas(&self) -> &[ColumnMetadata] {
+        &self.column_metadatas
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_column_metadatas(&mut self, column_metadatas: Vec<ColumnMetadata>) {
+        self.column_metadatas = column_metadatas;
     }
 }
