@@ -20,11 +20,7 @@ use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
 use api::v1::ArrowIpc;
-use arrow::array::{
-    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
-};
-use arrow::datatypes::{DataType, Int64Type, TimeUnit};
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
@@ -61,6 +57,10 @@ impl Inserter {
             return Ok(0);
         };
         decode_timer.observe_duration();
+
+        if record_batch.num_rows() == 0 {
+            return Ok(0);
+        }
 
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info, record_batch.clone());
@@ -155,6 +155,9 @@ impl Inserter {
         let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
             for (region_id, mask) in masks {
+                if mask.select_none() {
+                    continue;
+                }
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
                 let node_manager = self.node_manager.clone();
@@ -304,32 +307,11 @@ fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Re
     if rb.num_rows() == 0 {
         return Ok(vec![]);
     }
-    let primitive = match ts_col.data_type() {
-        DataType::Timestamp(unit, _) => match unit {
-            TimeUnit::Second => ts_col
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Millisecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Microsecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Nanosecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-        },
-        t => {
-            return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
-        }
-    };
+    let (primitive, _) =
+        datatypes::timestamp::timestamp_array_to_primitive(ts_col).with_context(|| {
+            error::InvalidTimeIndexTypeSnafu {
+                ty: ts_col.data_type().clone(),
+            }
+        })?;
     Ok(primitive.iter().flatten().collect())
 }

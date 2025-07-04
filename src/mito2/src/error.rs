@@ -1020,6 +1020,18 @@ pub enum Error {
         location: Location,
         source: mito_codec::error::Error,
     },
+
+    #[snafu(display(
+        "Inconsistent timestamp column length, expect: {}, actual: {}",
+        expected,
+        actual
+    ))]
+    InconsistentTimestampLength {
+        expected: usize,
+        actual: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1175,6 +1187,8 @@ impl ErrorExt for Error {
             ConvertBulkWalEntry { source, .. } => source.status_code(),
 
             Encode { source, .. } | Decode { source, .. } => source.status_code(),
+
+            InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow_array::{
+    ArrayRef, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
+};
+use arrow_schema::DataType;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use paste::paste;
@@ -137,6 +142,41 @@ define_timestamp_with_unit!(Second);
 define_timestamp_with_unit!(Millisecond);
 define_timestamp_with_unit!(Microsecond);
 define_timestamp_with_unit!(Nanosecond);
+
+pub fn timestamp_array_to_primitive(
+    ts_array: &ArrayRef,
+) -> Option<(
+    PrimitiveArray<arrow_array::types::Int64Type>,
+    arrow::datatypes::TimeUnit,
+)> {
+    let DataType::Timestamp(unit, _) = ts_array.data_type() else {
+        return None;
+    };
+
+    let ts_primitive = match unit {
+        arrow_schema::TimeUnit::Second => ts_array
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .unwrap()
+            .reinterpret_cast::<arrow_array::types::Int64Type>(),
+        arrow_schema::TimeUnit::Millisecond => ts_array
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .reinterpret_cast::<arrow_array::types::Int64Type>(),
+        arrow_schema::TimeUnit::Microsecond => ts_array
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap()
+            .reinterpret_cast::<arrow_array::types::Int64Type>(),
+        arrow_schema::TimeUnit::Nanosecond => ts_array
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap()
+            .reinterpret_cast::<arrow_array::types::Int64Type>(),
+    };
+    Some((ts_primitive, *unit))
+}
 
 #[cfg(test)]
 mod tests {
