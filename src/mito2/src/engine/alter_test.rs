@@ -26,7 +26,7 @@ use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, Fulltex
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, RegionAlterRequest,
+    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, PathType, RegionAlterRequest,
     RegionOpenRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
@@ -135,7 +135,7 @@ async fn test_alter_region() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -171,7 +171,8 @@ async fn test_alter_region() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -230,7 +231,7 @@ async fn test_put_after_alter() {
         .await;
 
     let mut column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -264,7 +265,8 @@ async fn test_put_after_alter() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -501,7 +503,7 @@ async fn test_alter_column_fulltext_options() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -586,7 +588,8 @@ async fn test_alter_column_fulltext_options() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -622,7 +625,7 @@ async fn test_alter_column_set_inverted_index() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -696,7 +699,8 @@ async fn test_alter_column_set_inverted_index() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),

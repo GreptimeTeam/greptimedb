@@ -307,7 +307,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -342,7 +342,7 @@ async fn test_flush_reopen_region(factory: Option<LogStoreFactory>) {
             .unwrap(),
         );
     };
-    reopen_region(&engine, region_id, region_dir, true, options).await;
+    reopen_region(&engine, region_id, table_dir, true, options).await;
     check_region();
 
     // Puts again.
@@ -494,13 +494,13 @@ async fn test_flush_workers() {
         )
         .await;
 
-    let request = CreateRequestBuilder::new().region_dir("r0").build();
+    let request = CreateRequestBuilder::new().table_dir("r0").build();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id0, RegionRequest::Create(request))
         .await
         .unwrap();
-    let request = CreateRequestBuilder::new().region_dir("r1").build();
+    let request = CreateRequestBuilder::new().table_dir("r1").build();
     engine
         .handle_request(region_id1, RegionRequest::Create(request.clone()))
         .await

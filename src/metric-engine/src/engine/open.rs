@@ -20,11 +20,9 @@ use common_error::ext::BoxedError;
 use common_telemetry::info;
 use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
-use object_store::util::join_dir;
 use snafu::{OptionExt, ResultExt};
-use store_api::metric_engine_consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{AffectedRows, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::create::region_options_for_metadata_region;
@@ -164,12 +162,10 @@ impl MetricEngineInner {
         &self,
         request: RegionOpenRequest,
     ) -> (RegionOpenRequest, RegionOpenRequest) {
-        let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
-        let data_region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
-
         let metadata_region_options = region_options_for_metadata_region(&request.options);
         let open_metadata_region_request = RegionOpenRequest {
-            region_dir: metadata_region_dir,
+            table_dir: request.table_dir.clone(),
+            path_type: PathType::Metadata,
             options: metadata_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,
@@ -181,7 +177,8 @@ impl MetricEngineInner {
             self.config.experimental_sparse_primary_key_encoding,
         );
         let open_data_region_request = RegionOpenRequest {
-            region_dir: data_region_dir,
+            table_dir: request.table_dir.clone(),
+            path_type: PathType::Data,
             options: data_region_options,
             engine: MITO_ENGINE_NAME.to_string(),
             skip_wal_replay: request.skip_wal_replay,

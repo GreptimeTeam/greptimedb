@@ -391,6 +391,7 @@ mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::config::{FulltextIndexConfig, Mode};
+    use crate::sst::file::RegionFileId;
 
     struct MetaConfig {
         with_inverted: bool,
@@ -482,11 +483,11 @@ mod tests {
     struct NoopPathProvider;
 
     impl FilePathProvider for NoopPathProvider {
-        fn build_index_file_path(&self, _file_id: FileId) -> String {
+        fn build_index_file_path(&self, _file_id: RegionFileId) -> String {
             unreachable!()
         }
 
-        fn build_sst_file_path(&self, _file_id: FileId) -> String {
+        fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
             unreachable!()
         }
     }

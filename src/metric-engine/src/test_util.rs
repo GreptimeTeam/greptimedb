@@ -29,7 +29,8 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
 
@@ -101,7 +102,8 @@ impl TestEnv {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: METRIC_ENGINE_NAME.to_string(),
-                    region_dir: self.default_region_dir(),
+                    table_dir: Self::default_table_dir(),
+                    path_type: PathType::Bare, // Use Bare path type for engine regions
                     options: physical_region_option,
                     skip_wal_replay: true,
                 }),
@@ -144,7 +146,8 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            region_dir: self.default_region_dir(),
+            table_dir: Self::default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
         };
 
         // create physical region
@@ -158,7 +161,7 @@ impl TestEnv {
         let region_create_request = create_logical_region_request(
             &["job"],
             self.default_physical_region_id(),
-            "test_metric_logical_region",
+            "test_metric_logical_table",
         );
         self.metric()
             .handle_request(region_id, RegionRequest::Create(region_create_request))
@@ -184,8 +187,8 @@ impl TestEnv {
         RegionId::new(3, 2)
     }
 
-    /// Default region dir `test_metric_region`
-    pub fn default_region_dir(&self) -> String {
+    /// Default table dir `test_metric_table`
+    pub fn default_table_dir() -> String {
         "test_metric_region".to_string()
     }
 }
@@ -222,7 +225,7 @@ pub fn alter_logical_region_add_tag_columns(
 pub fn create_logical_region_request(
     tags: &[&str],
     physical_region_id: RegionId,
-    region_dir: &str,
+    table_dir: &str,
 ) -> RegionCreateRequest {
     let mut column_metadatas = vec![
         ColumnMetadata {
@@ -265,7 +268,8 @@ pub fn create_logical_region_request(
         )]
         .into_iter()
         .collect(),
-        region_dir: region_dir.to_string(),
+        table_dir: table_dir.to_string(),
+        path_type: PathType::Bare, // Use Bare path type for engine regions
     }
 }
 
@@ -344,14 +348,15 @@ mod test {
         let builder = Fs::default().root(&env.data_home());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let region_dir = "test_metric_region";
+        let table_dir = TestEnv::default_table_dir();
+        let region_dir = join_dir(&table_dir, "1_0000000002");
         // assert metadata region's dir
-        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
         let exist = object_store.exists(&metadata_region_dir).await.unwrap();
         assert!(exist);
 
         // assert data region's dir
-        let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
+        let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
         let exist = object_store.exists(&data_region_dir).await.unwrap();
         assert!(exist);
 
