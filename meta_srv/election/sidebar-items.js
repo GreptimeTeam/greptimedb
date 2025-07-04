@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CANDIDATES_ROOT","CANDIDATE_LEASE_SECS","ELECTION_KEY","KEEP_ALIVE_INTERVAL_SECS"],"enum":["LeaderChangeMessage"],"fn":["listen_leader_change","send_leader_change_and_set_flags"],"mod":["etcd","rds"],"trait":["Election","LeaderKey"]};

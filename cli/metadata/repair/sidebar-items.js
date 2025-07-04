@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["alter_table","create_table"],"struct":["RepairLogicalTablesCommand","RepairTool"]};

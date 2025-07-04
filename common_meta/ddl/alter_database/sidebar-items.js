@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlterDatabaseState"],"fn":["build_new_schema_value"],"struct":["AlterDatabaseData","AlterDatabaseProcedure"]};

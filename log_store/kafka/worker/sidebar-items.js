@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WorkerRequest"],"mod":["dump_index","flush","produce","update_high_watermark"],"struct":["BackgroundProducerWorker","DumpIndexRequest","PendingRequest","ProduceRequest","ProduceResultHandle","ProduceResultReceiver","TruncateIndexRequest"]};

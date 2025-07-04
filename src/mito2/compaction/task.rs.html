@@ -1,0 +1,175 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/mito2/src/compaction/task.rs`."><title>task.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2" crossorigin href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0ce1a80b.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="mito2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.89.0-nightly (4d051fb30 2025-05-18)" data-channel="nightly" data-search-js="search-f7877310.js" data-settings-js="settings-5514c975.js" ><script src="../../../static.files/storage-4e99c027.js"></script><script defer src="../../../static.files/src-script-63605ae7.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-7ef8a74a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-32bb7600.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-6580c154.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><rustdoc-search></rustdoc-search><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">mito2/compaction/</div>task.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">use </span>std::fmt::{Debug, Formatter};
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>std::sync::Arc;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span>std::time::Instant;
+<a href=#18 id=18 data-nosnippet>18</a>
+<a href=#19 id=19 data-nosnippet>19</a><span class="kw">use </span>common_telemetry::{error, info};
+<a href=#20 id=20 data-nosnippet>20</a><span class="kw">use </span>snafu::ResultExt;
+<a href=#21 id=21 data-nosnippet>21</a><span class="kw">use </span>tokio::sync::mpsc;
+<a href=#22 id=22 data-nosnippet>22</a>
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span><span class="kw">crate</span>::compaction::compactor::{CompactionRegion, Compactor};
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span><span class="kw">crate</span>::compaction::picker::{CompactionTask, PickerOutput};
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span><span class="kw">crate</span>::error::CompactRegionSnafu;
+<a href=#26 id=26 data-nosnippet>26</a><span class="kw">use </span><span class="kw">crate</span>::manifest::action::RegionEdit;
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span><span class="kw">crate</span>::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">use </span><span class="kw">crate</span>::request::{
+<a href=#29 id=29 data-nosnippet>29</a>    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
+<a href=#30 id=30 data-nosnippet>30</a>};
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">use </span><span class="kw">crate</span>::worker::WorkerListener;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">use crate</span>::{error, metrics};
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a><span class="doccomment">/// Maximum number of compaction tasks in parallel.
+<a href=#35 id=35 data-nosnippet>35</a></span><span class="kw">pub const </span>MAX_PARALLEL_COMPACTION: usize = <span class="number">1</span>;
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>CompactionTaskImpl {
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="kw">pub </span>compaction_region: CompactionRegion,
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="doccomment">/// Request sender to notify the worker.
+<a href=#40 id=40 data-nosnippet>40</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) request_sender: mpsc::Sender&lt;WorkerRequest&gt;,
+<a href=#41 id=41 data-nosnippet>41</a>    <span class="doccomment">/// Senders that are used to notify waiters waiting for pending compaction tasks.
+<a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">pub </span>waiters: Vec&lt;OutputTx&gt;,
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="doccomment">/// Start time of compaction task
+<a href=#44 id=44 data-nosnippet>44</a>    </span><span class="kw">pub </span>start_time: Instant,
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="doccomment">/// Event listener.
+<a href=#46 id=46 data-nosnippet>46</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) listener: WorkerListener,
+<a href=#47 id=47 data-nosnippet>47</a>    <span class="doccomment">/// Compactor to handle compaction.
+<a href=#48 id=48 data-nosnippet>48</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) compactor: Arc&lt;<span class="kw">dyn </span>Compactor&gt;,
+<a href=#49 id=49 data-nosnippet>49</a>    <span class="doccomment">/// Output of the picker.
+<a href=#50 id=50 data-nosnippet>50</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) picker_output: PickerOutput,
+<a href=#51 id=51 data-nosnippet>51</a>}
+<a href=#52 id=52 data-nosnippet>52</a>
+<a href=#53 id=53 data-nosnippet>53</a><span class="kw">impl </span>Debug <span class="kw">for </span>CompactionTaskImpl {
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#55 id=55 data-nosnippet>55</a>        f.debug_struct(<span class="string">"TwcsCompactionTask"</span>)
+<a href=#56 id=56 data-nosnippet>56</a>            .field(<span class="string">"region_id"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.compaction_region.region_id)
+<a href=#57 id=57 data-nosnippet>57</a>            .field(<span class="string">"picker_output"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.picker_output)
+<a href=#58 id=58 data-nosnippet>58</a>            .field(
+<a href=#59 id=59 data-nosnippet>59</a>                <span class="string">"append_mode"</span>,
+<a href=#60 id=60 data-nosnippet>60</a>                <span class="kw-2">&amp;</span><span class="self">self</span>.compaction_region.region_options.append_mode,
+<a href=#61 id=61 data-nosnippet>61</a>            )
+<a href=#62 id=62 data-nosnippet>62</a>            .finish()
+<a href=#63 id=63 data-nosnippet>63</a>    }
+<a href=#64 id=64 data-nosnippet>64</a>}
+<a href=#65 id=65 data-nosnippet>65</a>
+<a href=#66 id=66 data-nosnippet>66</a><span class="kw">impl </span>Drop <span class="kw">for </span>CompactionTaskImpl {
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="self">self</span>.mark_files_compacting(<span class="bool-val">false</span>)
+<a href=#69 id=69 data-nosnippet>69</a>    }
+<a href=#70 id=70 data-nosnippet>70</a>}
+<a href=#71 id=71 data-nosnippet>71</a>
+<a href=#72 id=72 data-nosnippet>72</a><span class="kw">impl </span>CompactionTaskImpl {
+<a href=#73 id=73 data-nosnippet>73</a>    <span class="kw">fn </span>mark_files_compacting(<span class="kw-2">&amp;</span><span class="self">self</span>, compacting: bool) {
+<a href=#74 id=74 data-nosnippet>74</a>        <span class="self">self</span>.picker_output
+<a href=#75 id=75 data-nosnippet>75</a>            .outputs
+<a href=#76 id=76 data-nosnippet>76</a>            .iter()
+<a href=#77 id=77 data-nosnippet>77</a>            .for_each(|o| o.inputs.iter().for_each(|f| f.set_compacting(compacting)));
+<a href=#78 id=78 data-nosnippet>78</a>    }
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="kw">async fn </span>handle_compaction(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; error::Result&lt;RegionEdit&gt; {
+<a href=#81 id=81 data-nosnippet>81</a>        <span class="self">self</span>.mark_files_compacting(<span class="bool-val">true</span>);
+<a href=#82 id=82 data-nosnippet>82</a>
+<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw">let </span>merge_timer = COMPACTION_STAGE_ELAPSED
+<a href=#84 id=84 data-nosnippet>84</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"merge"</span>])
+<a href=#85 id=85 data-nosnippet>85</a>            .start_timer();
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>        <span class="kw">let </span>compaction_result = <span class="kw">match </span><span class="self">self
+<a href=#88 id=88 data-nosnippet>88</a>            </span>.compactor
+<a href=#89 id=89 data-nosnippet>89</a>            .merge_ssts(<span class="kw-2">&amp;</span><span class="self">self</span>.compaction_region, <span class="self">self</span>.picker_output.clone())
+<a href=#90 id=90 data-nosnippet>90</a>            .<span class="kw">await
+<a href=#91 id=91 data-nosnippet>91</a>        </span>{
+<a href=#92 id=92 data-nosnippet>92</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
+<a href=#93 id=93 data-nosnippet>93</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#94 id=94 data-nosnippet>94</a>                <span class="macro">error!</span>(e; <span class="string">"Failed to compact region: {}"</span>, <span class="self">self</span>.compaction_region.region_id);
+<a href=#95 id=95 data-nosnippet>95</a>                merge_timer.stop_and_discard();
+<a href=#96 id=96 data-nosnippet>96</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(e);
+<a href=#97 id=97 data-nosnippet>97</a>            }
+<a href=#98 id=98 data-nosnippet>98</a>        };
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>merge_time = merge_timer.stop_and_record();
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a>        metrics::COMPACTION_INPUT_BYTES.inc_by(compaction_result.input_file_size() <span class="kw">as </span>f64);
+<a href=#102 id=102 data-nosnippet>102</a>        metrics::COMPACTION_OUTPUT_BYTES.inc_by(compaction_result.output_file_size() <span class="kw">as </span>f64);
+<a href=#103 id=103 data-nosnippet>103</a>        <span class="macro">info!</span>(
+<a href=#104 id=104 data-nosnippet>104</a>            <span class="string">"Compacted SST files, region_id: {}, input: {:?}, output: {:?}, window: {:?}, waiter_num: {}, merge_time: {}s"</span>,
+<a href=#105 id=105 data-nosnippet>105</a>            <span class="self">self</span>.compaction_region.region_id,
+<a href=#106 id=106 data-nosnippet>106</a>            compaction_result.files_to_remove,
+<a href=#107 id=107 data-nosnippet>107</a>            compaction_result.files_to_add,
+<a href=#108 id=108 data-nosnippet>108</a>            compaction_result.compaction_time_window,
+<a href=#109 id=109 data-nosnippet>109</a>            <span class="self">self</span>.waiters.len(),
+<a href=#110 id=110 data-nosnippet>110</a>            merge_time,
+<a href=#111 id=111 data-nosnippet>111</a>        );
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a>        <span class="self">self</span>.listener
+<a href=#114 id=114 data-nosnippet>114</a>            .on_merge_ssts_finished(<span class="self">self</span>.compaction_region.region_id)
+<a href=#115 id=115 data-nosnippet>115</a>            .<span class="kw">await</span>;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a>        <span class="kw">let </span>_manifest_timer = COMPACTION_STAGE_ELAPSED
+<a href=#118 id=118 data-nosnippet>118</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"write_manifest"</span>])
+<a href=#119 id=119 data-nosnippet>119</a>            .start_timer();
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a>        <span class="self">self</span>.compactor
+<a href=#122 id=122 data-nosnippet>122</a>            .update_manifest(<span class="kw-2">&amp;</span><span class="self">self</span>.compaction_region, compaction_result)
+<a href=#123 id=123 data-nosnippet>123</a>            .<span class="kw">await
+<a href=#124 id=124 data-nosnippet>124</a>    </span>}
+<a href=#125 id=125 data-nosnippet>125</a>
+<a href=#126 id=126 data-nosnippet>126</a>    <span class="doccomment">/// Handles compaction failure, notifies all waiters.
+<a href=#127 id=127 data-nosnippet>127</a>    </span><span class="kw">fn </span>on_failure(<span class="kw-2">&amp;mut </span><span class="self">self</span>, err: Arc&lt;error::Error&gt;) {
+<a href=#128 id=128 data-nosnippet>128</a>        COMPACTION_FAILURE_COUNT.inc();
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="kw">for </span>waiter <span class="kw">in </span><span class="self">self</span>.waiters.drain(..) {
+<a href=#130 id=130 data-nosnippet>130</a>            waiter.send(<span class="prelude-val">Err</span>(err.clone()).context(CompactRegionSnafu {
+<a href=#131 id=131 data-nosnippet>131</a>                region_id: <span class="self">self</span>.compaction_region.region_id,
+<a href=#132 id=132 data-nosnippet>132</a>            }));
+<a href=#133 id=133 data-nosnippet>133</a>        }
+<a href=#134 id=134 data-nosnippet>134</a>    }
+<a href=#135 id=135 data-nosnippet>135</a>
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="doccomment">/// Notifies region worker to handle post-compaction tasks.
+<a href=#137 id=137 data-nosnippet>137</a>    </span><span class="kw">async fn </span>send_to_worker(<span class="kw-2">&amp;</span><span class="self">self</span>, request: WorkerRequest) {
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="self">self</span>.request_sender.send(request).<span class="kw">await </span>{
+<a href=#139 id=139 data-nosnippet>139</a>            <span class="macro">error!</span>(
+<a href=#140 id=140 data-nosnippet>140</a>                <span class="string">"Failed to notify compaction job status for region {}, request: {:?}"</span>,
+<a href=#141 id=141 data-nosnippet>141</a>                <span class="self">self</span>.compaction_region.region_id, e.<span class="number">0
+<a href=#142 id=142 data-nosnippet>142</a>            </span>);
+<a href=#143 id=143 data-nosnippet>143</a>        }
+<a href=#144 id=144 data-nosnippet>144</a>    }
+<a href=#145 id=145 data-nosnippet>145</a>}
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a><span class="attr">#[async_trait::async_trait]
+<a href=#148 id=148 data-nosnippet>148</a></span><span class="kw">impl </span>CompactionTask <span class="kw">for </span>CompactionTaskImpl {
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="kw">async fn </span>run(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="kw">let </span>notify = <span class="kw">match </span><span class="self">self</span>.handle_compaction().<span class="kw">await </span>{
+<a href=#151 id=151 data-nosnippet>151</a>            <span class="prelude-val">Ok</span>(edit) =&gt; BackgroundNotify::CompactionFinished(CompactionFinished {
+<a href=#152 id=152 data-nosnippet>152</a>                region_id: <span class="self">self</span>.compaction_region.region_id,
+<a href=#153 id=153 data-nosnippet>153</a>                senders: std::mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.waiters),
+<a href=#154 id=154 data-nosnippet>154</a>                start_time: <span class="self">self</span>.start_time,
+<a href=#155 id=155 data-nosnippet>155</a>                edit,
+<a href=#156 id=156 data-nosnippet>156</a>            }),
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#158 id=158 data-nosnippet>158</a>                <span class="macro">error!</span>(e; <span class="string">"Failed to compact region, region id: {}"</span>, <span class="self">self</span>.compaction_region.region_id);
+<a href=#159 id=159 data-nosnippet>159</a>                <span class="kw">let </span>err = Arc::new(e);
+<a href=#160 id=160 data-nosnippet>160</a>                <span class="comment">// notify compaction waiters
+<a href=#161 id=161 data-nosnippet>161</a>                </span><span class="self">self</span>.on_failure(err.clone());
+<a href=#162 id=162 data-nosnippet>162</a>                BackgroundNotify::CompactionFailed(CompactionFailed {
+<a href=#163 id=163 data-nosnippet>163</a>                    region_id: <span class="self">self</span>.compaction_region.region_id,
+<a href=#164 id=164 data-nosnippet>164</a>                    err,
+<a href=#165 id=165 data-nosnippet>165</a>                })
+<a href=#166 id=166 data-nosnippet>166</a>            }
+<a href=#167 id=167 data-nosnippet>167</a>        };
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>        <span class="self">self</span>.send_to_worker(WorkerRequest::Background {
+<a href=#170 id=170 data-nosnippet>170</a>            region_id: <span class="self">self</span>.compaction_region.region_id,
+<a href=#171 id=171 data-nosnippet>171</a>            notify,
+<a href=#172 id=172 data-nosnippet>172</a>        })
+<a href=#173 id=173 data-nosnippet>173</a>        .<span class="kw">await</span>;
+<a href=#174 id=174 data-nosnippet>174</a>    }
+<a href=#175 id=175 data-nosnippet>175</a>}</code></pre></div></section></main></body></html>
