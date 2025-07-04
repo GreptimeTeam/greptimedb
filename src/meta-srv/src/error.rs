@@ -900,6 +900,28 @@ pub enum Error {
         #[snafu(source)]
         source: common_meta::error::Error,
     },
+
+    #[snafu(display("Failed to insert events"))]
+    InsertEvents {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: client::error::Error,
+    },
+
+    #[snafu(display("Failed to send event"))]
+    SendEvent {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("No available frontend"))]
+    NoAvailableFrontend {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl Error {
@@ -953,6 +975,8 @@ impl ErrorExt for Error {
             | Error::BuildPartitionClient { .. }
             | Error::BuildKafkaClient { .. }
             | Error::DeleteRecords { .. }
+            | Error::InsertEvents { .. }
+            | Error::NoAvailableFrontend { .. }
             | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
@@ -1002,6 +1026,7 @@ impl ErrorExt for Error {
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }
+            Error::SendEvent { source, .. } => source.status_code(),
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
 

@@ -40,7 +40,9 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
+use crate::cluster::MetaPeerClientBuilder;
 use crate::error::{self, Error, Result};
+use crate::event_recorder::{EventRecorderImpl, EventRecorderRef};
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -68,6 +70,7 @@ pub struct TestingEnv {
     procedure_manager: ProcedureManagerRef,
     tracker: RegionMigrationProcedureTracker,
     kv_backend: KvBackendRef,
+    event_recorder: EventRecorderRef,
 }
 
 impl Default for TestingEnv {
@@ -97,6 +100,16 @@ impl TestingEnv {
             None,
         ));
 
+        let event_recorder = Arc::new(EventRecorderImpl::new(
+            MetaPeerClientBuilder::default()
+                .election(None)
+                .in_memory(kv_backend.clone())
+                .build()
+                .map(Arc::new)
+                // Safety: all required fields set at initialization
+                .unwrap(),
+        ));
+
         Self {
             table_metadata_manager,
             opening_region_keeper,
@@ -105,6 +118,7 @@ impl TestingEnv {
             procedure_manager,
             tracker: Default::default(),
             kv_backend,
+            event_recorder,
         }
     }
 
@@ -180,6 +194,11 @@ impl TestingEnv {
             .await
             .unwrap();
     }
+
+    /// Returns the [EventRecorderRef].
+    pub fn event_recorder(&self) -> EventRecorderRef {
+        self.event_recorder.clone()
+    }
 }
 
 /// Generates a [PersistentContext].
@@ -192,6 +211,31 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         region_id,
         timeout: Duration::from_secs(10),
         trigger_reason: RegionMigrationTriggerReason::default(),
+    }
+}
+
+/// Generates a [DefaultContextFactory].
+pub fn new_default_context_factory() -> DefaultContextFactory {
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+    let mailbox_sequence =
+        SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
+    let mailbox_ctx = MailboxContext::new(mailbox_sequence);
+    let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+    let server_addr = "localhost".to_string();
+
+    DefaultContextFactory {
+        table_metadata_manager,
+        opening_region_keeper,
+        volatile_ctx: Default::default(),
+        in_memory_key: Arc::new(MemoryKvBackend::default()),
+        mailbox: mailbox_ctx.mailbox().clone(),
+        server_addr: server_addr.clone(),
+        region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+        cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(
+            mailbox_ctx.mailbox().clone(),
+            MetasrvInfo { server_addr },
+        )),
     }
 }
 

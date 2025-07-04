@@ -775,8 +775,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let expected_keys = persistent_context.lock_key();
 
-        let env = TestingEnv::new();
-        let context = env.context_factory();
+        let context = new_default_context_factory();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 
@@ -792,8 +791,7 @@ mod tests {
     fn test_data_serialization() {
         let persistent_context = new_persistent_context();
 
-        let env = TestingEnv::new();
-        let context = env.context_factory();
+        let context = new_default_context_factory();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context, None);
 

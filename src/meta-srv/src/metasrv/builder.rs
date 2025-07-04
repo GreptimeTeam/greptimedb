@@ -47,6 +47,7 @@ use snafu::{ensure, ResultExt};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::event_recorder::EventRecorderImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -190,6 +191,10 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+
+        // Builds the event recorder to record important events and persist them as the system table.
+        let event_recorder = Arc::new(EventRecorderImpl::new(meta_peer_client.clone()));
+
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
@@ -322,6 +327,7 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
+            event_recorder.clone(),
         ));
         region_migration_manager.try_start()?;
         let region_supervisor_selector = plugins

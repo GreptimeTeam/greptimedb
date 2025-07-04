@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
@@ -34,11 +35,21 @@ use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
+use meta_srv::event_recorder::{
+    REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME, REGION_MIGRATION_EVENTS_TABLE_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_TO_DATANODE_ID_COLUMN_NAME,
+    REGION_MIGRATION_EVENTS_TABLE_TRIGGER_REASON_COLUMN_NAME,
+};
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
 };
 use meta_srv::selector::{Selector, SelectorOptions};
+use sea_query::{Expr, Iden, Order, PostgresQueryBuilder, Query};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::storage::RegionId;
@@ -137,7 +148,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let mut logical_timer = 1685508715000;
     let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
@@ -233,6 +244,15 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         .await
         .unwrap_err();
     assert!(matches!(err, error::Error::RegionMigrated { .. }));
+
+    check_region_migration_events_system_table(
+        cluster.fe_instance(),
+        &procedure.unwrap().to_string(),
+        region_id.as_u64(),
+        from_peer_id,
+        to_peer_id,
+    )
+    .await;
 }
 
 /// A naive metric table region migration test by SQL function
@@ -280,7 +300,7 @@ pub async fn test_metric_table_region_migration_by_sql(
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     // Prepares test metric tables.
     let table_id = prepare_testing_metric_table(&cluster).await;
@@ -321,11 +341,12 @@ pub async fn test_metric_table_region_migration_by_sql(
 
     // Waits condition by checking procedure state
     let frontend = cluster.fe_instance().clone();
+    let procedure_id_for_closure = procedure_id.clone();
     wait_condition(
         Duration::from_secs(10),
         Box::pin(async move {
             loop {
-                let state = query_procedure_by_sql(&frontend, &procedure_id).await;
+                let state = query_procedure_by_sql(&frontend, &procedure_id_for_closure).await;
                 if state == "{\"status\":\"Done\"}" {
                     info!("Migration done: {state}");
                     break;
@@ -369,6 +390,15 @@ pub async fn test_metric_table_region_migration_by_sql(
 | job1 | 1970-01-01T00:00:00     | 0.0 |
 +------+-------------------------+-----+";
     check_output_stream(result.unwrap().data, expected).await;
+
+    check_region_migration_events_system_table(
+        cluster.fe_instance(),
+        &procedure_id,
+        region_id.as_u64(),
+        from_peer_id,
+        to_peer_id,
+    )
+    .await;
 }
 
 /// A naive region migration test by SQL function
@@ -413,7 +443,7 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let mut logical_timer = 1685508715000;
 
@@ -454,11 +484,12 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
 
     // Waits condition by checking procedure state
     let frontend = cluster.fe_instance().clone();
+    let procedure_id_for_closure = procedure_id.clone();
     wait_condition(
         Duration::from_secs(10),
         Box::pin(async move {
             loop {
-                let state = query_procedure_by_sql(&frontend, &procedure_id).await;
+                let state = query_procedure_by_sql(&frontend, &procedure_id_for_closure).await;
                 if state == "{\"status\":\"Done\"}" {
                     info!("Migration done: {state}");
                     break;
@@ -468,6 +499,15 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
                 }
             }
         }),
+    )
+    .await;
+
+    check_region_migration_events_system_table(
+        cluster.fe_instance(),
+        &procedure_id,
+        region_id.as_u64(),
+        from_peer_id,
+        to_peer_id,
     )
     .await;
 
@@ -543,7 +583,7 @@ pub async fn test_region_migration_multiple_regions(
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let mut logical_timer = 1685508715000;
     let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
@@ -628,6 +668,15 @@ pub async fn test_region_migration_multiple_regions(
     )
     .await;
 
+    check_region_migration_events_system_table(
+        cluster.fe_instance(),
+        &procedure.unwrap().to_string(),
+        region_id.as_u64(),
+        from_peer_id,
+        to_peer_id,
+    )
+    .await;
+
     // Inserts more table.
     let results = insert_values(cluster.fe_instance(), logical_timer).await;
     for result in results {
@@ -693,7 +742,7 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let mut logical_timer = 1685508715000;
     let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
@@ -768,6 +817,15 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
     )
     .await;
 
+    check_region_migration_events_system_table(
+        cluster.fe_instance(),
+        &procedure.unwrap().to_string(),
+        region_id.as_u64(),
+        from_peer_id,
+        to_peer_id,
+    )
+    .await;
+
     // Inserts more table.
     let results = insert_values(cluster.fe_instance(), logical_timer).await;
     for result in results {
@@ -835,7 +893,7 @@ pub async fn test_region_migration_incorrect_from_peer(
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let logical_timer = 1685508715000;
     let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
@@ -918,7 +976,7 @@ pub async fn test_region_migration_incorrect_region_id(
         }))
         .with_shared_home_dir(Arc::new(home_dir))
         .with_meta_selector(const_selector.clone())
-        .build()
+        .build(true)
         .await;
     let logical_timer = 1685508715000;
     let table_metadata_manager = cluster.metasrv.table_metadata_manager().clone();
@@ -1225,4 +1283,82 @@ async fn run_sql(
 ) -> FrontendResult<Output> {
     info!("Run SQL: {sql}");
     instance.do_query(sql, query_ctx).await.remove(0)
+}
+
+enum RegionMigrationEvents {
+    Schema,
+    Table,
+    TriggerReason,
+    Status,
+    ProcedureId,
+    RegionId,
+    FromDatanodeId,
+    ToDatanodeId,
+    Timestamp,
+}
+
+impl Iden for RegionMigrationEvents {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        write!(
+            s,
+            "{}",
+            match self {
+                Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
+                Self::Table => REGION_MIGRATION_EVENTS_TABLE_NAME,
+                Self::TriggerReason => REGION_MIGRATION_EVENTS_TABLE_TRIGGER_REASON_COLUMN_NAME,
+                Self::Status => REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
+                Self::ProcedureId => REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+                Self::RegionId => REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME,
+                Self::FromDatanodeId => REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME,
+                Self::ToDatanodeId => REGION_MIGRATION_EVENTS_TABLE_TO_DATANODE_ID_COLUMN_NAME,
+                Self::Timestamp => REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+            }
+        )
+        .unwrap();
+    }
+}
+
+async fn check_region_migration_events_system_table(
+    fe_instance: &Arc<Instance>,
+    procedure_id: &str,
+    region_id: u64,
+    from_datanode_id: u64,
+    to_datanode_id: u64,
+) {
+    // Sleep for while to ensure the event is recorded.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // The query is equivalent to the following SQL:
+    //   SELECT trigger_reason, status FROM region_migration_events WHERE
+    //       procedure_id = '${procedure_id}' AND
+    //       table_id = ${table_id} AND
+    //       region_id = ${region_id} AND
+    //       from_datanode_id = ${from_datanode_id} AND
+    //       to_datanode_id = ${to_datanode_id}
+    //       ORDER BY timestamp ASC
+    let query = Query::select()
+        .column(RegionMigrationEvents::TriggerReason)
+        .column(RegionMigrationEvents::Status)
+        .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
+        .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
+        .and_where(Expr::col(RegionMigrationEvents::RegionId).eq(region_id))
+        .and_where(Expr::col(RegionMigrationEvents::FromDatanodeId).eq(from_datanode_id))
+        .and_where(Expr::col(RegionMigrationEvents::ToDatanodeId).eq(to_datanode_id))
+        .order_by(RegionMigrationEvents::Timestamp, Order::Asc)
+        .to_string(PostgresQueryBuilder);
+
+    let result = fe_instance
+        .do_query(&query, QueryContext::arc())
+        .await
+        .remove(0);
+
+    let expected = "\
++----------------+----------+
+| trigger_reason | status   |
++----------------+----------+
+| Manual         | Starting |
+| Manual         | Running  |
+| Manual         | Finished |
++----------------+----------+";
+    check_output_stream(result.unwrap().data, expected).await;
 }

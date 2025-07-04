@@ -83,7 +83,7 @@ mod test {
 
         let db = GreptimeDbClusterBuilder::new("test_distributed_flight_do_put")
             .await
-            .build()
+            .build(false)
             .await;
 
         let runtime = common_runtime::global_runtime().clone();
