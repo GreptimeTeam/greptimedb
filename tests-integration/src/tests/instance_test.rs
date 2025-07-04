@@ -22,6 +22,7 @@ use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir;
+use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
@@ -2197,5 +2198,67 @@ WITH(
             let output = execute_sql(&frontend, "drop table test_table").await.data;
             assert!(matches!(output, OutputData::AffectedRows(0)));
         }
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_copy_parquet_map_to_json(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let output = execute_sql(
+        &instance,
+        r#"CREATE TABLE map_json_test (
+            "id" INT,
+            map_data JSON,
+            ts TIMESTAMP TIME INDEX
+        );"#,
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let parquet_path = find_testing_resource("/tests/data/parquet/map_to_json.parquet");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY map_json_test FROM '{}' WITH (FORMAT='parquet');",
+            parquet_path
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(5)));
+
+    let output = execute_sql(
+        &instance,
+        "SELECT \"id\", map_data FROM map_json_test ORDER BY \"id\";",
+    )
+    .await
+    .data;
+
+    let OutputData::Stream(stream) = output else {
+        panic!("Expected stream output")
+    };
+    let batches = common_recordbatch::util::collect(stream).await.unwrap();
+    let batch = &batches[0];
+
+    let map_data_col = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<datatypes::vectors::BinaryVector>()
+        .unwrap();
+
+    let expected_jsons = [
+        r#"{"a":"1","b":"2","c":"hello"}"#,
+        r#"{"x":"42","y":"test"}"#,
+        r#"{}"#,
+        r#"{"single":"value"}"#,
+        r#"{"complex":"structure","nested":"data"}"#,
+    ];
+
+    for i in 0..expected_jsons.len() {
+        let bytes = map_data_col.get_data(i).unwrap();
+        let json_str = std::str::from_utf8(bytes).unwrap();
+        assert_eq!(json_str, expected_jsons[i]);
     }
 }
