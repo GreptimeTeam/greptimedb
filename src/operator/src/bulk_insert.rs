@@ -311,32 +311,11 @@ fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Re
     if rb.num_rows() == 0 {
         return Ok(vec![]);
     }
-    let primitive = match ts_col.data_type() {
-        DataType::Timestamp(unit, _) => match unit {
-            TimeUnit::Second => ts_col
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Millisecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Microsecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-            TimeUnit::Nanosecond => ts_col
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap()
-                .reinterpret_cast::<Int64Type>(),
-        },
-        t => {
-            return error::InvalidTimeIndexTypeSnafu { ty: t.clone() }.fail();
-        }
-    };
+    let (primitive, _) =
+        datatypes::timestamp::timestamp_array_to_primitive(ts_col).with_context(|| {
+            error::InvalidTimeIndexTypeSnafu {
+                ty: ts_col.data_type().clone(),
+            }
+        })?;
     Ok(primitive.iter().flatten().collect())
 }
