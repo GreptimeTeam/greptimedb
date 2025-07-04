@@ -1182,17 +1182,48 @@ mod tests {
     }
 
     #[test]
-    fn test_skipping_index_options_deserialize_v0_14_to_v0_15() {
-        let options = "{\"granularity\":10240,\"type\":\"BLOOM\"}";
+    fn test_skipping_index_options_deserialization() {
+        let original_options = "{\"granularity\":1024,\"false-positive-rate-in-10000\":10,\"index-type\":\"BloomFilter\"}";
+        let options = serde_json::from_str::<SkippingIndexOptions>(original_options).unwrap();
+        assert_eq!(1024, options.granularity);
+        assert_eq!(SkippingIndexType::BloomFilter, options.index_type);
+        assert_eq!(0.001, options.false_positive_rate());
+
+        let options_str = serde_json::to_string(&options).unwrap();
+        assert_eq!(options_str, original_options);
+    }
+
+    #[test]
+    fn test_skipping_index_options_deserialization_v0_14_to_v0_15() {
+        let options = "{\"granularity\":10240,\"index-type\":\"BloomFilter\"}";
         let options = serde_json::from_str::<SkippingIndexOptions>(options).unwrap();
         assert_eq!(10240, options.granularity);
         assert_eq!(SkippingIndexType::BloomFilter, options.index_type);
         assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
+
+        let options_str = serde_json::to_string(&options).unwrap();
+        assert_eq!(options_str, "{\"granularity\":10240,\"false-positive-rate-in-10000\":100,\"index-type\":\"BloomFilter\"}");
     }
 
     #[test]
-    fn test_fulltext_options_deserialize_v0_14_to_v0_15() {
-        let options = "{\"enable\":true,\"analyzer\":\"English\",\"case_sensitive\":false,\"backend\":\"bloom\"}";
+    fn test_fulltext_options_deserialization() {
+        let original_options = "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":1024,\"false-positive-rate-in-10000\":10}";
+        let options = serde_json::from_str::<FulltextOptions>(original_options).unwrap();
+        assert!(!options.case_sensitive);
+        assert!(options.enable);
+        assert_eq!(FulltextBackend::Bloom, options.backend);
+        assert_eq!(FulltextAnalyzer::default(), options.analyzer);
+        assert_eq!(1024, options.granularity);
+        assert_eq!(0.001, options.false_positive_rate());
+
+        let options_str = serde_json::to_string(&options).unwrap();
+        assert_eq!(options_str, original_options);
+    }
+
+    #[test]
+    fn test_fulltext_options_deserialization_v0_14_to_v0_15() {
+        // 0.14 to 0.15
+        let options = "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\"}";
         let options = serde_json::from_str::<FulltextOptions>(options).unwrap();
         assert!(!options.case_sensitive);
         assert!(options.enable);
@@ -1200,5 +1231,8 @@ mod tests {
         assert_eq!(FulltextAnalyzer::default(), options.analyzer);
         assert_eq!(DEFAULT_GRANULARITY, options.granularity);
         assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
+
+        let options_str = serde_json::to_string(&options).unwrap();
+        assert_eq!(options_str, "{\"enable\":true,\"analyzer\":\"English\",\"case-sensitive\":false,\"backend\":\"bloom\",\"granularity\":10240,\"false-positive-rate-in-10000\":100}");
     }
 }
