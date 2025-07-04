@@ -20,11 +20,7 @@ use api::v1::region::{
     bulk_insert_request, region_request, BulkInsertRequest, RegionRequest, RegionRequestHeader,
 };
 use api::v1::ArrowIpc;
-use arrow::array::{
-    Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
-};
-use arrow::datatypes::{DataType, Int64Type, TimeUnit};
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use common_base::AffectedRows;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
