@@ -339,7 +339,7 @@ jobs:
       build-windows-artifacts,
       release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
