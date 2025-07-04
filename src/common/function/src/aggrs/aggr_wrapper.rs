@@ -705,7 +705,9 @@ mod tests {
         let sum = datafusion::functions_aggregate::sum::sum_udaf();
         let sum = (*sum).clone();
 
-        let sum_state_to_input = StateTypeLookup {
+        let sum_state_to_input = get_possible_state_to_input_types(&sum).unwrap();
+
+        let expected_sum_state_to_input = StateTypeLookup {
             mapping: BTreeMap::from([
                 (vec![DataType::Float64], vec![DataType::Float64]),
                 (vec![DataType::Int64], vec![DataType::Int64]),
@@ -720,6 +722,8 @@ mod tests {
                 ),
             ]),
         };
+
+        assert_eq!(sum_state_to_input, expected_sum_state_to_input);
 
         let wrapper = StateMergeWrapper::new(sum.clone(), sum_state_to_input.clone()).unwrap();
         let expected = StateMergeWrapper {
@@ -818,7 +822,8 @@ mod tests {
         let avg = datafusion::functions_aggregate::average::avg_udaf();
         let avg = (*avg).clone();
 
-        let avg_type = StateTypeLookup {
+        let avg_type = get_possible_state_to_input_types(&avg).unwrap();
+        let expected_avg_type = StateTypeLookup {
             mapping: {
                 use DataType::*;
                 BTreeMap::from([
@@ -837,6 +842,7 @@ mod tests {
                 ])
             },
         };
+        assert_eq!(avg_type, expected_avg_type);
 
         let wrapper = StateMergeWrapper::new(avg.clone(), avg_type.clone()).unwrap();
 
@@ -860,6 +866,7 @@ mod tests {
         let values = vec![Arc::new(input) as arrow::array::ArrayRef];
 
         let state_func = wrapper.state_function();
+
         let accum_args = AccumulatorArgs {
             return_type: &DataType::UInt64,
             schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
