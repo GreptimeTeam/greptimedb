@@ -160,6 +160,7 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         options: Default::default(),
         region_numbers: (1..=100).collect(),
         partition_key_indices: vec![],
+        column_ids: vec![],
     };
 
     RawTableInfo {
