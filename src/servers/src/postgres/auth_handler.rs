@@ -118,8 +118,8 @@ fn do_encode_pg_secret_key_bytes(secret_key: i32, server_addr: &str, catalog: &s
 
     bytes.put_i32(secret_key);
 
-    bytes.put_u8(server_addr.as_bytes().len() as u8);
-    bytes.put_u8(catalog.as_bytes().len() as u8);
+    bytes.put_u8(server_addr.len() as u8);
+    bytes.put_u8(catalog.len() as u8);
 
     bytes.put_slice(server_addr.as_bytes());
     bytes.put_slice(catalog.as_bytes());
