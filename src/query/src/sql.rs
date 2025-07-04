@@ -950,17 +950,19 @@ pub async fn show_flows(
     .await
 }
 
-pub const TRIGGER_NAME: &str = "trigger_name";
-pub const TRIGGERS_COLUMN: &str = "Triggers";
-pub const TRIGGER_LIST_TABLE: &str = "trigger_list";
-
+#[cfg(feature = "enterprise")]
 pub async fn show_triggers(
-    stmt: ShowTriggers,
+    stmt: sql::statements::show::trigger::ShowTriggers,
     query_engine: &QueryEngineRef,
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let projects = vec![(TRIGGER_NAME, FLOWS_COLUMN)];
+    use catalog::information_schema::TRIGGER_LIST;
+
+    const TRIGGER_NAME: &str = "trigger_name";
+    const TRIGGERS_COLUMN: &str = "Triggers";
+
+    let projects = vec![(TRIGGER_NAME, TRIGGERS_COLUMN)];
     let like_field = Some(TRIGGER_NAME);
     let sort = vec![col(TRIGGER_NAME).sort(true, true)];
 
@@ -968,7 +970,7 @@ pub async fn show_triggers(
         query_engine,
         catalog_manager,
         query_ctx,
-        TRIGGER_LIST_TABLE,
+        TRIGGER_LIST,
         vec![],
         projects,
         vec![],
