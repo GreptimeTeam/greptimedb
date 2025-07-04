@@ -81,6 +81,7 @@ impl NumbersTable {
             options: Default::default(),
             created_on: Default::default(),
             partition_key_indices: vec![],
+            column_ids: vec![],
         };
 
         let table_info = TableInfoBuilder::default()

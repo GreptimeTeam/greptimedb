@@ -27,17 +27,18 @@ use common_telemetry::{error, info, warn};
 use futures_util::future;
 pub use region_request::make_alter_region_request;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
 use crate::ddl::utils::{
-    add_peer_context_if_needed, map_to_procedure_error, sync_follower_regions,
+    add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
+    sync_follower_regions,
 };
 use crate::ddl::DdlContext;
-use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
+use crate::error::Result;
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
@@ -137,37 +138,13 @@ impl AlterLogicalTablesProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        // Collects responses from datanodes.
-        let phy_raw_schemas = results
-            .iter_mut()
-            .map(|res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY))
-            .collect::<Vec<_>>();
-
-        if phy_raw_schemas.is_empty() {
-            self.submit_sync_region_requests(results, &physical_table_route.region_routes)
-                .await;
-            self.data.state = AlterTablesState::UpdateMetadata;
-            return Ok(Status::executing(true));
-        }
-
-        // Verify all the physical schemas are the same
-        // Safety: previous check ensures this vec is not empty
-        let first = phy_raw_schemas.first().unwrap();
-        ensure!(
-            phy_raw_schemas.iter().all(|x| x == first),
-            MetadataCorruptionSnafu {
-                err_msg: "The physical schemas from datanodes are not the same."
-            }
-        );
-
-        // Decodes the physical raw schemas
-        if let Some(phy_raw_schema) = first {
-            self.data.physical_columns =
-                ColumnMetadata::decode_list(phy_raw_schema).context(DecodeJsonSnafu)?;
+        if let Some(column_metadatas) =
+            extract_column_metadatas(&mut results, ALTER_PHYSICAL_EXTENSION_KEY)?
+        {
+            self.data.physical_columns = column_metadatas;
         } else {
             warn!("altering logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
-
         self.submit_sync_region_requests(results, &physical_table_route.region_routes)
             .await;
         self.data.state = AlterTablesState::UpdateMetadata;
@@ -183,7 +160,7 @@ impl AlterLogicalTablesProcedure {
         if let Err(err) = sync_follower_regions(
             &self.context,
             self.data.physical_table_id,
-            results,
+            &results,
             region_routes,
             table_info.meta.engine.as_str(),
         )

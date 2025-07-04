@@ -24,7 +24,14 @@ use std::collections::HashMap;
 use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, SemanticType};
 use common_procedure::Status;
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    METRIC_ENGINE_NAME,
+};
+use store_api::storage::consts::ReservedColumnId;
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
@@ -146,6 +153,7 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
     }
 }
 
+/// Creates a physical table task with a single region.
 pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
     let create_table = TestCreateTableExprBuilder::default()
         .column_defs([
@@ -181,4 +189,96 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
         }],
         table_info,
     }
+}
+
+/// Creates a column metadata list with tag fields.
+pub fn test_column_metadatas(tag_fields: &[&str]) -> Vec<ColumnMetadata> {
+    let mut output = Vec::with_capacity(tag_fields.len() + 4);
+    output.extend([
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::table_id(),
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: ReservedColumnId::tsid(),
+        },
+    ]);
+
+    for (i, name) in tag_fields.iter().enumerate() {
+        output.push(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                name.to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: (i + 2) as u32,
+        });
+    }
+
+    output
+}
+
+/// Asserts the column names.
+pub fn assert_column_name(table_info: &RawTableInfo, expected_column_names: &[&str]) {
+    assert_eq!(
+        table_info
+            .meta
+            .schema
+            .column_schemas
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect::<Vec<_>>(),
+        expected_column_names
+    );
+}
+
+/// Asserts the column metadatas
+pub fn assert_column_name_and_id(column_metadatas: &[ColumnMetadata], expected: &[(&str, u32)]) {
+    assert_eq!(expected.len(), column_metadatas.len());
+    for (name, id) in expected {
+        let column_metadata = column_metadatas
+            .iter()
+            .find(|c| c.column_id == *id)
+            .unwrap();
+        assert_eq!(column_metadata.column_schema.name, *name);
+    }
+}
+
+/// Gets the raw table info.
+pub async fn get_raw_table_info(ddl_context: &DdlContext, table_id: TableId) -> RawTableInfo {
+    ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info
 }

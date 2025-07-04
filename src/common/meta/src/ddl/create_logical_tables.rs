@@ -27,7 +27,7 @@ use common_telemetry::{debug, error, warn};
 use futures::future;
 pub use region_request::create_region_request_builder;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
@@ -35,10 +35,11 @@ use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::utils::{
-    add_peer_context_if_needed, map_to_procedure_error, sync_follower_regions,
+    add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
+    sync_follower_regions,
 };
 use crate::ddl::DdlContext;
-use crate::error::{DecodeJsonSnafu, MetadataCorruptionSnafu, Result};
+use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
@@ -166,47 +167,23 @@ impl CreateLogicalTablesProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        // Collects response from datanodes.
-        let phy_raw_schemas = results
-            .iter_mut()
-            .map(|res| res.extensions.remove(ALTER_PHYSICAL_EXTENSION_KEY))
-            .collect::<Vec<_>>();
-
-        if phy_raw_schemas.is_empty() {
-            self.submit_sync_region_requests(results, region_routes)
-                .await;
-            self.data.state = CreateTablesState::CreateMetadata;
-            return Ok(Status::executing(false));
-        }
-
-        // Verify all the physical schemas are the same
-        // Safety: previous check ensures this vec is not empty
-        let first = phy_raw_schemas.first().unwrap();
-        ensure!(
-            phy_raw_schemas.iter().all(|x| x == first),
-            MetadataCorruptionSnafu {
-                err_msg: "The physical schemas from datanodes are not the same."
-            }
-        );
-
-        // Decodes the physical raw schemas
-        if let Some(phy_raw_schemas) = first {
-            self.data.physical_columns =
-                ColumnMetadata::decode_list(phy_raw_schemas).context(DecodeJsonSnafu)?;
+        if let Some(column_metadatas) =
+            extract_column_metadatas(&mut results, ALTER_PHYSICAL_EXTENSION_KEY)?
+        {
+            self.data.physical_columns = column_metadatas;
         } else {
             warn!("creating logical table result doesn't contains extension key `{ALTER_PHYSICAL_EXTENSION_KEY}`,leaving the physical table's schema unchanged");
         }
 
-        self.submit_sync_region_requests(results, region_routes)
+        self.submit_sync_region_requests(&results, region_routes)
             .await;
         self.data.state = CreateTablesState::CreateMetadata;
-
         Ok(Status::executing(true))
     }
 
     async fn submit_sync_region_requests(
         &self,
-        results: Vec<RegionResponse>,
+        results: &[RegionResponse],
         region_routes: &[RegionRoute],
     ) {
         if let Err(err) = sync_follower_regions(

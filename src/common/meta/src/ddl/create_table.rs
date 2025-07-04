@@ -22,20 +22,23 @@ use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{info, warn};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
+use crate::ddl::physical_table_metadata::update_table_info_column_ids;
 use crate::ddl::utils::{
-    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, map_to_procedure_error,
-    region_storage_path,
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
+    extract_column_metadatas, map_to_procedure_error, region_storage_path,
 };
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
@@ -243,14 +246,21 @@ impl CreateTableProcedure {
             }
         }
 
-        join_all(create_region_tasks)
+        self.creator.data.state = CreateTableState::CreateMetadata;
+
+        let mut results = join_all(create_region_tasks)
             .await
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        self.creator.data.state = CreateTableState::CreateMetadata;
+        if let Some(column_metadatas) =
+            extract_column_metadatas(&mut results, TABLE_COLUMN_METADATA_EXTENSION_KEY)?
+        {
+            self.creator.data.column_metadatas = column_metadatas;
+        } else {
+            warn!("creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
+        }
 
-        // TODO(weny): Add more tests.
         Ok(Status::executing(true))
     }
 
@@ -262,7 +272,10 @@ impl CreateTableProcedure {
         let table_id = self.table_id();
         let manager = &self.context.table_metadata_manager;
 
-        let raw_table_info = self.table_info().clone();
+        let mut raw_table_info = self.table_info().clone();
+        if !self.creator.data.column_metadatas.is_empty() {
+            update_table_info_column_ids(&mut raw_table_info, &self.creator.data.column_metadatas);
+        }
         // Safety: the region_wal_options must be allocated.
         let region_wal_options = self.region_wal_options()?.clone();
         // Safety: the table_route must be allocated.
@@ -346,6 +359,7 @@ impl TableCreator {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
+                column_metadatas: vec![],
                 task,
                 table_route: None,
                 region_wal_options: None,
@@ -407,6 +421,8 @@ pub enum CreateTableState {
 pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
+    #[serde(default)]
+    pub column_metadatas: Vec<ColumnMetadata>,
     /// None stands for not allocated yet.
     table_route: Option<PhysicalTableRouteValue>,
     /// None stands for not allocated yet.

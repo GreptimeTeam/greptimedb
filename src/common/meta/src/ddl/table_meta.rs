@@ -122,6 +122,7 @@ impl TableMetadataAllocator {
         );
 
         let peers = self.peer_allocator.alloc(regions).await?;
+        debug!("Allocated peers {:?} for table {}", peers, table_id);
         let region_routes = task
             .partitions
             .iter()
