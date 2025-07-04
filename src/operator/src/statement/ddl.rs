@@ -1644,6 +1644,7 @@ fn create_table_info(
         options: table_options,
         created_on: Utc::now(),
         partition_key_indices,
+        column_ids: vec![],
     };
 
     let desc = if create_table.desc.is_empty() {

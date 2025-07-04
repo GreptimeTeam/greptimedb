@@ -30,7 +30,12 @@ use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
-use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::{
+    MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
+};
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::RegionId;
 use table::requests::TTL_KEY;
@@ -43,6 +48,7 @@ use crate::ddl::test_util::datanode_handler::{
     AllFailureDatanodeHandler, DatanodeWatcher, PartialSuccessDatanodeHandler,
     RequestOutdatedErrorDatanodeHandler,
 };
+use crate::ddl::test_util::{assert_column_name, assert_column_name_and_id};
 use crate::error::{Error, Result};
 use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_name::TableNameKey;
@@ -179,6 +185,30 @@ fn alter_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionRe
             RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::mito(1, 1))])
                 .unwrap(),
         );
+        response.extensions.insert(
+            TABLE_COLUMN_METADATA_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&[
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 0,
+                },
+                ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "host",
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 1,
+                },
+            ])
+            .unwrap(),
+        );
         return Ok(response);
     }
 
@@ -187,6 +217,7 @@ fn alter_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionRe
 
 #[tokio::test]
 async fn test_on_submit_alter_request() {
+    common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx).with_handler(alter_request_handler);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
@@ -234,6 +265,8 @@ async fn test_on_submit_alter_request() {
     assert_sync_request(peer, request, 4, RegionId::new(table_id, 2), 1);
     let (peer, request) = results.remove(0);
     assert_sync_request(peer, request, 5, RegionId::new(table_id, 1), 1);
+    let column_metadatas = procedure.data().column_metadatas();
+    assert_column_name_and_id(column_metadatas, &[("ts", 0), ("host", 1)]);
 }
 
 #[tokio::test]
@@ -378,6 +411,7 @@ async fn test_on_update_metadata_rename() {
 
 #[tokio::test]
 async fn test_on_update_metadata_add_columns() {
+    common_telemetry::init_default_ut_logging();
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let table_name = "foo";
@@ -431,6 +465,34 @@ async fn test_on_update_metadata_add_columns() {
         .submit_alter_region_requests(procedure_id, provider.as_ref())
         .await
         .unwrap();
+    // Returned column metadatas is empty.
+    assert!(procedure.data().column_metadatas().is_empty());
+    procedure.mut_data().set_column_metadatas(vec![
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("host", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 2,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("my_tag3", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 3,
+        },
+    ]);
     procedure.on_update_metadata().await.unwrap();
 
     let table_info = ddl_context
@@ -447,6 +509,8 @@ async fn test_on_update_metadata_add_columns() {
         table_info.meta.schema.column_schemas.len() as u32,
         table_info.meta.next_column_id
     );
+    assert_column_name(&table_info, &["ts", "host", "cpu", "my_tag3"]);
+    assert_eq!(table_info.meta.column_ids, vec![0, 1, 2, 3]);
 }
 
 #[tokio::test]
