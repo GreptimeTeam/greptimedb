@@ -68,18 +68,37 @@ pub(crate) fn build_new_physical_table_info(
     raw_table_info
 }
 
-/// Update the column ids in the table info.
+/// Updates the column IDs in the table info based on the provided column metadata.
+///
+/// This function validates that the column metadata matches the existing table schema
+/// before updating the column ids. If the column metadata doesn't match the table schema,
+/// the table info remains unchanged.
 pub(crate) fn update_table_info_column_ids(
     raw_table_info: &mut RawTableInfo,
     column_metadatas: &[ColumnMetadata],
 ) {
-    if column_metadatas.len() != raw_table_info.meta.schema.column_schemas.len() {
+    let mut table_column_names = raw_table_info
+        .meta
+        .schema
+        .column_schemas
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect::<Vec<_>>();
+    table_column_names.sort_unstable();
+
+    let mut column_names = column_metadatas
+        .iter()
+        .map(|c| c.column_schema.name.as_str())
+        .collect::<Vec<_>>();
+    column_names.sort_unstable();
+
+    if table_column_names != column_names {
         warn!(
-            "Trying to update column ids for table {}, table_id: {}, column metadatas length({}) is not equal to column schemas length({})",
+            "Column metadata doesn't match the table schema for table {}, table_id: {}, column in table: {:?}, column in metadata: {:?}",
             raw_table_info.name,
             raw_table_info.ident.table_id,
-            column_metadatas.len(),
-            raw_table_info.meta.schema.column_schemas.len(),
+            table_column_names,
+            column_names,
         );
         return;
     }
@@ -97,15 +116,5 @@ pub(crate) fn update_table_info_column_ids(
         }
     }
 
-    if column_ids.len() != schema.len() {
-        warn!(
-            "Column metadata is not complete for table {}, table_id: {}, column ids length({}) is not equal to column schemas length({})",
-            raw_table_info.name,
-            raw_table_info.ident.table_id,
-            column_ids.len(),
-            schema.len(),
-        );
-    } else {
-        raw_table_info.meta.column_ids = column_ids;
-    }
+    raw_table_info.meta.column_ids = column_ids;
 }
