@@ -950,6 +950,35 @@ pub async fn show_flows(
     .await
 }
 
+pub const TRIGGER_NAME: &str = "trigger_name";
+pub const TRIGGERS_COLUMN: &str = "Triggers";
+pub const TRIGGER_LIST_TABLE: &str = "trigger_list";
+
+pub async fn show_triggers(
+    stmt: ShowTriggers,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let projects = vec![(TRIGGER_NAME, FLOWS_COLUMN)];
+    let like_field = Some(TRIGGER_NAME);
+    let sort = vec![col(TRIGGER_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        TRIGGER_LIST_TABLE,
+        vec![],
+        projects,
+        vec![],
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
 pub fn show_create_flow(
     flow_name: ObjectName,
     flow_val: FlowInfoValue,
