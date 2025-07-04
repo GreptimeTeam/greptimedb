@@ -35,6 +35,7 @@ use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::cancel::CancelRequest;
+use pgwire::messages::startup::SecretKey;
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
@@ -431,12 +432,17 @@ impl ErrorHandler for PostgresServerHandlerInner {
 impl CancelHandler for PostgresServerHandlerInner {
     async fn on_cancel_request(&self, cancel_request: CancelRequest) {
         let pid = cancel_request.pid as u32;
-        let _secret_key = cancel_request.secret_key;
 
-        // FIXME:
-        let _ = self
-            .process_manager
-            .kill_process("todo".to_string(), "todo".to_string(), pid)
-            .await;
+        // We don't support i32 secret key even if it seems workable on
+        // standalone setup.
+        if let SecretKey::Bytes(secret_key) = cancel_request.secret_key {
+            if let Some((_key, server_addr, catalog)) = self.decode_secret_key(secret_key) {
+                //TODO(sunng87): verify _key
+                let _ = self
+                    .process_manager
+                    .kill_process(server_addr, catalog, pid)
+                    .await;
+            }
+        }
     }
 }

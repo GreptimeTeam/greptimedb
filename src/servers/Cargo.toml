@@ -89,7 +89,7 @@ opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 #pgwire = { version = "0.30", default-features = false, features = ["server-api-ring"] }
-pgwire = { git = "https://github.com/sunng87/pgwire", rev = "d3dbe48d30d2d4b47919830d05c3ef1e2d043cb1", default-features = false, features = [
+pgwire = { git = "https://github.com/sunng87/pgwire", rev = "bfd3beee1f29121cde4d83a2cd1129d35f3359d1", default-features = false, features = [
     "server-api-ring",
 ] }
 pin-project = "1.0"
@@ -149,7 +149,7 @@ session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tempfile = "3.0.0"
 tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.12"
+tokio-postgres-rustls = "0.13"
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }

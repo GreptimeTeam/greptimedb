@@ -17,6 +17,7 @@ use std::sync::Exclusive;
 
 use ::auth::{userinfo_by_name, Identity, Password, UserInfoRef, UserProviderRef};
 use async_trait::async_trait;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
@@ -24,9 +25,8 @@ use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
-use pgwire::messages::startup::Authentication;
-use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::Session;
+use pgwire::messages::startup::{Authentication, SecretKey};
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage, ProtocolVersion};
 use snafu::IntoError;
 
 use crate::error::{AuthSnafu, Result};
@@ -113,24 +113,98 @@ impl PgLoginVerifier {
     }
 }
 
-fn set_client_info<C>(client: &mut C, session: &Session)
-where
-    C: ClientInfo,
-{
-    if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
-        session.set_catalog(current_catalog.clone());
+fn do_encode_pg_secret_key_bytes(secret_key: i32, server_addr: &str, catalog: &str) -> Vec<u8> {
+    let mut bytes = BytesMut::with_capacity(256);
+
+    bytes.put_i32(secret_key);
+
+    bytes.put_u8(server_addr.as_bytes().len() as u8);
+    bytes.put_u8(catalog.as_bytes().len() as u8);
+
+    bytes.put_slice(server_addr.as_bytes());
+    bytes.put_slice(catalog.as_bytes());
+
+    bytes.freeze().to_vec()
+}
+
+fn do_decode_pg_secret_key_bytes(mut buf: Bytes) -> Option<(i32, String, String)> {
+    // this byte block should be at least 6-byte len
+    if buf.remaining() > 6 {
+        // get the i32 key
+        let key = buf.get_i32();
+        // get server addr len
+        let server_addr_len = buf.get_u8() as usize;
+        // get catalog len
+        let catalog_len = buf.get_u8() as usize;
+
+        if buf.remaining() >= server_addr_len + catalog_len {
+            let server_addr = String::from_utf8_lossy(&buf.split_to(server_addr_len)).into();
+            let catalog = String::from_utf8_lossy(&buf.split_to(catalog_len)).into();
+
+            Some((key, server_addr, catalog))
+        } else {
+            None
+        }
+    } else {
+        None
     }
-    if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
-        session.set_schema(current_schema.clone());
+}
+
+impl PostgresServerHandlerInner {
+    /// Generate a Postgres specific secret key
+    ///
+    /// The secret key has to carry enough information to call `kill_process` in
+    /// a distributed setup. It has to carry:
+    ///
+    /// - A random i32 number
+    /// - the local frontend server address: u8(byte length) + bytes
+    /// - the catalog that client has authenticated: u8(byte length) + bytes
+    ///
+    /// The final byte content is:
+    ///
+    /// int32(secret_key) + u8(server_addr len) + u8(catalog len)
+    /// + server_addr... + catalog...
+    ///
+    /// According to Postgres spec, the key should carry less than 256 bytes
+    pub fn encode_secret_key_bytes(&self) -> Vec<u8> {
+        do_encode_pg_secret_key_bytes(
+            self.session.secret_key().unwrap_or(0),
+            self.process_manager.server_addr(),
+            &self.session.catalog(),
+        )
     }
 
-    // pass generated process id and secret key to client, this information will
-    // be sent to postgres client for query cancellation.
-    client.set_pid_and_secret_key(
-        session.process_id() as i32,
-        session.secret_key().unwrap_or_default(),
-    );
-    // set userinfo outside
+    /// Validate and decode secret key into (catalog, frontend) tuple
+    pub fn decode_secret_key(&self, secret_key_bytes: Bytes) -> Option<(i32, String, String)> {
+        do_decode_pg_secret_key_bytes(secret_key_bytes)
+    }
+
+    fn set_client_info<C>(&self, client: &mut C)
+    where
+        C: ClientInfo,
+    {
+        if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
+            self.session.set_catalog(current_catalog.clone());
+        }
+        if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
+            self.session.set_schema(current_schema.clone());
+        }
+
+        // pass generated process id and secret key to client, this information will
+        // be sent to postgres client for query cancellation.
+        if client.protocol_version() == ProtocolVersion::PROTOCOL3_0 {
+            // 3.0 protocol is not supported for cancel, we give client all 0
+            client.set_pid_and_secret_key(0, SecretKey::I32(0));
+        } else {
+            let secret_key_bytes = self.encode_secret_key_bytes();
+            client.set_pid_and_secret_key(
+                self.session.process_id() as i32,
+                SecretKey::Bytes(Bytes::copy_from_slice(&secret_key_bytes)),
+            );
+        }
+
+        // set userinfo outside
+    }
 }
 
 #[async_trait]
@@ -157,6 +231,8 @@ impl StartupHandler for PostgresServerHandlerInner {
                     return Ok(());
                 }
 
+                // performance postgres protocol negotiation
+                auth::protocol_negotiation(client, startup).await?;
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
@@ -183,7 +259,7 @@ impl StartupHandler for PostgresServerHandlerInner {
                     self.session.set_user_info(userinfo_by_name(
                         client.metadata().get(super::METADATA_USER).cloned(),
                     ));
-                    set_client_info(client, &self.session);
+                    self.set_client_info(client);
                     auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 }
             }
@@ -200,7 +276,7 @@ impl StartupHandler for PostgresServerHandlerInner {
 
                 if let Ok(Some(user_info)) = auth_result {
                     self.session.set_user_info(user_info);
-                    set_client_info(client, &self.session);
+                    self.set_client_info(client);
                     auth::finish_authentication(client, self.param_provider.as_ref()).await?;
                 } else {
                     return send_error(
@@ -258,5 +334,22 @@ where
         }
     } else {
         Ok(DbResolution::NotFound("Database not specified".to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_secret_key_roundtrip() {
+        let tuple = (3244, "10.0.0.23", "greptime");
+        let bytes = do_encode_pg_secret_key_bytes(tuple.0, tuple.1, tuple.2);
+        let decoded = do_decode_pg_secret_key_bytes(Bytes::copy_from_slice(&bytes))
+            .expect("failed to decode secret key");
+
+        assert_eq!(tuple.0, decoded.0);
+        assert_eq!(tuple.1, decoded.1);
+        assert_eq!(tuple.2, decoded.2);
     }
 }

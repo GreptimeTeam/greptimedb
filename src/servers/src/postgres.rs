@@ -119,13 +119,13 @@ impl PgWireServerHandlers for PostgresServerHandler {
 impl MakePostgresServerHandler {
     fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
         let process_id = self.process_manager.next_id();
-        // generate cluster unique secret key
-        let secret_key = self.process_manager.generate_secret_key();
+        let secret_key = rand::random();
 
         let session = Arc::new(
             Session::new(addr, Channel::Postgres, Default::default(), process_id)
                 .with_secret_key(secret_key),
         );
+
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
             process_manager: self.process_manager.clone(),
