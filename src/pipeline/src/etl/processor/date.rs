@@ -14,22 +14,22 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDateTime};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use lazy_static::lazy_static;
 use snafu::{OptionExt, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    DateFailedToGetLocalTimezoneSnafu, DateFailedToGetTimestampSnafu, DateParseSnafu,
-    DateParseTimezoneSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
-    ProcessorFailedToParseStringSnafu, ProcessorMissingFieldSnafu, Result,
+    DateFailedToGetLocalTimezoneSnafu, DateParseSnafu, DateParseTimezoneSnafu, Error,
+    KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorFailedToParseStringSnafu,
+    ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
     FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::{Timestamp, Value};
 
 pub(crate) const PROCESSOR_DATE: &str = "date";
 
@@ -162,7 +162,7 @@ pub struct DateProcessor {
 }
 
 impl DateProcessor {
-    fn parse(&self, val: &str) -> Result<Timestamp> {
+    fn parse(&self, val: &str) -> Result<DateTime<Utc>> {
         let mut tz = Tz::UTC;
         if let Some(timezone) = &self.timezone {
             tz = timezone.parse::<Tz>().context(DateParseTimezoneSnafu {
@@ -171,8 +171,8 @@ impl DateProcessor {
         }
 
         for fmt in self.formats.iter() {
-            if let Ok(ns) = try_parse(val, fmt, tz) {
-                return Ok(Timestamp::Nanosecond(ns));
+            if let Ok(utc_ts) = try_parse(val, fmt, tz) {
+                return Ok(utc_ts);
             }
         }
 
@@ -193,16 +193,19 @@ impl Processor for DateProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
+
             match val.get(index) {
-                Some(Value::String(s)) => {
-                    let timestamp = self.parse(s)?;
+                Some(VrlValue::Bytes(s)) => {
+                    let timestamp = self.parse(String::from_utf8_lossy(s).as_ref())?;
                     let output_key = field.target_or_input_field();
-                    val.insert(output_key.to_string(), Value::Timestamp(timestamp))?;
+                    val.insert(KeyString::from(output_key), VrlValue::Timestamp(timestamp));
                 }
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind().to_string(),
@@ -225,20 +228,16 @@ impl Processor for DateProcessor {
 }
 
 /// try to parse val with timezone first, if failed, parse without timezone
-fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<i64> {
+fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
-        Ok(dt
-            .timestamp_nanos_opt()
-            .context(DateFailedToGetTimestampSnafu)?)
+        Ok(dt.to_utc())
     } else {
         let dt = NaiveDateTime::parse_from_str(val, fmt)
             .context(DateParseSnafu { value: val })?
             .and_local_timezone(tz)
             .single()
             .context(DateFailedToGetLocalTimezoneSnafu)?;
-        Ok(dt
-            .timestamp_nanos_opt()
-            .context(DateFailedToGetTimestampSnafu)?)
+        Ok(dt.to_utc())
     }
 }
 

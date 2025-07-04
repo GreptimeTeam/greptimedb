@@ -16,23 +16,21 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use pipeline::error::Result;
-use pipeline::{
-    json_to_map, parse, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo,
-};
-use serde_json::{Deserializer, Value};
+use pipeline::{parse, setup_pipeline, Content, Pipeline, PipelineContext, SchemaInfo};
+use serde_json::Deserializer;
+use vrl::value::Value as VrlValue;
 
 fn processor_mut(
     pipeline: Arc<Pipeline>,
     pipeline_ctx: &PipelineContext<'_>,
     schema_info: &mut SchemaInfo,
-    input_values: Vec<Value>,
+    input_values: Vec<VrlValue>,
 ) -> Result<Vec<greptime_proto::v1::Row>> {
     let mut result = Vec::with_capacity(input_values.len());
 
     for v in input_values {
-        let payload = json_to_map(v).unwrap();
         let r = pipeline
-            .exec_mut(payload, pipeline_ctx, schema_info)?
+            .exec_mut(v, pipeline_ctx, schema_info)?
             .into_transformed()
             .expect("expect transformed result ");
         result.push(r.0);
@@ -237,7 +235,7 @@ transform:
 fn criterion_benchmark(c: &mut Criterion) {
     let input_value_str = include_str!("./data.log");
     let input_value = Deserializer::from_str(input_value_str)
-        .into_iter::<serde_json::Value>()
+        .into_iter::<VrlValue>()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     let pipeline = prepare_pipeline();

@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use snafu::OptionExt;
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, LetterInvalidMethodSnafu, ProcessorExpectStringSnafu,
-    ProcessorMissingFieldSnafu, Result,
+    ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, METHOD_NAME,
 };
-use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_LETTER: &str = "letter";
 
@@ -67,15 +68,14 @@ pub struct LetterProcessor {
 }
 
 impl LetterProcessor {
-    fn process_field(&self, val: &str) -> Result<Value> {
-        let processed = match self.method {
-            Method::Upper => val.to_uppercase(),
-            Method::Lower => val.to_lowercase(),
-            Method::Capital => capitalize(val),
-        };
-        let val = Value::String(processed);
-
-        Ok(val)
+    fn process_field(&self, val: &Bytes) -> VrlValue {
+        match self.method {
+            Method::Upper => VrlValue::Bytes(Bytes::from(val.to_ascii_uppercase())),
+            Method::Lower => VrlValue::Bytes(Bytes::from(val.to_ascii_lowercase())),
+            Method::Capital => VrlValue::Bytes(Bytes::from(capitalize(
+                String::from_utf8_lossy(val).as_ref(),
+            ))),
+        }
     }
 }
 
@@ -125,16 +125,17 @@ impl Processor for LetterProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
-                Some(Value::String(s)) => {
-                    let result = self.process_field(s)?;
+                Some(VrlValue::Bytes(s)) => {
+                    let result = self.process_field(s);
                     let output_key = field.target_or_input_field();
-                    val.insert(output_key.to_string(), result)?;
+                    val.insert(KeyString::from(output_key), result);
                 }
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -167,8 +168,10 @@ fn capitalize(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use vrl::prelude::Bytes;
+    use vrl::value::Value as VrlValue;
+
     use crate::etl::processor::letter::{LetterProcessor, Method};
-    use crate::etl::value::Value;
 
     #[test]
     fn test_process() {
@@ -177,8 +180,8 @@ mod tests {
                 method: Method::Upper,
                 ..Default::default()
             };
-            let processed = processor.process_field("pipeline").unwrap();
-            assert_eq!(Value::String("PIPELINE".into()), processed)
+            let processed = processor.process_field(&Bytes::from("pipeline"));
+            assert_eq!(VrlValue::Bytes(Bytes::from("PIPELINE")), processed)
         }
 
         {
@@ -186,8 +189,8 @@ mod tests {
                 method: Method::Lower,
                 ..Default::default()
             };
-            let processed = processor.process_field("Pipeline").unwrap();
-            assert_eq!(Value::String("pipeline".into()), processed)
+            let processed = processor.process_field(&Bytes::from("Pipeline"));
+            assert_eq!(VrlValue::Bytes(Bytes::from("pipeline")), processed)
         }
 
         {
@@ -195,8 +198,8 @@ mod tests {
                 method: Method::Capital,
                 ..Default::default()
             };
-            let processed = processor.process_field("pipeline").unwrap();
-            assert_eq!(Value::String("Pipeline".into()), processed)
+            let processed = processor.process_field(&Bytes::from("pipeline"));
+            assert_eq!(VrlValue::Bytes(Bytes::from("Pipeline")), processed)
         }
     }
 }

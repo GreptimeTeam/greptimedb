@@ -13,14 +13,17 @@
 // limitations under the License.
 
 use snafu::OptionExt as _;
+use vrl::value::{KeyString, Value as VrlValue};
 
-use crate::error::{Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result};
+use crate::error::{
+    Error, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
+};
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, KEY_NAME,
 };
-use crate::{Processor, Value};
+use crate::Processor;
 
 pub(crate) const PROCESSOR_SIMPLE_EXTRACT: &str = "simple_extract";
 
@@ -74,14 +77,14 @@ impl TryFrom<&yaml_rust::yaml::Hash> for SimpleExtractProcessor {
 }
 
 impl SimpleExtractProcessor {
-    fn process_field(&self, val: &Value) -> Result<Value> {
+    fn process_field(&self, val: &VrlValue) -> Result<VrlValue> {
         let mut current = val;
         for key in self.key.iter() {
-            let Value::Map(map) = current else {
-                return Ok(Value::Null);
+            let VrlValue::Object(map) = current else {
+                return Ok(VrlValue::Null);
             };
-            let Some(v) = map.get(key) else {
-                return Ok(Value::Null);
+            let Some(v) = map.get(key.as_str()) else {
+                return Ok(VrlValue::Null);
             };
             current = v;
         }
@@ -98,14 +101,15 @@ impl Processor for SimpleExtractProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed)?;
+                    val.insert(KeyString::from(output_index), processed);
                 }
                 None => {
                     if !self.ignore_missing {
@@ -124,11 +128,13 @@ impl Processor for SimpleExtractProcessor {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
+    use vrl::prelude::Bytes;
 
     #[test]
     fn test_simple_extract() {
         use super::*;
-        use crate::{Map, Value};
 
         let processor = SimpleExtractProcessor {
             key: vec!["hello".to_string()],
@@ -136,12 +142,12 @@ mod test {
         };
 
         let result = processor
-            .process_field(&Value::Map(Map::one(
-                "hello",
-                Value::String("world".to_string()),
-            )))
+            .process_field(&VrlValue::Object(BTreeMap::from([(
+                KeyString::from("hello"),
+                VrlValue::Bytes(Bytes::from("world".to_string())),
+            )])))
             .unwrap();
 
-        assert_eq!(result, Value::String("world".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("world".to_string())));
     }
 }

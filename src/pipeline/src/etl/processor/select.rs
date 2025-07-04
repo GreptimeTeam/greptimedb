@@ -14,6 +14,7 @@
 
 use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorUnsupportedValueSnafu, Result, ValueMustBeMapSnafu,
@@ -22,7 +23,7 @@ use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME, TYPE_NAME,
 };
-use crate::{Processor, Value};
+use crate::Processor;
 
 pub(crate) const PROCESSOR_SELECT: &str = "select";
 const INCLUDE_KEY: &str = "include";
@@ -98,8 +99,8 @@ impl Processor for SelectProcessor {
         true
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
-        let v_map = val.as_map_mut().context(ValueMustBeMapSnafu)?;
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
+        let v_map = val.as_object_mut().context(ValueMustBeMapSnafu)?;
 
         match self.select_type {
             SelectType::Include => {
@@ -109,7 +110,7 @@ impl Processor for SelectProcessor {
                     let field_name = field.input_field();
                     if let Some(target_name) = field.target_field() {
                         if let Some(v) = v_map.remove(field_name) {
-                            v_map.insert(target_name.to_string(), v);
+                            v_map.insert(KeyString::from(target_name), v);
                         }
                         include_key_set.insert(target_name);
                     } else {
@@ -133,9 +134,12 @@ impl Processor for SelectProcessor {
 mod test {
     use std::collections::BTreeMap;
 
+    use vrl::prelude::Bytes;
+    use vrl::value::{KeyString, Value as VrlValue};
+
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::select::{SelectProcessor, SelectType};
-    use crate::{Map, Processor, Value};
+    use crate::Processor;
 
     #[test]
     fn test_select() {
@@ -145,15 +149,24 @@ mod test {
         };
 
         let mut p = BTreeMap::new();
-        p.insert("hello".to_string(), Value::String("world".to_string()));
-        p.insert("hello2".to_string(), Value::String("world2".to_string()));
+        p.insert(
+            KeyString::from("hello"),
+            VrlValue::Bytes(Bytes::from("world".to_string())),
+        );
+        p.insert(
+            KeyString::from("hello2"),
+            VrlValue::Bytes(Bytes::from("world2".to_string())),
+        );
 
-        let result = processor.exec_mut(Value::Map(Map { values: p }));
+        let result = processor.exec_mut(VrlValue::Object(p));
         assert!(result.is_ok());
         let mut result = result.unwrap();
-        let p = result.as_map_mut().unwrap();
+        let p = result.as_object_mut().unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p.get("hello"), Some(&Value::String("world".to_string())));
+        assert_eq!(
+            p.get(&KeyString::from("hello")),
+            Some(&VrlValue::Bytes(Bytes::from("world".to_string())))
+        );
     }
 
     #[test]
@@ -164,15 +177,24 @@ mod test {
         };
 
         let mut p = BTreeMap::new();
-        p.insert("hello".to_string(), Value::String("world".to_string()));
-        p.insert("hello2".to_string(), Value::String("world2".to_string()));
+        p.insert(
+            KeyString::from("hello"),
+            VrlValue::Bytes(Bytes::from("world".to_string())),
+        );
+        p.insert(
+            KeyString::from("hello2"),
+            VrlValue::Bytes(Bytes::from("world2".to_string())),
+        );
 
-        let result = processor.exec_mut(Value::Map(Map { values: p }));
+        let result = processor.exec_mut(VrlValue::Object(p));
         assert!(result.is_ok());
         let mut result = result.unwrap();
-        let p = result.as_map_mut().unwrap();
+        let p = result.as_object_mut().unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p.get("hello3"), Some(&Value::String("world".to_string())));
+        assert_eq!(
+            p.get(&KeyString::from("hello3")),
+            Some(&VrlValue::Bytes(Bytes::from("world".to_string())))
+        );
     }
 
     #[test]
@@ -183,15 +205,24 @@ mod test {
         };
 
         let mut p = BTreeMap::new();
-        p.insert("hello".to_string(), Value::String("world".to_string()));
-        p.insert("hello2".to_string(), Value::String("world2".to_string()));
+        p.insert(
+            KeyString::from("hello"),
+            VrlValue::Bytes(Bytes::from("world".to_string())),
+        );
+        p.insert(
+            KeyString::from("hello2"),
+            VrlValue::Bytes(Bytes::from("world2".to_string())),
+        );
 
-        let result = processor.exec_mut(Value::Map(Map { values: p }));
+        let result = processor.exec_mut(VrlValue::Object(p));
         assert!(result.is_ok());
         let mut result = result.unwrap();
-        let p = result.as_map_mut().unwrap();
+        let p = result.as_object_mut().unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p.get("hello"), None);
-        assert_eq!(p.get("hello2"), Some(&Value::String("world2".to_string())));
+        assert_eq!(p.get(&KeyString::from("hello")), None);
+        assert_eq!(
+            p.get(&KeyString::from("hello2")),
+            Some(&VrlValue::Bytes(Bytes::from("world2".to_string())))
+        );
     }
 }

@@ -14,17 +14,17 @@
 
 use jsonpath_rust::JsonPath;
 use snafu::{OptionExt, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
-    Error, JsonPathParseResultIndexSnafu, JsonPathParseSnafu, KeyMustBeStringSnafu,
-    ProcessorMissingFieldSnafu, Result,
+    Error, JsonParseSnafu, JsonPathParseResultIndexSnafu, JsonPathParseSnafu, KeyMustBeStringSnafu,
+    ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME, JSON_PATH_NAME, JSON_PATH_RESULT_INDEX_NAME,
 };
-use crate::Value;
 
 pub(crate) const PROCESSOR_JSON_PATH: &str = "json_path";
 
@@ -84,7 +84,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JsonPathProcessor {
 #[derive(Debug)]
 pub struct JsonPathProcessor {
     fields: Fields,
-    json_path: JsonPath<Value>,
+    json_path: JsonPath<serde_json::Value>,
     ignore_missing: bool,
     result_index: Option<usize>,
 }
@@ -101,17 +101,22 @@ impl Default for JsonPathProcessor {
 }
 
 impl JsonPathProcessor {
-    fn process_field(&self, val: &Value) -> Result<Value> {
-        let processed = self.json_path.find(val);
-        match processed {
-            Value::Array(arr) => {
+    fn process_field(&self, val: &VrlValue) -> Result<VrlValue> {
+        let v = serde_json::to_value(val).context(JsonParseSnafu)?;
+        let p = self.json_path.find(&v);
+        match p {
+            serde_json::Value::Array(arr) => {
                 if let Some(index) = self.result_index {
-                    Ok(arr.get(index).cloned().unwrap_or(Value::Null))
+                    Ok(arr
+                        .get(index)
+                        .cloned()
+                        .map(|v| v.into())
+                        .unwrap_or(VrlValue::Null))
                 } else {
-                    Ok(Value::Array(arr))
+                    Ok(VrlValue::Array(arr.into_iter().map(|v| v.into()).collect()))
                 }
             }
-            v => Ok(v),
+            v => Ok(v.into()),
         }
     }
 }
@@ -125,14 +130,15 @@ impl Processor for JsonPathProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed)?;
+                    val.insert(KeyString::from(output_index), processed);
                 }
                 None => {
                     if !self.ignore_missing {
@@ -151,12 +157,13 @@ impl Processor for JsonPathProcessor {
 
 #[cfg(test)]
 mod test {
-    use crate::Map;
+    use std::collections::BTreeMap;
+
+    use vrl::prelude::Bytes;
 
     #[test]
     fn test_json_path() {
         use super::*;
-        use crate::Value;
 
         let json_path = JsonPath::try_from("$.hello").unwrap();
         let processor = JsonPathProcessor {
@@ -166,11 +173,11 @@ mod test {
         };
 
         let result = processor
-            .process_field(&Value::Map(Map::one(
-                "hello",
-                Value::String("world".to_string()),
-            )))
+            .process_field(&VrlValue::Object(BTreeMap::from([(
+                KeyString::from("hello"),
+                VrlValue::Bytes(Bytes::from("world")),
+            )])))
             .unwrap();
-        assert_eq!(result, Value::String("world".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("world")));
     }
 }

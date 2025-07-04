@@ -14,6 +14,7 @@
 
 use common_telemetry::debug;
 use snafu::OptionExt;
+use vrl::value::Value as VrlValue;
 use yaml_rust::Yaml;
 
 use crate::error::{
@@ -21,7 +22,7 @@ use crate::error::{
     ValueRequiredForDispatcherRuleSnafu,
 };
 use crate::etl::ctx_req::TABLE_SUFFIX_KEY;
-use crate::Value;
+use crate::etl::value::yaml_to_vrl_value;
 
 const FIELD: &str = "field";
 const PIPELINE: &str = "pipeline";
@@ -62,7 +63,7 @@ pub(crate) struct Dispatcher {
 ///   name
 #[derive(Debug, PartialEq)]
 pub(crate) struct Rule {
-    pub value: Value,
+    pub value: VrlValue,
     pub table_suffix: String,
     pub pipeline: Option<String>,
 }
@@ -90,7 +91,8 @@ impl TryFrom<&Yaml> for Dispatcher {
                     if rule[VALUE].is_badvalue() {
                         ValueRequiredForDispatcherRuleSnafu.fail()?;
                     }
-                    let value = Value::try_from(&rule[VALUE])?;
+
+                    let value = yaml_to_vrl_value(&rule[VALUE])?;
 
                     Ok(Rule {
                         value,
@@ -109,8 +111,9 @@ impl TryFrom<&Yaml> for Dispatcher {
 
 impl Dispatcher {
     /// execute dispatcher and returns matched rule if any
-    pub(crate) fn exec(&self, data: &Value) -> Option<&Rule> {
-        if let Some(value) = data.get(&self.field) {
+    pub(crate) fn exec(&self, data: &VrlValue) -> Option<&Rule> {
+        let data = data.as_object()?;
+        if let Some(value) = data.get(self.field.as_str()) {
             for rule in &self.rules {
                 if rule.value == *value {
                     return Some(rule);

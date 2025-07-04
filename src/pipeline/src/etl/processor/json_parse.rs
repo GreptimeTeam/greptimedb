@@ -13,16 +13,17 @@
 // limitations under the License.
 
 use snafu::{OptionExt as _, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     Error, FieldMustBeTypeSnafu, JsonParseSnafu, KeyMustBeStringSnafu, ProcessorMissingFieldSnafu,
-    ProcessorUnsupportedValueSnafu, Result,
+    ProcessorUnsupportedValueSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::{json_to_map, Processor, Value};
+use crate::Processor;
 
 pub(crate) const PROCESSOR_JSON_PARSE: &str = "json_parse";
 
@@ -67,21 +68,21 @@ impl TryFrom<&yaml_rust::yaml::Hash> for JsonParseProcessor {
 }
 
 impl JsonParseProcessor {
-    fn process_field(&self, val: &Value) -> Result<Value> {
+    fn process_field(&self, val: &VrlValue) -> Result<VrlValue> {
         let Some(json_str) = val.as_str() else {
             return FieldMustBeTypeSnafu {
-                field: val.to_str_type(),
+                field: val.to_string(),
                 ty: "string",
             }
             .fail();
         };
-        let parsed: serde_json::Value = serde_json::from_str(json_str).context(JsonParseSnafu)?;
+        let parsed: VrlValue = serde_json::from_str(&json_str).context(JsonParseSnafu)?;
         match parsed {
-            serde_json::Value::Object(_) => Ok(json_to_map(parsed)?),
-            serde_json::Value::Array(arr) => Ok(Value::Array(arr.try_into()?)),
+            VrlValue::Object(_) => Ok(parsed),
+            VrlValue::Array(_) => Ok(parsed),
             _ => ProcessorUnsupportedValueSnafu {
                 processor: self.kind(),
-                val: val.to_str_type(),
+                val: val.to_string(),
             }
             .fail(),
         }
@@ -97,14 +98,15 @@ impl Processor for JsonParseProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
                 Some(v) => {
                     let processed = self.process_field(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), processed)?;
+                    val.insert(KeyString::from(output_index.to_string()), processed);
                 }
                 None => {
                     if !self.ignore_missing {
@@ -123,24 +125,27 @@ impl Processor for JsonParseProcessor {
 
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+
+    use vrl::prelude::Bytes;
+    use vrl::value::{KeyString, Value as VrlValue};
+
+    use crate::etl::processor::json_parse::JsonParseProcessor;
 
     #[test]
     fn test_json_parse() {
-        use super::*;
-        use crate::Value;
-
         let processor = JsonParseProcessor {
             ..Default::default()
         };
 
         let result = processor
-            .process_field(&Value::String(r#"{"hello": "world"}"#.to_string()))
+            .process_field(&VrlValue::Bytes(Bytes::from(r#"{"hello": "world"}"#)))
             .unwrap();
 
-        let expected = Value::Map(crate::Map::one(
-            "hello".to_string(),
-            Value::String("world".to_string()),
-        ));
+        let expected = VrlValue::Object(BTreeMap::from([(
+            KeyString::from("hello"),
+            VrlValue::Bytes(Bytes::from("world")),
+        )]));
 
         assert_eq!(result, expected);
     }
