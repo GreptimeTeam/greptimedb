@@ -159,6 +159,9 @@ impl Inserter {
         let mut raw_data_bytes = None;
         for (peer, masks) in mask_per_datanode {
             for (region_id, mask) in masks {
+                if mask.select_none() {
+                    continue;
+                }
                 let rb = record_batch.clone();
                 let schema_bytes = schema_bytes.clone();
                 let node_manager = self.node_manager.clone();

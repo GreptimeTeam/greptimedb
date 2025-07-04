@@ -41,6 +41,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .with_label_values(&["process_bulk_req"])
             .start_timer();
         let batch = request.payload;
+        if batch.num_rows() == 0 {
+            sender.send(Ok(0));
+            return;
+        }
 
         let Some((ts_index, ts)) = batch
             .schema()
