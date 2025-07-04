@@ -527,7 +527,7 @@ pub struct FulltextOptions {
     #[serde(default = "fulltext_options_default_granularity")]
     pub granularity: u32,
     /// The false positive rate of the fulltext index (for bloom backend only)
-    #[serde(default = "fulltext_options_default_false_positive_rate_in_10000")]
+    #[serde(default = "index_options_default_false_positive_rate_in_10000")]
     pub false_positive_rate_in_10000: u32,
 }
 
@@ -535,7 +535,7 @@ fn fulltext_options_default_granularity() -> u32 {
     DEFAULT_GRANULARITY
 }
 
-fn fulltext_options_default_false_positive_rate_in_10000() -> u32 {
+fn index_options_default_false_positive_rate_in_10000() -> u32 {
     (DEFAULT_FALSE_POSITIVE_RATE * 10000.0) as u32
 }
 
@@ -773,15 +773,11 @@ pub struct SkippingIndexOptions {
     /// The granularity of the skip index.
     pub granularity: u32,
     /// The false positive rate of the skip index (in ten-thousandths, e.g., 100 = 1%).
-    #[serde(default = "skipping_index_options_default_false_positive_rate_in_10000")]
+    #[serde(default = "index_options_default_false_positive_rate_in_10000")]
     pub false_positive_rate_in_10000: u32,
     /// The type of the skip index.
     #[serde(default)]
     pub index_type: SkippingIndexType,
-}
-
-fn skipping_index_options_default_false_positive_rate_in_10000() -> u32 {
-    (DEFAULT_FALSE_POSITIVE_RATE * 10000.0) as u32
 }
 
 impl SkippingIndexOptions {
