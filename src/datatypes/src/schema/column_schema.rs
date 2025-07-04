@@ -773,10 +773,15 @@ pub struct SkippingIndexOptions {
     /// The granularity of the skip index.
     pub granularity: u32,
     /// The false positive rate of the skip index (in ten-thousandths, e.g., 100 = 1%).
+    #[serde(default = "skipping_index_options_default_false_positive_rate_in_10000")]
     pub false_positive_rate_in_10000: u32,
     /// The type of the skip index.
     #[serde(default)]
     pub index_type: SkippingIndexType,
+}
+
+fn skipping_index_options_default_false_positive_rate_in_10000() -> u32 {
+    (DEFAULT_FALSE_POSITIVE_RATE * 10000.0) as u32
 }
 
 impl SkippingIndexOptions {
@@ -1178,5 +1183,26 @@ mod tests {
         assert!(!column_schema.is_time_index);
         assert!(column_schema.default_constraint.is_none());
         assert!(column_schema.metadata.is_empty());
+    }
+
+    #[test]
+    fn test_skipping_index_options_deserialize_v0_14_to_v0_15() {
+        let options = "{\"granularity\":10240,\"type\":\"BLOOM\"}";
+        let options = serde_json::from_str::<SkippingIndexOptions>(options).unwrap();
+        assert_eq!(10240, options.granularity);
+        assert_eq!(SkippingIndexType::BloomFilter, options.index_type);
+        assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
+    }
+
+    #[test]
+    fn test_fulltext_options_deserialize_v0_14_to_v0_15() {
+        let options = "{\"enable\":true,\"analyzer\":\"English\",\"case_sensitive\":false,\"backend\":\"bloom\"}";
+        let options = serde_json::from_str::<FulltextOptions>(options).unwrap();
+        assert!(!options.case_sensitive);
+        assert!(options.enable);
+        assert_eq!(FulltextBackend::Bloom, options.backend);
+        assert_eq!(FulltextAnalyzer::default(), options.analyzer);
+        assert_eq!(DEFAULT_GRANULARITY, options.granularity);
+        assert_eq!(DEFAULT_FALSE_POSITIVE_RATE, options.false_positive_rate());
     }
 }
