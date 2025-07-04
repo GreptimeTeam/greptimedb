@@ -22,7 +22,7 @@ use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -31,7 +31,8 @@ use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::MIN_REFRESH_DURATION;
 use crate::error::{DatatypesSnafu, InternalSnafu, TimeSnafu, UnexpectedSnafu};
 use crate::metrics::{
-    METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT,
+    METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE,
+    METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE,
 };
 use crate::{Error, FlowId};
 
@@ -178,6 +179,33 @@ impl DirtyTimeWindows {
         self.windows.len()
     }
 
+    /// Get the effective count of time windows, which is the number of time windows that can be
+    /// used for query, compute from total time window range divided by `window_size`.
+    pub fn effective_count(&self, window_size: &Duration) -> usize {
+        if self.windows.is_empty() {
+            return 0;
+        }
+        let window_size =
+            chrono::Duration::from_std(*window_size).unwrap_or(chrono::Duration::zero());
+        let total_window_time_range =
+            self.windows
+                .iter()
+                .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                    if let Some(end) = end {
+                        acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+                    } else {
+                        acc + window_size
+                    }
+                });
+
+        // not sure window_size is zero have any meaning, but just in case
+        if window_size.num_seconds() == 0 {
+            0
+        } else {
+            (total_window_time_range.num_seconds() / window_size.num_seconds()) as usize
+        }
+    }
+
     /// Generate all filter expressions consuming all time windows
     ///
     /// there is two limits:
@@ -192,6 +220,13 @@ impl DirtyTimeWindows {
         flow_id: FlowId,
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<datafusion_expr::Expr>, Error> {
+        ensure!(
+            window_size.num_seconds() > 0,
+            UnexpectedSnafu {
+                reason: "window_size is zero, can't generate filter exprs",
+            }
+        );
+
         debug!(
             "expire_lower_bound: {:?}, window_size: {:?}",
             expire_lower_bound.map(|t| t.to_iso8601_string()),
@@ -228,62 +263,94 @@ impl DirtyTimeWindows {
 
         // get the first `window_cnt` time windows
         let max_time_range = window_size * window_cnt as i32;
-        let nth = {
-            let mut cur_time_range = chrono::Duration::zero();
-            let mut nth_key = None;
-            for (idx, (start, end)) in self.windows.iter().enumerate() {
-                // if time range is too long, stop
-                if cur_time_range > max_time_range {
-                    nth_key = Some(*start);
-                    break;
-                }
 
-                // if we have enough time windows, stop
-                if idx >= window_cnt {
-                    nth_key = Some(*start);
-                    break;
-                }
+        let mut to_be_query = BTreeMap::new();
+        let mut new_windows = self.windows.clone();
+        let mut cur_time_range = chrono::Duration::zero();
+        for (idx, (start, end)) in self.windows.iter().enumerate() {
+            let first_end = start
+                .add_duration(window_size.to_std().unwrap())
+                .context(TimeSnafu)?;
+            let end = end.unwrap_or(first_end);
 
-                if let Some(end) = end {
-                    if let Some(x) = end.sub(start) {
-                        cur_time_range += x;
-                    }
-                }
+            // if time range is too long, stop
+            if cur_time_range >= max_time_range {
+                break;
             }
 
-            nth_key
-        };
-        let first_nth = {
-            if let Some(nth) = nth {
-                let mut after = self.windows.split_off(&nth);
-                std::mem::swap(&mut self.windows, &mut after);
+            // if we have enough time windows, stop
+            if idx >= window_cnt {
+                break;
+            }
 
-                after
+            let Some(x) = end.sub(start) else {
+                continue;
+            };
+            if cur_time_range + x <= max_time_range {
+                to_be_query.insert(*start, Some(end));
+                new_windows.remove(start);
+                cur_time_range += x;
             } else {
-                std::mem::take(&mut self.windows)
+                // too large a window, split it
+                // split at window_size * times
+                let surplus = max_time_range - cur_time_range;
+                if surplus.num_seconds() <= window_size.num_seconds() {
+                    // Skip splitting if surplus is smaller than window_size
+                    break;
+                }
+                let times = surplus.num_seconds() / window_size.num_seconds();
+
+                let split_offset = window_size * times as i32;
+                let split_at = start
+                    .add_duration(split_offset.to_std().unwrap())
+                    .context(TimeSnafu)?;
+                to_be_query.insert(*start, Some(split_at));
+
+                // remove the original window
+                new_windows.remove(start);
+                new_windows.insert(split_at, Some(end));
+                cur_time_range += split_offset;
+                break;
             }
-        };
+        }
+
+        self.windows = new_windows;
 
         METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT
             .with_label_values(&[flow_id.to_string().as_str()])
-            .observe(first_nth.len() as f64);
+            .observe(to_be_query.len() as f64);
 
-        let full_time_range = first_nth
+        let full_time_range = to_be_query
             .iter()
             .fold(chrono::Duration::zero(), |acc, (start, end)| {
                 if let Some(end) = end {
                     acc + end.sub(start).unwrap_or(chrono::Duration::zero())
                 } else {
-                    acc
+                    acc + window_size
                 }
             })
             .num_seconds() as f64;
-        METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME_RANGE
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE
             .with_label_values(&[flow_id.to_string().as_str()])
             .observe(full_time_range);
 
+        let stalled_time_range =
+            self.windows
+                .iter()
+                .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                    if let Some(end) = end {
+                        acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+                    } else {
+                        acc + window_size
+                    }
+                });
+
+        METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE
+            .with_label_values(&[flow_id.to_string().as_str()])
+            .observe(stalled_time_range.num_seconds() as f64);
+
         let mut expr_lst = vec![];
-        for (start, end) in first_nth.into_iter() {
+        for (start, end) in to_be_query.into_iter() {
             // align using time window exprs
             let (start, end) = if let Some(ctx) = task_ctx {
                 let Some(time_window_expr) = &ctx.config.time_window_expr else {
@@ -517,6 +584,64 @@ mod test {
                     "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:00:21' AS TIMESTAMP)))",
                 )
             ),
+            // split range
+            (
+                Vec::from_iter((0..20).map(|i|Timestamp::new_second(i*3)).chain(std::iter::once(
+                    Timestamp::new_second(60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1)),
+                ))),
+                (chrono::Duration::seconds(3), None),
+                BTreeMap::from([
+                (
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(
+                        60
+                    )),
+                ),
+                (
+                    Timestamp::new_second(60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1)),
+                    Some(Timestamp::new_second(
+                        60 + 3 * (DirtyTimeWindows::MERGE_DIST as i64 + 1) + 3
+                    )),
+                )]),
+                Some(
+                    "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:00' AS TIMESTAMP)))",
+                )
+            ),
+            // split 2 min into 1 min
+            (
+                Vec::from_iter((0..40).map(|i|Timestamp::new_second(i*3))),
+                (chrono::Duration::seconds(3), None),
+                BTreeMap::from([
+                (
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(
+                        40 * 3
+                    )),
+                )]),
+                Some(
+                    "((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:00' AS TIMESTAMP)))",
+                )
+            ),
+            // split 3s + 1min into 3s + 57s
+            (
+                Vec::from_iter(std::iter::once(Timestamp::new_second(0)).chain((0..40).map(|i|Timestamp::new_second(20+i*3)))),
+                (chrono::Duration::seconds(3), None),
+                BTreeMap::from([
+                (
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(
+                        3
+                    )),
+                ),(
+                    Timestamp::new_second(20),
+                    Some(Timestamp::new_second(
+                        140
+                    )),
+                )]),
+                Some(
+                    "(((ts >= CAST('1970-01-01 00:00:00' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:00:03' AS TIMESTAMP))) OR ((ts >= CAST('1970-01-01 00:00:20' AS TIMESTAMP)) AND (ts < CAST('1970-01-01 00:01:17' AS TIMESTAMP))))",
+                )
+            ),
             // expired
             (
                 vec![
@@ -533,6 +658,8 @@ mod test {
                 None
             ),
         ];
+        // let len = testcases.len();
+        // let testcases = testcases[(len - 2)..(len - 1)].to_vec();
         for (lower_bounds, (window_size, expire_lower_bound), expected, expected_filter_expr) in
             testcases
         {

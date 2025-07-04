@@ -211,8 +211,9 @@ impl BatchingTask {
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
+        max_window_cnt: Option<usize>,
     ) -> Result<Option<(u32, Duration)>, Error> {
-        if let Some(new_query) = self.gen_insert_plan(engine).await? {
+        if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query);
             self.execute_logical_plan(frontend_client, &new_query).await
         } else {
@@ -224,6 +225,7 @@ impl BatchingTask {
     pub async fn gen_insert_plan(
         &self,
         engine: &QueryEngineRef,
+        max_window_cnt: Option<usize>,
     ) -> Result<Option<LogicalPlan>, Error> {
         let (table, df_schema) = get_table_info_df_schema(
             self.config.catalog_manager.clone(),
@@ -232,7 +234,7 @@ impl BatchingTask {
         .await?;
 
         let new_query = self
-            .gen_query_with_time_window(engine.clone(), &table.meta.schema)
+            .gen_query_with_time_window(engine.clone(), &table.meta.schema, max_window_cnt)
             .await?;
 
         let insert_into = if let Some((new_query, _column_cnt)) = new_query {
@@ -437,7 +439,7 @@ impl BatchingTask {
                 .with_label_values(&[&flow_id_str])
                 .inc();
 
-            let new_query = match self.gen_insert_plan(&engine).await {
+            let new_query = match self.gen_insert_plan(&engine, None).await {
                 Ok(new_query) => new_query,
                 Err(err) => {
                     common_telemetry::error!(err; "Failed to generate query for flow={}", self.config.flow_id);
@@ -521,6 +523,7 @@ impl BatchingTask {
         &self,
         engine: QueryEngineRef,
         sink_table_schema: &Arc<Schema>,
+        max_window_cnt: Option<usize>,
     ) -> Result<Option<(LogicalPlan, usize)>, Error> {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         let start = SystemTime::now();
@@ -574,8 +577,8 @@ impl BatchingTask {
         };
 
         debug!(
-            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?}",
-            self.config.flow_id, l, u
+            "Flow id = {:?}, found time window: precise_lower_bound={:?}, precise_upper_bound={:?} with dirty time windows: {:?}",
+            self.config.flow_id, l, u, self.state.read().unwrap().dirty_time_windows
         );
         let window_size = u.sub(&l).with_context(|| UnexpectedSnafu {
             reason: format!("Can't get window size from {u:?} - {l:?}"),
@@ -601,7 +604,7 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
-                DirtyTimeWindows::MAX_FILTER_NUM,
+                max_window_cnt.unwrap_or(DirtyTimeWindows::MAX_FILTER_NUM),
                 self.config.flow_id,
                 Some(self),
             )?;
