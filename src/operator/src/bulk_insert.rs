@@ -62,6 +62,10 @@ impl Inserter {
         };
         decode_timer.observe_duration();
 
+        if record_batch.num_rows() == 0 {
+            return Ok(0);
+        }
+
         // notify flownode to update dirty timestamps if flow is configured.
         self.maybe_update_flow_dirty_window(table_info, record_batch.clone());
 
