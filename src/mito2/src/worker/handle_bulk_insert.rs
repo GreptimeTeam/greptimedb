@@ -15,15 +15,11 @@
 //! Handles bulk insert requests.
 
 use datatypes::arrow;
-use datatypes::arrow::array::{
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
-};
-use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBulkInsertsRequest;
 
+use crate::error::InconsistentTimestampLengthSnafu;
 use crate::memtable::bulk::part::BulkPart;
 use crate::request::{OptionOutputTx, SenderBulkRequest};
 use crate::worker::RegionWorkerLoop;
@@ -41,6 +37,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .with_label_values(&["process_bulk_req"])
             .start_timer();
         let batch = request.payload;
+        if batch.num_rows() == 0 {
+            sender.send(Ok(0));
+            return;
+        }
 
         let Some((ts_index, ts)) = batch
             .schema()
@@ -60,55 +60,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        let DataType::Timestamp(unit, _) = ts.data_type() else {
-            // safety: ts data type must be a timestamp type.
-            unreachable!()
-        };
+        if batch.num_rows() != ts.len() {
+            sender.send(
+                InconsistentTimestampLengthSnafu {
+                    expected: batch.num_rows(),
+                    actual: ts.len(),
+                }
+                .fail(),
+            );
+            return;
+        }
 
-        let (min_ts, max_ts) = match unit {
-            TimeUnit::Second => {
-                let ts = ts.as_any().downcast_ref::<TimestampSecondArray>().unwrap();
-                (
-                    //safety: ts array must contain at least one row so this won't return None.
-                    arrow::compute::min(ts).unwrap(),
-                    arrow::compute::max(ts).unwrap(),
-                )
-            }
+        // safety: ts data type must be a timestamp type.
+        let (ts_primitive, _) = datatypes::timestamp::timestamp_array_to_primitive(ts).unwrap();
 
-            TimeUnit::Millisecond => {
-                let ts = ts
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-                (
-                    //safety: ts array must contain at least one row so this won't return None.
-                    arrow::compute::min(ts).unwrap(),
-                    arrow::compute::max(ts).unwrap(),
-                )
-            }
-            TimeUnit::Microsecond => {
-                let ts = ts
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .unwrap();
-                (
-                    //safety: ts array must contain at least one row so this won't return None.
-                    arrow::compute::min(ts).unwrap(),
-                    arrow::compute::max(ts).unwrap(),
-                )
-            }
-            TimeUnit::Nanosecond => {
-                let ts = ts
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .unwrap();
-                (
-                    //safety: ts array must contain at least one row so this won't return None.
-                    arrow::compute::min(ts).unwrap(),
-                    arrow::compute::max(ts).unwrap(),
-                )
-            }
-        };
+        // safety: we've checked ts.len() == batch.num_rows() and batch is not empty
+        let min_ts = arrow::compute::min(&ts_primitive).unwrap();
+        let max_ts = arrow::compute::max(&ts_primitive).unwrap();
 
         let part = BulkPart {
             batch,

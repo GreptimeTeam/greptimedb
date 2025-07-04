@@ -1009,6 +1009,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Inconsistent timestamp column length, expect: {}, actual: {}",
+        expected,
+        actual
+    ))]
+    InconsistentTimestampLength {
+        expected: usize,
+        actual: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1166,6 +1178,8 @@ impl ErrorExt for Error {
 
             #[cfg(feature = "enterprise")]
             ScanExternalRange { source, .. } => source.status_code(),
+
+            InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
         }
     }
 
