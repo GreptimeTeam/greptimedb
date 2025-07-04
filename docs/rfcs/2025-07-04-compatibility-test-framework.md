@@ -82,11 +82,11 @@ SHOW CREATE TABLE $TABLE;
 
 In this example, we use some new sqlness features that will be introduced in the next section (`since`, `IGNORE_RESULT`, `TEMPLATE`).
 
-### Maintaince
+### Maintenance
 
 Each time implement a new feature that should be covered by the compatibility test, we should create a new test case in `1.feature/` and `3.cleanup/` for them. And check if existing cases in `2.verify/` can be reused to verify the database behavior.
 
-This simulates an enthusiastic user who uses all the new features at the first time. All the new maintaince burden is on the feature implementer to write one more test case for the new feature, to "fixation" the behavior. And once there is a breaking change in the future, it can be detected by the compatibility test framework automatically.
+This simulates an enthusiastic user who uses all the new features at the first time. All the new Maintenance burden is on the feature implementer to write one more test case for the new feature, to "fixation" the behavior. And once there is a breaking change in the future, it can be detected by the compatibility test framework automatically.
 
 Another topic is about deprecation. If a feature is deprecated, we should also mark it in the test case. Still use above example, assume we deprecate the `index.granularity` and `index.false_positive_rate` index options in `v0.99.0`, we can mark them as:
 ```sql
@@ -112,13 +112,13 @@ Follows the `ARG` interceptor in sqlness, we can mark a feature is available bet
 
 `IGNORE_RESULT` is a new interceptor, it tells the runner to ignore the result of the query, only check whether the query is executed successfully.
 
-This is useful to reduce the maintaince burden of the test cases, unlike the integration sqlness test, in most cases we don't care about the result of the query, only need to make sure the query is executed successfully.
+This is useful to reduce the Maintenance burden of the test cases, unlike the integration sqlness test, in most cases we don't care about the result of the query, only need to make sure the query is executed successfully.
 
 ### TEMPLATE
 
 `TEMPLATE` is another new interceptor, it can generate queries from a template based on a runtime data.
 
-In above exmample, we need to run the `SHOW CREATE TABLE` query for all existing tables, so we can use the `TEMPLATE` interceptor to generate the query with a dynamic table list.
+In above example, we need to run the `SHOW CREATE TABLE` query for all existing tables, so we can use the `TEMPLATE` interceptor to generate the query with a dynamic table list.
 
 ### RUNNER
 
