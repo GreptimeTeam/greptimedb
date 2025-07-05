@@ -40,5 +40,6 @@ store-api.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 mito2 = { workspace = true, features = ["test"] }

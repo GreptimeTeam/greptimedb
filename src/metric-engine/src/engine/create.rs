@@ -80,7 +80,8 @@ impl MetricEngineInner {
                 }
             );
             let (region_id, request) = requests.pop().unwrap();
-            self.create_physical_region(region_id, request).await?;
+            self.create_physical_region(region_id, request, extension_return_value)
+                .await?;
 
             return Ok(0);
         } else if first_request
@@ -122,6 +123,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionCreateRequest,
+        extension_return_value: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         let physical_region_options = PhysicalRegionOptions::try_from(&request.options)?;
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
@@ -162,7 +164,8 @@ impl MetricEngineInner {
             .context(UnexpectedRequestSnafu {
                 reason: "No time index column found",
             })?;
-        self.mito
+        let response = self
+            .mito
             .handle_request(
                 data_region_id,
                 RegionRequest::Create(create_data_region_request),
@@ -176,6 +179,7 @@ impl MetricEngineInner {
                 region_id: data_region_id,
             },
         )?;
+        extension_return_value.extend(response.extensions);
 
         info!("Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}");
         PHYSICAL_REGION_COUNT.inc();
@@ -613,12 +617,15 @@ pub(crate) fn region_options_for_metadata_region(
 
 #[cfg(test)]
 mod test {
+    use common_meta::ddl::test_util::assert_column_name_and_id;
+    use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+    use store_api::region_request::BatchRegionDdlRequest;
 
     use super::*;
     use crate::config::EngineConfig;
     use crate::engine::MetricEngine;
-    use crate::test_util::TestEnv;
+    use crate::test_util::{create_logical_region_request, TestEnv};
 
     #[test]
     fn test_verify_region_create_request() {
@@ -806,5 +813,51 @@ mod test {
             "forever"
         );
         assert!(!metadata_region_request.options.contains_key("skip_wal"));
+    }
+
+    #[tokio::test]
+    async fn test_create_logical_regions() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id1 = RegionId::new(1024, 0);
+        let physical_region_id2 = RegionId::new(1024, 1);
+        let logical_region_id1 = RegionId::new(1025, 0);
+        let logical_region_id2 = RegionId::new(1025, 1);
+        env.create_physical_region(physical_region_id1, "/test_dir1")
+            .await;
+        env.create_physical_region(physical_region_id2, "/test_dir2")
+            .await;
+
+        let region_create_request1 =
+            create_logical_region_request(&["job"], physical_region_id1, "logical1");
+        let region_create_request2 =
+            create_logical_region_request(&["job"], physical_region_id2, "logical2");
+
+        let response = engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Create(vec![
+                (logical_region_id1, region_create_request1),
+                (logical_region_id2, region_create_request2),
+            ]))
+            .await
+            .unwrap();
+
+        let manifest_infos = parse_manifest_infos_from_extensions(&response.extensions).unwrap();
+        assert_eq!(manifest_infos.len(), 2);
+        let region_ids = manifest_infos.into_iter().map(|i| i.0).collect::<Vec<_>>();
+        assert!(region_ids.contains(&physical_region_id1));
+        assert!(region_ids.contains(&physical_region_id2));
+
+        let column_metadatas =
+            parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        assert_column_name_and_id(
+            &column_metadatas,
+            &[
+                ("greptime_timestamp", 0),
+                ("greptime_value", 1),
+                ("__table_id", ReservedColumnId::table_id()),
+                ("__tsid", ReservedColumnId::tsid()),
+                ("job", 2),
+            ],
+        );
     }
 }
