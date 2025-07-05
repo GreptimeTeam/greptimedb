@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-enterprise = ["common-meta/enterprise", "sql/enterprise"]
+enterprise = ["common-meta/enterprise", "sql/enterprise", "query/enterprise"]
 
 [lints]
 workspace = true

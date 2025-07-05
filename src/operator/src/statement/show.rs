@@ -231,10 +231,12 @@ impl StatementExecutor {
     #[tracing::instrument(skip_all)]
     pub(super) async fn show_triggers(
         &self,
-        _stmt: sql::statements::show::trigger::ShowTriggers,
-        _query_ctx: QueryContextRef,
+        stmt: sql::statements::show::trigger::ShowTriggers,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        crate::error::UnsupportedTriggerSnafu.fail()
+        query::sql::show_triggers(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
     }
 
     #[tracing::instrument(skip_all)]

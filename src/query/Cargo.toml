@@ -7,6 +7,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+enterprise = []
+
 [dependencies]
 ahash.workspace = true
 api.workspace = true
