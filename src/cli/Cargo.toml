@@ -43,7 +43,6 @@ common-time.workspace = true
 common-version.workspace = true
 common-wal.workspace = true
 datatypes.workspace = true
-either = "1.8"
 etcd-client.workspace = true
 futures.workspace = true
 humantime.workspace = true
