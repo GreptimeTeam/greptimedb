@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod health;
-mod heartbeat;
-mod leader;
-mod maintenance;
-mod node_lease;
-mod procedure;
+pub(crate) mod health;
+pub(crate) mod heartbeat;
+pub(crate) mod leader;
+pub(crate) mod maintenance;
+pub(crate) mod node_lease;
+pub(crate) mod procedure;
 mod util;
 
 use std::collections::HashMap;
@@ -25,6 +25,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::{routing, Router as AxumRouter};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use tonic::body::BoxBody;
@@ -32,6 +35,25 @@ use tonic::codegen::{empty_body, http, BoxFuture, Service};
 use tonic::server::NamedService;
 
 use crate::metasrv::Metasrv;
+use crate::service::admin::health::HealthHandler;
+use crate::service::admin::heartbeat::HeartBeatHandler;
+use crate::service::admin::leader::LeaderHandler;
+use crate::service::admin::maintenance::MaintenanceHandler;
+use crate::service::admin::node_lease::NodeLeaseHandler;
+use crate::service::admin::procedure::ProcedureManagerHandler;
+use crate::service::admin::util::{to_axum_json_response, to_axum_not_found_response};
+
+const ADMIN_NODE_LEASE: &str = "/admin/node-lease";
+const ADMIN_HEARTBEAT: &str = "/admin/heartbeat";
+const ADMIN_HEARTBEAT_HELP: &str = "/admin/heartbeat/help";
+const ADMIN_LEADER: &str = "/admin/leader";
+const ADMIN_MAINTENANCE: &str = "/admin/maintenance";
+const ADMIN_MAINTENANCE_STATUS: &str = "/admin/maintenance/status";
+const ADMIN_MAINTENANCE_ENABLE: &str = "/admin/maintenance/enable";
+const ADMIN_MAINTENANCE_DISABLE: &str = "/admin/maintenance/disable";
+const ADMIN_PROC_STATUS: &str = "/admin/procedure-manager/status";
+const ADMIN_PROC_PAUSE: &str = "/admin/procedure-manager/pause";
+const ADMIN_PROC_RESUME: &str = "/admin/procedure-manager/resume";
 
 pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
@@ -221,6 +243,222 @@ fn boxed(body: String) -> BoxBody {
     Full::new(Bytes::from(body))
         .map_err(|err| match err {})
         .boxed_unsync()
+}
+
+/// Expose admin HTTP endpoints as an Axum router for the main HTTP server.
+pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
+    let node_lease_handler = Arc::new(NodeLeaseHandler {
+        meta_peer_client: metasrv.meta_peer_client().clone(),
+    });
+    let heartbeat_handler = Arc::new(HeartBeatHandler {
+        meta_peer_client: metasrv.meta_peer_client().clone(),
+    });
+    let leader_handler = Arc::new(LeaderHandler {
+        election: metasrv.election().cloned(),
+    });
+    let maintenance_handler = Arc::new(MaintenanceHandler {
+        manager: metasrv.runtime_switch_manager().clone(),
+    });
+    let procedure_handler = Arc::new(ProcedureManagerHandler {
+        manager: metasrv.runtime_switch_manager().clone(),
+    });
+
+    AxumRouter::new()
+        .route(
+            "/admin/health",
+            routing::get(move || {
+                let handler = HealthHandler;
+                async move {
+                    match handler
+                        .handle("/admin/health", http::Method::GET, &Default::default())
+                        .await
+                    {
+                        Ok(status) => status.body().clone().into_response(),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Health handler failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_NODE_LEASE,
+            routing::get({
+                let handler = node_lease_handler.clone();
+                move || async move {
+                    match handler
+                        .handle(ADMIN_NODE_LEASE, http::Method::GET, &Default::default())
+                        .await
+                    {
+                        Ok(resp) => resp.body().clone().into_response(),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Node lease handler failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_HEARTBEAT,
+            routing::get({
+                let handler = heartbeat_handler.clone();
+                move || async move {
+                    match handler
+                        .handle(ADMIN_HEARTBEAT, http::Method::GET, &Default::default())
+                        .await
+                    {
+                        Ok(resp) => resp.body().clone().into_response(),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Heartbeat handler failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_HEARTBEAT_HELP,
+            routing::get({
+                let handler = heartbeat_handler.clone();
+                move || async move {
+                    match handler
+                        .handle(ADMIN_HEARTBEAT_HELP, http::Method::GET, &Default::default())
+                        .await
+                    {
+                        Ok(resp) => resp.body().clone().into_response(),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Heartbeat help handler failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_LEADER,
+            routing::get({
+                let handler = leader_handler.clone();
+                move || async move {
+                    match handler
+                        .handle(ADMIN_LEADER, http::Method::GET, &Default::default())
+                        .await
+                    {
+                        Ok(resp) => resp.body().clone().into_response(),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Leader handler failed");
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_MAINTENANCE,
+            routing::get({
+                let handler = maintenance_handler.clone();
+                move || async move {
+                    match handler.get_maintenance().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Maintenance handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_MAINTENANCE_STATUS,
+            routing::get({
+                let handler = maintenance_handler.clone();
+                move || async move {
+                    match handler.get_maintenance().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Maintenance status handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_MAINTENANCE_ENABLE,
+            routing::post({
+                let handler = maintenance_handler.clone();
+                move || async move {
+                    match handler.set_maintenance().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Maintenance enable handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_MAINTENANCE_DISABLE,
+            routing::post({
+                let handler = maintenance_handler.clone();
+                move || async move {
+                    match handler.unset_maintenance().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Maintenance disable handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_PROC_STATUS,
+            routing::get({
+                let handler = procedure_handler.clone();
+                move || async move {
+                    match handler.get_procedure_manager_status().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Procedure manager status handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_PROC_PAUSE,
+            routing::post({
+                let handler = procedure_handler.clone();
+                move || async move {
+                    match handler.pause_procedure_manager().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Procedure manager pause handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            ADMIN_PROC_RESUME,
+            routing::post({
+                let handler = procedure_handler.clone();
+                move || async move {
+                    match handler.resume_procedure_manager().await {
+                        Ok(resp) => to_axum_json_response(resp),
+                        Err(e) => {
+                            common_telemetry::error!(e; "Procedure manager resume handler failed");
+                            to_axum_not_found_response()
+                        }
+                    }
+                }
+            }),
+        )
 }
 
 #[cfg(test)]
@@ -556,5 +794,232 @@ mod tests {
         )
         .await;
         assert!(response.contains("404 Not Found"));
+    }
+}
+
+#[cfg(test)]
+mod axum_admin_tests {
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Method, Request, StatusCode};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use tower::ServiceExt; // for `oneshot`
+
+    use super::*;
+    use crate::metasrv::builder::MetasrvBuilder;
+    use crate::metasrv::MetasrvOptions;
+
+    async fn setup_axum_app() -> AxumRouter {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions::default())
+            .kv_backend(kv_backend)
+            .build()
+            .await
+            .unwrap();
+        let metasrv = Arc::new(metasrv);
+        admin_axum_router(metasrv)
+    }
+
+    async fn get_body_string(resp: axum::response::Response) -> String {
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8_lossy(&body_bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_admin_health() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.to_lowercase().contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_node_lease() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/node-lease")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_heartbeat() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/heartbeat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_heartbeat_help() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/heartbeat/help")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_leader() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/leader")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_maintenance() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/maintenance")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("enabled"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_maintenance_status() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/maintenance/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("enabled"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_maintenance_enable_disable() {
+        // Enable maintenance
+        let response = setup_axum_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/maintenance/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("enabled"));
+        // Disable maintenance
+        let response = setup_axum_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/maintenance/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("enabled"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_procedure_manager_status() {
+        let app = setup_axum_app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/procedure-manager/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("status"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_procedure_manager_pause_resume() {
+        // Pause
+        let response = setup_axum_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/procedure-manager/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("paused"));
+        // Resume
+        let response = setup_axum_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/procedure-manager/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("running"));
     }
 }
