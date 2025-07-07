@@ -16,6 +16,7 @@
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
+use common_meta::ddl::utils::parse_column_metadatas;
 use common_telemetry::debug;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -26,12 +27,14 @@ use object_store::util::join_dir;
 use object_store::ObjectStore;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    ALTER_PHYSICAL_EXTENSION_KEY, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    PHYSICAL_TABLE_METADATA_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::config::EngineConfig;
@@ -116,13 +119,8 @@ impl TestEnv {
         (mito, metric)
     }
 
-    /// Create regions in [MetricEngine] under [`default_region_id`]
-    /// and region dir `"test_metric_region"`.
-    ///
-    /// This method will create one logical region with three columns `(ts, val, job)`
-    /// under [`default_logical_region_id`].
-    pub async fn init_metric_region(&self) {
-        let region_id = self.default_physical_region_id();
+    /// Create regions in [MetricEngine] with specific `physical_region_id`.
+    pub async fn create_physical_region(&self, physical_region_id: RegionId, region_dir: &str) {
         let region_create_request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -149,26 +147,88 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            region_dir: self.default_region_dir(),
+            region_dir: region_dir.to_string(),
         };
 
         // create physical region
-        self.metric()
-            .handle_request(region_id, RegionRequest::Create(region_create_request))
+        let response = self
+            .metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
             .await
             .unwrap();
+        let column_metadatas =
+            parse_column_metadatas(&response.extensions, TABLE_COLUMN_METADATA_EXTENSION_KEY)
+                .unwrap();
+        assert_eq!(column_metadatas.len(), 4);
+    }
 
-        // create logical region
-        let region_id = self.default_logical_region_id();
+    /// Create logical region in [MetricEngine] with specific `physical_region_id` and `logical_region_id`.
+    pub async fn create_logical_region(
+        &self,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+    ) {
         let region_create_request = create_logical_region_request(
             &["job"],
-            self.default_physical_region_id(),
+            physical_region_id,
             "test_metric_logical_region",
         );
-        self.metric()
-            .handle_request(region_id, RegionRequest::Create(region_create_request))
+        let response = self
+            .metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
             .await
             .unwrap();
+        let column_metadatas =
+            parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        assert_eq!(column_metadatas.len(), 5);
+        let column_names = column_metadatas
+            .iter()
+            .map(|c| c.column_schema.name.as_str())
+            .collect::<Vec<_>>();
+        let column_ids = column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            column_names,
+            vec![
+                "greptime_timestamp",
+                "greptime_value",
+                "__table_id",
+                "__tsid",
+                "job",
+            ]
+        );
+        assert_eq!(
+            column_ids,
+            vec![
+                0,
+                1,
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+                2,
+            ]
+        );
+    }
+
+    /// Create regions in [MetricEngine] under [`default_region_id`]
+    /// and region dir `"test_metric_region"`.
+    ///
+    /// This method will create one logical region with three columns `(ts, val, job)`
+    /// under [`default_logical_region_id`].
+    pub async fn init_metric_region(&self) {
+        let physical_region_id = self.default_physical_region_id();
+        self.create_physical_region(physical_region_id, &self.default_region_dir())
+            .await;
+        let logical_region_id = self.default_logical_region_id();
+        self.create_logical_region(physical_region_id, logical_region_id)
+            .await;
     }
 
     pub fn metadata_region(&self) -> MetadataRegion {
@@ -271,6 +331,30 @@ pub fn create_logical_region_request(
         .into_iter()
         .collect(),
         region_dir: region_dir.to_string(),
+    }
+}
+
+/// Generate a [RegionAlterRequest] for logical region.
+/// Only need to specify tag column's name
+pub fn alter_logical_region_request(tags: &[&str]) -> RegionAlterRequest {
+    RegionAlterRequest {
+        kind: AlterKind::AddColumns {
+            columns: tags
+                .iter()
+                .map(|tag| AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_id: 0,
+                        semantic_type: SemanticType::Tag,
+                        column_schema: ColumnSchema::new(
+                            tag.to_string(),
+                            ConcreteDataType::string_datatype(),
+                            false,
+                        ),
+                    },
+                    location: None,
+                })
+                .collect::<Vec<_>>(),
+        },
     }
 }
 
