@@ -739,6 +739,8 @@ mod tests {
     use datafusion::catalog::{Session, TableProvider};
     use datafusion::datasource::DefaultTableSource;
     use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+    use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
+    use datafusion::optimizer::AnalyzerRule;
     use datafusion::physical_plan::aggregates::AggregateExec;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -746,9 +748,8 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use datafusion_common::{Column, DFSchema, TableReference};
     use datafusion_expr::expr::AggregateFunction;
-    use datafusion_expr::function::AccumulatorArgs;
     use datafusion_expr::{Aggregate, Expr, LogicalPlan, Signature, TableScan};
-    use datafusion_physical_expr::{EquivalenceProperties, LexOrdering, Partitioning};
+    use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
     use futures::Stream;
     use pretty_assertions::assert_eq;
 
@@ -1132,8 +1133,10 @@ mod tests {
         assert_eq!(merge_eval_res, ScalarValue::Int64(Some(48)));
     }
 
-    #[test]
-    fn test_avg_udaf() {
+    #[tokio::test]
+    async fn test_avg_udaf() {
+        let ctx = SessionContext::new();
+
         let avg = datafusion::functions_aggregate::average::avg_udaf();
         let avg = (*avg).clone();
 
@@ -1176,25 +1179,87 @@ mod tests {
         };
         assert_eq!(wrapper, expected);
 
+        // create the child logical plan for the state function, which usually should be running on datanode
+        let aggr_state_plan =
+            dummy_aggr_state_plan(Arc::new(wrapper.state_function().clone().into()));
+        let expected_plan = LogicalPlan::Aggregate(
+            Aggregate::try_new(
+                Arc::new(dummy_table_scan()),
+                vec![],
+                vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(wrapper.state_function().clone().into()),
+                    vec![Expr::Column(Column::new_unqualified("number"))],
+                    false,
+                    None,
+                    None,
+                    None,
+                ))],
+            )
+            .unwrap(),
+        );
+        assert_eq!(aggr_state_plan, expected_plan);
+        assert_eq!(
+            aggr_state_plan.schema().as_arrow(),
+            &arrow_schema::Schema::new(vec![Field::new(
+                "__avg_state(number)",
+                DataType::Struct(
+                    vec![
+                        Field::new("avg[count]", DataType::UInt64, true),
+                        Field::new("avg[sum]", DataType::Float64, true)
+                    ]
+                    .into()
+                ),
+                true,
+            )])
+        );
+
+        // the state schema should be the input schema of the merge function
+        let state_schema = aggr_state_plan.schema().clone();
+
+        let expected_merge_plan = LogicalPlan::Aggregate(
+            Aggregate::try_new(
+                Arc::new(dummy_table_scan_with_schema(
+                    state_schema.clone(),
+                    TableReference::bare("MergeState"),
+                )),
+                vec![],
+                vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                    Arc::new(wrapper.merge_function().clone().into()),
+                    vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
+                    false,
+                    None,
+                    None,
+                    None,
+                ))],
+            )
+            .unwrap(),
+        );
+
+        let aggr_merge_plan = dummy_aggr_merge_plan(
+            state_schema,
+            Arc::new(wrapper.merge_function().clone().into()),
+        );
+        assert_eq!(aggr_merge_plan, expected_merge_plan);
+
         // evaluate the state function
         let input = Float64Array::from(vec![Some(1.), Some(2.), None, Some(3.)]);
         let values = vec![Arc::new(input) as arrow::array::ArrayRef];
 
-        let state_func = wrapper.state_function();
+        // type coerced so avg aggr function can function correctly
+        let coerced_aggr_state_plan = TypeCoercion::new()
+            .analyze(aggr_state_plan, &Default::default())
+            .unwrap();
 
-        let accum_args = AccumulatorArgs {
-            return_type: &DataType::UInt64,
-            schema: &arrow_schema::Schema::new(vec![Field::new("col", DataType::Float64, true)]),
-            ignore_nulls: false,
-            ordering_req: LexOrdering::empty(),
-            is_reversed: false,
-            name: state_func.name(),
-            is_distinct: false,
-            exprs: &[Arc::new(
-                datafusion::physical_expr::expressions::Column::new("col", 0),
-            )],
-        };
-        let mut state_accum = state_func.accumulator(accum_args).unwrap();
+        let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
+            .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
+            .await
+            .unwrap();
+        let aggr_exec = phy_aggr_state_plan
+            .as_any()
+            .downcast_ref::<AggregateExec>()
+            .unwrap();
+        let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+        let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
         state_accum.update_batch(&values).unwrap();
         let state = state_accum.state().unwrap();
@@ -1234,29 +1299,18 @@ mod tests {
             None,
         )
         .unwrap();
-        let merge_func = wrapper.merge_function();
-        // this accum args is still the original aggregate function's args
-        let merge_accum_args = AccumulatorArgs {
-            return_type: &avg.return_type(&[DataType::Float64]).unwrap(),
-            schema: &arrow_schema::Schema::new(vec![
-                Field::new("col0", DataType::UInt64, true),
-                Field::new("col1", DataType::Float64, true),
-            ]),
-            ignore_nulls: false,
-            ordering_req: LexOrdering::empty(),
-            is_reversed: false,
-            name: state_func.name(),
-            is_distinct: false,
-            exprs: &[
-                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                    "col0", 0,
-                )),
-                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                    "col1", 1,
-                )),
-            ],
-        };
-        let mut merge_accum = merge_func.accumulator(merge_accum_args).unwrap();
+
+        let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
+            .create_physical_plan(&aggr_merge_plan, &ctx.state())
+            .await
+            .unwrap();
+        let aggr_exec = phy_aggr_merge_plan
+            .as_any()
+            .downcast_ref::<AggregateExec>()
+            .unwrap();
+        let aggr_func_expr = &aggr_exec.aggr_expr()[0];
+        let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
+
         merge_accum
             .update_batch(&[Arc::new(merge_input_struct_arr)])
             .unwrap();
