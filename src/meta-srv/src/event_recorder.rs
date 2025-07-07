@@ -29,6 +29,7 @@ use snafu::ResultExt;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{
@@ -44,7 +45,8 @@ pub use region_migration_event::*;
 const DEFAULT_EVENTS_CHANNEL_SIZE: usize = 2048;
 const DEFAULT_EVENTS_BATCH_SIZE: usize = 100;
 const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
-const DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS: u64 = 1;
+const DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS: u64 = 5;
+const DEFAULT_EVENTS_MAX_RETRY_TIMES: u64 = 3;
 
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
@@ -74,7 +76,8 @@ pub trait EventRecorder: Send + Sync + 'static {
 #[async_trait]
 pub trait EventHandler: Send + Sync + 'static {
     /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
-    async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()>;
+    /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
+    async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
 }
 
 /// Implementation of [EventRecorder] that records the events and forwards them to frontend instances for persistence as system tables.
@@ -137,12 +140,12 @@ struct DefaultEventHandlerImpl {
 
 #[async_trait]
 impl EventHandler for DefaultEventHandlerImpl {
-    async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()> {
+    async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         debug!("Received {} events: {:?}", events.len(), events);
         // TODO(zyy17): Avoid to create a new database client when handling the events.
         let database_client = self.build_database_client().await?;
         let row_inserts = RowInsertRequests {
-            inserts: events.into_iter().map(|e| e.to_row_insert()).collect(),
+            inserts: events.iter().map(|e| e.to_row_insert()).collect(),
         };
         debug!("Inserting events: {:?}", row_inserts);
 
@@ -165,7 +168,7 @@ impl DefaultEventHandlerImpl {
     async fn build_database_client(&self) -> Result<Database> {
         let frontends = self
             .peer_lookup_service
-            .frontends()
+            .active_frontends()
             .await
             .context(KvBackendSnafu)?;
 
@@ -185,6 +188,15 @@ impl DefaultEventHandlerImpl {
             DEFAULT_PRIVATE_SCHEMA_NAME,
             Client::with_urls(urls),
         ))
+    }
+}
+
+impl Drop for EventRecorderImpl {
+    fn drop(&mut self) {
+        if let Some(handle) = self._handle.take() {
+            handle.abort();
+            info!("Aborted the background processor in event recorder");
+        }
     }
 }
 
@@ -210,33 +222,47 @@ impl EventProcessor {
                 maybe_event = self.rx.recv() => {
                     if let Some(maybe_event) = maybe_event {
                         debug!("Received event: {:?}", maybe_event);
-                        // Push the event to the buffer, the buffer will be flushed when the interval is triggered.
+                        // Push the event to the buffer, the buffer will be flushed when the interval is triggered or received a closed signal.
                         buffer.push(maybe_event);
                     } else {
                         // When received a closed signal, flush the buffer and exit the loop.
-                        if !buffer.is_empty() {
-                            if let Err(e) = self
-                                .event_handler
-                                .handle(std::mem::take(&mut buffer))
-                                .await
-                            {
-                                error!(e; "Failed to handle events");
-                            }
-                        }
+                        self.flush_events_to_handler(&mut buffer).await;
                         break;
                     }
                 }
                 // When the interval is triggered, flush the buffer and send the events to the event handler.
                 _ = interval.tick() => {
-                    if !buffer.is_empty() {
-                        debug!("Flushing buffer by trigger with {} events", buffer.len());
-                        if let Err(e) = self.event_handler.handle(std::mem::take(&mut buffer)).await {
-                            error!(e; "Failed to handle events");
-                        }
-                    }
+                    self.flush_events_to_handler(&mut buffer).await;
                 }
             }
         }
+    }
+
+    // NOTE: While we implement a retry mechanism for failed event handling, there is no guarantee that all events will be processed successfully.
+    async fn flush_events_to_handler(&self, buffer: &mut Vec<Box<dyn Event>>) {
+        if !buffer.is_empty() {
+            debug!("Flushing {} events to the event handler", buffer.len());
+
+            // Use the fixed interval to retry the failed events.
+            let mut retry = 0;
+            while retry < DEFAULT_EVENTS_MAX_RETRY_TIMES {
+                if let Err(e) = self.event_handler.handle(buffer).await {
+                    error!(e; "Failed to handle events");
+                    retry += 1;
+                    sleep(Duration::from_millis(
+                        DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS * 1000
+                            / DEFAULT_EVENTS_MAX_RETRY_TIMES,
+                    ))
+                    .await;
+                } else {
+                    info!("Successfully handled {} events", buffer.len());
+                    break;
+                }
+            }
+        }
+
+        // Clear the buffer to prevent unbounded memory growth, regardless of whether event processing succeeded or failed.
+        buffer.clear();
     }
 }
 
@@ -298,7 +324,7 @@ mod tests {
 
     #[async_trait]
     impl EventHandler for TestEventHandlerImpl {
-        async fn handle(&self, events: Vec<Box<dyn Event>>) -> Result<()> {
+        async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
             let event = events
                 .first()
                 .unwrap()
@@ -330,7 +356,7 @@ mod tests {
 
         async fn process(mut self) {
             while let Some(event) = self.rx.recv().await {
-                self.event_handler.handle(vec![event]).await.unwrap()
+                self.event_handler.handle(&[event]).await.unwrap()
             }
         }
     }

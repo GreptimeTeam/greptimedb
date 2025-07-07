@@ -1326,7 +1326,7 @@ async fn check_region_migration_events_system_table(
     to_datanode_id: u64,
 ) {
     // Sleep for while to ensure the event is recorded.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // The query is equivalent to the following SQL:
     //   SELECT trigger_reason, status FROM region_migration_events WHERE

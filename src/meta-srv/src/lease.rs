@@ -296,7 +296,7 @@ impl PeerLookupService for MetaPeerLookupService {
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
     }
-    async fn frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
+    async fn active_frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
         lookup_frontends(
             &self.meta_peer_client,
             FRONTEND_HEARTBEAT_INTERVAL_MILLIS / 2000,

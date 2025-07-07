@@ -214,7 +214,7 @@ impl PeerLookupService for NoopPeerLookupService {
         Ok(Some(Peer::empty(id)))
     }
 
-    async fn frontends(&self) -> Result<Vec<Peer>> {
+    async fn active_frontends(&self) -> Result<Vec<Peer>> {
         Ok(vec![])
     }
 }

@@ -29,7 +29,7 @@ pub trait PeerLookupService {
     async fn flownode(&self, id: FlownodeId) -> Result<Option<Peer>, Error>;
 
     /// Returns all active frontends from the memory backend.
-    async fn frontends(&self) -> Result<Vec<Peer>, Error>;
+    async fn active_frontends(&self) -> Result<Vec<Peer>, Error>;
 }
 
 pub type PeerLookupServiceRef = Arc<dyn PeerLookupService + Send + Sync>;
