@@ -628,7 +628,7 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
-                self.config.batch_opts.max_filter_num_per_query,
+                max_window_cnt.unwrap_or(self.config.batch_opts.max_filter_num_per_query),
                 self.config.flow_id,
                 Some(self),
             )?;
