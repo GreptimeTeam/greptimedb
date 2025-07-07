@@ -477,8 +477,9 @@ struct MetricEngineInner {
 mod test {
     use std::collections::HashMap;
 
+    use common_telemetry::info;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-    use store_api::region_request::{RegionCloseRequest, RegionOpenRequest};
+    use store_api::region_request::{RegionCloseRequest, RegionFlushRequest, RegionOpenRequest};
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -562,5 +563,91 @@ mod test {
 
         assert!(env.metric().region_statistic(logical_region_id).is_none());
         assert!(env.metric().region_statistic(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_region_failure() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+
+        let metric_engine = env.metric();
+        metric_engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let path = format!("{}/metadata/", env.default_region_dir());
+        let object_store = env.get_object_store().unwrap();
+        let list = object_store.list(&path).await.unwrap();
+        // Delete parquet files in metadata region
+        for entry in list {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            if entry.name().ends_with("parquet") {
+                info!("deleting {}", entry.path());
+                object_store.delete(entry.path()).await.unwrap();
+            }
+        }
+
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: physical_region_option,
+            skip_wal_replay: false,
+        };
+        // Opening an already opened region should succeed.
+        // Since the region is already open, no metadata recovery operations will be performed.
+        metric_engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // Close the region
+        metric_engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // Try to reopen region.
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: physical_region_option,
+            skip_wal_replay: false,
+        };
+        let err = metric_engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap_err();
+        // Failed to open region because of missing parquet files.
+        assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+
+        let mito_engine = metric_engine.mito();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        // The metadata/data region should be closed.
+        let err = mito_engine.get_metadata(data_region_id).await.unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        let err = mito_engine
+            .get_metadata(metadata_region_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
     }
 }
