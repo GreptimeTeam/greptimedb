@@ -20,16 +20,18 @@ use std::time::Duration;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
+use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
+use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, PathType, RegionAlterRequest,
     RegionOpenRequest, RegionRequest, SetRegionOption,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
@@ -84,12 +86,14 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
         kind: AlterKind::SetIndex {
             options: ApiSetIndexOptions::Fulltext {
                 column_name: "tag_0".to_string(),
-                options: FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::English,
-                    case_sensitive: false,
-                    backend: FulltextBackend::Bloom,
-                },
+                options: FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::English,
+                    false,
+                    FulltextBackend::Bloom,
+                    1000,
+                    0.01,
+                ),
             },
         },
     }
@@ -109,6 +113,17 @@ fn check_region_version(
     assert_eq!(committed_sequence, version_data.committed_sequence);
     assert_eq!(flushed_entry_id, version_data.version.flushed_entry_id);
     assert_eq!(flushed_sequence, version_data.version.flushed_sequence);
+}
+
+fn assert_column_metadatas(column_name: &[(&str, ColumnId)], column_metadatas: &[ColumnMetadata]) {
+    assert_eq!(column_name.len(), column_metadatas.len());
+    for (name, id) in column_name {
+        let column_metadata = column_metadatas
+            .iter()
+            .find(|c| c.column_id == *id)
+            .unwrap();
+        assert_eq!(column_metadata.column_schema.name, *name);
+    }
 }
 
 #[tokio::test]
@@ -134,10 +149,16 @@ async fn test_alter_region() {
 
     let column_schemas = rows_schema(&request);
     let table_dir = request.table_dir.clone();
-    engine
+    let response = engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let column_metadatas =
+        parse_column_metadatas(&response.extensions, TABLE_COLUMN_METADATA_EXTENSION_KEY).unwrap();
+    assert_column_metadatas(
+        &[("tag_0", 0), ("field_0", 1), ("ts", 2)],
+        &column_metadatas,
+    );
 
     let rows = Rows {
         schema: column_schemas,
@@ -146,7 +167,7 @@ async fn test_alter_region() {
     put_rows(&engine, region_id, rows).await;
 
     let request = add_tag1();
-    engine
+    let response = engine
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
         .unwrap();
@@ -161,6 +182,18 @@ async fn test_alter_region() {
 +-------+-------+---------+---------------------+";
     scan_check_after_alter(&engine, region_id, expected).await;
     check_region_version(&engine, region_id, 1, 3, 1, 3);
+
+    let mut manifests = parse_manifest_infos_from_extensions(&response.extensions).unwrap();
+    assert_eq!(manifests.len(), 1);
+    let (return_region_id, manifest) = manifests.remove(0);
+    assert_eq!(return_region_id, region_id);
+    assert_eq!(manifest, RegionManifestInfo::mito(2, 1));
+    let column_metadatas =
+        parse_column_metadatas(&response.extensions, TABLE_COLUMN_METADATA_EXTENSION_KEY).unwrap();
+    assert_column_metadatas(
+        &[("tag_0", 0), ("field_0", 1), ("ts", 2), ("tag_1", 3)],
+        &column_metadatas,
+    );
 
     // Reopen region.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
@@ -555,12 +588,14 @@ async fn test_alter_column_fulltext_options() {
     // Wait for the write job.
     alter_job.await.unwrap();
 
-    let expect_fulltext_options = FulltextOptions {
-        enable: true,
-        analyzer: FulltextAnalyzer::English,
-        case_sensitive: false,
-        backend: FulltextBackend::Bloom,
-    };
+    let expect_fulltext_options = FulltextOptions::new_unchecked(
+        true,
+        FulltextAnalyzer::English,
+        false,
+        FulltextBackend::Bloom,
+        1000,
+        0.01,
+    );
     let check_fulltext_options = |engine: &MitoEngine, expected: &FulltextOptions| {
         let current_fulltext_options = engine
             .get_region(region_id)

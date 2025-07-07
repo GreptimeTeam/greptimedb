@@ -97,6 +97,9 @@ impl RangeMeta {
         Self::push_seq_mem_ranges(&input.memtables, &mut ranges);
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
+        #[cfg(feature = "enterprise")]
+        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
+
         let ranges = group_ranges_for_seq_scan(ranges);
         if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
             // We don't split ranges in compaction or TimeSeriesDistribution::PerSeries.
@@ -115,6 +118,9 @@ impl RangeMeta {
             &input.cache_strategy,
             &mut ranges,
         );
+
+        #[cfg(feature = "enterprise")]
+        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
 
         ranges
     }
@@ -309,6 +315,28 @@ impl RangeMeta {
                     row_group_index: ALL_ROW_GROUPS,
                 }],
                 num_rows: file.meta_ref().num_rows as usize,
+            });
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn push_extension_ranges(
+        ranges: &[crate::extension::BoxedExtensionRange],
+        metas: &mut Vec<RangeMeta>,
+    ) {
+        for range in ranges.iter() {
+            let index = metas.len();
+            metas.push(RangeMeta {
+                time_range: range.time_range(),
+                indices: smallvec![SourceIndex {
+                    index,
+                    num_row_groups: range.num_row_groups(),
+                }],
+                row_group_indices: smallvec![RowGroupIndex {
+                    index,
+                    row_group_index: ALL_ROW_GROUPS,
+                }],
+                num_rows: range.num_rows() as usize,
             });
         }
     }

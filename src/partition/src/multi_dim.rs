@@ -30,10 +30,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 
-use crate::error::{
-    self, ConjunctExprWithNonExprSnafu, InvalidExprSnafu, Result, UnclosedValueSnafu,
-    UndefinedColumnSnafu,
-};
+use crate::checker::PartitionChecker;
+use crate::error::{self, Result, UndefinedColumnSnafu};
 use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::partition::RegionMask;
 use crate::PartitionRule;
@@ -65,10 +63,15 @@ pub struct MultiDimPartitionRule {
 }
 
 impl MultiDimPartitionRule {
+    /// Create a new [`MultiDimPartitionRule`].
+    ///
+    /// If `check_exprs` is true, the function will check if the expressions are valid. This is
+    /// required when constructing a new partition rule like `CREATE TABLE` or `ALTER TABLE`.
     pub fn try_new(
         partition_columns: Vec<String>,
         regions: Vec<RegionNumber>,
         exprs: Vec<PartitionExpr>,
+        check_exprs: bool,
     ) -> Result<Self> {
         let name_to_index = partition_columns
             .iter()
@@ -84,10 +87,16 @@ impl MultiDimPartitionRule {
             physical_expr_cache: RwLock::new(None),
         };
 
-        let mut checker = RuleChecker::new(&rule);
-        checker.check()?;
+        if check_exprs {
+            let checker = PartitionChecker::try_new(&rule)?;
+            checker.check()?;
+        }
 
         Ok(rule)
+    }
+
+    pub fn exprs(&self) -> &[PartitionExpr] {
+        &self.exprs
     }
 
     fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
@@ -167,7 +176,7 @@ impl MultiDimPartitionRule {
             .map(|col_name| {
                 record_batch
                     .column_by_name(col_name)
-                    .context(error::UndefinedColumnSnafu { column: col_name })
+                    .context(UndefinedColumnSnafu { column: col_name })
                     .and_then(|array| {
                         Helper::try_into_vector(array).context(error::ConvertToVectorSnafu)
                     })
@@ -341,142 +350,13 @@ impl PartitionRule for MultiDimPartitionRule {
     }
 }
 
-/// Helper for [RuleChecker]
-type Axis = HashMap<Value, SplitPoint>;
-
-/// Helper for [RuleChecker]
-struct SplitPoint {
-    is_equal: bool,
-    less_than_counter: isize,
-}
-
-/// Check if the rule set covers all the possible values.
-///
-/// Note this checker have false-negative on duplicated exprs. E.g.:
-/// `a != 20`, `a <= 20` and `a > 20`.
-///
-/// It works on the observation that each projected split point should be included (`is_equal`)
-/// and have a balanced `<` and `>` counter.
-struct RuleChecker<'a> {
-    axis: Vec<Axis>,
-    rule: &'a MultiDimPartitionRule,
-}
-
-impl<'a> RuleChecker<'a> {
-    pub fn new(rule: &'a MultiDimPartitionRule) -> Self {
-        let mut projections = Vec::with_capacity(rule.partition_columns.len());
-        projections.resize_with(rule.partition_columns.len(), Default::default);
-
-        Self {
-            axis: projections,
-            rule,
-        }
-    }
-
-    pub fn check(&mut self) -> Result<()> {
-        for expr in &self.rule.exprs {
-            self.walk_expr(expr)?
-        }
-
-        self.check_axis()
-    }
-
-    #[allow(clippy::mutable_key_type)]
-    fn walk_expr(&mut self, expr: &PartitionExpr) -> Result<()> {
-        // recursively check the expr
-        match expr.op {
-            RestrictedOp::And | RestrictedOp::Or => {
-                match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
-                    (Operand::Expr(lhs), Operand::Expr(rhs)) => {
-                        self.walk_expr(lhs)?;
-                        self.walk_expr(rhs)?
-                    }
-                    _ => ConjunctExprWithNonExprSnafu { expr: expr.clone() }.fail()?,
-                }
-
-                return Ok(());
-            }
-            // Not conjunction
-            _ => {}
-        }
-
-        let (col, val) = match (expr.lhs.as_ref(), expr.rhs.as_ref()) {
-            (Operand::Expr(_), _)
-            | (_, Operand::Expr(_))
-            | (Operand::Column(_), Operand::Column(_))
-            | (Operand::Value(_), Operand::Value(_)) => {
-                InvalidExprSnafu { expr: expr.clone() }.fail()?
-            }
-
-            (Operand::Column(col), Operand::Value(val))
-            | (Operand::Value(val), Operand::Column(col)) => (col, val),
-        };
-
-        let col_index =
-            *self
-                .rule
-                .name_to_index
-                .get(col)
-                .with_context(|| UndefinedColumnSnafu {
-                    column: col.clone(),
-                })?;
-        let axis = &mut self.axis[col_index];
-        let split_point = axis.entry(val.clone()).or_insert(SplitPoint {
-            is_equal: false,
-            less_than_counter: 0,
-        });
-        match expr.op {
-            RestrictedOp::Eq => {
-                split_point.is_equal = true;
-            }
-            RestrictedOp::NotEq => {
-                // less_than +1 -1
-            }
-            RestrictedOp::Lt => {
-                split_point.less_than_counter += 1;
-            }
-            RestrictedOp::LtEq => {
-                split_point.less_than_counter += 1;
-                split_point.is_equal = true;
-            }
-            RestrictedOp::Gt => {
-                split_point.less_than_counter -= 1;
-            }
-            RestrictedOp::GtEq => {
-                split_point.less_than_counter -= 1;
-                split_point.is_equal = true;
-            }
-            RestrictedOp::And | RestrictedOp::Or => {
-                unreachable!("conjunct expr should be handled above")
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Return if the rule is legal.
-    fn check_axis(&self) -> Result<()> {
-        for (col_index, axis) in self.axis.iter().enumerate() {
-            for (val, split_point) in axis {
-                if split_point.less_than_counter != 0 || !split_point.is_equal {
-                    UnclosedValueSnafu {
-                        value: format!("{val:?}"),
-                        column: self.rule.partition_columns[col_index].clone(),
-                    }
-                    .fail()?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
 
     use super::*;
     use crate::error::{self, Error};
+    use crate::expr::col;
 
     #[test]
     fn test_find_region() {
@@ -513,6 +393,7 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("sh".into())),
                 ),
             ],
+            true,
         )
         .unwrap();
         assert_matches!(
@@ -556,6 +437,7 @@ mod tests {
                     )),
                 )),
             )],
+            true,
         );
 
         // check rule
@@ -579,10 +461,11 @@ mod tests {
                 RestrictedOp::And,
                 Operand::Value(datatypes::value::Value::String("sh".into())),
             )],
+            true,
         );
 
         // check rule
-        assert_matches!(rule.unwrap_err(), Error::ConjunctExprWithNonExpr { .. });
+        assert_matches!(rule.unwrap_err(), Error::InvalidExpr { .. });
     }
 
     /// ```ignore
@@ -614,10 +497,11 @@ mod tests {
                     Operand::Value(datatypes::value::Value::String("s".into())),
                 ),
             ],
+            true,
         );
 
         // check rule
-        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
+        assert_matches!(rule.unwrap_err(), Error::CheckpointNotCovered { .. });
     }
 
     /// ```
@@ -757,10 +641,11 @@ mod tests {
                     )),
                 ),
             ],
+            true,
         );
 
         // check rule
-        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
+        assert_matches!(rule.unwrap_err(), Error::CheckpointNotCovered { .. });
     }
 
     #[test]
@@ -784,14 +669,14 @@ mod tests {
                     Operand::Value(datatypes::value::Value::Int64(10)),
                 ),
             ],
+            true,
         );
 
         // check rule
-        assert_matches!(rule.unwrap_err(), Error::UnclosedValue { .. });
+        assert_matches!(rule.unwrap_err(), Error::CheckpointOverlapped { .. });
     }
 
     #[test]
-    #[ignore = "checker cannot detect this kind of duplicate for now"]
     fn duplicate_expr_case_2() {
         // PARTITION ON COLUMNS (a) (
         //     a != 20,
@@ -818,10 +703,40 @@ mod tests {
                     Operand::Value(datatypes::value::Value::Int64(20)),
                 ),
             ],
+            true,
         );
 
         // check rule
-        assert!(rule.is_err());
+        assert_matches!(rule.unwrap_err(), Error::CheckpointOverlapped { .. });
+    }
+
+    /// ```ignore
+    /// value
+    ///                                 │
+    ///                                 │
+    ///    value=10 --------------------│
+    ///                                 │
+    /// ────────────────────────────────┼──► host
+    ///                                 │
+    ///                             host=server10
+    /// ```
+    #[test]
+    fn test_partial_divided() {
+        let _rule = MultiDimPartitionRule::try_new(
+            vec!["host".to_string(), "value".to_string()],
+            vec![0, 1, 2, 3],
+            vec![
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").lt(Value::Int64(10))),
+                col("host")
+                    .lt(Value::String("server10".into()))
+                    .and(col("value").gt_eq(Value::Int64(10))),
+                col("host").gt_eq(Value::String("server10".into())),
+            ],
+            true,
+        )
+        .unwrap();
     }
 }
 
@@ -868,6 +783,7 @@ mod test_split_record_batch {
                 col("host").lt(Value::String("server1".into())),
                 col("host").gt_eq(Value::String("server1".into())),
             ],
+            true,
         )
         .unwrap();
 
@@ -892,11 +808,11 @@ mod test_split_record_batch {
         let rule = MultiDimPartitionRule::try_new(
             vec!["host".to_string()],
             vec![1],
-            vec![PartitionExpr::new(
-                Operand::Column("host".to_string()),
-                RestrictedOp::Eq,
-                Operand::Value(Value::String("server1".into())),
-            )],
+            vec![
+                col("host").lt(Value::String("server1".into())),
+                col("host").gt_eq(Value::String("server1".into())),
+            ],
+            true,
         )
         .unwrap();
 
@@ -929,6 +845,7 @@ mod test_split_record_batch {
                     .gt_eq(Value::String("server10".into()))
                     .and(col("value").gt_eq(Value::Int64(10))),
             ],
+            true,
         )
         .unwrap();
 
@@ -942,118 +859,6 @@ mod test_split_record_batch {
     }
 
     #[test]
-    fn test_default_region() {
-        let rule = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), "value".to_string()],
-            vec![0, 1, 2, 3],
-            vec![
-                col("host")
-                    .lt(Value::String("server10".into()))
-                    .and(col("value").eq(Value::Int64(10))),
-                col("host")
-                    .lt(Value::String("server10".into()))
-                    .and(col("value").eq(Value::Int64(20))),
-                col("host")
-                    .gt_eq(Value::String("server10".into()))
-                    .and(col("value").eq(Value::Int64(10))),
-                col("host")
-                    .gt_eq(Value::String("server10".into()))
-                    .and(col("value").eq(Value::Int64(20))),
-            ],
-        )
-        .unwrap();
-
-        let schema = test_schema();
-        let host_array = StringArray::from(vec!["server1", "server1", "server1", "server100"]);
-        let value_array = Int64Array::from(vec![10, 20, 30, 10]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
-            .unwrap();
-        let result = rule.split_record_batch(&batch).unwrap();
-        let expected = rule.split_record_batch_naive(&batch).unwrap();
-        for (region, value) in &result {
-            assert_eq!(value.array(), expected.get(region).unwrap());
-        }
-    }
-
-    #[test]
-    fn test_default_region_with_unselected_rows() {
-        // Create a rule where some rows won't match any partition
-        let rule = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), "value".to_string()],
-            vec![1, 2, 3],
-            vec![
-                col("value").eq(Value::Int64(10)),
-                col("value").eq(Value::Int64(20)),
-                col("value").eq(Value::Int64(30)),
-            ],
-        )
-        .unwrap();
-
-        let schema = test_schema();
-        let host_array =
-            StringArray::from(vec!["server1", "server2", "server3", "server4", "server5"]);
-        let value_array = Int64Array::from(vec![10, 20, 30, 40, 50]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
-            .unwrap();
-
-        let result = rule.split_record_batch(&batch).unwrap();
-
-        // Check that we have 4 regions (3 defined + default)
-        assert_eq!(result.len(), 4);
-
-        // Check that default region (0) contains the unselected rows
-        assert!(result.contains_key(&DEFAULT_REGION));
-        let default_mask = result.get(&DEFAULT_REGION).unwrap();
-
-        // The default region should have 2 rows (with values 40 and 50)
-        assert_eq!(default_mask.selected_rows(), 2);
-
-        // Verify each region has the correct number of rows
-        assert_eq!(result.get(&1).unwrap().selected_rows(), 1); // value = 10
-        assert_eq!(result.get(&2).unwrap().selected_rows(), 1); // value = 20
-        assert_eq!(result.get(&3).unwrap().selected_rows(), 1); // value = 30
-    }
-
-    #[test]
-    fn test_default_region_with_existing_default() {
-        // Create a rule where some rows are explicitly assigned to default region
-        // and some rows are implicitly assigned to default region
-        let rule = MultiDimPartitionRule::try_new(
-            vec!["host".to_string(), "value".to_string()],
-            vec![0, 1, 2],
-            vec![
-                col("value").eq(Value::Int64(10)), // Explicitly assign value=10 to region 0 (default)
-                col("value").eq(Value::Int64(20)),
-                col("value").eq(Value::Int64(30)),
-            ],
-        )
-        .unwrap();
-
-        let schema = test_schema();
-        let host_array =
-            StringArray::from(vec!["server1", "server2", "server3", "server4", "server5"]);
-        let value_array = Int64Array::from(vec![10, 20, 30, 40, 50]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
-            .unwrap();
-
-        let result = rule.split_record_batch(&batch).unwrap();
-
-        // Check that we have 3 regions
-        assert_eq!(result.len(), 3);
-
-        // Check that default region contains both explicitly assigned and unselected rows
-        assert!(result.contains_key(&DEFAULT_REGION));
-        let default_mask = result.get(&DEFAULT_REGION).unwrap();
-
-        // The default region should have 3 rows (value=10, 40, 50)
-        assert_eq!(default_mask.selected_rows(), 3);
-
-        // Verify each region has the correct number of rows
-        assert_eq!(result.get(&1).unwrap().selected_rows(), 1); // value = 20
-        assert_eq!(result.get(&2).unwrap().selected_rows(), 1); // value = 30
-    }
-
-    #[test]
     fn test_all_rows_selected() {
         // Test the fast path where all rows are selected by some partition
         let rule = MultiDimPartitionRule::try_new(
@@ -1063,6 +868,7 @@ mod test_split_record_batch {
                 col("value").lt(Value::Int64(30)),
                 col("value").gt_eq(Value::Int64(30)),
             ],
+            true,
         )
         .unwrap();
 

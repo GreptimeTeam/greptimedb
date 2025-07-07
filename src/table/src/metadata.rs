@@ -134,6 +134,8 @@ pub struct TableMeta {
     pub created_on: DateTime<Utc>,
     #[builder(default = "Vec::new()")]
     pub partition_key_indices: Vec<usize>,
+    #[builder(default = "Vec::new()")]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl TableMetaBuilder {
@@ -150,6 +152,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -178,6 +181,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -1088,7 +1092,7 @@ pub struct RawTableMeta {
     /// Engine type of this table. Usually in small case.
     pub engine: String,
     /// Next column id of a new column.
-    /// Deprecated. See https://github.com/GreptimeTeam/greptimedb/issues/2982
+    /// It's used to ensure all columns with the same name across all regions have the same column id.
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
@@ -1096,6 +1100,10 @@ pub struct RawTableMeta {
     /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
+    /// Map of column name to column id.
+    /// Note: This field may be empty for older versions that did not include this field.
+    #[serde(default)]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl From<TableMeta> for RawTableMeta {
@@ -1110,6 +1118,7 @@ impl From<TableMeta> for RawTableMeta {
             options: meta.options,
             created_on: meta.created_on,
             partition_key_indices: meta.partition_key_indices,
+            column_ids: meta.column_ids,
         }
     }
 }
@@ -1128,6 +1137,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             options: raw.options,
             created_on: raw.created_on,
             partition_key_indices: raw.partition_key_indices,
+            column_ids: raw.column_ids,
         })
     }
 }
@@ -1145,6 +1155,24 @@ pub struct RawTableInfo {
 }
 
 impl RawTableInfo {
+    /// Returns the map of column name to column id.
+    ///
+    /// Note: This method may return an empty map for older versions that did not include this field.
+    pub fn name_to_ids(&self) -> Option<HashMap<String, ColumnId>> {
+        if self.meta.column_ids.len() != self.meta.schema.column_schemas.len() {
+            None
+        } else {
+            Some(
+                self.meta
+                    .column_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| (self.meta.schema.column_schemas[index].name.clone(), *id))
+                    .collect(),
+            )
+        }
+    }
+
     /// Sort the columns in [RawTableInfo], logical tables require it.
     pub fn sort_columns(&mut self) {
         let column_schemas = &self.meta.schema.column_schemas;
@@ -1155,6 +1183,7 @@ impl RawTableInfo {
             .map(|index| column_schemas[*index].name.clone())
             .collect::<HashSet<_>>();
 
+        let name_to_ids = self.name_to_ids().unwrap_or_default();
         self.meta
             .schema
             .column_schemas
@@ -1165,6 +1194,7 @@ impl RawTableInfo {
         let mut timestamp_index = None;
         let mut value_indices =
             Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+        let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
         for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
@@ -1173,12 +1203,16 @@ impl RawTableInfo {
             } else {
                 value_indices.push(index);
             }
+            if let Some(id) = name_to_ids.get(&column_schema.name) {
+                column_ids.push(*id);
+            }
         }
 
         // Overwrite table meta
         self.meta.schema.timestamp_index = timestamp_index;
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
+        self.meta.column_ids = column_ids;
     }
 
     /// Extracts region options from table info.
@@ -1876,12 +1910,14 @@ mod tests {
         let alter_kind = AlterKind::SetIndex {
             options: SetIndexOptions::Fulltext {
                 column_name: "my_tag_first".to_string(),
-                options: FulltextOptions {
-                    enable: true,
-                    analyzer: FulltextAnalyzer::Chinese,
-                    case_sensitive: true,
-                    backend: FulltextBackend::Bloom,
-                },
+                options: FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::Chinese,
+                    true,
+                    FulltextBackend::Bloom,
+                    1000,
+                    0.01,
+                ),
             },
         };
         let new_meta = new_meta

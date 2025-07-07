@@ -28,7 +28,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{
     ComputeArrowSnafu, CreateDefaultSnafu, InvalidRequestSnafu, NewRecordBatchSnafu, Result,
-    UnexpectedImpureDefaultSnafu,
+    UnexpectedSnafu,
 };
 use crate::sst::parquet::plain_format::PLAIN_FIXED_POS_COLUMN_NUM;
 
@@ -202,10 +202,13 @@ fn fill_column_put_default(
     num_rows: usize,
 ) -> Result<ArrayRef> {
     if column.column_schema.is_default_impure() {
-        return UnexpectedImpureDefaultSnafu {
-            region_id,
-            column: &column.column_schema.name,
-            default_value: format!("{:?}", column.column_schema.default_constraint()),
+        return UnexpectedSnafu {
+            reason: format!(
+                "unexpected impure default value with region_id: {}, column: {}, default_value: {:?}",
+                region_id,
+                column.column_schema.name,
+                column.column_schema.default_constraint(),
+            ),
         }
         .fail();
     }

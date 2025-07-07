@@ -62,6 +62,10 @@ use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
 use crate::{metrics, QueryEngine};
 
+/// Query parallelism hint key.
+/// This hint can be set in the query context to control the parallelism of the query execution.
+pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
+
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
     plugins: Plugins,
@@ -480,7 +484,7 @@ impl QueryEngine for DatafusionQueryEngine {
         state.config_mut().set_extension(query_ctx.clone());
         // note that hints in "x-greptime-hints" is automatically parsed
         // and set to query context's extension, so we can get it from query context.
-        if let Some(parallelism) = query_ctx.extension("query_parallelism") {
+        if let Some(parallelism) = query_ctx.extension(QUERY_PARALLELISM_HINT) {
             if let Ok(n) = parallelism.parse::<u64>() {
                 if n > 0 {
                     let new_cfg = state.config().clone().with_target_partitions(n as usize);

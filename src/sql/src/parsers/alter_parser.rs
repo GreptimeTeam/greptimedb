@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_column_fulltext() {
-        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false',backend='bloom')";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET FULLTEXT INDEX WITH(analyzer='English',case_sensitive='false',backend='bloom',granularity=1000,false_positive_rate=0.01)";
         let mut result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -1029,12 +1029,14 @@ mod tests {
                     } => {
                         assert_eq!("a", column_name.value);
                         assert_eq!(
-                            FulltextOptions {
-                                enable: true,
-                                analyzer: FulltextAnalyzer::English,
-                                case_sensitive: false,
-                                backend: FulltextBackend::Bloom,
-                            },
+                            FulltextOptions::new_unchecked(
+                                true,
+                                FulltextAnalyzer::English,
+                                false,
+                                FulltextBackend::Bloom,
+                                1000,
+                                0.01,
+                            ),
                             *options
                         );
                     }

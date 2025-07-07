@@ -80,8 +80,10 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadataRef;
-use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
+use store_api::metric_engine_consts::{
+    MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
+};
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
@@ -95,8 +97,10 @@ use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
 };
+#[cfg(feature = "enterprise")]
+use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
@@ -113,6 +117,81 @@ use crate::worker::WorkerGroup;
 
 pub const MITO_ENGINE_NAME: &str = "mito";
 
+pub struct MitoEngineBuilder<'a, S: LogStore> {
+    data_home: &'a str,
+    config: MitoConfig,
+    log_store: Arc<S>,
+    object_store_manager: ObjectStoreManagerRef,
+    schema_metadata_manager: SchemaMetadataManagerRef,
+    plugins: Plugins,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+}
+
+impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
+    pub fn new(
+        data_home: &'a str,
+        config: MitoConfig,
+        log_store: Arc<S>,
+        object_store_manager: ObjectStoreManagerRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+        plugins: Plugins,
+    ) -> Self {
+        Self {
+            data_home,
+            config,
+            log_store,
+            object_store_manager,
+            schema_metadata_manager,
+            plugins,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory: None,
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    pub fn with_extension_range_provider_factory(
+        self,
+        extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+    ) -> Self {
+        Self {
+            extension_range_provider_factory,
+            ..self
+        }
+    }
+
+    pub async fn try_build(mut self) -> Result<MitoEngine> {
+        self.config.sanitize(self.data_home)?;
+
+        let config = Arc::new(self.config);
+        let workers = WorkerGroup::start(
+            config.clone(),
+            self.log_store.clone(),
+            self.object_store_manager,
+            self.schema_metadata_manager,
+            self.plugins,
+        )
+        .await?;
+        let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
+        let inner = EngineInner {
+            workers,
+            config,
+            wal_raw_entry_reader,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider_factory: None,
+        };
+
+        #[cfg(feature = "enterprise")]
+        let inner =
+            inner.with_extension_range_provider_factory(self.extension_range_provider_factory);
+
+        Ok(MitoEngine {
+            inner: Arc::new(inner),
+        })
+    }
+}
+
 /// Region engine implementation for timeseries data.
 #[derive(Clone)]
 pub struct MitoEngine {
@@ -123,26 +202,21 @@ impl MitoEngine {
     /// Returns a new [MitoEngine] with specific `config`, `log_store` and `object_store`.
     pub async fn new<S: LogStore>(
         data_home: &str,
-        mut config: MitoConfig,
+        config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         plugins: Plugins,
     ) -> Result<MitoEngine> {
-        config.sanitize(data_home)?;
-
-        Ok(MitoEngine {
-            inner: Arc::new(
-                EngineInner::new(
-                    config,
-                    log_store,
-                    object_store_manager,
-                    schema_metadata_manager,
-                    plugins,
-                )
-                .await?,
-            ),
-        })
+        let builder = MitoEngineBuilder::new(
+            data_home,
+            config,
+            log_store,
+            object_store_manager,
+            schema_metadata_manager,
+            plugins,
+        );
+        builder.try_build().await
     }
 
     /// Returns true if the specific region exists.
@@ -263,6 +337,22 @@ impl MitoEngine {
         Ok(())
     }
 
+    fn encode_column_metadatas_to_extensions(
+        region_id: &RegionId,
+        column_metadatas: Vec<ColumnMetadata>,
+        extensions: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        extensions.insert(
+            TABLE_COLUMN_METADATA_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&column_metadatas).context(SerializeColumnMetadataSnafu)?,
+        );
+        info!(
+            "Added column metadatas: {:?} to extensions, region_id: {:?}",
+            column_metadatas, region_id
+        );
+        Ok(())
+    }
+
     /// Find the current version's memtables and SSTs stats by region_id.
     /// The stats must be collected in one place one time to ensure data consistency.
     pub fn find_memtable_and_sst_stats(
@@ -316,6 +406,8 @@ struct EngineInner {
     config: Arc<MitoConfig>,
     /// The Wal raw entry reader.
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
 
 type TopicGroupedRegionOpenRequests = HashMap<String, Vec<(RegionId, RegionOpenRequest)>>;
@@ -352,28 +444,16 @@ fn prepare_batch_open_requests(
 }
 
 impl EngineInner {
-    /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    async fn new<S: LogStore>(
-        config: MitoConfig,
-        log_store: Arc<S>,
-        object_store_manager: ObjectStoreManagerRef,
-        schema_metadata_manager: SchemaMetadataManagerRef,
-        plugins: Plugins,
-    ) -> Result<EngineInner> {
-        let config = Arc::new(config);
-        let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
-        Ok(EngineInner {
-            workers: WorkerGroup::start(
-                config.clone(),
-                log_store,
-                object_store_manager,
-                schema_metadata_manager,
-                plugins,
-            )
-            .await?,
-            config,
-            wal_raw_entry_reader,
-        })
+    #[cfg(feature = "enterprise")]
+    #[must_use]
+    fn with_extension_range_provider_factory(
+        self,
+        extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
+    ) -> Self {
+        Self {
+            extension_range_provider_factory,
+            ..self
+        }
     }
 
     /// Stop the inner engine.
@@ -524,7 +604,25 @@ impl EngineInner {
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
 
+        #[cfg(feature = "enterprise")]
+        let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
+
         Ok(scan_region)
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn maybe_fill_extension_range_provider(
+        &self,
+        mut scan_region: ScanRegion,
+        region: MitoRegionRef,
+    ) -> ScanRegion {
+        if region.is_follower()
+            && let Some(factory) = self.extension_range_provider_factory.as_ref()
+        {
+            scan_region
+                .set_extension_range_provider(factory.create_extension_range_provider(region));
+        }
+        scan_region
     }
 
     /// Converts the [`RegionRole`].
@@ -615,6 +713,7 @@ impl RegionEngine for MitoEngine {
             .start_timer();
 
         let is_alter = matches!(request, RegionRequest::Alter(_));
+        let is_create = matches!(request, RegionRequest::Create(_));
         let mut response = self
             .inner
             .handle_request(region_id, request)
@@ -623,14 +722,11 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)?;
 
         if is_alter {
-            if let Some(statistic) = self.region_statistic(region_id) {
-                Self::encode_manifest_info_to_extensions(
-                    &region_id,
-                    statistic.manifest,
-                    &mut response.extensions,
-                )
+            self.handle_alter_response(region_id, &mut response)
                 .map_err(BoxedError::new)?;
-            }
+        } else if is_create {
+            self.handle_create_response(region_id, &mut response)
+                .map_err(BoxedError::new)?;
         }
 
         Ok(response)
@@ -723,6 +819,55 @@ impl RegionEngine for MitoEngine {
     }
 }
 
+impl MitoEngine {
+    fn handle_alter_response(
+        &self,
+        region_id: RegionId,
+        response: &mut RegionResponse,
+    ) -> Result<()> {
+        if let Some(statistic) = self.region_statistic(region_id) {
+            Self::encode_manifest_info_to_extensions(
+                &region_id,
+                statistic.manifest,
+                &mut response.extensions,
+            )?;
+        }
+        let column_metadatas = self
+            .inner
+            .find_region(region_id)
+            .ok()
+            .map(|r| r.metadata().column_metadatas.clone());
+        if let Some(column_metadatas) = column_metadatas {
+            Self::encode_column_metadatas_to_extensions(
+                &region_id,
+                column_metadatas,
+                &mut response.extensions,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn handle_create_response(
+        &self,
+        region_id: RegionId,
+        response: &mut RegionResponse,
+    ) -> Result<()> {
+        let column_metadatas = self
+            .inner
+            .find_region(region_id)
+            .ok()
+            .map(|r| r.metadata().column_metadatas.clone());
+        if let Some(column_metadatas) = column_metadatas {
+            Self::encode_column_metadatas_to_extensions(
+                &region_id,
+                column_metadatas,
+                &mut response.extensions,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 // Tests methods.
 #[cfg(any(test, feature = "test"))]
 #[allow(clippy::too_many_arguments)]
@@ -756,6 +901,8 @@ impl MitoEngine {
                 .await?,
                 config,
                 wal_raw_entry_reader,
+                #[cfg(feature = "enterprise")]
+                extension_range_provider_factory: None,
             }),
         })
     }

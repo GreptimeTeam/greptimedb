@@ -64,18 +64,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-    "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
-    region_id, expected_last_entry_id, replayed_last_entry_id
-    ))]
-    UnexpectedReplay {
-        #[snafu(implicit)]
-        location: Location,
-        region_id: RegionId,
-        expected_last_entry_id: u64,
-        replayed_last_entry_id: u64,
-    },
-
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         #[snafu(implicit)]
@@ -106,6 +94,14 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
+    },
+
+    #[snafu(display("Failed to serialize column metadata"))]
+    SerializeColumnMetadata {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
@@ -960,20 +956,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Unexpected impure default value with region_id: {}, column: {}, default_value: {}",
-        region_id,
-        column,
-        default_value
-    ))]
-    UnexpectedImpureDefault {
-        #[snafu(implicit)]
-        location: Location,
-        region_id: RegionId,
-        column: String,
-        default_value: String,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1020,6 +1002,33 @@ pub enum Error {
         location: Location,
         source: mito_codec::error::Error,
     },
+
+    #[snafu(display("Unexpected: {reason}"))]
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Failed to scan external range"))]
+    ScanExternalRange {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Inconsistent timestamp column length, expect: {}, actual: {}",
+        expected,
+        actual
+    ))]
+    InconsistentTimestampLength {
+        expected: usize,
+        actual: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1058,12 +1067,12 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | OperateAbortedIndex { .. }
-            | UnexpectedReplay { .. }
             | IndexEncodeNull { .. }
-            | UnexpectedImpureDefault { .. }
             | NoCheckpoint { .. }
             | NoManifests { .. }
-            | InstallManifestTo { .. } => StatusCode::Unexpected,
+            | InstallManifestTo { .. }
+            | Unexpected { .. }
+            | SerializeColumnMetadata { .. } => StatusCode::Unexpected,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -1175,6 +1184,11 @@ impl ErrorExt for Error {
             ConvertBulkWalEntry { source, .. } => source.status_code(),
 
             Encode { source, .. } | Decode { source, .. } => source.status_code(),
+
+            #[cfg(feature = "enterprise")]
+            ScanExternalRange { source, .. } => source.status_code(),
+
+            InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
         }
     }
 

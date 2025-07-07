@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use catalog::information_extension::DistributedInformationExtension;
-use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManager, MetaKvBackend};
+use catalog::kvbackend::{CachedKvBackendBuilder, KvBackendCatalogManagerBuilder, MetaKvBackend};
 use catalog::process_manager::ProcessManager;
 use clap::Parser;
 use client::client_manager::NodeClients;
@@ -350,13 +350,20 @@ impl StartCommand {
             addrs::resolve_addr(&opts.grpc.bind_addr, Some(&opts.grpc.server_addr)),
             Some(meta_client.clone()),
         ));
-        let catalog_manager = KvBackendCatalogManager::new(
+
+        let builder = KvBackendCatalogManagerBuilder::new(
             information_extension,
             cached_meta_backend.clone(),
             layered_cache_registry.clone(),
-            None,
-            Some(process_manager.clone()),
-        );
+        )
+        .with_process_manager(process_manager.clone());
+        #[cfg(feature = "enterprise")]
+        let builder = if let Some(factories) = plugins.get() {
+            builder.with_extra_information_table_factories(factories)
+        } else {
+            builder
+        };
+        let catalog_manager = builder.build();
 
         let executor = HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),

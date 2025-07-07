@@ -907,6 +907,13 @@ SELECT device_model,
   ok_conection_rate,
   record_time_window FROM live_connection_statistics_detail;
 
+-- Create a flow with same source and sink table
+CREATE FLOW same_source_and_sink_table SINK TO live_connection_log AS
+SELECT
+    *
+FROM
+    live_connection_log;
+
 DROP FLOW live_connection_aggregation_detail;
 DROP TABLE live_connection_log;
 DROP TABLE live_connection_statistics_detail;

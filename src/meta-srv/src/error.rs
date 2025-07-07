@@ -374,6 +374,7 @@ pub enum Error {
         location: Location,
     },
 
+    #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to decode sql value"))]
     DecodeSqlValue {
         #[snafu(source)]

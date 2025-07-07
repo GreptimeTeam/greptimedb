@@ -1606,7 +1606,7 @@ fn parse_partitions(
             }
         }
     }
-    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs)
+    MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs, true)
         .context(InvalidPartitionSnafu)?;
 
     Ok((
@@ -1681,6 +1681,7 @@ fn create_table_info(
         options: table_options,
         created_on: Utc::now(),
         partition_key_indices,
+        column_ids: vec![],
     };
 
     let desc = if create_table.desc.is_empty() {

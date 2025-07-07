@@ -19,7 +19,7 @@ use cache::{
     with_default_composite_cache_registry,
 };
 use catalog::information_schema::NoopInformationExtension;
-use catalog::kvbackend::KvBackendCatalogManager;
+use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
 use cmd::error::StartFlownodeSnafu;
 use cmd::standalone::StandaloneOptions;
@@ -163,16 +163,16 @@ impl GreptimeDbStandaloneBuilder {
             .build(),
         );
 
-        let catalog_manager = KvBackendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
             Arc::new(NoopInformationExtension),
             kv_backend.clone(),
             cache_registry.clone(),
-            Some(procedure_manager.clone()),
-            None,
-        );
+        )
+        .with_procedure_manager(procedure_manager.clone())
+        .build();
 
         let (frontend_client, frontend_instance_handler) =
-            FrontendClient::from_empty_grpc_handler();
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
         let flow_builder = FlownodeBuilder::new(
             Default::default(),
             plugins.clone(),

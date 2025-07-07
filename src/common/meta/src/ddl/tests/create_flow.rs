@@ -141,3 +141,41 @@ async fn test_create_flow() {
     let err = procedure.on_prepare().await.unwrap_err();
     assert_matches!(err, error::Error::FlowAlreadyExists { .. });
 }
+
+#[tokio::test]
+async fn test_create_flow_same_source_and_sink_table() {
+    let table_id = 1024;
+    let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "same_table");
+
+    // Use the same table for both source and sink
+    let source_table_names = vec![table_name.clone()];
+    let sink_table_name = table_name.clone();
+
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    // Create the table first so it exists
+    let task = test_create_table_task("same_table", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Try to create a flow with same source and sink table - should fail
+    let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    let query_ctx = QueryContext::arc().into();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+
+    // Verify the error message contains information about the same table
+    if let error::Error::Unsupported { operation, .. } = &err {
+        assert!(operation.contains("source and sink table being the same"));
+        assert!(operation.contains("same_table"));
+    }
+}

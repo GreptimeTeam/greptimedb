@@ -23,7 +23,6 @@ use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 use table::metadata::TableType;
-use tokio::time::error::Elapsed;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -786,14 +785,6 @@ pub enum Error {
         json: String,
     },
 
-    #[snafu(display("Canceling statement due to statement timeout"))]
-    StatementTimeout {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: Elapsed,
-    },
-
     #[snafu(display("Cursor {name} is not found"))]
     CursorNotFound { name: String },
 
@@ -834,13 +825,6 @@ pub enum Error {
     #[snafu(display("Path not found: {path}"))]
     PathNotFound {
         path: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "enterprise")]
-    #[snafu(display("Trigger related operations are not currently supported"))]
-    UnsupportedTrigger {
         #[snafu(implicit)]
         location: Location,
     },
@@ -911,8 +895,6 @@ impl ErrorExt for Error {
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
             | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
-            #[cfg(feature = "enterprise")]
-            Error::UnsupportedTrigger { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),
@@ -983,7 +965,6 @@ impl ErrorExt for Error {
             Error::ExecuteAdminFunction { source, .. } => source.status_code(),
             Error::BuildRecordBatch { source, .. } => source.status_code(),
             Error::UpgradeCatalogManagerRef { .. } => StatusCode::Internal,
-            Error::StatementTimeout { .. } => StatusCode::Cancelled,
             Error::ColumnOptions { source, .. } => source.status_code(),
             Error::DecodeFlightData { source, .. } => source.status_code(),
             Error::ComputeArrow { .. } => StatusCode::Internal,

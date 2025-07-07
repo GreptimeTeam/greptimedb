@@ -74,6 +74,10 @@ pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 pub const ALTER_PHYSICAL_EXTENSION_KEY: &str = "ALTER_PHYSICAL";
 
 /// HashMap key to be used in the region server's extension response.
+/// Represent the column metadata of a table.
+pub const TABLE_COLUMN_METADATA_EXTENSION_KEY: &str = "TABLE_COLUMN_METADATA";
+
+/// HashMap key to be used in the region server's extension response.
 /// Represent the manifest info of a region.
 pub const MANIFEST_INFO_EXTENSION_KEY: &str = "MANIFEST_INFO";
 
@@ -113,12 +117,18 @@ pub const METRIC_ENGINE_INDEX_TYPE_OPTION: &str = "index.type";
 ///     physical_metric_table = "",
 ///     index.type = "skipping",
 ///     index.granularity = "102400",
+///     index.false_positive_rate = "0.01",
 /// );
 /// ```
 pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION: &str = "index.granularity";
+pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION: &str =
+    "index.false_positive_rate";
 
 /// Default granularity for the skipping index in the metric engine.
 pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT: u32 = 102400;
+
+/// Default false positive rate for the skipping index in the metric engine.
+pub const METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION_DEFAULT: f64 = 0.01;
 
 /// Returns true if the `key` is a valid option key for the metric engine.
 pub fn is_metric_engine_option_key(key: &str) -> bool {
@@ -127,6 +137,7 @@ pub fn is_metric_engine_option_key(key: &str) -> bool {
         LOGICAL_TABLE_METADATA_KEY,
         METRIC_ENGINE_INDEX_TYPE_OPTION,
         METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION,
+        METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION,
     ]
     .contains(&key)
 }

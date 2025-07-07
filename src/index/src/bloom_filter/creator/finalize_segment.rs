@@ -23,7 +23,7 @@ use futures::{stream, AsyncWriteExt, Stream};
 use snafu::ResultExt;
 
 use crate::bloom_filter::creator::intermediate_codec::IntermediateBloomFilterCodecV1;
-use crate::bloom_filter::creator::{FALSE_POSITIVE_RATE, SEED};
+use crate::bloom_filter::creator::SEED;
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::external_provider::ExternalTempFileProvider;
 use crate::Bytes;
@@ -33,6 +33,9 @@ const MIN_MEMORY_USAGE_THRESHOLD: usize = 1024 * 1024; // 1MB
 
 /// Storage for finalized Bloom filters.
 pub struct FinalizedBloomFilterStorage {
+    /// The false positive rate of the Bloom filter.
+    false_positive_rate: f64,
+
     /// Indices of the segments in the sequence of finalized Bloom filters.
     segment_indices: Vec<usize>,
 
@@ -65,12 +68,14 @@ pub struct FinalizedBloomFilterStorage {
 impl FinalizedBloomFilterStorage {
     /// Creates a new `FinalizedBloomFilterStorage`.
     pub fn new(
+        false_positive_rate: f64,
         intermediate_provider: Arc<dyn ExternalTempFileProvider>,
         global_memory_usage: Arc<AtomicUsize>,
         global_memory_usage_threshold: Option<usize>,
     ) -> Self {
         let external_prefix = format!("intm-bloom-filters-{}", uuid::Uuid::new_v4());
         Self {
+            false_positive_rate,
             segment_indices: Vec::new(),
             in_memory: Vec::new(),
             intermediate_file_id_counter: 0,
@@ -96,7 +101,7 @@ impl FinalizedBloomFilterStorage {
         elems: impl IntoIterator<Item = Bytes>,
         element_count: usize,
     ) -> Result<()> {
-        let mut bf = BloomFilter::with_false_pos(FALSE_POSITIVE_RATE)
+        let mut bf = BloomFilter::with_false_pos(self.false_positive_rate)
             .seed(&SEED)
             .expected_items(element_count);
         for elem in elems.into_iter() {
@@ -284,6 +289,7 @@ mod tests {
         let global_memory_usage_threshold = Some(1024 * 1024); // 1MB
         let provider = Arc::new(mock_provider);
         let mut storage = FinalizedBloomFilterStorage::new(
+            0.01,
             provider,
             global_memory_usage.clone(),
             global_memory_usage_threshold,
@@ -340,6 +346,7 @@ mod tests {
         let global_memory_usage_threshold = Some(1024 * 1024); // 1MB
         let provider = Arc::new(mock_provider);
         let mut storage = FinalizedBloomFilterStorage::new(
+            0.01,
             provider,
             global_memory_usage.clone(),
             global_memory_usage_threshold,

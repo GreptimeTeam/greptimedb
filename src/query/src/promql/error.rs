@@ -201,6 +201,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("vector cannot contain metrics with the same labelset"))]
+    SameLabelSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -221,6 +227,7 @@ impl ErrorExt for Error {
             | CombineTableColumnMismatch { .. }
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
+            | SameLabelSet { .. }
             | TimestampOutOfRange { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } => StatusCode::Internal,

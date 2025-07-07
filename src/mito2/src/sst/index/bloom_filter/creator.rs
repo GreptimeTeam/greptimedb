@@ -97,6 +97,7 @@ impl BloomFilterIndexer {
 
             let creator = BloomFilterCreator::new(
                 options.granularity as _,
+                options.false_positive_rate(),
                 temp_file_provider.clone(),
                 global_memory_usage.clone(),
                 memory_usage_threshold,
@@ -409,10 +410,11 @@ pub(crate) mod tests {
                     ConcreteDataType::string_datatype(),
                     false,
                 )
-                .with_skipping_options(SkippingIndexOptions {
-                    index_type: SkippingIndexType::BloomFilter,
-                    granularity: 2,
-                })
+                .with_skipping_options(SkippingIndexOptions::new_unchecked(
+                    2,
+                    0.01,
+                    SkippingIndexType::BloomFilter,
+                ))
                 .unwrap(),
                 semantic_type: SemanticType::Tag,
                 column_id: 1,
@@ -432,10 +434,11 @@ pub(crate) mod tests {
                     ConcreteDataType::uint64_datatype(),
                     false,
                 )
-                .with_skipping_options(SkippingIndexOptions {
-                    index_type: SkippingIndexType::BloomFilter,
-                    granularity: 4,
-                })
+                .with_skipping_options(SkippingIndexOptions::new_unchecked(
+                    4,
+                    0.01,
+                    SkippingIndexType::BloomFilter,
+                ))
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 3,

@@ -153,6 +153,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid index option"))]
+    InvalidIndexOption {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -180,7 +188,8 @@ impl ErrorExt for Error {
             | Error::InvalidUnsetTableOptionRequest { .. }
             | Error::InvalidSetFulltextOptionRequest { .. }
             | Error::InvalidSetSkippingIndexOptionRequest { .. }
-            | Error::MissingAlterIndexOption { .. } => StatusCode::InvalidArguments,
+            | Error::MissingAlterIndexOption { .. }
+            | Error::InvalidIndexOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

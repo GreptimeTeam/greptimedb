@@ -468,7 +468,6 @@ impl IndexSource {
     /// Returns the blob with the specified key from local cache or remote store.
     ///
     /// Returns `None` if the blob is not found.
-    #[allow(unused)]
     async fn blob(
         &self,
         file_id: RegionFileId,

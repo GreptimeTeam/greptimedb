@@ -44,11 +44,12 @@ impl State for RegionMigrationAbort {
         _procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         warn!(
-            "Region migration is aborted: {}, region_id: {}, from_peer: {}, to_peer: {}, {}",
+            "Region migration is aborted: {}, region_id: {}, from_peer: {}, to_peer: {}, trigger_reason: {}, {}",
             self.reason,
             ctx.region_id(),
             ctx.persistent_ctx.from_peer,
             ctx.persistent_ctx.to_peer,
+            ctx.persistent_ctx.trigger_reason,
             ctx.volatile_ctx.metrics,
         );
         error::MigrationAbortSnafu {

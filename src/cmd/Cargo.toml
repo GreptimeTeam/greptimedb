@@ -16,7 +16,7 @@ default = [
     "meta-srv/pg_kvbackend",
     "meta-srv/mysql_kvbackend",
 ]
-enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
+enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise", "catalog/enterprise"]
 tokio-console = ["common-telemetry/tokio-console"]
 
 [lints]
@@ -52,7 +52,6 @@ common-version.workspace = true
 common-wal.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
-either = "1.8"
 etcd-client.workspace = true
 file-engine.workspace = true
 flow.workspace = true

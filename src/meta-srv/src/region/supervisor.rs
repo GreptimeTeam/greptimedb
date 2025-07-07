@@ -43,7 +43,9 @@ use tokio::time::{interval, interval_at, MissedTickBehavior};
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
-use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::region_migration::manager::{
+    RegionMigrationManagerRef, RegionMigrationTriggerReason,
+};
 use crate::procedure::region_migration::{
     RegionMigrationProcedureTask, DEFAULT_REGION_MIGRATION_TIMEOUT,
 };
@@ -649,6 +651,7 @@ impl RegionSupervisor {
                 from_peer: from_peer.clone(),
                 to_peer: peer,
                 timeout: DEFAULT_REGION_MIGRATION_TIMEOUT * count,
+                trigger_reason: RegionMigrationTriggerReason::Failover,
             };
             tasks.push((task, count));
         }

@@ -178,8 +178,6 @@ pub enum Error {
     StreamTimeout {
         #[snafu(implicit)]
         location: Location,
-        #[snafu(source)]
-        error: tokio::time::error::Elapsed,
     },
 
     #[snafu(display("RecordBatch slice index overflow: {visit_index} > {size}"))]

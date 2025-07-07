@@ -54,6 +54,10 @@ impl Instance {
     pub fn get_inner(&self) -> &MetasrvInstance {
         &self.instance
     }
+
+    pub fn mut_inner(&mut self) -> &mut MetasrvInstance {
+        &mut self.instance
+    }
 }
 
 #[async_trait]

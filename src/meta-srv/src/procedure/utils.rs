@@ -196,6 +196,7 @@ pub mod test_data {
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
                 partition_key_indices: vec![],
+                column_ids: vec![],
             },
             table_type: TableType::Base,
         }

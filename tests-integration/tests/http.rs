@@ -34,7 +34,9 @@ use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
 use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
-use servers::http::header::constants::GREPTIME_LOG_TABLE_NAME_HEADER_NAME;
+use servers::http::header::constants::{
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+};
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
@@ -116,7 +118,9 @@ macro_rules! http_tests {
                 test_otlp_traces_v1,
                 test_otlp_logs,
                 test_loki_pb_logs,
+                test_loki_pb_logs_with_pipeline,
                 test_loki_json_logs,
+                test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
                 test_log_query,
@@ -1674,7 +1678,7 @@ transform:
     assert_eq!(res.status(), StatusCode::OK);
 
     // 3. check schema
-    let expected_schema = "[[\"logs1\",\"CREATE TABLE IF NOT EXISTS \\\"logs1\\\" (\\n  \\\"id1\\\" INT NULL INVERTED INDEX,\\n  \\\"id2\\\" INT NULL INVERTED INDEX,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"type\\\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\\n  \\\"log\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false'),\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\"),\\n  PRIMARY KEY (\\\"type\\\", \\\"log\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    let expected_schema = "[[\"logs1\",\"CREATE TABLE IF NOT EXISTS \\\"logs1\\\" (\\n  \\\"id1\\\" INT NULL INVERTED INDEX,\\n  \\\"id2\\\" INT NULL INVERTED INDEX,\\n  \\\"logger\\\" STRING NULL,\\n  \\\"type\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"log\\\" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),\\n  \\\"time\\\" TIMESTAMP(9) NOT NULL,\\n  TIME INDEX (\\\"time\\\"),\\n  PRIMARY KEY (\\\"type\\\", \\\"log\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
     validate_data(
         "pipeline_schema",
         &client,
@@ -3702,7 +3706,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= 'f',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= 'f',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -3976,6 +3980,140 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_loki_pb_logs_with_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_pb_logs_with_pipeline").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - epoch:
+      field: greptime_timestamp
+      resolution: ms
+    "#;
+
+    let res = client
+        .post("/v1/pipelines/loki_pipe")
+        .header("content-type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // init loki request
+    let req: PushRequest = PushRequest {
+        streams: vec![StreamAdapter {
+            labels: r#"{service="test",source="integration",wadaxi="do anything"}"#.to_string(),
+            entries: vec![
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:50").unwrap()),
+                    line: "this is a log message".to_string(),
+                    structured_metadata: vec![
+                        LabelPairAdapter {
+                            name: "key1".to_string(),
+                            value: "value1".to_string(),
+                        },
+                        LabelPairAdapter {
+                            name: "key2".to_string(),
+                            value: "value2".to_string(),
+                        },
+                    ],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:51").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![LabelPairAdapter {
+                        name: "key3".to_string(),
+                        value: "value3".to_string(),
+                    }],
+                    parsed: vec![],
+                },
+                EntryAdapter {
+                    timestamp: Some(Timestamp::from_str("2024-11-07T10:53:52").unwrap()),
+                    line: "this is a log message 2".to_string(),
+                    structured_metadata: vec![],
+                    parsed: vec![],
+                },
+            ],
+            hash: rand::random(),
+        }],
+    };
+    let encode = req.encode_to_vec();
+    let body = prom_store::snappy_compress(&encode).unwrap();
+
+    // write to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("content-encoding"),
+                HeaderValue::from_static("snappy"),
+            ),
+            (
+                HeaderName::from_static("accept-encoding"),
+                HeaderValue::from_static("identity"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_PIPELINE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_pipe"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    // CREATE TABLE IF NOT EXISTS "loki_table_name" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "loki_label_service" STRING NULL,
+    //     "loki_label_source" STRING NULL,
+    //     "loki_label_wadaxi" STRING NULL,
+    //     "loki_line" STRING NULL,
+    //     "loki_metadata_key1" STRING NULL,
+    //     "loki_metadata_key2" STRING NULL,
+    //     "loki_metadata_key3" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp")
+    //     )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //   )
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_pb_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected =      "[[1730976830000,\"test\",\"integration\",\"do anything\",\"this is a log message\",\"value1\",\"value2\",null],[1730976831000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,\"value3\"],[1730976832000,\"test\",\"integration\",\"do anything\",\"this is a log message 2\",null,null,null]]";
+    validate_data(
+        "loki_pb_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_loki_json_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -4035,6 +4173,109 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
 
     // test content
     let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
+    validate_data(
+        "loki_json_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_loki_json_logs_with_pipeline(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_loki_json_logs_with_pipeline").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline = r#"
+processors:
+  - epoch:
+      field: greptime_timestamp
+      resolution: ms
+    "#;
+
+    let res = client
+        .post("/v1/pipelines/loki_pipe")
+        .header("content-type", "application/x-yaml")
+        .body(pipeline)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let body = r#"
+{
+  "streams": [
+    {
+      "stream": {
+        "source": "test",
+        "sender": "integration"
+      },
+      "values": [
+          [ "1735901380059465984", "this is line one", {"key1":"value1","key2":"value2"}],
+          [ "1735901398478897920", "this is line two", {"key3":"value3"}],
+          [ "1735901398478897921", "this is line two updated"]
+      ]
+    }
+  ]
+}
+    "#;
+
+    let body = body.as_bytes().to_vec();
+
+    // write plain to loki
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_table_name"),
+            ),
+            (
+                HeaderName::from_static(GREPTIME_PIPELINE_NAME_HEADER_NAME),
+                HeaderValue::from_static("loki_pipe"),
+            ),
+        ],
+        "/v1/loki/api/v1/push",
+        body,
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // test schema
+    // CREATE TABLE IF NOT EXISTS "loki_table_name" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "loki_label_sender" STRING NULL,
+    //     "loki_label_source" STRING NULL,
+    //     "loki_line" STRING NULL,
+    //     "loki_metadata_key1" STRING NULL,
+    //     "loki_metadata_key2" STRING NULL,
+    //     "loki_metadata_key3" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp")
+    //     )
+    //   ENGINE=mito
+    //   WITH(
+    //     append_mode = 'true'
+    //   )
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  append_mode = 'true'\\n)\"]]";
+    validate_data(
+        "loki_json_schema",
+        &client,
+        "show create table loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // test content
+    let expected = "[[1735901380059,\"integration\",\"test\",\"this is line one\",\"value1\",\"value2\",null],[1735901398478,\"integration\",\"test\",\"this is line two updated\",null,null,null],[1735901398478,\"integration\",\"test\",\"this is line two\",null,null,\"value3\"]]";
     validate_data(
         "loki_json_content",
         &client,

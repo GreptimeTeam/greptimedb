@@ -23,21 +23,72 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
-use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
 use crate::ddl::test_util::{
-    create_physical_table_metadata, test_create_logical_table_task, test_create_physical_table_task,
+    assert_column_name, create_physical_table_metadata, get_raw_table_info, test_column_metadatas,
+    test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::TableMetadata;
 use crate::error::{Error, Result};
 use crate::key::table_route::{PhysicalTableRouteValue, TableRouteValue};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{new_ddl_context, MockDatanodeManager};
+
+fn make_creates_request_handler(
+    column_metadatas: Vec<ColumnMetadata>,
+) -> impl Fn(Peer, RegionRequest) -> Result<RegionResponse> {
+    move |_peer, request| {
+        let _ = _peer;
+        if let region_request::Body::Creates(_) = request.body.unwrap() {
+            let mut response = RegionResponse::new(0);
+            // Default region id for physical table.
+            let region_id = RegionId::new(1024, 1);
+            response.extensions.insert(
+                MANIFEST_INFO_EXTENSION_KEY.to_string(),
+                RegionManifestInfo::encode_list(&[(
+                    region_id,
+                    RegionManifestInfo::metric(1, 0, 2, 0),
+                )])
+                .unwrap(),
+            );
+            response.extensions.insert(
+                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+                ColumnMetadata::encode_list(&column_metadatas).unwrap(),
+            );
+            return Ok(response);
+        }
+
+        Ok(RegionResponse::new(0))
+    }
+}
+
+fn assert_creates_request(
+    peer: Peer,
+    request: RegionRequest,
+    expected_peer_id: u64,
+    expected_region_ids: &[RegionId],
+) {
+    assert_eq!(peer.id, expected_peer_id,);
+    let Some(region_request::Body::Creates(req)) = request.body else {
+        unreachable!();
+    };
+    for (i, region_id) in expected_region_ids.iter().enumerate() {
+        assert_eq!(
+            req.requests[i].region_id,
+            *region_id,
+            "actual region id: {}",
+            RegionId::from_u64(req.requests[i].region_id)
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_on_prepare_physical_table_not_found() {
@@ -227,7 +278,12 @@ async fn test_on_prepare_part_logical_tables_exist() {
 
 #[tokio::test]
 async fn test_on_create_metadata() {
-    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let column_metadatas = test_column_metadatas(&["host", "cpu"]);
+    let datanode_handler =
+        DatanodeWatcher::new(tx).with_handler(make_creates_request_handler(column_metadatas));
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -255,7 +311,7 @@ async fn test_on_create_metadata() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, yet_another_task],
         physical_table_id,
-        ddl_context,
+        ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
@@ -274,11 +330,42 @@ async fn test_on_create_metadata() {
     let status = procedure.execute(&ctx).await.unwrap();
     let table_ids = status.downcast_output_ref::<Vec<u32>>().unwrap();
     assert_eq!(*table_ids, vec![1025, 1026]);
+
+    let (peer, request) = rx.try_recv().unwrap();
+    rx.try_recv().unwrap_err();
+    assert_creates_request(
+        peer,
+        request,
+        0,
+        &[RegionId::new(1025, 0), RegionId::new(1026, 0)],
+    );
+
+    let table_info = get_raw_table_info(&ddl_context, table_id).await;
+    assert_column_name(
+        &table_info,
+        &["ts", "value", "__table_id", "__tsid", "host", "cpu"],
+    );
+    assert_eq!(
+        table_info.meta.column_ids,
+        vec![
+            0,
+            1,
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            2,
+            3
+        ]
+    );
 }
 
 #[tokio::test]
 async fn test_on_create_metadata_part_logical_tables_exist() {
-    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let column_metadatas = test_column_metadatas(&["host", "cpu"]);
+    let datanode_handler =
+        DatanodeWatcher::new(tx).with_handler(make_creates_request_handler(column_metadatas));
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
@@ -317,7 +404,7 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     let mut procedure = CreateLogicalTablesProcedure::new(
         vec![task, non_exist_task],
         physical_table_id,
-        ddl_context,
+        ddl_context.clone(),
     );
     let status = procedure.on_prepare().await.unwrap();
     assert_matches!(
@@ -336,6 +423,27 @@ async fn test_on_create_metadata_part_logical_tables_exist() {
     let status = procedure.execute(&ctx).await.unwrap();
     let table_ids = status.downcast_output_ref::<Vec<u32>>().unwrap();
     assert_eq!(*table_ids, vec![8192, 1025]);
+
+    let (peer, request) = rx.try_recv().unwrap();
+    rx.try_recv().unwrap_err();
+    assert_creates_request(peer, request, 0, &[RegionId::new(1025, 0)]);
+
+    let table_info = get_raw_table_info(&ddl_context, table_id).await;
+    assert_column_name(
+        &table_info,
+        &["ts", "value", "__table_id", "__tsid", "host", "cpu"],
+    );
+    assert_eq!(
+        table_info.meta.column_ids,
+        vec![
+            0,
+            1,
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            2,
+            3
+        ]
+    );
 }
 
 #[tokio::test]
@@ -399,27 +507,13 @@ async fn test_on_create_metadata_err() {
     assert!(!error.is_retry_later());
 }
 
-fn creates_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
-    if let region_request::Body::Creates(_) = request.body.unwrap() {
-        let mut response = RegionResponse::new(0);
-        // Default region id for physical table.
-        let region_id = RegionId::new(1024, 1);
-        response.extensions.insert(
-            MANIFEST_INFO_EXTENSION_KEY.to_string(),
-            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::metric(1, 0, 2, 0))])
-                .unwrap(),
-        );
-        return Ok(response);
-    }
-
-    Ok(RegionResponse::new(0))
-}
-
 #[tokio::test]
 async fn test_on_submit_create_request() {
     common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(8);
-    let handler = DatanodeWatcher::new(tx).with_handler(creates_request_handler);
+    let column_metadatas = test_column_metadatas(&["host", "cpu"]);
+    let handler =
+        DatanodeWatcher::new(tx).with_handler(make_creates_request_handler(column_metadatas));
     let node_manager = Arc::new(MockDatanodeManager::new(handler));
     let ddl_context = new_ddl_context(node_manager);
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");

@@ -167,6 +167,25 @@ impl CreateFlowProcedure {
         }
 
         self.collect_source_tables().await?;
+
+        // Validate that source and sink tables are not the same
+        let sink_table_name = &self.data.task.sink_table_name;
+        if self
+            .data
+            .task
+            .source_table_names
+            .iter()
+            .any(|source| source == sink_table_name)
+        {
+            return error::UnsupportedSnafu {
+                operation: format!(
+                    "Creating flow with source and sink table being the same: {}",
+                    sink_table_name
+                ),
+            }
+            .fail();
+        }
+
         if self.data.flow_id.is_none() {
             self.allocate_flow_id().await?;
         }

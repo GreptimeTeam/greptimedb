@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::region::RegionResponse;
 use api::v1::region::RegionRequest;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
@@ -45,10 +47,13 @@ impl MockDatanodeHandler for () {
     }
 }
 
+type RegionRequestHandler =
+    Arc<dyn Fn(Peer, RegionRequest) -> Result<RegionResponse> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct DatanodeWatcher {
     sender: mpsc::Sender<(Peer, RegionRequest)>,
-    handler: Option<fn(Peer, RegionRequest) -> Result<RegionResponse>>,
+    handler: Option<RegionRequestHandler>,
 }
 
 impl DatanodeWatcher {
@@ -61,9 +66,9 @@ impl DatanodeWatcher {
 
     pub fn with_handler(
         mut self,
-        user_handler: fn(Peer, RegionRequest) -> Result<RegionResponse>,
+        user_handler: impl Fn(Peer, RegionRequest) -> Result<RegionResponse> + Send + Sync + 'static,
     ) -> Self {
-        self.handler = Some(user_handler);
+        self.handler = Some(Arc::new(user_handler));
         self
     }
 }
@@ -76,7 +81,7 @@ impl MockDatanodeHandler for DatanodeWatcher {
             .send((peer.clone(), request.clone()))
             .await
             .unwrap();
-        if let Some(handler) = self.handler {
+        if let Some(handler) = self.handler.as_ref() {
             handler(peer.clone(), request)
         } else {
             Ok(RegionResponse::new(0))
