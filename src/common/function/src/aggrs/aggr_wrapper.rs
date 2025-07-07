@@ -52,7 +52,7 @@ pub fn aggr_merge_func_name(aggr_name: &str) -> String {
 ///
 /// Notice state functions may have multiple output columns, and the merge function is used to merge the states of the state functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateMergeWrapper {
+pub struct StateMergeHelper {
     /// The original aggregate function.
     original: AggregateUDF,
     /// The state functions of the aggregate function.
@@ -63,7 +63,7 @@ pub struct StateMergeWrapper {
     merge_function: MergeWrapper,
 }
 
-impl StateMergeWrapper {
+impl StateMergeHelper {
     pub fn new(
         original: AggregateUDF,
         state_to_input_types: StateTypeLookup,
@@ -349,15 +349,7 @@ impl AggregateUDFImpl for MergeWrapper {
         // The return type is the same as the original aggregate function's return type.
         // notice here return type is fixed, instead of using the input types to determine the return type.
         // as the input type now is actually `state_fields`'s data type, and can't be use to determine the output type
-        let input_types = self
-            .state_to_input_types
-            .get_input_types(arg_types)?
-            .ok_or_else(|| {
-                datafusion_common::DataFusionError::Internal(format!(
-                    "No input types found for state fields: {:?}",
-                    arg_types
-                ))
-            })?;
+        let input_types = self.get_old_input_type(arg_types)?;
         let ret_type = self.inner.return_type(&input_types)?;
         Ok(ret_type)
     }
@@ -435,6 +427,7 @@ impl Accumulator for MergeAccum {
                     value.data_type()
                 ))
             })?;
+        // the input struct array's naming is irrelevant, only the order of the columns matters.
         let state_columns = struct_arr.columns();
         self.inner.merge_batch(state_columns)
     }
