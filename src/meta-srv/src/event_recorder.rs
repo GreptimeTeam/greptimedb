@@ -23,6 +23,7 @@ use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
+use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
@@ -104,6 +105,7 @@ impl EventRecorder for EventRecorderImpl {
     fn build_event_handler(&self) -> Box<dyn EventHandler> {
         Box::new(DefaultEventHandlerImpl {
             peer_lookup_service: self.peer_lookup_service.clone(),
+            channel_manager: ChannelManager::new(),
         })
     }
 }
@@ -136,13 +138,13 @@ impl EventRecorderImpl {
 // DefaultEventHandlerImpl is the default event handler implementation. It sends the received events to the frontend instances.
 struct DefaultEventHandlerImpl {
     peer_lookup_service: PeerLookupServiceRef,
+    channel_manager: ChannelManager,
 }
 
 #[async_trait]
 impl EventHandler for DefaultEventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         debug!("Received {} events: {:?}", events.len(), events);
-        // TODO(zyy17): Avoid to create a new database client when handling the events.
         let database_client = self.build_database_client().await?;
         let row_inserts = RowInsertRequests {
             inserts: events.iter().map(|e| e.to_row_insert()).collect(),
@@ -186,7 +188,7 @@ impl DefaultEventHandlerImpl {
         Ok(Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_PRIVATE_SCHEMA_NAME,
-            Client::with_urls(urls),
+            Client::with_manager_and_urls(self.channel_manager.clone(), urls),
         ))
     }
 }
@@ -244,10 +246,13 @@ impl EventProcessor {
             debug!("Flushing {} events to the event handler", buffer.len());
 
             // Use the fixed interval to retry the failed events.
-            let mut retry = 0;
-            while retry < DEFAULT_EVENTS_MAX_RETRY_TIMES {
+            let mut retry = 1;
+            while retry <= DEFAULT_EVENTS_MAX_RETRY_TIMES {
                 if let Err(e) = self.event_handler.handle(buffer).await {
-                    error!(e; "Failed to handle events");
+                    error!(
+                        e; "Failed to handle events, retrying... ({}/{})",
+                        retry, DEFAULT_EVENTS_MAX_RETRY_TIMES
+                    );
                     retry += 1;
                     sleep(Duration::from_millis(
                         DEFAULT_EVENTS_PROCESS_INTERVAL_SECONDS * 1000
@@ -257,6 +262,14 @@ impl EventProcessor {
                 } else {
                     info!("Successfully handled {} events", buffer.len());
                     break;
+                }
+
+                if retry > DEFAULT_EVENTS_MAX_RETRY_TIMES {
+                    error!(
+                        "Failed to handle {} events after {} retries",
+                        buffer.len(),
+                        DEFAULT_EVENTS_MAX_RETRY_TIMES
+                    );
                 }
             }
         }
