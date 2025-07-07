@@ -22,7 +22,7 @@ use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::physical_table_metadata;
+use crate::ddl::utils::raw_table_info;
 use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::instruction::CacheIdent;
 
@@ -47,7 +47,7 @@ impl CreateLogicalTablesProcedure {
         // Generates new table info
         let raw_table_info = physical_table_info.deref().table_info.clone();
 
-        let new_table_info = physical_table_metadata::build_new_physical_table_info(
+        let new_table_info = raw_table_info::build_new_physical_table_info(
             raw_table_info,
             &self.data.physical_columns,
         );

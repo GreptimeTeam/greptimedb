@@ -50,7 +50,6 @@ pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
-mod physical_table_metadata;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

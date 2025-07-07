@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod check;
+mod executor;
 mod metadata;
 mod region_request;
-mod update_metadata;
 
 use std::vec;
 
@@ -29,33 +28,29 @@ use common_procedure::{
     Context as ProcedureContext, ContextProvider, Error as ProcedureError, LockKey, PoisonKey,
     PoisonKeys, Procedure, ProcedureId, Status, StringKey,
 };
-use common_telemetry::{debug, error, info, warn};
-use futures::future::{self};
+use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
-use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
 use table::table_reference::TableReference;
 
-use crate::cache_invalidator::Context;
-use crate::ddl::physical_table_metadata::update_table_info_column_ids;
+use crate::ddl::alter_table::executor::AlterTableExecutor;
 use crate::ddl::utils::{
-    add_peer_context_if_needed, extract_column_metadatas, handle_multiple_results,
-    map_to_procedure_error, sync_follower_regions, MultipleResults,
+    extract_column_metadatas, handle_multiple_results, map_to_procedure_error,
+    sync_follower_regions, MultipleResults,
 };
 use crate::ddl::DdlContext;
 use crate::error::{AbortProcedureSnafu, NoLeaderSnafu, PutPoisonSnafu, Result, RetryLaterSnafu};
-use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::{DeserializedValueWithBytes, RegionDistribution};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::poison_key::table_poison_key;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders, region_distribution, RegionRoute};
+use crate::rpc::router::{find_leaders, region_distribution, RegionRoute};
 
 /// The alter table procedure
 pub struct AlterTableProcedure {
@@ -67,6 +62,24 @@ pub struct AlterTableProcedure {
     /// If we recover the procedure from json, then the table info value is not cached.
     /// But we already validated it in the prepare step.
     new_table_info: Option<TableInfo>,
+    /// The alter table executor.
+    executor: AlterTableExecutor,
+}
+
+/// Builds the executor from the [`AlterTableData`].
+///
+/// # Panics
+/// - If the alter kind is not set.
+fn build_executor_from_alter_expr(alter_data: &AlterTableData) -> AlterTableExecutor {
+    let table_name = alter_data.table_ref().into();
+    let table_id = alter_data.table_id;
+    let alter_kind = alter_data.task.alter_table.kind.as_ref().unwrap();
+    let new_table_name = if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
+        Some(new_table_name.to_string())
+    } else {
+        None
+    };
+    AlterTableExecutor::new(table_name, table_id, new_table_name)
 }
 
 impl AlterTableProcedure {
@@ -74,33 +87,42 @@ impl AlterTableProcedure {
 
     pub fn new(table_id: TableId, task: AlterTableTask, context: DdlContext) -> Result<Self> {
         task.validate()?;
+        let data = AlterTableData::new(task, table_id);
+        let executor = build_executor_from_alter_expr(&data);
         Ok(Self {
             context,
-            data: AlterTableData::new(task, table_id),
+            data,
             new_table_info: None,
+            executor,
         })
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data: AlterTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let executor = build_executor_from_alter_expr(&data);
+
         Ok(AlterTableProcedure {
             context,
             data,
             new_table_info: None,
+            executor,
         })
     }
 
     // Checks whether the table exists.
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        self.check_alter().await?;
+        self.executor
+            .on_prepare(&self.context.table_metadata_manager)
+            .await?;
         self.fill_table_info().await?;
 
-        // Validates the request and builds the new table info.
-        // We need to build the new table info here because we should ensure the alteration
-        // is valid in `UpdateMeta` state as we already altered the region.
-        // Safety: `fill_table_info()` already set it.
+        // Safety: filled in `fill_table_info`.
         let table_info_value = self.data.table_info_value.as_ref().unwrap();
-        self.new_table_info = Some(self.build_new_table_info(&table_info_value.table_info)?);
+        let new_table_info = AlterTableExecutor::validate_alter_table_expr(
+            &table_info_value.table_info,
+            self.data.task.alter_table.clone(),
+        )?;
+        self.new_table_info = Some(new_table_info);
 
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
@@ -143,9 +165,7 @@ impl AlterTableProcedure {
 
         self.data.region_distribution =
             Some(region_distribution(&physical_table_route.region_routes));
-
         let leaders = find_leaders(&physical_table_route.region_routes);
-        let mut alter_region_tasks = Vec::with_capacity(leaders.len());
         let alter_kind = self.make_region_alter_kind()?;
 
         info!(
@@ -158,31 +178,14 @@ impl AlterTableProcedure {
         ensure!(!leaders.is_empty(), NoLeaderSnafu { table_id });
         // Puts the poison before submitting alter region requests to datanodes.
         self.put_poison(ctx_provider, procedure_id).await?;
-        for datanode in leaders {
-            let requester = self.context.node_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
-
-            for region in regions {
-                let region_id = RegionId::new(table_id, region);
-                let request = self.make_alter_region_request(region_id, alter_kind.clone())?;
-                debug!("Submitting {request:?} to {datanode}");
-
-                let datanode = datanode.clone();
-                let requester = requester.clone();
-
-                alter_region_tasks.push(async move {
-                    requester
-                        .handle(request)
-                        .await
-                        .map_err(add_peer_context_if_needed(datanode))
-                });
-            }
-        }
-
-        let results = future::join_all(alter_region_tasks)
-            .await
-            .into_iter()
-            .collect::<Vec<_>>();
+        let results = self
+            .executor
+            .on_alter_regions(
+                &self.context.node_manager,
+                &physical_table_route.region_routes,
+                alter_kind,
+            )
+            .await;
 
         match handle_multiple_results(results) {
             MultipleResults::PartialRetryable(error) => {
@@ -260,43 +263,34 @@ impl AlterTableProcedure {
     pub(crate) async fn on_update_metadata(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
         let table_ref = self.data.table_ref();
-        // Safety: checked before.
+        // Safety: filled in `fill_table_info`.
         let table_info_value = self.data.table_info_value.as_ref().unwrap();
+        // Safety: Checked in `AlterTableProcedure::new`.
+        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
+
         // Gets the table info from the cache or builds it.
-        let new_info = match &self.new_table_info {
+        let  new_info = match &self.new_table_info {
             Some(cached) => cached.clone(),
-            None => self.build_new_table_info(&table_info_value.table_info)
+            None => AlterTableExecutor::validate_alter_table_expr(
+                &table_info_value.table_info,
+                self.data.task.alter_table.clone(),
+               )
                 .inspect_err(|e| {
                     // We already check the table info in the prepare step so this should not happen.
                     error!(e; "Unable to build info for table {} in update metadata step, table_id: {}", table_ref, table_id);
                 })?,
         };
 
-        debug!(
-            "Starting update table: {} metadata, new table info {:?}",
-            table_ref.to_string(),
-            new_info
-        );
-
-        // Safety: Checked in `AlterTableProcedure::new`.
-        let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
-        if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
-            self.on_update_metadata_for_rename(new_table_name.to_string(), table_info_value)
-                .await?;
-        } else {
-            let mut raw_table_info = new_info.into();
-            if !self.data.column_metadatas.is_empty() {
-                update_table_info_column_ids(&mut raw_table_info, &self.data.column_metadatas);
-            }
-            // region distribution is set in submit_alter_region_requests
-            let region_distribution = self.data.region_distribution.as_ref().unwrap().clone();
-            self.on_update_metadata_for_alter(
-                raw_table_info,
-                region_distribution,
+        // Safety: region distribution is set in `submit_alter_region_requests`.
+        self.executor
+            .on_alter_metadata(
+                &self.context.table_metadata_manager,
                 table_info_value,
+                self.data.region_distribution.as_ref(),
+                new_info.into(),
+                &self.data.column_metadatas,
             )
             .await?;
-        }
 
         info!("Updated table metadata for table {table_ref}, table_id: {table_id}, kind: {alter_kind:?}");
         self.data.state = AlterTableState::InvalidateTableCache;
@@ -305,18 +299,9 @@ impl AlterTableProcedure {
 
     /// Broadcasts the invalidating table cache instructions.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let cache_invalidator = &self.context.cache_invalidator;
-
-        cache_invalidator
-            .invalidate(
-                &Context::default(),
-                &[
-                    CacheIdent::TableId(self.data.table_id()),
-                    CacheIdent::TableName(self.data.table_ref().into()),
-                ],
-            )
+        self.executor
+            .invalidate_table_cache(&self.context.cache_invalidator)
             .await?;
-
         Ok(Status::done())
     }
 
