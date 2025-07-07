@@ -297,9 +297,11 @@ impl PeerLookupService for MetaPeerLookupService {
             .context(common_meta::error::ExternalSnafu)
     }
     async fn active_frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
+        // Get the active frontends within the last heartbeat interval.
         lookup_frontends(
             &self.meta_peer_client,
-            FRONTEND_HEARTBEAT_INTERVAL_MILLIS / 2000,
+            // TODO(zyy17): How to get the heartbeat interval of the frontend if it uses a custom heartbeat interval?
+            FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
         )
         .await
         .map_err(BoxedError::new)
