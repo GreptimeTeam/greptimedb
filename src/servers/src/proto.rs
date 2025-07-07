@@ -259,7 +259,7 @@ impl PromTimeSeries {
 
 #[derive(Default, Debug)]
 pub struct PromWriteRequest {
-    table_data: TablesBuilder,
+    pub(crate) table_data: TablesBuilder,
     series: PromTimeSeries,
 }
 

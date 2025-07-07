@@ -32,7 +32,7 @@ mod hint_headers;
 pub mod http;
 pub mod influxdb;
 pub mod interceptor;
-mod metrics;
+pub mod metrics;
 pub mod metrics_handler;
 pub mod mysql;
 pub mod opentsdb;

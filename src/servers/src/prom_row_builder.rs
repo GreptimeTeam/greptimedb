@@ -38,7 +38,7 @@ pub struct PromCtx {
 #[derive(Default, Debug)]
 pub struct TablesBuilder {
     // schema -> table -> table_builder
-    tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
 }
 
 impl Clear for TablesBuilder {
