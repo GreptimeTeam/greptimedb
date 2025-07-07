@@ -282,8 +282,8 @@ async fn test_sum_udaf() {
 
     assert_eq!(sum_state_to_input, expected_sum_state_to_input);
 
-    let wrapper = StateMergeWrapper::new(sum.clone(), sum_state_to_input.clone()).unwrap();
-    let expected = StateMergeWrapper {
+    let wrapper = StateMergeHelper::new(sum.clone(), sum_state_to_input.clone()).unwrap();
+    let expected = StateMergeHelper {
         original: sum.clone(),
         state_function: StateWrapper {
             inner: sum.clone(),
@@ -446,9 +446,9 @@ async fn test_avg_udaf() {
     };
     assert_eq!(avg_type, expected_avg_type);
 
-    let wrapper = StateMergeWrapper::new(avg.clone(), avg_type.clone()).unwrap();
+    let wrapper = StateMergeHelper::new(avg.clone(), avg_type.clone()).unwrap();
 
-    let expected = StateMergeWrapper {
+    let expected = StateMergeHelper {
         original: avg.clone(),
         state_function: StateWrapper {
             inner: avg.clone(),
