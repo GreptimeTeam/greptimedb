@@ -478,6 +478,7 @@ mod test {
     use std::collections::HashMap;
 
     use common_telemetry::info;
+    use mito2::sst::location::region_dir_from_table_dir;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::region_request::{
         PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest,
@@ -586,7 +587,11 @@ mod test {
             .await
             .unwrap();
 
-        let path = format!("{}/metadata/", TestEnv::default_table_dir());
+        let path = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            physical_region_id,
+            PathType::Metadata,
+        );
         let object_store = env.get_object_store().unwrap();
         let list = object_store.list(&path).await.unwrap();
         // Delete parquet files in metadata region
