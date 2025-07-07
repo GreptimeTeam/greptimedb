@@ -513,6 +513,14 @@ impl StatementExecutor {
                 table_name: table_ref.to_string(),
             })
     }
+
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
+    }
+
+    pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
+        &self.cache_invalidator
+    }
 }
 
 fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {

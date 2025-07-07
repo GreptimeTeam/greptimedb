@@ -988,6 +988,14 @@ impl Inserter {
             }
         }
     }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        &self.node_manager
+    }
+
+    pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
+        &self.partition_manager
+    }
 }
 
 fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
