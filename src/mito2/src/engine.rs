@@ -80,8 +80,10 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadataRef;
-use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
+use store_api::metric_engine_consts::{
+    MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
+};
 use store_api::region_engine::{
     BatchResponses, RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef,
     RegionStatistic, SetRegionRoleStateResponse, SettableRegionRoleState, SyncManifestResponse,
@@ -95,7 +97,7 @@ use crate::cache::CacheStrategy;
 use crate::config::MitoConfig;
 use crate::error::{
     InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu, RegionNotFoundSnafu, Result,
-    SerdeJsonSnafu,
+    SerdeJsonSnafu, SerializeColumnMetadataSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -331,6 +333,22 @@ impl MitoEngine {
         info!(
             "Added manifest info: {:?} to extensions, region_id: {:?}",
             region_manifest_info, region_id
+        );
+        Ok(())
+    }
+
+    fn encode_column_metadatas_to_extensions(
+        region_id: &RegionId,
+        column_metadatas: Vec<ColumnMetadata>,
+        extensions: &mut HashMap<String, Vec<u8>>,
+    ) -> Result<()> {
+        extensions.insert(
+            TABLE_COLUMN_METADATA_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&column_metadatas).context(SerializeColumnMetadataSnafu)?,
+        );
+        info!(
+            "Added column metadatas: {:?} to extensions, region_id: {:?}",
+            column_metadatas, region_id
         );
         Ok(())
     }
@@ -695,6 +713,7 @@ impl RegionEngine for MitoEngine {
             .start_timer();
 
         let is_alter = matches!(request, RegionRequest::Alter(_));
+        let is_create = matches!(request, RegionRequest::Create(_));
         let mut response = self
             .inner
             .handle_request(region_id, request)
@@ -703,14 +722,11 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)?;
 
         if is_alter {
-            if let Some(statistic) = self.region_statistic(region_id) {
-                Self::encode_manifest_info_to_extensions(
-                    &region_id,
-                    statistic.manifest,
-                    &mut response.extensions,
-                )
+            self.handle_alter_response(region_id, &mut response)
                 .map_err(BoxedError::new)?;
-            }
+        } else if is_create {
+            self.handle_create_response(region_id, &mut response)
+                .map_err(BoxedError::new)?;
         }
 
         Ok(response)
@@ -800,6 +816,55 @@ impl RegionEngine for MitoEngine {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl MitoEngine {
+    fn handle_alter_response(
+        &self,
+        region_id: RegionId,
+        response: &mut RegionResponse,
+    ) -> Result<()> {
+        if let Some(statistic) = self.region_statistic(region_id) {
+            Self::encode_manifest_info_to_extensions(
+                &region_id,
+                statistic.manifest,
+                &mut response.extensions,
+            )?;
+        }
+        let column_metadatas = self
+            .inner
+            .find_region(region_id)
+            .ok()
+            .map(|r| r.metadata().column_metadatas.clone());
+        if let Some(column_metadatas) = column_metadatas {
+            Self::encode_column_metadatas_to_extensions(
+                &region_id,
+                column_metadatas,
+                &mut response.extensions,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn handle_create_response(
+        &self,
+        region_id: RegionId,
+        response: &mut RegionResponse,
+    ) -> Result<()> {
+        let column_metadatas = self
+            .inner
+            .find_region(region_id)
+            .ok()
+            .map(|r| r.metadata().column_metadatas.clone());
+        if let Some(column_metadatas) = column_metadatas {
+            Self::encode_column_metadatas_to_extensions(
+                &region_id,
+                column_metadatas,
+                &mut response.extensions,
+            )?;
+        }
+        Ok(())
     }
 }
 
