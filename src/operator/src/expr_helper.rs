@@ -89,7 +89,7 @@ pub fn create_table_expr_by_column_schemas(
     Ok(expr)
 }
 
-pub(crate) fn extract_add_columns_expr(
+pub fn extract_add_columns_expr(
     schema: &Schema,
     column_exprs: Vec<ColumnExpr>,
 ) -> Result<Option<AddColumns>> {

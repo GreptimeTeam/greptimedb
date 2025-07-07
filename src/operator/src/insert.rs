@@ -85,7 +85,7 @@ pub type InserterRef = Arc<Inserter>;
 
 /// Hint for the table type to create automatically.
 #[derive(Clone)]
-enum AutoCreateTableType {
+pub enum AutoCreateTableType {
     /// A logical table with the physical table name.
     Logical(String),
     /// A physical table.
@@ -1009,6 +1009,47 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Fill table options for a new table by create type.
+pub fn fill_table_options_for_create(
+    table_options: &mut std::collections::HashMap<String, String>,
+    create_type: &AutoCreateTableType,
+    ctx: &QueryContextRef,
+) {
+    for key in VALID_TABLE_OPTION_KEYS {
+        if let Some(value) = ctx.extension(key) {
+            table_options.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    match create_type {
+        AutoCreateTableType::Logical(physical_table) => {
+            table_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_table.to_string(),
+            );
+        }
+        AutoCreateTableType::Physical => {
+            if let Some(append_mode) = ctx.extension(APPEND_MODE_KEY) {
+                table_options.insert(APPEND_MODE_KEY.to_string(), append_mode.to_string());
+            }
+            if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
+                table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
+            }
+        }
+        // Set append_mode to true for log table.
+        // because log tables should keep rows with the same ts and tags.
+        AutoCreateTableType::Log => {
+            table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+        }
+        AutoCreateTableType::LastNonNull => {
+            table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        }
+        AutoCreateTableType::Trace => {
+            table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+        }
+    }
 }
 
 pub fn build_create_table_expr(
