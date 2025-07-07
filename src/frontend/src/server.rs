@@ -159,7 +159,7 @@ where
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
-            .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
+            .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler))
             .frontend_grpc_handler(frontend_grpc_handler)
             .build();

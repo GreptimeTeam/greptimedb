@@ -76,7 +76,7 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
         } else {
-            self.handle_row_inserts(requests, ctx.clone(), true, true)
+            self.handle_row_inserts(requests, ctx.clone(), false, false)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
