@@ -1,0 +1,376 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::any::Any;
+use std::fmt::Debug;
+use std::sync::Arc;
+use std::time::Duration;
+
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    RowInsertRequest, Rows, SemanticType,
+};
+use async_trait::async_trait;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
+use common_telemetry::{debug, error, info};
+use common_time::timestamp::{TimeUnit, Timestamp};
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
+
+use crate::error::{Result, SendEventSnafu};
+
+/// The default table name for storing the events.
+pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
+
+/// The column name for the event type.
+pub const EVENTS_TABLE_TYPE_COLUMN_NAME: &str = "type";
+/// The column name for the event payload.
+pub const EVENTS_TABLE_PAYLOAD_COLUMN_NAME: &str = "payload";
+/// The column name for the event timestamp.
+pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+
+/// EventRecorderRef is the reference to the event recorder.
+pub type EventRecorderRef = Arc<dyn EventRecorder>;
+
+/// The default TTL for the events table.
+pub const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
+
+/// Event trait defines the interface for events that can be recorded and persisted as the system table.
+pub trait Event: Send + Sync + Debug {
+    /// Returns the type of the event.
+    fn event_type(&self) -> &str;
+
+    /// Returns the timestamp of the event. Default to the current time.
+    fn timestamp(&self) -> Timestamp {
+        Timestamp::current_time(TimeUnit::Nanosecond)
+    }
+
+    /// Returns the JSON bytes of the event as the payload.
+    fn json_payload(&self) -> Result<String>;
+
+    /// Add the extra schema to the event with the default schema.
+    fn extra_schema(&self) -> Vec<ColumnSchema> {
+        vec![]
+    }
+
+    /// Add the extra row to the event with the default row.
+    fn extra_row(&self) -> Result<Row> {
+        Ok(Row { values: vec![] })
+    }
+
+    /// Returns the event as any type.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Returns the hints for the insert operation.
+pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (TTL_KEY, DEFAULT_EVENTS_TABLE_TTL),
+        (APPEND_MODE_KEY, "true"),
+    ]
+}
+
+/// Builds the row insert request for the event that will be persisted to the events table.
+// TODO(zyy17): Add the schema validation to avoid the conflict of the schema.
+pub fn build_row_insert_request(event: &dyn Event) -> Result<RowInsertRequest> {
+    let mut schema = vec![
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Binary as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::TimestampNanosecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+            ..Default::default()
+        },
+    ];
+    schema.extend(event.extra_schema());
+
+    let mut row = Row {
+        values: vec![
+            ValueData::StringValue(event.event_type().to_string()).into(),
+            ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
+            ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+        ],
+    };
+    row.values.extend(event.extra_row()?.values);
+
+    Ok(RowInsertRequest {
+        table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+        rows: Some(Rows {
+            schema,
+            rows: vec![row],
+        }),
+    })
+}
+
+/// EventRecorder trait defines the interface for recording events.
+pub trait EventRecorder: Send + Sync + 'static {
+    /// Records an event for persistence and processing by [EventHandler].
+    fn record(&self, event: Box<dyn Event>) -> Result<()>;
+}
+
+/// EventHandler trait defines the interface for how to handle the event.
+#[async_trait]
+pub trait EventHandler: Send + Sync + 'static {
+    /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
+    /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
+    async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
+}
+
+/// EventRecorderOptions is the options for the event recorder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRecorderOptions {
+    /// The size of the channel to send the events to the background processor.
+    pub channel_size: usize,
+    /// The batch size to flush the events to the event handler.
+    pub batch_size: usize,
+    /// The interval to flush the events to the event handler.
+    pub process_interval_millis: u64,
+    /// The maximum number of retries for the event handler.
+    pub max_retry_times: u64,
+}
+
+impl Default for EventRecorderOptions {
+    fn default() -> Self {
+        Self {
+            channel_size: 2048,
+            batch_size: 100,
+            process_interval_millis: 5000, // 5 seconds
+            max_retry_times: 3,
+        }
+    }
+}
+
+/// Implementation of [EventRecorder] that records the events and processes them in the background by the [EventHandler].
+pub struct EventRecorderImpl {
+    // The channel to send the events to the background processor.
+    tx: Sender<Box<dyn Event>>,
+    // The background processor to process the events.
+    pub(crate) handle: Option<JoinHandle<()>>,
+}
+
+impl EventRecorderImpl {
+    pub fn new(event_handler: Box<dyn EventHandler>, opts: EventRecorderOptions) -> Self {
+        let (tx, rx) = channel(opts.channel_size);
+
+        let mut recorder = Self { tx, handle: None };
+
+        let processor = EventProcessor::new(
+            rx,
+            event_handler,
+            opts.process_interval_millis,
+            opts.max_retry_times,
+        );
+
+        // Spawn a background task to process the events.
+        let handle = tokio::spawn(async move {
+            processor.process(opts.batch_size).await;
+        });
+
+        recorder.handle = Some(handle);
+
+        info!("Created event recorder with options: {:?}", opts);
+
+        recorder
+    }
+}
+
+impl EventRecorder for EventRecorderImpl {
+    // Accepts an event and send it to the background handler.
+    fn record(&self, event: Box<dyn Event>) -> Result<()> {
+        self.tx
+            .try_send(event)
+            .map_err(|e| BoxedError::new(PlainError::new(e.to_string(), StatusCode::Internal)))
+            .context(SendEventSnafu)
+    }
+}
+
+impl Drop for EventRecorderImpl {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            info!("Aborted the background processor in event recorder");
+        }
+    }
+}
+
+struct EventProcessor {
+    rx: Receiver<Box<dyn Event>>,
+    event_handler: Box<dyn EventHandler>,
+    max_retry_times: u64,
+    process_interval_millis: u64,
+}
+
+impl EventProcessor {
+    fn new(
+        rx: Receiver<Box<dyn Event>>,
+        event_handler: Box<dyn EventHandler>,
+        process_interval_millis: u64,
+        max_retry_times: u64,
+    ) -> Self {
+        Self {
+            rx,
+            event_handler,
+            max_retry_times,
+            process_interval_millis,
+        }
+    }
+
+    async fn process(mut self, batch_size: usize) {
+        info!("Start the background processor in event recorder to handle the received events.");
+
+        let mut buffer = Vec::with_capacity(batch_size);
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(self.process_interval_millis));
+
+        loop {
+            tokio::select! {
+                maybe_event = self.rx.recv() => {
+                    if let Some(maybe_event) = maybe_event {
+                        debug!("Received event: {:?}", maybe_event);
+                        // Push the event to the buffer, the buffer will be flushed when the interval is triggered or received a closed signal.
+                        buffer.push(maybe_event);
+                    } else {
+                        // When received a closed signal, flush the buffer and exit the loop.
+                        self.flush_events_to_handler(&mut buffer).await;
+                        break;
+                    }
+                }
+                // When the interval is triggered, flush the buffer and send the events to the event handler.
+                _ = interval.tick() => {
+                    self.flush_events_to_handler(&mut buffer).await;
+                }
+            }
+        }
+    }
+
+    // NOTE: While we implement a retry mechanism for failed event handling, there is no guarantee that all events will be processed successfully.
+    async fn flush_events_to_handler(&self, buffer: &mut Vec<Box<dyn Event>>) {
+        if !buffer.is_empty() {
+            debug!("Flushing {} events to the event handler", buffer.len());
+
+            // Use the fixed interval to retry the failed events.
+            let mut retry = 1;
+            while retry <= self.max_retry_times {
+                if let Err(e) = self.event_handler.handle(buffer).await {
+                    error!(
+                        e; "Failed to handle events, retrying... ({}/{})",
+                        retry, self.max_retry_times
+                    );
+                    retry += 1;
+                    sleep(Duration::from_millis(
+                        self.process_interval_millis / self.max_retry_times,
+                    ))
+                    .await;
+                } else {
+                    info!("Successfully handled {} events", buffer.len());
+                    break;
+                }
+
+                if retry > self.max_retry_times {
+                    error!(
+                        "Failed to handle {} events after {} retries",
+                        buffer.len(),
+                        self.max_retry_times
+                    );
+                }
+            }
+        }
+
+        // Clear the buffer to prevent unbounded memory growth, regardless of whether event processing succeeded or failed.
+        buffer.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestEvent {}
+
+    impl Event for TestEvent {
+        fn event_type(&self) -> &str {
+            "test_event"
+        }
+
+        fn json_payload(&self) -> Result<String> {
+            Ok("{\"procedure_id\": \"1234567890\"}".to_string())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct TestEventHandlerImpl {}
+
+    #[async_trait]
+    impl EventHandler for TestEventHandlerImpl {
+        async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
+            let event = events
+                .first()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TestEvent>()
+                .unwrap();
+            assert_eq!(
+                event.json_payload().unwrap(),
+                "{\"procedure_id\": \"1234567890\"}"
+            );
+            assert_eq!(event.event_type(), "test_event");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder() {
+        let opts = EventRecorderOptions {
+            process_interval_millis: 1, // almost immediate flush for testing.
+            ..Default::default()
+        };
+        let mut event_recorder = EventRecorderImpl::new(Box::new(TestEventHandlerImpl {}), opts);
+        event_recorder.record(Box::new(TestEvent {})).unwrap();
+
+        // Sleep for a while to let the background task process the event.
+        sleep(Duration::from_millis(50)).await;
+
+        let handle = event_recorder.handle.take().unwrap();
+
+        // Abort the background task.
+        handle.abort();
+
+        assert!(!handle.await.unwrap_err().is_panic());
+    }
+}

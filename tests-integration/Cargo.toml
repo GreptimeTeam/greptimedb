@@ -27,6 +27,7 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
 common-grpc.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure.workspace = true

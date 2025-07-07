@@ -17,6 +17,9 @@ use std::time::Duration;
 
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
+use common_event_recorder::{
+    DEFAULT_EVENTS_TABLE_NAME, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME, EVENTS_TABLE_TYPE_COLUMN_NAME,
+};
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
@@ -35,14 +38,10 @@ use frontend::instance::Instance;
 use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
-use meta_srv::event_recorder::{
-    REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME, REGION_MIGRATION_EVENTS_TABLE_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_TO_DATANODE_ID_COLUMN_NAME,
-    REGION_MIGRATION_EVENTS_TABLE_TRIGGER_REASON_COLUMN_NAME,
+use meta_srv::events::region_migration_event::{
+    EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_REGION_ID_COLUMN_NAME,
+    EVENTS_TABLE_REGION_MIGRATION_STATUS_COLUMN_NAME,
+    EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME, REGION_MIGRATION_EVENT_TYPE,
 };
 use meta_srv::metasrv::SelectorContext;
 use meta_srv::procedure::region_migration::{
@@ -249,8 +248,6 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         cluster.fe_instance(),
         &procedure.unwrap().to_string(),
         region_id.as_u64(),
-        from_peer_id,
-        to_peer_id,
     )
     .await;
 }
@@ -395,8 +392,6 @@ pub async fn test_metric_table_region_migration_by_sql(
         cluster.fe_instance(),
         &procedure_id,
         region_id.as_u64(),
-        from_peer_id,
-        to_peer_id,
     )
     .await;
 }
@@ -506,8 +501,6 @@ pub async fn test_region_migration_by_sql(store_type: StorageType, endpoints: Ve
         cluster.fe_instance(),
         &procedure_id,
         region_id.as_u64(),
-        from_peer_id,
-        to_peer_id,
     )
     .await;
 
@@ -672,8 +665,6 @@ pub async fn test_region_migration_multiple_regions(
         cluster.fe_instance(),
         &procedure.unwrap().to_string(),
         region_id.as_u64(),
-        from_peer_id,
-        to_peer_id,
     )
     .await;
 
@@ -821,8 +812,6 @@ pub async fn test_region_migration_all_regions(store_type: StorageType, endpoint
         cluster.fe_instance(),
         &procedure.unwrap().to_string(),
         region_id.as_u64(),
-        from_peer_id,
-        to_peer_id,
     )
     .await;
 
@@ -1288,12 +1277,11 @@ async fn run_sql(
 enum RegionMigrationEvents {
     Schema,
     Table,
-    TriggerReason,
-    Status,
+    EventType,
+    RegionMigrationTriggerReason,
+    RegionMigrationStatus,
     ProcedureId,
     RegionId,
-    FromDatanodeId,
-    ToDatanodeId,
     Timestamp,
 }
 
@@ -1304,14 +1292,14 @@ impl Iden for RegionMigrationEvents {
             "{}",
             match self {
                 Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
-                Self::Table => REGION_MIGRATION_EVENTS_TABLE_NAME,
-                Self::TriggerReason => REGION_MIGRATION_EVENTS_TABLE_TRIGGER_REASON_COLUMN_NAME,
-                Self::Status => REGION_MIGRATION_EVENTS_TABLE_STATUS_COLUMN_NAME,
-                Self::ProcedureId => REGION_MIGRATION_EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
-                Self::RegionId => REGION_MIGRATION_EVENTS_TABLE_REGION_ID_COLUMN_NAME,
-                Self::FromDatanodeId => REGION_MIGRATION_EVENTS_TABLE_FROM_DATANODE_ID_COLUMN_NAME,
-                Self::ToDatanodeId => REGION_MIGRATION_EVENTS_TABLE_TO_DATANODE_ID_COLUMN_NAME,
-                Self::Timestamp => REGION_MIGRATION_EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+                Self::Table => DEFAULT_EVENTS_TABLE_NAME,
+                Self::EventType => EVENTS_TABLE_TYPE_COLUMN_NAME,
+                Self::RegionMigrationTriggerReason =>
+                    EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME,
+                Self::RegionMigrationStatus => EVENTS_TABLE_REGION_MIGRATION_STATUS_COLUMN_NAME,
+                Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+                Self::RegionId => EVENTS_TABLE_REGION_ID_COLUMN_NAME,
+                Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
             }
         )
         .unwrap();
@@ -1322,28 +1310,24 @@ async fn check_region_migration_events_system_table(
     fe_instance: &Arc<Instance>,
     procedure_id: &str,
     region_id: u64,
-    from_datanode_id: u64,
-    to_datanode_id: u64,
 ) {
     // Sleep for while to ensure the event is recorded.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // The query is equivalent to the following SQL:
-    //   SELECT trigger_reason, status FROM region_migration_events WHERE
+    //   SELECT region_migration_trigger_reason, region_migration_status FROM greptime_private.events WHERE
+    //       type = 'region_migration' AND
     //       procedure_id = '${procedure_id}' AND
     //       table_id = ${table_id} AND
-    //       region_id = ${region_id} AND
-    //       from_datanode_id = ${from_datanode_id} AND
-    //       to_datanode_id = ${to_datanode_id}
+    //       region_id = ${region_id}
     //       ORDER BY timestamp ASC
     let query = Query::select()
-        .column(RegionMigrationEvents::TriggerReason)
-        .column(RegionMigrationEvents::Status)
+        .column(RegionMigrationEvents::RegionMigrationTriggerReason)
+        .column(RegionMigrationEvents::RegionMigrationStatus)
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
+        .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
         .and_where(Expr::col(RegionMigrationEvents::RegionId).eq(region_id))
-        .and_where(Expr::col(RegionMigrationEvents::FromDatanodeId).eq(from_datanode_id))
-        .and_where(Expr::col(RegionMigrationEvents::ToDatanodeId).eq(to_datanode_id))
         .order_by(RegionMigrationEvents::Timestamp, Order::Asc)
         .to_string(PostgresQueryBuilder);
 
@@ -1353,12 +1337,12 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+----------------+----------+
-| trigger_reason | status   |
-+----------------+----------+
-| Manual         | Starting |
-| Manual         | Running  |
-| Manual         | Finished |
-+----------------+----------+";
++---------------------------------+-------------------------+
+| region_migration_trigger_reason | region_migration_status |
++---------------------------------+-------------------------+
+| Manual                          | Starting                |
+| Manual                          | Running                 |
+| Manual                          | Finished                |
++---------------------------------+-------------------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }

@@ -18,10 +18,12 @@ use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use common_event_recorder::EventRecorderRef;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
+use common_procedure::error::Error;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -30,7 +32,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
-use crate::event_recorder::{EventRecorderRef, RegionMigrationEvent, RegionMigrationStatus};
+use crate::events::{RegionMigrationEvent, RegionMigrationStatus};
 use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
 use crate::procedure::region_migration::{
     DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
@@ -409,6 +411,7 @@ impl RegionMigrationManager {
             task.clone(),
             procedure_id,
             RegionMigrationStatus::Starting,
+            None,
         );
 
         let procedure_manager = self.procedure_manager.clone();
@@ -422,7 +425,8 @@ impl RegionMigrationManager {
                         &event_recorder,
                         task.clone(),
                         procedure_id,
-                        RegionMigrationStatus::Failed(e),
+                        RegionMigrationStatus::Failed,
+                        Some(e),
                     );
                     return;
                 }
@@ -433,6 +437,7 @@ impl RegionMigrationManager {
                 task.clone(),
                 procedure_id,
                 RegionMigrationStatus::Running,
+                None,
             );
 
             METRIC_META_REGION_MIGRATION_DATANODES
@@ -449,7 +454,8 @@ impl RegionMigrationManager {
                     &event_recorder,
                     task.clone(),
                     procedure_id,
-                    RegionMigrationStatus::Failed(e),
+                    RegionMigrationStatus::Failed,
+                    Some(e),
                 );
                 return;
             }
@@ -461,6 +467,7 @@ impl RegionMigrationManager {
                 task,
                 procedure_id,
                 RegionMigrationStatus::Finished,
+                None,
             );
         });
 
@@ -473,11 +480,13 @@ fn record_region_migration_event(
     task: RegionMigrationProcedureTask,
     procedure_id: ProcedureId,
     status: RegionMigrationStatus,
+    error: Option<Error>,
 ) {
     if let Err(e) = event_recorder.record(Box::new(RegionMigrationEvent::new(
         task,
         procedure_id,
         status,
+        error,
     ))) {
         error!(e; "Failed to record region migration event for procedure {procedure_id}");
     }

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_event_recorder::{EventRecorderImpl, EventRecorderOptions, EventRecorderRef};
 use common_meta::ddl::NoopRegionFailureDetectorControl;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -42,7 +43,7 @@ use table::metadata::RawTableInfo;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientBuilder;
 use crate::error::{self, Error, Result};
-use crate::event_recorder::{EventRecorderImpl, EventRecorderRef};
+use crate::events::EventHandlerImpl;
 use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -101,13 +102,16 @@ impl TestingEnv {
         ));
 
         let event_recorder = Arc::new(EventRecorderImpl::new(
-            MetaPeerClientBuilder::default()
-                .election(None)
-                .in_memory(kv_backend.clone())
-                .build()
-                .map(Arc::new)
-                // Safety: all required fields set at initialization
-                .unwrap(),
+            Box::new(EventHandlerImpl::new(
+                MetaPeerClientBuilder::default()
+                    .election(None)
+                    .in_memory(kv_backend.clone())
+                    .build()
+                    .map(Arc::new)
+                    // Safety: all required fields set at initialization
+                    .unwrap(),
+            )),
+            EventRecorderOptions::default(),
         ));
 
         Self {
