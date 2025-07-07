@@ -2370,6 +2370,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datatypes",
  "derive_more",
+ "futures",
  "geo",
  "geo-types",
  "geohash",
