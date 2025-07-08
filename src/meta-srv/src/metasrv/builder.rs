@@ -331,7 +331,7 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
-            event_recorder.clone(),
+            event_recorder,
         ));
         region_migration_manager.try_start()?;
         let region_supervisor_selector = plugins

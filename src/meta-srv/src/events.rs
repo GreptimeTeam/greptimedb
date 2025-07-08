@@ -26,7 +26,7 @@ use common_event_recorder::{build_row_inserts_request, insert_hints, Event, Even
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::debug;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::cluster::MetaPeerClientRef;
 pub use crate::events::region_migration_event::*;
@@ -67,9 +67,7 @@ impl EventHandlerImpl {
             .await
             .context(KvBackendSnafu)?;
 
-        if frontends.is_empty() {
-            return NoAvailableFrontendSnafu.fail();
-        }
+        ensure!(!frontends.is_empty(), NoAvailableFrontendSnafu);
 
         let urls = frontends
             .into_iter()

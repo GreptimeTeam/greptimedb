@@ -370,10 +370,6 @@
 | `wal.replication_factor` | Integer | `1` | Expected number of replicas of each partition. |
 | `wal.create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
-| `event_recorder.channel_size` | Integer | `2048` | The capacity of the tokio channel for transmitting events to background processor. |
-| `event_recorder.buffer_size` | Integer | `100` | The size of the buffer for batching events before flushing to event handler. |
-| `event_recorder.flush_interval` | String | `5s` | The time interval for flushing batched events to the event handler. |
-| `event_recorder.max_retry_times` | Integer | `3` | The maximum number of retry attempts when event handler processing fails. |
 | `event_recorder.ttl` | String | `30d` | TTL for the events table that will be used to store the events. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |

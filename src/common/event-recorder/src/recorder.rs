@@ -25,18 +25,15 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, PlainError};
-use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::error::{MismatchedSchemaSnafu, Result, SendEventSnafu};
+use crate::error::{MismatchedSchemaSnafu, Result};
 
 /// The default table name for storing the events.
 pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
@@ -53,7 +50,17 @@ pub type EventRecorderRef = Arc<dyn EventRecorder>;
 
 static EVENTS_TABLE_TTL: OnceLock<String> = OnceLock::new();
 
+/// The time interval for flushing batched events to the event handler.
+pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+// The default TTL for the events table.
 const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
+// The capacity of the tokio channel for transmitting events to background processor.
+const DEFAULT_CHANNEL_SIZE: usize = 2048;
+// The size of the buffer for batching events before flushing to event handler.
+const DEFAULT_BUFFER_SIZE: usize = 100;
+// The maximum number of retry attempts when event handler processing fails.
+const DEFAULT_MAX_RETRY_TIMES: u64 = 3;
+
 /// Event trait defines the interface for events that can be recorded and persisted as the system table.
 pub trait Event: Send + Sync + Debug {
     /// Returns the type of the event.
@@ -185,7 +192,7 @@ fn validate_events(events: &[&Box<dyn Event>]) -> Result<()> {
 /// EventRecorder trait defines the interface for recording events.
 pub trait EventRecorder: Send + Sync + 'static {
     /// Records an event for persistence and processing by [EventHandler].
-    fn record(&self, event: Box<dyn Event>) -> Result<()>;
+    fn record(&self, event: Box<dyn Event>);
 }
 
 /// EventHandler trait defines the interface for how to handle the event.
@@ -199,15 +206,6 @@ pub trait EventHandler: Send + Sync + 'static {
 /// Configuration options for the event recorder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventRecorderOptions {
-    /// The capacity of the tokio channel for transmitting events to background processor.
-    pub channel_size: usize,
-    /// The size of the buffer for batching events before flushing to event handler.
-    pub buffer_size: usize,
-    /// The time interval for flushing batched events to the event handler.
-    #[serde(with = "humantime_serde")]
-    pub flush_interval: Duration,
-    /// The maximum number of retry attempts when event handler processing fails.
-    pub max_retry_times: u64,
     /// TTL for the events table that will be used to store the events.
     pub ttl: String,
 }
@@ -215,10 +213,6 @@ pub struct EventRecorderOptions {
 impl Default for EventRecorderOptions {
     fn default() -> Self {
         Self {
-            channel_size: 2048,
-            buffer_size: 100,
-            flush_interval: Duration::from_secs(5),
-            max_retry_times: 3,
             ttl: DEFAULT_EVENTS_TABLE_TTL.to_string(),
         }
     }
@@ -236,23 +230,30 @@ impl EventRecorderImpl {
     pub fn new(event_handler: Box<dyn EventHandler>, opts: EventRecorderOptions) -> Self {
         info!("Creating event recorder with options: {:?}", opts);
 
-        let (tx, rx) = channel(opts.channel_size);
+        let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
 
         let mut recorder = Self { tx, handle: None };
 
-        let processor =
-            EventProcessor::new(rx, event_handler, opts.flush_interval, opts.max_retry_times);
+        let processor = EventProcessor::new(
+            rx,
+            event_handler,
+            DEFAULT_FLUSH_INTERVAL,
+            DEFAULT_MAX_RETRY_TIMES,
+        );
 
         // Spawn a background task to process the events.
         let handle = tokio::spawn(async move {
-            processor.process(opts.buffer_size).await;
+            processor.process(DEFAULT_BUFFER_SIZE).await;
         });
 
         recorder.handle = Some(handle);
 
         // It only sets the ttl once, so it's safe to skip the error.
-        if EVENTS_TABLE_TTL.set(opts.ttl).is_err() {
-            info!("Events table ttl already set, skip setting it");
+        if EVENTS_TABLE_TTL.set(opts.ttl.clone()).is_err() {
+            info!(
+                "Events table ttl already set to {}, skip setting it",
+                opts.ttl
+            );
         }
 
         recorder
@@ -261,11 +262,10 @@ impl EventRecorderImpl {
 
 impl EventRecorder for EventRecorderImpl {
     // Accepts an event and send it to the background handler.
-    fn record(&self, event: Box<dyn Event>) -> Result<()> {
-        self.tx
-            .try_send(event)
-            .map_err(|e| BoxedError::new(PlainError::new(e.to_string(), StatusCode::Internal)))
-            .context(SendEventSnafu)
+    fn record(&self, event: Box<dyn Event>) {
+        if let Err(e) = self.tx.try_send(event) {
+            error!("Failed to send event to the background processor: {}", e);
+        }
     }
 }
 
@@ -355,12 +355,12 @@ impl EventProcessor {
                     ))
                     .await;
                 } else {
-                    info!("Successfully handled {} events", buffer.len());
+                    debug!("Successfully handled {} events", buffer.len());
                     break;
                 }
 
                 if retry > self.max_retry_times {
-                    error!(
+                    warn!(
                         "Failed to handle {} events after {} retries",
                         buffer.len(),
                         self.max_retry_times
@@ -417,15 +417,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_recorder() {
-        let opts = EventRecorderOptions {
-            flush_interval: Duration::from_millis(1), // almost immediate flush for testing.
-            ..Default::default()
-        };
-        let mut event_recorder = EventRecorderImpl::new(Box::new(TestEventHandlerImpl {}), opts);
-        event_recorder.record(Box::new(TestEvent {})).unwrap();
+        let mut event_recorder = EventRecorderImpl::new(
+            Box::new(TestEventHandlerImpl {}),
+            EventRecorderOptions::default(),
+        );
+        event_recorder.record(Box::new(TestEvent {}));
 
         // Sleep for a while to let the background task process the event.
-        sleep(Duration::from_millis(50)).await;
+        sleep(DEFAULT_FLUSH_INTERVAL * 2).await;
 
         let handle = event_recorder.handle.take().unwrap();
 

@@ -2305,7 +2305,6 @@ dependencies = [
  "common-meta",
  "common-telemetry",
  "common-time",
- "humantime-serde",
  "serde",
  "serde_json",
  "snafu 0.8.5",

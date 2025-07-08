@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::ColumnSchema;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -22,14 +22,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to send event"))]
-    SendEvent {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Failed to insert events"))]
     InsertEvents {
         #[snafu(implicit)]
@@ -73,7 +65,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::SendEvent { source, .. } => source.status_code(),
             Error::SerializeEvent { .. } | Error::MismatchedSchema { .. } => {
                 StatusCode::InvalidArguments
             }

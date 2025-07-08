@@ -18,7 +18,8 @@ use std::time::Duration;
 use client::{OutputData, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_event_recorder::{
-    DEFAULT_EVENTS_TABLE_NAME, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME, EVENTS_TABLE_TYPE_COLUMN_NAME,
+    DEFAULT_EVENTS_TABLE_NAME, DEFAULT_FLUSH_INTERVAL, EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+    EVENTS_TABLE_TYPE_COLUMN_NAME,
 };
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
@@ -1312,7 +1313,7 @@ async fn check_region_migration_events_system_table(
     region_id: u64,
 ) {
     // Sleep for while to ensure the event is recorded.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(DEFAULT_FLUSH_INTERVAL * 2).await;
 
     // The query is equivalent to the following SQL:
     //   SELECT region_migration_trigger_reason, region_migration_status FROM greptime_private.events WHERE

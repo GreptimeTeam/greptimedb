@@ -214,14 +214,6 @@ create_topic_timeout = "30s"
 
 ## Configuration options for the event recorder.
 [event_recorder]
-## The capacity of the tokio channel for transmitting events to background processor.
-channel_size = 2048
-## The size of the buffer for batching events before flushing to event handler.
-buffer_size = 100
-## The time interval for flushing batched events to the event handler.
-flush_interval = "5s"
-## The maximum number of retry attempts when event handler processing fails.
-max_retry_times = 3
 ## TTL for the events table that will be used to store the events.
 ttl = "30d"
 

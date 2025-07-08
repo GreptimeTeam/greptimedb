@@ -34,10 +34,19 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{Error, KvBackendSnafu, Result};
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
-fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
-    move |v: &LeaseValue| {
-        ((time_util::current_time_millis() - v.timestamp_millis) as u64)
-            < lease_secs.saturating_mul(1000)
+enum Value<'a> {
+    LeaseValue(&'a LeaseValue),
+    NodeInfo(&'a NodeInfo),
+}
+
+fn build_lease_filter(lease_secs: u64) -> impl Fn(Value) -> bool {
+    move |value: Value| {
+        let active_time = match value {
+            Value::LeaseValue(lease_value) => lease_value.timestamp_millis,
+            Value::NodeInfo(node_info) => node_info.last_activity_ts,
+        };
+
+        ((time_util::current_time_millis() - active_time) as u64) < lease_secs.saturating_mul(1000)
     }
 }
 
@@ -94,7 +103,7 @@ pub async fn lookup_datanode_peer(
         return Ok(None);
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
-    let is_alive = lease_filter(&lease_value);
+    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -158,7 +167,7 @@ where
             let condition = this.condition;
             let key_prefix = std::mem::take(&mut this.key_prefix);
             let fut = filter(key_prefix, this.meta_peer_client, move |v| {
-                lease_filter(v) && condition.unwrap_or(|_| true)(v)
+                lease_filter(Value::LeaseValue(v)) && condition.unwrap_or(|_| true)(v)
             });
 
             this.inner_future = Some(Box::pin(fut));
@@ -195,7 +204,7 @@ pub async fn lookup_flownode_peer(
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
 
-    let is_alive = lease_filter(&lease_value);
+    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -215,12 +224,12 @@ pub async fn lookup_frontends(
         RangeRequest::new().with_prefix(NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend));
 
     let response = meta_peer_client.range(range_request).await?;
+    let lease_filter = build_lease_filter(lease_secs);
 
     let mut peers = Vec::with_capacity(response.kvs.len());
     for kv in response.kvs {
         let node_info = NodeInfo::try_from(kv.value).context(KvBackendSnafu)?;
-        let is_alive = ((time_util::current_time_millis() - node_info.last_activity_ts) as u64)
-            < lease_secs.saturating_mul(1000);
+        let is_alive = lease_filter(Value::NodeInfo(&node_info));
         if is_alive {
             peers.push(node_info.peer);
         }
