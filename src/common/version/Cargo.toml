@@ -18,3 +18,4 @@ shadow-rs.workspace = true
 [build-dependencies]
 build-data = "0.2"
 shadow-rs.workspace = true
+cargo-manifest = "0.19"

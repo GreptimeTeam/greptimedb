@@ -112,7 +112,7 @@ pub trait App: Send {
 pub fn log_versions(version: &str, short_version: &str, app: &str) {
     // Report app version as gauge.
     APP_VERSION
-        .with_label_values(&[env!("CARGO_PKG_VERSION"), short_version, app])
+        .with_label_values(&[common_version::version(), short_version, app])
         .inc();
 
     // Log version and argument flags.

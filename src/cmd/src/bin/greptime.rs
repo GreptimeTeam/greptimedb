@@ -144,7 +144,7 @@ async fn start(cli: Command) -> Result<()> {
 
 fn setup_human_panic() {
     human_panic::setup_panic!(
-        human_panic::Metadata::new("GreptimeDB", env!("CARGO_PKG_VERSION"))
+        human_panic::Metadata::new("GreptimeDB", common_version::version())
             .homepage("https://github.com/GreptimeTeam/greptimedb/discussions")
     );
 

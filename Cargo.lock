@@ -1603,6 +1603,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acbc26382d871df4b7442e3df10a9402bf3cf5e55cbd66f12be38861425f0564"
 
 [[package]]
+name = "cargo-manifest"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d8af896b707212cd0e99c112a78c9497dd32994192a463ed2f7419d29bd8c6"
+dependencies = [
+ "serde",
+ "thiserror 2.0.12",
+ "toml 0.8.19",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2674,6 +2685,7 @@ version = "0.16.0"
 dependencies = [
  "backtrace",
  "common-error",
+ "common-version",
  "console-subscriber",
  "greptime-proto",
  "humantime-serde",
@@ -2731,6 +2743,7 @@ name = "common-version"
 version = "0.16.0"
 dependencies = [
  "build-data",
+ "cargo-manifest",
  "const_format",
  "serde",
  "shadow-rs",
@@ -13155,6 +13168,7 @@ version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1ed1f98e3fdc28d6d910e6737ae6ab1a93bf1985935a1193e68f93eeb68d24e"
 dependencies = [
+ "indexmap 2.9.0",
  "serde",
  "serde_spanned",
  "toml_datetime",
