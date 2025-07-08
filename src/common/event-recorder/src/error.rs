@@ -59,26 +59,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Mismatched event type, expected: {}, actual: {}", expected, actual))]
-    MismatchedEventType {
-        #[snafu(implicit)]
-        location: Location,
-        expected: String,
-        actual: String,
-    },
-
     #[snafu(display("Mismatched schema, expected: {:?}, actual: {:?}", expected, actual))]
     MismatchedSchema {
         #[snafu(implicit)]
         location: Location,
         expected: Vec<ColumnSchema>,
         actual: Vec<ColumnSchema>,
-    },
-
-    #[snafu(display("Empty events"))]
-    EmptyEvents {
-        #[snafu(implicit)]
-        location: Location,
     },
 }
 
@@ -88,10 +74,9 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::SendEvent { source, .. } => source.status_code(),
-            Error::SerializeEvent { .. }
-            | Error::MismatchedEventType { .. }
-            | Error::MismatchedSchema { .. }
-            | Error::EmptyEvents { .. } => StatusCode::InvalidArguments,
+            Error::SerializeEvent { .. } | Error::MismatchedSchema { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::InsertEvents { .. }
             | Error::NoAvailableFrontend { .. }
             | Error::KvBackend { .. } => StatusCode::Internal,
