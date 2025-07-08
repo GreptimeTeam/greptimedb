@@ -2455,7 +2455,7 @@ transform:
         "test_pipeline_with_vrl",
         &client,
         "select * from d_table",
-        "[[2436,1716668197217000000]]",
+        "[[\"channel_1\",1716668197217000000]]",
     )
     .await;
 
