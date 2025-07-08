@@ -33,7 +33,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
 use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_time::timezone::set_default_timezone;
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -282,7 +282,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);

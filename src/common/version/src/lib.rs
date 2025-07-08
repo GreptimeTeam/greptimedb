@@ -112,6 +112,10 @@ pub const fn build_info() -> BuildInfo {
 const BUILD_INFO: BuildInfo = build_info();
 
 pub const fn version() -> &'static str {
+    BUILD_INFO.version
+}
+
+pub const fn verbose_version() -> &'static str {
     const_format::formatcp!(
         "\nbranch: {}\ncommit: {}\nclean: {}\nversion: {}",
         BUILD_INFO.branch,

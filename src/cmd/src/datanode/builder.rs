@@ -19,7 +19,7 @@ use catalog::kvbackend::MetaKvBackend;
 use common_base::Plugins;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::info;
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use datanode::datanode::DatanodeBuilder;
 use datanode::service::DatanodeServiceBuilder;
 use meta_client::MetaClientType;
@@ -67,7 +67,7 @@ impl InstanceBuilder {
             None,
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)

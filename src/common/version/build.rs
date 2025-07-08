@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::env;
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use build_data::{format_timestamp, get_source_time};
 use cargo_manifest::Manifest;
@@ -35,7 +36,7 @@ fn main() -> shadow_rs::SdResult<()> {
     // made as a submodule in another repo.
     let src_path = env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
 
-    let manifest = Manifest::from_path(&PathBuf::from(&src_path).join("Cargo.toml"))
+    let manifest = Manifest::from_path(PathBuf::from(&src_path).join("Cargo.toml"))
         .expect("Failed to parse Cargo.toml");
     if let Some(product_version) = manifest.workspace.as_ref().and_then(|w| {
         w.metadata.as_ref().and_then(|m| {
