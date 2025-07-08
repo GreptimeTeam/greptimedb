@@ -26,7 +26,7 @@ use api::v1::{
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -208,7 +208,10 @@ impl EventRecorderImpl {
 
         recorder.handle = Some(handle);
 
-        EVENTS_TABLE_TTL.set(opts.ttl).unwrap();
+        // It only sets the ttl once, so it's safe to skip the error.
+        if EVENTS_TABLE_TTL.set(opts.ttl).is_err() {
+            info!("Events table ttl already set, skip setting it");
+        }
 
         recorder
     }
@@ -255,10 +258,10 @@ impl EventProcessor {
         }
     }
 
-    async fn process(mut self, batch_size: usize) {
+    async fn process(mut self, buffer_size: usize) {
         info!("Start the background processor in event recorder to handle the received events.");
 
-        let mut buffer = Vec::with_capacity(batch_size);
+        let mut buffer = Vec::with_capacity(buffer_size);
         let mut interval = tokio::time::interval(self.process_interval);
 
         loop {
@@ -266,6 +269,15 @@ impl EventProcessor {
                 maybe_event = self.rx.recv() => {
                     if let Some(maybe_event) = maybe_event {
                         debug!("Received event: {:?}", maybe_event);
+
+                        if buffer.len() >= buffer_size {
+                            warn!(
+                                "Flushing events to the event handler because the buffer is full with {} events",
+                                buffer.len()
+                            );
+                            self.flush_events_to_handler(&mut buffer).await;
+                        }
+
                         // Push the event to the buffer, the buffer will be flushed when the interval is triggered or received a closed signal.
                         buffer.push(maybe_event);
                     } else {
