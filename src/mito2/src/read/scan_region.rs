@@ -1057,7 +1057,7 @@ impl StreamContext {
         }
         write!(
             f,
-            r#"partition_count:{{count:{}, mem_ranges:{}, files:{}, file_ranges:{}"#,
+            r#""partition_count":{{"count":{}, "mem_ranges":{}, "files":{}, "file_ranges":{}"#,
             self.ranges.len(),
             num_mem_ranges,
             self.input.num_files(),
