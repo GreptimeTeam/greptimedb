@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
-use common_event_recorder::{EventRecorderImpl, EventRecorderOptions};
+use common_event_recorder::EventRecorderImpl;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -196,7 +196,7 @@ impl MetasrvBuilder {
         // Builds the event recorder to record important events and persist them as the system table.
         let event_recorder = Arc::new(EventRecorderImpl::new(
             Box::new(EventHandlerImpl::new(meta_peer_client.clone())),
-            EventRecorderOptions::default(),
+            options.event_recorder.clone(),
         ));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
