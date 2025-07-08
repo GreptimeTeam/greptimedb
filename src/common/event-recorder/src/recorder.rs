@@ -21,7 +21,7 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, Rows, SemanticType,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
@@ -35,7 +35,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::error::{Result, SendEventSnafu};
+use crate::error::{EmptyEventsSnafu, MismatchedEventTypeSnafu, Result, SendEventSnafu};
 
 /// The default table name for storing the events.
 pub const DEFAULT_EVENTS_TABLE_NAME: &str = "events";
@@ -94,9 +94,14 @@ pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Builds the row insert request for the event that will be persisted to the events table.
+/// Builds the row inserts request for the events that will be persisted to the events table.
 // TODO(zyy17): Add the schema validation to avoid the conflict of the schema.
-pub fn build_row_insert_request(event: &dyn Event) -> Result<RowInsertRequest> {
+pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertRequests> {
+    // Ensure every event has the same event type.
+    validate_events(events)?;
+
+    // We already validated the events, so it's safe to get the first event to build the schema for the whole RowInsertRequest.
+    let event = &events[0];
     let mut schema = vec![
         ColumnSchema {
             column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
@@ -122,24 +127,54 @@ pub fn build_row_insert_request(event: &dyn Event) -> Result<RowInsertRequest> {
     ];
     schema.extend(event.extra_schema());
 
-    let mut row = Row {
-        values: vec![
-            ValueData::StringValue(event.event_type().to_string()).into(),
-            ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
-            ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
-        ],
-    };
-    row.values.extend(event.extra_row()?.values);
+    let rows = events
+        .iter()
+        .map(|event| {
+            let mut row = Row {
+                values: vec![
+                    ValueData::StringValue(event.event_type().to_string()).into(),
+                    ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
+                    ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+                ],
+            };
+            row.values.extend(event.extra_row()?.values);
+            Ok(row)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    Ok(RowInsertRequest {
-        table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
-        rows: Some(Rows {
-            schema,
-            rows: vec![row],
-        }),
+    debug!(
+        "Building row insert request with {} events, schema: {:?}, rows: {:?}",
+        rows.len(),
+        schema,
+        rows
+    );
+
+    Ok(RowInsertRequests {
+        inserts: vec![RowInsertRequest {
+            table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+            rows: Some(Rows { schema, rows }),
+        }],
     })
 }
 
+// For every event, we need to ensure the event type is the same.
+fn validate_events(events: &[Box<dyn Event>]) -> Result<()> {
+    if events.is_empty() {
+        EmptyEventsSnafu.fail()?;
+    }
+
+    let event_type = events[0].event_type();
+    for event in events {
+        if event.event_type() != event_type {
+            MismatchedEventTypeSnafu {
+                expected: event_type.to_string(),
+                actual: event.event_type().to_string(),
+            }
+            .fail()?;
+        }
+    }
+    Ok(())
+}
 /// EventRecorder trait defines the interface for recording events.
 pub trait EventRecorder: Send + Sync + 'static {
     /// Records an event for persistence and processing by [EventHandler].

@@ -16,14 +16,13 @@ pub mod region_migration_event;
 
 use std::sync::Arc;
 
-use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use client::{Client, Database};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_event_recorder::error::{
     InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result,
 };
-use common_event_recorder::{build_row_insert_request, insert_hints, Event, EventHandler};
+use common_event_recorder::{build_row_inserts_request, insert_hints, Event, EventHandler};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::debug;
@@ -51,22 +50,11 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        debug!("Received {} events: {:?}", events.len(), events);
-        let database_client = self.build_database_client().await?;
-        let row_inserts = RowInsertRequests {
-            inserts: events
-                .iter()
-                .map(|e| build_row_insert_request(e.as_ref()))
-                .collect::<Result<Vec<_>>>()?,
-        };
-
-        debug!("Inserting events: {:?}", row_inserts);
-
-        database_client
-            .row_inserts_with_hints(row_inserts, &insert_hints())
+        self.build_database_client()
+            .await?
+            .row_inserts_with_hints(build_row_inserts_request(events)?, &insert_hints())
             .await
             .context(InsertEventsSnafu)?;
-
         Ok(())
     }
 }

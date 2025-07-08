@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::ColumnSchema;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -57,6 +58,28 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Mismatched event type, expected: {}, actual: {}", expected, actual))]
+    MismatchedEventType {
+        #[snafu(implicit)]
+        location: Location,
+        expected: String,
+        actual: String,
+    },
+
+    #[snafu(display("Mismatched schema, expected: {:?}, actual: {:?}", expected, actual))]
+    MismatchedSchema {
+        #[snafu(implicit)]
+        location: Location,
+        expected: Vec<ColumnSchema>,
+        actual: Vec<ColumnSchema>,
+    },
+
+    #[snafu(display("Empty events"))]
+    EmptyEvents {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -65,7 +88,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::SendEvent { source, .. } => source.status_code(),
-            Error::SerializeEvent { .. } => StatusCode::InvalidArguments,
+            Error::SerializeEvent { .. }
+            | Error::MismatchedEventType { .. }
+            | Error::MismatchedSchema { .. }
+            | Error::EmptyEvents { .. } => StatusCode::InvalidArguments,
             Error::InsertEvents { .. }
             | Error::NoAvailableFrontend { .. }
             | Error::KvBackend { .. } => StatusCode::Internal,
