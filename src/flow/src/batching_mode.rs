@@ -36,10 +36,10 @@ pub struct BatchingModeOptions {
     /// The minimum duration between two queries execution by batching mode task
     #[serde(with = "humantime_serde")]
     pub min_refresh_duration: Duration,
-    /// Grpc connection timeout
+    /// The gRPC connection timeout
     #[serde(with = "humantime_serde")]
     pub grpc_conn_timeout: Duration,
-    /// Grpc max retry number
+    /// The gRPC max retry number
     pub grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
     /// if failed to find available frontend after frontend_scan_timeout elapsed, return error

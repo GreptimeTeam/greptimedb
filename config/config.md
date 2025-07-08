@@ -566,8 +566,8 @@
 | `flow.batching_mode.query_timeout` | String | `600s` | The default batching engine query timeout is 10 minutes |
 | `flow.batching_mode.slow_query_threshold` | String | `60s` | will output a warn log for any query that runs for more that this threshold |
 | `flow.batching_mode.min_refresh_duration` | String | `5s` | The minimum duration between two queries execution by batching mode task |
-| `flow.batching_mode.grpc_conn_timeout` | String | `5s` | Grpc connection timeout |
-| `flow.batching_mode.grpc_max_retries` | Integer | `3` | Grpc max retry number |
+| `flow.batching_mode.grpc_conn_timeout` | String | `5s` | The gRPC connection timeout |
+| `flow.batching_mode.grpc_max_retries` | Integer | `3` | The gRPC max retry number |
 | `flow.batching_mode.frontend_scan_timeout` | String | `30s` | Flow wait for available frontend timeout,<br/>if failed to find available frontend after frontend_scan_timeout elapsed, return error<br/>which prevent flownode from starting |
 | `flow.batching_mode.frontend_activity_timeout` | String | `60s` | Frontend activity timeout<br/>if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,<br/>it will be removed from the list that flownode use to connect |
 | `flow.batching_mode.max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
