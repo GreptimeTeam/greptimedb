@@ -102,7 +102,7 @@ impl App for Instance {
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    pub subcmd: SubCommand,
 }
 
 impl Command {
@@ -116,7 +116,7 @@ impl Command {
 }
 
 #[derive(Parser)]
-enum SubCommand {
+pub enum SubCommand {
     Start(StartCommand),
 }
 
@@ -153,7 +153,7 @@ pub struct StartCommand {
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(short, long)]
-    config_file: Option<String>,
+    pub config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
     #[clap(long, value_delimiter = ',', num_args = 1..)]
@@ -169,7 +169,7 @@ pub struct StartCommand {
     #[clap(long)]
     disable_dashboard: Option<bool>,
     #[clap(long, default_value = "GREPTIMEDB_FRONTEND")]
-    env_prefix: String,
+    pub env_prefix: String,
 }
 
 impl StartCommand {
