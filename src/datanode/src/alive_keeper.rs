@@ -86,26 +86,33 @@ impl RegionAliveKeeper {
     /// Add the countdown task for a specific region.
     /// It will be ignored if the task exists.
     pub async fn register_region(&self, region_id: RegionId) {
-        if self.find_handle(region_id).await.is_some() {
-            return;
-        }
-
         let handle = Arc::new(CountdownTaskHandle::new(
             self.region_server.clone(),
             self.countdown_task_handler_ext.clone(),
             region_id,
         ));
 
-        let mut handles = self.tasks.lock().await;
-        let _ = handles.insert(region_id, handle.clone());
+        let should_start = {
+            let mut handles = self.tasks.lock().await;
 
-        if self.started.load(Ordering::Relaxed) {
+            // Check if already exists, return early if so
+            if handles.contains_key(&region_id) {
+                return;
+            }
+
+            // Insert new handle
+            handles.insert(region_id, handle.clone());
+
+            // Return whether we should start (check state inside lock)
+            self.started.load(Ordering::Relaxed)
+        };
+
+        if should_start {
             handle.start(self.heartbeat_interval_millis).await;
-
-            info!("Region alive countdown for region {region_id} is started!",);
+            info!("Region alive countdown for region {region_id} is started!");
         } else {
             info!(
-                "Region alive countdown for region {region_id} is registered but not started yet!",
+                "Region alive countdown for region {region_id} is registered but not started yet!"
             );
         }
     }
