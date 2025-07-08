@@ -17,16 +17,13 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
 use datafusion_common::DataFusionError;
-use datafusion_sql::sqlparser::ast::UnaryOperator;
 use datatypes::prelude::{ConcreteDataType, Value};
 use snafu::{Location, Snafu};
 use sqlparser::ast::Ident;
 use sqlparser::parser::ParserError;
 
-use crate::ast::{Expr, Value as SqlValue};
+use crate::ast::Expr;
 use crate::parsers::error::TQLError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -55,18 +52,6 @@ pub enum Error {
         actual: String,
         #[snafu(source)]
         error: ParserError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Unsupported expr in default constraint: {:?} for column: {}",
-        expr,
-        column_name
-    ))]
-    UnsupportedDefaultValue {
-        column_name: String,
-        expr: Expr,
         #[snafu(implicit)]
         location: Location,
     },
@@ -218,30 +203,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to cast SQL value {} to datatype {}", sql_value, datatype))]
-    InvalidCast {
-        sql_value: sqlparser::ast::Value,
-        datatype: ConcreteDataType,
-        #[snafu(implicit)]
-        location: Location,
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Invalid unary operator {} for value {}", unary_op, value))]
-    InvalidUnaryOp {
-        unary_op: UnaryOperator,
-        value: Value,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unsupported unary operator {}", unary_op))]
-    UnsupportedUnaryOp {
-        unary_op: UnaryOperator,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unrecognized table option key: {}", key))]
     InvalidTableOption {
         key: String,
@@ -271,36 +232,9 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Invalid sql value: {}", value))]
-    InvalidSqlValue {
-        value: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display(
-        "Converting timestamp {:?} to unit {:?} overflow",
-        timestamp,
-        target_unit
-    ))]
-    TimestampOverflow {
-        timestamp: Timestamp,
-        target_unit: TimeUnit,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Unable to convert statement {} to DataFusion statement", statement))]
     ConvertToDfStatement {
         statement: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unable to convert sql value {} to datatype {:?}", value, datatype))]
-    ConvertSqlValue {
-        value: SqlValue,
-        datatype: ConcreteDataType,
         #[snafu(implicit)]
         location: Location,
     },
@@ -354,27 +288,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Datatype error: {}", source))]
-    Datatype {
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Invalid partition number: {}, should be in range [2, 65536]",
         partition_num
     ))]
     InvalidPartitionNumber {
         partition_num: u32,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unable to convert {} to datatype {:?}", value, datatype))]
-    ConvertStr {
-        value: String,
-        datatype: ConcreteDataType,
         #[snafu(implicit)]
         location: Location,
     },
@@ -410,6 +329,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Sql common error"))]
+    SqlCommon {
+        source: common_sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -417,7 +343,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
+            Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
             | TQLSyntax { .. }
@@ -441,17 +367,11 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | InvalidFlowName { .. }
             | InvalidFlowQuery { .. }
-            | InvalidSqlValue { .. }
-            | TimestampOverflow { .. }
             | InvalidTableOption { .. }
-            | InvalidCast { .. }
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
-            | InvalidUnaryOp { .. }
-            | InvalidPartitionNumber { .. }
-            | UnsupportedUnaryOp { .. }
-            | ConvertStr { .. } => StatusCode::InvalidArguments,
+            | InvalidPartitionNumber { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             InvalidTriggerName { .. } => StatusCode::InvalidArguments,
@@ -463,9 +383,9 @@ impl ErrorExt for Error {
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
-            Datatype { source, .. } => source.status_code(),
+            SqlCommon { source, .. } => source.status_code(),
             ConvertToDfStatement { .. } => StatusCode::Internal,
-            ConvertSqlValue { .. } | ConvertValue { .. } => StatusCode::Unsupported,
+            ConvertValue { .. } => StatusCode::Unsupported,
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
             SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
