@@ -120,3 +120,30 @@ ORDER BY
   true_collect_time DESC;
 
 DROP TABLE lightning;
+
+CREATE TABLE IF NOT EXISTS `instance_job_metrics` (
+  `greptime_timestamp` TIMESTAMP(3) NOT NULL,
+  `greptime_value` DOUBLE NULL,
+  `instance` STRING NULL,
+  `job` STRING NULL,
+  TIME INDEX (`greptime_timestamp`),
+  PRIMARY KEY (`instance`, `job`)
+);
+
+INSERT INTO `instance_job_metrics` VALUES
+  ('2023-10-01 00:00:01.000', 1696118400.0, 'node1', 'job1'),
+  ('2023-10-01 00:00:02.000', 1696118400.0, 'node2', 'job1'),
+  ('2023-10-01 00:00:03.000', 1696118400.0, 'node3', 'job2');
+
+TQL EVAL('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
+
+DROP TABLE IF EXISTS `instance_job_metrics`;
