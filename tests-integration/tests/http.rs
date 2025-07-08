@@ -2405,14 +2405,19 @@ processors:
       ignore_missing: true
   - vrl:
       source: |
-        .log_id = .id
-        del(.id)
+        .from_source = "channel_2"
+        cond, err = .id1 > .id2
+        if (cond) {
+            .from_source = "channel_1"
+        }
+        del(.id1)
+        del(.id2)
         .
 
 transform:
   - fields:
-      - log_id
-    type: int32
+      - from_source
+    type: string
   - field: time
     type: time
     index: timestamp
@@ -2432,7 +2437,8 @@ transform:
     let data_body = r#"
 [
   {
-    "id": "2436",
+    "id1": 2436,
+    "id2": 123,
     "time": "2024-05-25 20:16:37.217"
   }
 ]

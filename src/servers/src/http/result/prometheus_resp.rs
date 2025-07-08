@@ -322,7 +322,10 @@ impl PrometheusJsonResponse {
                 }
                 PromQueryResult::Matrix(ref mut v) => {
                     // sort values by timestamp
-                    values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                    if !values.is_sorted_by(|a, b| a.0 <= b.0) {
+                        values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                    }
+
                     v.push(PromSeriesMatrix { metric, values });
                 }
                 PromQueryResult::Scalar(ref mut v) => {
