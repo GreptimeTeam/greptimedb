@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
@@ -311,7 +312,7 @@ impl PrometheusJsonResponse {
             let metric = tags
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<HashMap<_, _>>();
+                .collect::<BTreeMap<_, _>>();
             match result {
                 PromQueryResult::Vector(ref mut v) => {
                     v.push(PromSeriesVector {
@@ -320,6 +321,7 @@ impl PrometheusJsonResponse {
                     });
                 }
                 PromQueryResult::Matrix(ref mut v) => {
+                    values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
                     v.push(PromSeriesMatrix { metric, values });
                 }
                 PromQueryResult::Scalar(ref mut v) => {
@@ -330,6 +332,12 @@ impl PrometheusJsonResponse {
                 }
             }
         });
+
+        // sort matrix by metric
+        // see: https://prometheus.io/docs/prometheus/3.5/querying/api/#range-vectors
+        if let PromQueryResult::Matrix(ref mut v) = result {
+            v.sort_by(|a, b| a.metric.cmp(&b.metric));
+        }
 
         let result_type_string = result_type.to_string();
         let data = PrometheusResponse::PromData(PromData {
