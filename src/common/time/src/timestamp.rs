@@ -498,6 +498,17 @@ impl Timestamp {
 
     pub const MIN_NANOSECOND: Self = Self::new_nanosecond(i64::MIN);
     pub const MAX_NANOSECOND: Self = Self::new_nanosecond(i64::MAX);
+
+    /// Checks if a value would overflow for the given time unit.
+    pub fn is_overflow(value: i64, unit: TimeUnit) -> bool {
+        let (min_val, max_val) = match unit {
+            TimeUnit::Second => (Self::MIN_SECOND.value(), Self::MAX_SECOND.value()),
+            TimeUnit::Millisecond => (Self::MIN_MILLISECOND.value(), Self::MAX_MILLISECOND.value()),
+            TimeUnit::Microsecond => (Self::MIN_MICROSECOND.value(), Self::MAX_MICROSECOND.value()),
+            TimeUnit::Nanosecond => (Self::MIN_NANOSECOND.value(), Self::MAX_NANOSECOND.value()),
+        };
+        value < min_val || value > max_val
+    }
 }
 
 /// Converts the naive datetime (which has no specific timezone) to a
