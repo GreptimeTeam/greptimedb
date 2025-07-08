@@ -156,7 +156,8 @@ TQL EVAL (0, 180, '60s') sum by(host) (rate(metrics[1m])) * 60;
 -- Test querying non-existent table
 TQL EVAL (0, 180, '60s') sum(rate(non_existent_table[1m]));
 
-Error: 1004(InvalidArguments), Expect a range selector, but not found
+++
+++
 
 -- Test querying non-existent label
 TQL EVAL (0, 180, '60s') sum(rate(metrics{non_existent_label="value"}[1m]));
@@ -185,12 +186,14 @@ TQL EVAL (0, 180, '60s') sum(rate(metrics{host="host1", non_existent_label="valu
 -- Test querying non-existent table with non-existent labels
 TQL EVAL (0, 180, '60s') sum(rate(non_existent_table{non_existent_label="value"}[1m]));
 
-Error: 1004(InvalidArguments), Expect a range selector, but not found
+++
+++
 
 -- Test querying non-existent table with multiple non-existent labels
 TQL EVAL (0, 180, '60s') sum(rate(non_existent_table{label1="value1", label2="value2"}[1m]));
 
-Error: 1004(InvalidArguments), Expect a range selector, but not found
+++
+++
 
 DROP TABLE metrics;
 
