@@ -96,9 +96,10 @@ impl PartSortExec {
 
         if partition >= self.partition_ranges.len() {
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "Partition index out of range: {} >= {} at {}",
                 partition,
-                self.partition_ranges.len()
+                self.partition_ranges.len(),
+                snafu::location!()
             )?;
         }
 
@@ -322,9 +323,10 @@ impl PartSortStream {
     ) -> datafusion_common::Result<()> {
         if self.cur_part_idx >= self.partition_ranges.len() {
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "Partition index out of range: {} >= {} at {}",
                 self.cur_part_idx,
-                self.partition_ranges.len()
+                self.partition_ranges.len(),
+                snafu::location!()
             )?;
         }
         let cur_range = self.partition_ranges[self.cur_part_idx];
@@ -355,9 +357,10 @@ impl PartSortStream {
         // check if the current partition index is out of range
         if self.cur_part_idx >= self.partition_ranges.len() {
             internal_err!(
-                "Partition index out of range: {} >= {}",
+                "Partition index out of range: {} >= {} at {}",
                 self.cur_part_idx,
-                self.partition_ranges.len()
+                self.partition_ranges.len(),
+                snafu::location!()
             )?;
         }
         let cur_range = self.partition_ranges[self.cur_part_idx];

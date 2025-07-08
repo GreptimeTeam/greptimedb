@@ -181,6 +181,15 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
             is_batch_coalesced = true;
         }
 
+        // only a very limited set of plans can exist between region scan and sort exec
+        // other plans might make this optimize wrong, so be safe here by limiting it
+        if !(plan.as_any().is::<ProjectionExec>()
+            || plan.as_any().is::<FilterExec>()
+            || plan.as_any().is::<CoalesceBatchesExec>())
+        {
+            partition_ranges = None;
+        }
+
         // TODO(discord9): do this in logical plan instead as it's lessy bugy there
         // Collects alias of the time index column.
         if let Some(projection) = plan.as_any().downcast_ref::<ProjectionExec>() {
@@ -194,6 +203,14 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         }
 
         if let Some(region_scan_exec) = plan.as_any().downcast_ref::<RegionScanExec>() {
+            // `PerSeries` distribution is not supported in windowed sort.
+            if region_scan_exec.distribution()
+                == Some(store_api::storage::TimeSeriesDistribution::PerSeries)
+            {
+                partition_ranges = None;
+                return Ok(Transformed::no(plan));
+            }
+
             partition_ranges = Some(region_scan_exec.get_uncollapsed_partition_ranges());
             // Reset time index column.
             time_index = HashSet::from([region_scan_exec.time_index()]);

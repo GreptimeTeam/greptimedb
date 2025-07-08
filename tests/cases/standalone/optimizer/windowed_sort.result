@@ -233,3 +233,65 @@ DROP TABLE lightning;
 
 Affected Rows: 0
 
+CREATE TABLE IF NOT EXISTS `instance_job_metrics` (
+  `greptime_timestamp` TIMESTAMP(3) NOT NULL,
+  `greptime_value` DOUBLE NULL,
+  `instance` STRING NULL,
+  `job` STRING NULL,
+  TIME INDEX (`greptime_timestamp`),
+  PRIMARY KEY (`instance`, `job`)
+);
+
+Affected Rows: 0
+
+INSERT INTO `instance_job_metrics` VALUES
+  ('2023-10-01 00:00:01.000', 1696118400.0, 'node1', 'job1'),
+  ('2023-10-01 00:00:02.000', 1696118400.0, 'node2', 'job1'),
+  ('2023-10-01 00:00:03.000', 1696118400.0, 'node3', 'job2');
+
+Affected Rows: 3
+
+TQL EVAL('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
+
++---------------------+------------------------------------------+
+| greptime_timestamp  | sum(instance_job_metrics.greptime_value) |
++---------------------+------------------------------------------+
+| 2023-10-01T00:00:01 | 1696118400.0                             |
+| 2023-10-01T00:00:02 | 3392236800.0                             |
+| 2023-10-01T00:00:03 | 5088355200.0                             |
+| 2023-10-01T00:00:04 | 5088355200.0                             |
+| 2023-10-01T00:00:05 | 5088355200.0                             |
++---------------------+------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+TQL ANALYZE('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(instance_job_REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(instance_job_REDACTED
+|_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, greptime_value@1 as greptime_value] REDACTED
+|_|_|_PromInstantManipulateExec: range=[1696118400000..1696118405000], lookback=[300000], interval=[1000], time index=[greptime_timestamp] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["instance", "job"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 5_|
++-+-+-+
+
+DROP TABLE IF EXISTS `instance_job_metrics`;
+
+Affected Rows: 0
+
