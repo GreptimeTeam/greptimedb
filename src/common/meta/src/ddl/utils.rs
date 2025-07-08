@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub(crate) mod raw_table_info;
+pub(crate) mod table_id;
+pub(crate) mod table_info;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
