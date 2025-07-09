@@ -241,7 +241,6 @@ impl RepairTool {
             let alter_table_request = alter_table::make_alter_region_request_for_peer(
                 logical_table_id,
                 &alter_table_expr,
-                full_table_metadata.table_info.ident.version,
                 peer,
                 physical_region_routes,
             )?;

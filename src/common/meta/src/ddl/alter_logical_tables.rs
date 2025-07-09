@@ -12,20 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod check;
-mod metadata;
-mod region_request;
-mod table_cache_keys;
+mod executor;
 mod update_metadata;
+mod validator;
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_catalog::format_full_table_name;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context, LockKey, Procedure, Status};
-use common_telemetry::{error, info, warn};
-use futures_util::future;
-pub use region_request::make_alter_region_request;
+use common_telemetry::{debug, error, info, warn};
+pub use executor::make_alter_region_request;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
@@ -33,10 +30,12 @@ use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
 use strum::AsRefStr;
 use table::metadata::TableId;
 
-use crate::ddl::utils::{
-    add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
-    sync_follower_regions,
+use crate::cache_invalidator::Context as CacheContext;
+use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
+use crate::ddl::alter_logical_tables::validator::{
+    retain_unskipped, AlterLogicalTableValidator, ValidatorResult,
 };
+use crate::ddl::utils::{extract_column_metadatas, map_to_procedure_error, sync_follower_regions};
 use crate::ddl::DdlContext;
 use crate::error::Result;
 use crate::instruction::CacheIdent;
@@ -46,11 +45,36 @@ use crate::key::DeserializedValueWithBytes;
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
-use crate::rpc::router::{find_leaders, RegionRoute};
+use crate::rpc::router::RegionRoute;
 
 pub struct AlterLogicalTablesProcedure {
     pub context: DdlContext,
     pub data: AlterTablesData,
+}
+
+/// Builds the validator from the [`AlterTablesData`].
+fn build_validator_from_alter_table_data<'a>(
+    data: &'a AlterTablesData,
+) -> AlterLogicalTableValidator<'a> {
+    let phsycial_table_id = data.physical_table_id;
+    let alters = data
+        .tasks
+        .iter()
+        .map(|task| &task.alter_table)
+        .collect::<Vec<_>>();
+    AlterLogicalTableValidator::new(phsycial_table_id, alters)
+}
+
+/// Builds the executor from the [`AlterTablesData`].
+fn build_executor_from_alter_expr<'a>(data: &'a AlterTablesData) -> AlterLogicalTablesExecutor<'a> {
+    debug_assert_eq!(data.tasks.len(), data.table_info_values.len());
+    let alters = data
+        .tasks
+        .iter()
+        .zip(data.table_info_values.iter())
+        .map(|(task, table_info)| (table_info.table_info.ident.table_id, &task.alter_table))
+        .collect::<Vec<_>>();
+    AlterLogicalTablesExecutor::new(alters)
 }
 
 impl AlterLogicalTablesProcedure {
@@ -82,35 +106,44 @@ impl AlterLogicalTablesProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        // Checks all the tasks
-        self.check_input_tasks()?;
-        // Fills the table info values
-        self.fill_table_info_values().await?;
-        // Checks the physical table, must after [fill_table_info_values]
-        self.check_physical_table().await?;
-        // Fills the physical table info
-        self.fill_physical_table_info().await?;
-        // Filter the finished tasks
-        let finished_tasks = self.check_finished_tasks()?;
-        let already_finished_count = finished_tasks
-            .iter()
-            .map(|x| if *x { 1 } else { 0 })
-            .sum::<usize>();
-        let apply_tasks_count = self.data.tasks.len();
-        if already_finished_count == apply_tasks_count {
+        let validator = build_validator_from_alter_table_data(&self.data);
+        let ValidatorResult {
+            num_skipped,
+            skip_alter,
+            table_info_values,
+            physical_table_info,
+            physical_table_route,
+        } = validator
+            .validate(&self.context.table_metadata_manager)
+            .await?;
+
+        let num_tasks = self.data.tasks.len();
+        if num_skipped == num_tasks {
             info!("All the alter tasks are finished, will skip the procedure.");
+            let cache_ident_keys = AlterLogicalTablesExecutor::build_cache_ident_keys(
+                &physical_table_info,
+                &table_info_values
+                    .iter()
+                    .map(|v| v.get_inner_ref())
+                    .collect::<Vec<_>>(),
+            );
+            self.data.table_cache_keys_to_invalidate = cache_ident_keys;
             // Re-invalidate the table cache
             self.data.state = AlterTablesState::InvalidateTableCache;
             return Ok(Status::executing(true));
-        } else if already_finished_count > 0 {
+        } else if num_skipped > 0 {
             info!(
                 "There are {} alter tasks, {} of them were already finished.",
-                apply_tasks_count, already_finished_count
+                num_tasks, num_skipped
             );
         }
-        self.filter_task(&finished_tasks)?;
 
-        // Next state
+        // Updates the procedure state.
+        retain_unskipped(&mut self.data.tasks, &skip_alter);
+        self.data.physical_table_info = Some(physical_table_info);
+        self.data.physical_table_route = Some(physical_table_route);
+        self.data.table_info_values = table_info_values;
+        debug_assert_eq!(self.data.tasks.len(), self.data.table_info_values.len());
         self.data.state = AlterTablesState::SubmitAlterRegionRequests;
         Ok(Status::executing(true))
     }
@@ -118,25 +151,13 @@ impl AlterLogicalTablesProcedure {
     pub(crate) async fn on_submit_alter_region_requests(&mut self) -> Result<Status> {
         // Safety: we have checked the state in on_prepare
         let physical_table_route = &self.data.physical_table_route.as_ref().unwrap();
-        let leaders = find_leaders(&physical_table_route.region_routes);
-        let mut alter_region_tasks = Vec::with_capacity(leaders.len());
-
-        for peer in leaders {
-            let requester = self.context.node_manager.datanode(&peer).await;
-            let request = self.make_request(&peer, &physical_table_route.region_routes)?;
-
-            alter_region_tasks.push(async move {
-                requester
-                    .handle(request)
-                    .await
-                    .map_err(add_peer_context_if_needed(peer))
-            });
-        }
-
-        let mut results = future::join_all(alter_region_tasks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let executor = build_executor_from_alter_expr(&self.data);
+        let mut results = executor
+            .on_alter_regions(
+                &self.context.node_manager,
+                &physical_table_route.region_routes,
+            )
+            .await?;
 
         if let Some(column_metadatas) =
             extract_column_metadatas(&mut results, ALTER_PHYSICAL_EXTENSION_KEY)?
@@ -177,7 +198,18 @@ impl AlterLogicalTablesProcedure {
         self.update_physical_table_metadata().await?;
         self.update_logical_tables_metadata().await?;
 
-        self.data.build_cache_keys_to_invalidate();
+        let logical_table_info_values = self
+            .data
+            .table_info_values
+            .iter()
+            .map(|v| v.get_inner_ref())
+            .collect::<Vec<_>>();
+
+        let cache_ident_keys = AlterLogicalTablesExecutor::build_cache_ident_keys(
+            self.data.physical_table_info.as_ref().unwrap(),
+            &logical_table_info_values,
+        );
+        self.data.table_cache_keys_to_invalidate = cache_ident_keys;
         self.data.clear_metadata_fields();
 
         self.data.state = AlterTablesState::InvalidateTableCache;
@@ -187,9 +219,16 @@ impl AlterLogicalTablesProcedure {
     pub(crate) async fn on_invalidate_table_cache(&mut self) -> Result<Status> {
         let to_invalidate = &self.data.table_cache_keys_to_invalidate;
 
+        let ctx = CacheContext {
+            subject: Some(format!(
+                "Invalidate table cache by altering logical tables, physical_table_id: {}",
+                self.data.physical_table_id,
+            )),
+        };
+
         self.context
             .cache_invalidator
-            .invalidate(&Default::default(), to_invalidate)
+            .invalidate(&ctx, to_invalidate)
             .await?;
         Ok(Status::done())
     }
@@ -209,6 +248,10 @@ impl Procedure for AlterLogicalTablesProcedure {
         let _timer = metrics::METRIC_META_PROCEDURE_ALTER_TABLE
             .with_label_values(&[step])
             .start_timer();
+        debug!(
+            "Executing alter logical tables procedure, state: {:?}",
+            state
+        );
 
         match state {
             AlterTablesState::Prepare => self.on_prepare().await,
