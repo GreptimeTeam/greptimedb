@@ -20,8 +20,8 @@ use api::v1::region::{alter_request, AlterRequest, RegionRequest, RegionRequestH
 use api::v1::AlterTableExpr;
 use common_catalog::format_full_table_name;
 use common_grpc_expr::alter_expr_to_request;
-use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{debug, info};
 use futures::future;
 use snafu::{ensure, ResultExt};
 use store_api::metadata::ColumnMetadata;
@@ -303,6 +303,11 @@ fn build_new_table_info(
         | AlterKind::UnsetIndex { .. }
         | AlterKind::DropDefaults { .. } => {}
     }
+
+    info!(
+        "Built new table info: {:?} for table {}, table_id: {}",
+        new_info.meta, table_name, table_id
+    );
 
     Ok(new_info)
 }
