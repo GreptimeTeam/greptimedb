@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! prom supply the prometheus HTTP API Server compliance
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -62,7 +62,7 @@ use crate::prometheus_handler::PrometheusHandlerRef;
 /// For [ValueType::Vector] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromSeriesVector {
-    pub metric: HashMap<String, String>,
+    pub metric: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<(f64, String)>,
 }
@@ -70,7 +70,7 @@ pub struct PromSeriesVector {
 /// For [ValueType::Matrix] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromSeriesMatrix {
-    pub metric: HashMap<String, String>,
+    pub metric: BTreeMap<String, String>,
     pub values: Vec<(f64, String)>,
 }
 
