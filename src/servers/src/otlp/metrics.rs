@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
@@ -28,6 +30,35 @@ const APPROXIMATE_COLUMN_COUNT: usize = 8;
 
 const COUNT_TABLE_SUFFIX: &str = "_count";
 const SUM_TABLE_SUFFIX: &str = "_sum";
+
+const DEFAULT_ATTRS: [&str; 21] = [
+    "instance",
+    "job",
+    "service.instance.id",
+    "service.name",
+    "service.namespace",
+    "service.version",
+    "cloud.availability_zone",
+    "cloud.region",
+    "container.name",
+    "deployment.environment",
+    "deployment.environment.name",
+    "k8s.cluster.name",
+    "k8s.container.name",
+    "k8s.cronjob.name",
+    "k8s.daemonset.name",
+    "k8s.deployment.name",
+    "k8s.job.name",
+    "k8s.namespace.name",
+    "k8s.pod.name",
+    "k8s.replicaset.name",
+    "k8s.statefulset.name",
+];
+
+lazy_static! {
+    static ref DEFAULT_ATTRS_HASHSET: HashSet<String> =
+        HashSet::from_iter(DEFAULT_ATTRS.iter().map(|s| s.to_string()));
+}
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -87,52 +118,23 @@ fn encode_metrics(
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let name = &metric.name;
-
-    let metric_metadata: &Vec<KeyValue> = &metric.metadata;
+    // metadata is not used in prometheus
 
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(
-                    table_writer,
-                    name,
-                    gauge,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(metric_metadata),
-                )?;
+                encode_gauge(table_writer, name, gauge, resource_attrs, scope_attrs)?;
             }
             metric::Data::Sum(sum) => {
-                encode_sum(
-                    table_writer,
-                    name,
-                    sum,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(metric_metadata),
-                )?;
+                encode_sum(table_writer, name, sum, resource_attrs, scope_attrs)?;
             }
             metric::Data::Summary(summary) => {
-                encode_summary(
-                    table_writer,
-                    name,
-                    summary,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(metric_metadata),
-                )?;
+                encode_summary(table_writer, name, summary, resource_attrs, scope_attrs)?;
             }
             metric::Data::Histogram(hist) => {
-                encode_histogram(
-                    table_writer,
-                    name,
-                    hist,
-                    resource_attrs,
-                    scope_attrs,
-                    Some(metric_metadata),
-                )?;
+                encode_histogram(table_writer, name, hist, resource_attrs, scope_attrs)?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
             metric::Data::ExponentialHistogram(_hist) => {}
@@ -149,8 +151,12 @@ fn write_attributes(
 ) -> Result<()> {
     if let Some(attrs) = attrs {
         let table_tags = attrs.iter().filter_map(|attr| {
+            if !DEFAULT_ATTRS_HASHSET.contains(&attr.key) {
+                return None;
+            }
+
             if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
-                let key = attr.key.to_string();
+                let key = attr.key.clone();
                 match val {
                     any_value::Value::StringValue(s) => Some((key, s.to_string())),
                     any_value::Value::IntValue(v) => Some((key, v.to_string())),
@@ -201,13 +207,11 @@ fn write_tags_and_timestamp(
     row: &mut Vec<Value>,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    metadata: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
     timestamp_nanos: i64,
 ) -> Result<()> {
     write_attributes(table, row, resource_attrs)?;
     write_attributes(table, row, scope_attrs)?;
-    write_attributes(table, row, metadata)?;
     write_attributes(table, row, data_point_attrs)?;
 
     write_timestamp(table, row, timestamp_nanos)?;
@@ -225,7 +229,6 @@ fn encode_gauge(
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    metadata: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -240,7 +243,6 @@ fn encode_gauge(
             &mut row,
             resource_attrs,
             scope_attrs,
-            metadata,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
@@ -261,7 +263,6 @@ fn encode_sum(
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    metadata: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -276,7 +277,6 @@ fn encode_sum(
             &mut row,
             resource_attrs,
             scope_attrs,
-            metadata,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
@@ -306,7 +306,6 @@ fn encode_histogram(
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    metadata: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -329,7 +328,6 @@ fn encode_histogram(
                 &mut bucket_row,
                 resource_attrs,
                 scope_attrs,
-                metadata,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
             )?;
@@ -369,7 +367,6 @@ fn encode_histogram(
                 &mut sum_row,
                 resource_attrs,
                 scope_attrs,
-                metadata,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
             )?;
@@ -384,7 +381,6 @@ fn encode_histogram(
             &mut count_row,
             resource_attrs,
             scope_attrs,
-            metadata,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
@@ -417,7 +413,6 @@ fn encode_summary(
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    metadata: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     // 1. quantile table
     // 2. count table
@@ -442,7 +437,6 @@ fn encode_summary(
                     &mut row,
                     resource_attrs,
                     scope_attrs,
-                    metadata,
                     Some(data_point.attributes.as_ref()),
                     data_point.time_unix_nano as i64,
                 )?;
@@ -463,7 +457,6 @@ fn encode_summary(
                 &mut row,
                 resource_attrs,
                 scope_attrs,
-                metadata,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
             )?;
@@ -490,7 +483,6 @@ fn encode_summary(
                 &mut row,
                 resource_attrs,
                 scope_attrs,
-                metadata,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
             )?;
@@ -548,7 +540,6 @@ mod tests {
             &gauge,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            Some(&vec![keyvalue("metadata", "test")]),
         )
         .unwrap();
 
@@ -600,7 +591,6 @@ mod tests {
             &sum,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            Some(&vec![keyvalue("metadata", "test")]),
         )
         .unwrap();
 
@@ -652,7 +642,6 @@ mod tests {
             &summary,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            Some(&vec![keyvalue("metadata", "test")]),
         )
         .unwrap();
 
@@ -705,7 +694,6 @@ mod tests {
             &histogram,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            Some(&vec![keyvalue("metadata", "test")]),
         )
         .unwrap();
 
