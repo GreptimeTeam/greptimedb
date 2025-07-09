@@ -186,6 +186,7 @@ impl PlanRewriter {
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
                     self.update_column_requirements(&plan);
+                    self.expand_on_next_call = true;
                     self.stage.push(plan)
                 }
             }
@@ -194,6 +195,7 @@ impl PlanRewriter {
                     && let Some(plan) = transformer(plan)
                 {
                     self.update_column_requirements(&plan);
+                    self.expand_on_next_call = true;
                     self.stage.push(plan)
                 }
             }
@@ -202,7 +204,7 @@ impl PlanRewriter {
                     && let Some(transformer_actions) = transformer(plan)
                 {
                     debug!(
-                        "PlanRewriter: transformed plan: {:#?}\n from {plan}",
+                        "PlanRewriter: transformed plan: {:?}\n from {plan}",
                         transformer_actions.extra_parent_plans
                     );
                     if let Some(last_stage) = transformer_actions.extra_parent_plans.last() {
