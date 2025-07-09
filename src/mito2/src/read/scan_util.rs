@@ -598,16 +598,17 @@ pub fn build_file_range_scan_stream(
 pub(crate) async fn scan_extension_range(
     context: Arc<StreamContext>,
     index: RowGroupIndex,
-    metrics: PartitionMetrics,
+    partition_metrics: PartitionMetrics,
 ) -> Result<BoxedBatchStream> {
     use snafu::ResultExt;
 
     let range = context.input.extension_range(index.index);
     let reader = range.reader(context.as_ref());
-    reader
-        .read(context, metrics, index)
+    let stream = reader
+        .read(context, partition_metrics, index)
         .await
-        .context(crate::error::ScanExternalRangeSnafu)
+        .context(crate::error::ScanExternalRangeSnafu)?;
+    Ok(stream)
 }
 
 pub(crate) async fn maybe_scan_other_ranges(
