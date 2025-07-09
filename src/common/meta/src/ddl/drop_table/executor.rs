@@ -185,11 +185,15 @@ impl DropTableExecutor {
             .await
     }
 
-    /// Invalidates frontend caches
+    /// Invalidates caches for the table.
     pub async fn invalidate_table_cache(&self, ctx: &DdlContext) -> Result<()> {
         let cache_invalidator = &ctx.cache_invalidator;
         let ctx = Context {
-            subject: Some("Invalidate table cache by dropping table".to_string()),
+            subject: Some(format!(
+                "Invalidate table cache by dropping table {}, table_id: {}",
+                self.table.table_ref(),
+                self.table_id,
+            )),
         };
 
         cache_invalidator

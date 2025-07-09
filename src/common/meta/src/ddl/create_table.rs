@@ -35,7 +35,7 @@ use table::metadata::{RawTableInfo, TableId};
 use table::table_reference::TableReference;
 
 use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
-use crate::ddl::physical_table_metadata::update_table_info_column_ids;
+use crate::ddl::utils::raw_table_info::update_table_info_column_ids;
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
     extract_column_metadatas, map_to_procedure_error, region_storage_path,
