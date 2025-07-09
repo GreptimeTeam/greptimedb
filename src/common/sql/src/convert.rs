@@ -56,8 +56,18 @@ macro_rules! parse_number_to_value {
                 },
             )+
             ConcreteDataType::Timestamp(t) => {
-                let n  = parse_sql_number::<i64>($n)?;
-                Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
+                let n = parse_sql_number::<i64>($n)?;
+                let timestamp = Timestamp::new(n, t.unit());
+
+                // Check if the value is within the valid range for the target unit
+                if Timestamp::is_overflow(n, t.unit()) {
+                    return TimestampOverflowSnafu {
+                        timestamp,
+                        target_unit: t.unit(),
+                    }.fail();
+                }
+
+                Ok(Value::Timestamp(timestamp))
             },
             // TODO(QuenKar): This could need to be optimized
             // if this from_str function is slow,
@@ -362,6 +372,7 @@ pub(crate) fn parse_hex_string(s: &str) -> Result<Value> {
 mod test {
     use common_base::bytes::Bytes;
     use common_time::timestamp::TimeUnit;
+    use datatypes::types::TimestampType;
     use datatypes::value::OrderedFloat;
 
     use super::*;
@@ -1080,5 +1091,90 @@ mod test {
             true,
         );
         assert!(v.is_ok());
+    }
+
+    #[test]
+    fn test_sql_number_to_value_timestamp_strict_typing() {
+        // Test that values are interpreted according to the target column type
+        let timestamp_type = TimestampType::Millisecond(datatypes::types::TimestampMillisecondType);
+        let data_type = ConcreteDataType::Timestamp(timestamp_type);
+
+        // Valid millisecond timestamp
+        let millisecond_str = "1747814093865";
+        let result = sql_number_to_value(&data_type, millisecond_str).unwrap();
+        if let Value::Timestamp(ts) = result {
+            assert_eq!(ts.unit(), TimeUnit::Millisecond);
+            assert_eq!(ts.value(), 1747814093865);
+        } else {
+            panic!("Expected timestamp value");
+        }
+
+        // Large value that would overflow when treated as milliseconds should be rejected
+        let nanosecond_str = "1747814093865000000"; // This is too large for millisecond precision
+        let result = sql_number_to_value(&data_type, nanosecond_str);
+        assert!(
+            result.is_err(),
+            "Should reject overly large timestamp values"
+        );
+    }
+
+    #[test]
+    fn test_sql_number_to_value_timestamp_different_units() {
+        // Test second precision
+        let second_type = TimestampType::Second(datatypes::types::TimestampSecondType);
+        let second_data_type = ConcreteDataType::Timestamp(second_type);
+
+        let second_str = "1747814093";
+        let result = sql_number_to_value(&second_data_type, second_str).unwrap();
+        if let Value::Timestamp(ts) = result {
+            assert_eq!(ts.unit(), TimeUnit::Second);
+            assert_eq!(ts.value(), 1747814093);
+        } else {
+            panic!("Expected timestamp value");
+        }
+
+        // Test nanosecond precision
+        let nanosecond_type = TimestampType::Nanosecond(datatypes::types::TimestampNanosecondType);
+        let nanosecond_data_type = ConcreteDataType::Timestamp(nanosecond_type);
+
+        let nanosecond_str = "1747814093865000000";
+        let result = sql_number_to_value(&nanosecond_data_type, nanosecond_str).unwrap();
+        if let Value::Timestamp(ts) = result {
+            assert_eq!(ts.unit(), TimeUnit::Nanosecond);
+            assert_eq!(ts.value(), 1747814093865000000);
+        } else {
+            panic!("Expected timestamp value");
+        }
+    }
+
+    #[test]
+    fn test_timestamp_range_validation() {
+        // Test that our range checking works correctly
+        let nanosecond_value = 1747814093865000000i64; // This should be too large for millisecond
+
+        // This should work for nanosecond precision
+        let nanosecond_type = TimestampType::Nanosecond(datatypes::types::TimestampNanosecondType);
+        let nanosecond_data_type = ConcreteDataType::Timestamp(nanosecond_type);
+        let result = sql_number_to_value(&nanosecond_data_type, "1747814093865000000");
+        assert!(
+            result.is_ok(),
+            "Nanosecond value should be valid for nanosecond column"
+        );
+
+        // This should fail for millisecond precision (value too large)
+        let millisecond_type =
+            TimestampType::Millisecond(datatypes::types::TimestampMillisecondType);
+        let millisecond_data_type = ConcreteDataType::Timestamp(millisecond_type);
+        let result = sql_number_to_value(&millisecond_data_type, "1747814093865000000");
+        assert!(
+            result.is_err(),
+            "Nanosecond value should be rejected for millisecond column"
+        );
+
+        // Verify the ranges work as expected
+        assert!(
+            nanosecond_value > Timestamp::MAX_MILLISECOND.value(),
+            "Test value should exceed millisecond range"
+        );
     }
 }
