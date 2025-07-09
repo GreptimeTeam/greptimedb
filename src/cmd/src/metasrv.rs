@@ -340,12 +340,12 @@ impl StartCommand {
             .await
             .context(StartMetaServerSnafu)?;
 
-        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
+        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins, None)
             .await
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
 
-        let instance = MetasrvInstance::new(opts, plugins, metasrv)
+        let instance = MetasrvInstance::new(metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 
