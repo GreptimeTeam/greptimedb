@@ -724,14 +724,10 @@ pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
     let sequence_pos = num_columns - 2;
 
     // Check row group 0
-    if let Some(row_group) = parquet_meta.row_groups().get(0) {
-        if let Some(stats) = row_group.column(sequence_pos).statistics() {
-            if let Statistics::Int64(value_stats) = stats {
-                if let (Some(min_val), Some(max_val)) =
-                    (value_stats.min_opt(), value_stats.max_opt())
-                {
-                    return *min_val == 0 && *max_val == 0;
-                }
+    if let Some(row_group) = parquet_meta.row_groups().first() {
+        if let Some(Statistics::Int64(value_stats)) = row_group.column(sequence_pos).statistics() {
+            if let (Some(min_val), Some(max_val)) = (value_stats.min_opt(), value_stats.max_opt()) {
+                return *min_val == 0 && *max_val == 0;
             }
         }
     }
