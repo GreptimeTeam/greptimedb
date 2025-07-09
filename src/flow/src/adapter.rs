@@ -497,7 +497,7 @@ impl StreamingEngine {
         &self,
         schema: &RelationDesc,
     ) -> Result<(Vec<String>, Vec<ColumnSchema>, bool), Error> {
-        // TODO(discord9): condiser remove buggy auto create by schema
+        // TODO(discord9): consider remove buggy auto create by schema
 
         // TODO(discord9): use default key from schema
         let primary_keys = schema

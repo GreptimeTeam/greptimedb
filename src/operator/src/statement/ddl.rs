@@ -654,7 +654,7 @@ impl StatementExecutor {
             ctx.clone(),
         )?;
 
-        //TODO(dennis): validate the logical plan
+        // TODO(dennis): validate the logical plan
         self.create_view_by_expr(expr, ctx).await
     }
 
