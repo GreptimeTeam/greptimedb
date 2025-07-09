@@ -227,7 +227,9 @@ impl Processor for DateProcessor {
     }
 }
 
-/// try to parse val with timezone first, if failed, parse without timezone
+// parse the datetime with timezone info
+// if failed, try to parse using naive date time and add tz info
+// finally convert the datetime to utc
 fn try_parse(val: &str, fmt: &str, tz: Tz) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_str(val, fmt) {
         Ok(dt.to_utc())

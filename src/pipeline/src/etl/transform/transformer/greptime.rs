@@ -25,6 +25,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnDataTypeExtension, JsonTypeExtension, SemanticType};
 use coerce::{coerce_columns, coerce_value};
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_telemetry::warn;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
 use jsonb::Number;
@@ -481,6 +482,10 @@ fn resolve_value(
         }
 
         VrlValue::Regex(v) => {
+            warn!(
+                "Persisting regex value in the table, this should not happen, column_name: {}",
+                column_name
+            );
             resolve_simple_type(
                 ValueData::StringValue(v.to_string()),
                 column_name,

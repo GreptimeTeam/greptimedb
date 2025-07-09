@@ -394,7 +394,7 @@ impl PromSeriesProcessor {
 
         for s in series.samples.iter() {
             let Ok(value) = NotNan::new(s.value) else {
-                warn!("invalid float value: {}", s.value);
+                warn!("Invalid float value: {}", s.value);
                 continue;
             };
 
