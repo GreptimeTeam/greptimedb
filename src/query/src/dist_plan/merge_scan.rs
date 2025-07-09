@@ -325,17 +325,6 @@ impl MergeScanExec {
                     "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
                     partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
                 );
-                // TODO(discord9): rm this debug log after debugging
-                common_telemetry::debug!(
-                    "All regions: {:?}, scan regions with skip partition: {:?}",
-                    regions,
-                    regions
-                        .iter()
-                        .skip(partition)
-                        .step_by(target_partition)
-                        .copied()
-                        .collect::<Vec<_>>()
-                );
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
