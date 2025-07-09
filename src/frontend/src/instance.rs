@@ -380,6 +380,13 @@ impl SqlQueryHandler for Instance {
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
+                if stmts.is_empty() {
+                    return vec![InvalidSqlSnafu {
+                        err_msg: "empty statements",
+                    }
+                    .fail()];
+                }
+
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
                     if let Err(e) = checker
