@@ -29,7 +29,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use datatypes::types::TimestampType;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -37,8 +37,7 @@ use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
 use crate::codec::PrimaryKeyEncoding;
 use crate::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, ApiUnsetIndexOptions,
-    ModifyColumnType,
+    AddColumn, AddColumnLocation, AlterKind, ModifyColumnType, SetIndexOption, UnsetIndexOption,
 };
 use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
@@ -582,30 +581,8 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
-            AlterKind::SetIndex { options } => match options {
-                ApiSetIndexOptions::Fulltext {
-                    column_name,
-                    options,
-                } => self.change_column_fulltext_options(column_name, true, Some(options))?,
-                ApiSetIndexOptions::Inverted { column_name } => {
-                    self.change_column_inverted_index_options(column_name, true)?
-                }
-                ApiSetIndexOptions::Skipping {
-                    column_name,
-                    options,
-                } => self.change_column_skipping_index_options(column_name, Some(options))?,
-            },
-            AlterKind::UnsetIndex { options } => match options {
-                ApiUnsetIndexOptions::Fulltext { column_name } => {
-                    self.change_column_fulltext_options(column_name, false, None)?
-                }
-                ApiUnsetIndexOptions::Inverted { column_name } => {
-                    self.change_column_inverted_index_options(column_name, false)?
-                }
-                ApiUnsetIndexOptions::Skipping { column_name } => {
-                    self.change_column_skipping_index_options(column_name, None)?
-                }
-            },
+            AlterKind::SetIndexes { options } => self.set_indexes(options)?,
+            AlterKind::UnsetIndexes { options } => self.unset_indexes(options)?,
             AlterKind::SetRegionOptions { options: _ } => {
                 // nothing to be done with RegionMetadata
             }
@@ -741,92 +718,114 @@ impl RegionMetadataBuilder {
         Ok(())
     }
 
-    fn change_column_inverted_index_options(
-        &mut self,
-        column_name: String,
-        value: bool,
-    ) -> Result<()> {
+    fn set_indexes(&mut self, options: Vec<SetIndexOption>) -> Result<()> {
+        let mut index_options = options
+            .into_iter()
+            .map(|option| (option.column_name().clone(), option))
+            .collect::<HashMap<_, _>>();
+
         for column_meta in self.column_metadatas.iter_mut() {
-            if column_meta.column_schema.name == column_name {
-                column_meta.column_schema.set_inverted_index(value)
+            if let Some(option) = index_options.remove(&column_meta.column_schema.name) {
+                Self::set_index(column_meta, option)?;
             }
         }
+
         Ok(())
     }
 
-    fn change_column_fulltext_options(
-        &mut self,
-        column_name: String,
-        enable: bool,
-        options: Option<FulltextOptions>,
-    ) -> Result<()> {
+    fn unset_indexes(&mut self, options: Vec<UnsetIndexOption>) -> Result<()> {
+        let mut index_options = options
+            .into_iter()
+            .map(|option| (option.column_name().clone(), option))
+            .collect::<HashMap<_, _>>();
+
         for column_meta in self.column_metadatas.iter_mut() {
-            if column_meta.column_schema.name == column_name {
+            if let Some(option) = index_options.remove(&column_meta.column_schema.name) {
+                Self::unset_index(column_meta, option)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn set_index(column_metadata: &mut ColumnMetadata, options: SetIndexOption) -> Result<()> {
+        match options {
+            SetIndexOption::Fulltext {
+                column_name,
+                options,
+            } => {
                 ensure!(
-                    column_meta.column_schema.data_type.is_string(),
+                    column_metadata.column_schema.data_type.is_string(),
+                    InvalidColumnOptionSnafu {
+                        column_name,
+                        msg: "FULLTEXT index only supports string type".to_string(),
+                    }
+                );
+                let current_fulltext_options = column_metadata
+                    .column_schema
+                    .fulltext_options()
+                    .with_context(|_| GetFulltextOptionsSnafu {
+                        column_name: column_name.to_string(),
+                    })?;
+                set_column_fulltext_options(
+                    column_metadata,
+                    column_name,
+                    options,
+                    current_fulltext_options,
+                )?;
+            }
+            SetIndexOption::Inverted { .. } => {
+                column_metadata.column_schema.set_inverted_index(true)
+            }
+            SetIndexOption::Skipping {
+                column_name,
+                options,
+            } => {
+                column_metadata
+                    .column_schema
+                    .set_skipping_options(&options)
+                    .context(UnsetSkippingIndexOptionsSnafu { column_name })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn unset_index(column_metadata: &mut ColumnMetadata, options: UnsetIndexOption) -> Result<()> {
+        match options {
+            UnsetIndexOption::Fulltext { column_name } => {
+                ensure!(
+                    column_metadata.column_schema.data_type.is_string(),
                     InvalidColumnOptionSnafu {
                         column_name,
                         msg: "FULLTEXT index only supports string type".to_string(),
                     }
                 );
 
-                let current_fulltext_options = column_meta
+                let current_fulltext_options = column_metadata
                     .column_schema
                     .fulltext_options()
-                    .context(SetFulltextOptionsSnafu {
-                        column_name: column_name.clone(),
+                    .with_context(|_| GetFulltextOptionsSnafu {
+                        column_name: column_name.to_string(),
                     })?;
 
-                if enable {
-                    ensure!(
-                        options.is_some(),
-                        InvalidColumnOptionSnafu {
-                            column_name,
-                            msg: "FULLTEXT index options must be provided",
-                        }
-                    );
-                    set_column_fulltext_options(
-                        column_meta,
-                        column_name,
-                        options.unwrap(),
-                        current_fulltext_options,
-                    )?;
-                } else {
-                    unset_column_fulltext_options(
-                        column_meta,
-                        column_name,
-                        current_fulltext_options,
-                    )?;
-                }
-                break;
+                unset_column_fulltext_options(
+                    column_metadata,
+                    column_name,
+                    current_fulltext_options,
+                )?;
+            }
+            UnsetIndexOption::Inverted { .. } => {
+                column_metadata.column_schema.set_inverted_index(false)
+            }
+            UnsetIndexOption::Skipping { column_name } => {
+                column_metadata
+                    .column_schema
+                    .unset_skipping_options()
+                    .context(UnsetSkippingIndexOptionsSnafu { column_name })?;
             }
         }
-        Ok(())
-    }
 
-    fn change_column_skipping_index_options(
-        &mut self,
-        column_name: String,
-        options: Option<SkippingIndexOptions>,
-    ) -> Result<()> {
-        for column_meta in self.column_metadatas.iter_mut() {
-            if column_meta.column_schema.name == column_name {
-                if let Some(options) = &options {
-                    column_meta
-                        .column_schema
-                        .set_skipping_options(options)
-                        .context(UnsetSkippingIndexOptionsSnafu {
-                            column_name: column_name.clone(),
-                        })?;
-                } else {
-                    column_meta.column_schema.unset_skipping_options().context(
-                        UnsetSkippingIndexOptionsSnafu {
-                            column_name: column_name.clone(),
-                        },
-                    )?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1013,6 +1012,14 @@ pub enum MetadataError {
 
     #[snafu(display("Failed to set fulltext options for column {}", column_name))]
     SetFulltextOptions {
+        column_name: String,
+        source: datatypes::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get fulltext options for column {}", column_name))]
+    GetFulltextOptions {
         column_name: String,
         source: datatypes::Error,
         #[snafu(implicit)]
@@ -1625,8 +1632,8 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::SetIndex {
-                options: ApiSetIndexOptions::Fulltext {
+            .alter(AlterKind::SetIndexes {
+                options: vec![SetIndexOption::Fulltext {
                     column_name: "b".to_string(),
                     options: FulltextOptions::new_unchecked(
                         true,
@@ -1636,7 +1643,7 @@ mod test {
                         1000,
                         0.01,
                     ),
-                },
+                }],
             })
             .unwrap();
         let metadata = builder.build().unwrap();
@@ -1656,10 +1663,10 @@ mod test {
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::UnsetIndex {
-                options: ApiUnsetIndexOptions::Fulltext {
+            .alter(AlterKind::UnsetIndexes {
+                options: vec![UnsetIndexOption::Fulltext {
                     column_name: "b".to_string(),
-                },
+                }],
             })
             .unwrap();
         let metadata = builder.build().unwrap();

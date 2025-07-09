@@ -299,8 +299,8 @@ fn build_new_table_info(
         | AlterKind::ModifyColumnTypes { .. }
         | AlterKind::SetTableOptions { .. }
         | AlterKind::UnsetTableOptions { .. }
-        | AlterKind::SetIndex { .. }
-        | AlterKind::UnsetIndex { .. }
+        | AlterKind::SetIndexes { .. }
+        | AlterKind::UnsetIndexes { .. }
         | AlterKind::DropDefaults { .. } => {}
     }
 
