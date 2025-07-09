@@ -69,6 +69,7 @@ table.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }

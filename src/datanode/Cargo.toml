@@ -66,6 +66,7 @@ table.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 cache.workspace = true
