@@ -19,12 +19,13 @@ use snafu::ResultExt;
 use table::metadata::{RawTableInfo, TableInfo};
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::physical_table_metadata;
+use crate::ddl::utils::raw_table_info;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::router::region_distribution;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
@@ -35,18 +36,24 @@ impl AlterLogicalTablesProcedure {
 
         // Safety: must exist.
         let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
+        let physical_table_route = self.data.physical_table_route.as_ref().unwrap();
+        let region_distribution = region_distribution(&physical_table_route.region_routes);
 
         // Generates new table info
         let old_raw_table_info = physical_table_info.table_info.clone();
-        let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
+        let new_raw_table_info = raw_table_info::build_new_physical_table_info(
             old_raw_table_info,
             &self.data.physical_columns,
         );
 
-        // Updates physical table's metadata, and we don't need to touch per-region settings.
+        // Updates physical table's metadata.
         self.context
             .table_metadata_manager
-            .update_table_info(physical_table_info, None, new_raw_table_info)
+            .update_table_info(
+                physical_table_info,
+                Some(region_distribution),
+                new_raw_table_info,
+            )
             .await?;
 
         Ok(())
