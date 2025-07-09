@@ -63,6 +63,9 @@ use crate::region_query::RegionQueryHandlerRef;
 /// we can still record the metrics.
 pub struct MeasuredStream {
     inner: SendableRecordBatchStream,
+    partition: usize,
+    region_id: RegionId,
+    do_get_cost: Duration,
     dbname: String,
     sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
     current_channel: u8,
@@ -72,6 +75,10 @@ pub struct MeasuredStream {
 
 impl Drop for MeasuredStream {
     fn drop(&mut self) {
+        common_telemetry::debug!(
+            "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
+            self.partition, self.region_id, self.poll_duration, self.metric.first_consume_time(), self.do_get_cost
+        );
         if let Some(metrics) = self.inner.metrics() {
             let (c, s) = parse_catalog_and_schema_from_db_string(&self.dbname);
             let value = read_meter!(
@@ -338,15 +345,18 @@ impl MergeScanExec {
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;
+                let do_get_cost = do_get_start.elapsed();
                 let mut stream = MeasuredStream {
                     inner: stream,
+                    partition,
+                    region_id,
+                    do_get_cost,
                     dbname: dbname.clone(),
                     sub_stage_metrics: sub_stage_metrics_moved.clone(),
                     current_channel: current_channel as u8,
                     metric: metric.clone(),
                     poll_duration: Duration::ZERO,
                 };
-                let do_get_cost = do_get_start.elapsed();
 
                 ready_timer.stop();
 
@@ -367,10 +377,6 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                common_telemetry::debug!(
-                    "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
-                    partition, region_id, stream.poll_duration, metric.first_consume_time(), do_get_cost
-                );
             }
         }));
 
