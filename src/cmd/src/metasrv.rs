@@ -22,7 +22,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::info;
 use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use meta_srv::bootstrap::MetasrvInstance;
 use meta_srv::metasrv::BackendImpl;
 use snafu::ResultExt;
@@ -320,7 +320,7 @@ impl StartCommand {
             None,
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Metasrv start command: {:#?}", self);

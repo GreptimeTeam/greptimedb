@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
-use std::{env, fmt};
 
 use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
@@ -47,7 +47,7 @@ impl Function for PGVersionFunction {
     fn eval(&self, _func_ctx: &FunctionContext, _columns: &[VectorRef]) -> Result<VectorRef> {
         let result = StringVector::from(vec![format!(
             "PostgreSQL 16.3 GreptimeDB {}",
-            env!("CARGO_PKG_VERSION")
+            common_version::version()
         )]);
         Ok(Arc::new(result))
     }

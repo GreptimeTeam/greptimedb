@@ -384,7 +384,7 @@ pub fn init_global_logging(
                         resource::SERVICE_INSTANCE_ID,
                         node_id.unwrap_or("none".to_string()),
                     ),
-                    KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                    KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
                     KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
                 ]));
 
