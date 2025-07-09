@@ -412,6 +412,10 @@ impl PromSeriesProcessor {
         let one_sample = series.samples.len() == 1;
 
         for s in series.samples.iter() {
+            // skip NaN value
+            if s.value.is_nan() {
+                continue;
+            }
             let timestamp = s.timestamp;
             pipeline_map.insert(GREPTIME_TIMESTAMP.to_string(), Value::Int64(timestamp));
             pipeline_map.insert(GREPTIME_VALUE.to_string(), Value::Float64(s.value));
