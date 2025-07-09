@@ -32,7 +32,7 @@ use table::table_name::TableName;
 
 use crate::cache_invalidator::{CacheInvalidatorRef, Context};
 use crate::ddl::utils::{add_peer_context_if_needed, raw_table_info};
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::CacheIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -114,9 +114,6 @@ impl AlterTableExecutor {
     }
 
     /// Updates table metadata for alter table operation.
-    ///
-    /// ## Panic:
-    /// - If the region distribution is not set when updating table metadata.
     pub(crate) async fn on_alter_metadata(
         &self,
         table_metadata_manager: &TableMetadataManagerRef,
@@ -143,15 +140,20 @@ impl AlterTableExecutor {
                 table_ref, table_id, raw_table_info
             );
 
-            debug_assert!(region_distribution.is_some());
+            ensure!(
+                region_distribution.is_some(),
+                UnexpectedSnafu {
+                    err_msg: "region distribution is not set when updating table metadata",
+                }
+            );
+
             if !column_metadatas.is_empty() {
                 raw_table_info::update_table_info_column_ids(&mut raw_table_info, column_metadatas);
             }
-            let region_distribution = region_distribution.unwrap().clone();
             table_metadata_manager
                 .update_table_info(
                     current_table_info_value,
-                    Some(region_distribution),
+                    region_distribution.cloned(),
                     raw_table_info,
                 )
                 .await?;
