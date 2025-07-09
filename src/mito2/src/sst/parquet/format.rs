@@ -262,7 +262,7 @@ impl ReadFormat {
             .take(FIXED_POS_COLUMN_NUM);
         // Safety: We have checked the column number.
         let op_type_array = fixed_pos_columns.next().unwrap();
-        let mut sequence_array = fixed_pos_columns.next().unwrap();
+        let mut sequence_array = fixed_pos_columns.next().unwrap().clone();
         let pk_array = fixed_pos_columns.next().unwrap();
         let ts_array = fixed_pos_columns.next().unwrap();
         let field_batch_columns = self.get_field_batch_columns(record_batch)?;
@@ -270,7 +270,13 @@ impl ReadFormat {
         // Override sequence array if provided.
         if let Some(override_array) = override_sequence_array {
             assert!(override_array.len() >= sequence_array.len());
-            sequence_array = override_array;
+            // It's fine to assign the override array directly, but we slice it to make
+            // sure it matches the length of the original sequence array.
+            sequence_array = if override_array.len() > sequence_array.len() {
+                override_array.slice(0, sequence_array.len())
+            } else {
+                override_array.clone()
+            };
         }
 
         // Compute primary key offsets.
@@ -713,7 +719,8 @@ pub(crate) fn parquet_row_group_time_range(
     Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
 }
 
-/// Checks if sequence override is needed based on row group 0 statistics.
+/// Checks if sequence override is needed based on all row groups' statistics.
+/// Returns true if ALL row groups have sequence min-max values of 0.
 pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
     let num_columns = parquet_meta.file_metadata().schema_descr().num_columns();
     if num_columns < FIXED_POS_COLUMN_NUM {
@@ -723,16 +730,26 @@ pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
     // The sequence column is the second-to-last column (before op_type)
     let sequence_pos = num_columns - 2;
 
-    // Check row group 0
-    if let Some(row_group) = parquet_meta.row_groups().first() {
+    // Check all row groups - all must have sequence min-max of 0
+    for row_group in parquet_meta.row_groups() {
         if let Some(Statistics::Int64(value_stats)) = row_group.column(sequence_pos).statistics() {
             if let (Some(min_val), Some(max_val)) = (value_stats.min_opt(), value_stats.max_opt()) {
-                return *min_val == 0 && *max_val == 0;
+                // If any row group doesn't have min=0 and max=0, return false
+                if *min_val != 0 || *max_val != 0 {
+                    return false;
+                }
+            } else {
+                // If any row group doesn't have statistics, return false
+                return false;
             }
+        } else {
+            // If any row group doesn't have Int64 statistics, return false
+            return false;
         }
     }
 
-    false
+    // All row groups have sequence min-max of 0, or there are no row groups
+    !parquet_meta.row_groups().is_empty()
 }
 
 #[cfg(test)]

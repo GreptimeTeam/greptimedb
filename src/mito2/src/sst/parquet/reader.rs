@@ -1259,6 +1259,7 @@ where
 {
     /// Creates a new reader.
     pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
+        // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
