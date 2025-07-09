@@ -151,15 +151,13 @@ impl<'a> AlterLogicalTablesExecutor<'a> {
         physical_table_info: &TableInfoValue,
         logical_table_info_values: &[&TableInfoValue],
     ) -> Vec<CacheIdent> {
-        let mut cache_keys = logical_table_info_values
-            .iter()
-            .flat_map(|table| {
-                vec![
-                    CacheIdent::TableId(table.table_info.ident.table_id),
-                    CacheIdent::TableName(table.table_name()),
-                ]
-            })
-            .collect::<Vec<_>>();
+        let mut cache_keys = Vec::with_capacity(logical_table_info_values.len() * 2 + 2);
+        cache_keys.extend(logical_table_info_values.iter().flat_map(|table| {
+            vec![
+                CacheIdent::TableId(table.table_info.ident.table_id),
+                CacheIdent::TableName(table.table_name()),
+            ]
+        }));
         cache_keys.push(CacheIdent::TableId(
             physical_table_info.table_info.ident.table_id,
         ));

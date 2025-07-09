@@ -234,7 +234,8 @@ pub(crate) struct ValidatorResult {
 /// Retains the elements that are not skipped.
 pub(crate) fn retain_unskipped<T>(target: &mut Vec<T>, skipped: &[bool]) {
     debug_assert_eq!(target.len(), skipped.len());
-    target.retain(|_| !skipped.iter().next().unwrap());
+    let mut iter = skipped.iter();
+    target.retain(|_| !iter.next().unwrap());
 }
 
 /// Returns true if does not required to alter the logical region.
@@ -267,4 +268,17 @@ fn skip_alter_logical_region(alter: &AlterTableExpr, table: &TableInfoValue) -> 
                 .map(|c| existing_columns.contains(c))
                 .unwrap_or(false)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retain_unskipped() {
+        let mut target = vec![1, 2, 3, 4, 5];
+        let skipped = vec![false, true, false, true, false];
+        retain_unskipped(&mut target, &skipped);
+        assert_eq!(target, vec![1, 3, 5]);
+    }
 }
