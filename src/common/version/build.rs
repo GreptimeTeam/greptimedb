@@ -14,8 +14,10 @@
 
 use std::collections::BTreeSet;
 use std::env;
+use std::path::PathBuf;
 
 use build_data::{format_timestamp, get_source_time};
+use cargo_manifest::Manifest;
 use shadow_rs::{BuildPattern, ShadowBuilder, CARGO_METADATA, CARGO_TREE};
 
 fn main() -> shadow_rs::SdResult<()> {
@@ -33,6 +35,24 @@ fn main() -> shadow_rs::SdResult<()> {
     // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
     // made as a submodule in another repo.
     let src_path = env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
+
+    let manifest = Manifest::from_path(PathBuf::from(&src_path).join("Cargo.toml"))
+        .expect("Failed to parse Cargo.toml");
+    if let Some(product_version) = manifest.workspace.as_ref().and_then(|w| {
+        w.metadata.as_ref().and_then(|m| {
+            m.get("greptime")
+                .and_then(|g| g.get("product_version").and_then(|v| v.as_str()))
+        })
+    }) {
+        println!(
+            "cargo:rustc-env=GREPTIME_PRODUCT_VERSION={}",
+            product_version
+        );
+    } else {
+        let version = env::var("CARGO_PKG_VERSION").unwrap();
+        println!("cargo:rustc-env=GREPTIME_PRODUCT_VERSION={}", version,);
+    }
+
     let out_path = env::var("OUT_DIR")?;
 
     let _ = ShadowBuilder::builder()
