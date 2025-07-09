@@ -105,13 +105,17 @@ pub const fn build_info() -> BuildInfo {
         build_time: env!("BUILD_TIMESTAMP"),
         rustc: build::RUST_VERSION,
         target: build::BUILD_TARGET,
-        version: build::PKG_VERSION,
+        version: env!("GREPTIME_PRODUCT_VERSION"),
     }
 }
 
 const BUILD_INFO: BuildInfo = build_info();
 
 pub const fn version() -> &'static str {
+    BUILD_INFO.version
+}
+
+pub const fn verbose_version() -> &'static str {
     const_format::formatcp!(
         "\nbranch: {}\ncommit: {}\nclean: {}\nversion: {}",
         BUILD_INFO.branch,

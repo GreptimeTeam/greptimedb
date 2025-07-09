@@ -51,7 +51,7 @@ use common_telemetry::logging::{
     LoggingOptions, SlowQueryOptions, TracingOptions, DEFAULT_LOGGING_DIR,
 };
 use common_time::timezone::set_default_timezone;
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -485,7 +485,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Standalone start command: {:#?}", self);
