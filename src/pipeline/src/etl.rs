@@ -220,7 +220,7 @@ impl From<&Rule> for DispatchedTo {
 impl DispatchedTo {
     /// Generate destination table name from input
     pub fn dispatched_to_table_name(&self, original: &str) -> String {
-        format!("{}_{}", &original, self.table_suffix)
+        [original, &self.table_suffix].concat()
     }
 }
 
