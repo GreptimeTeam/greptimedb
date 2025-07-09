@@ -475,7 +475,7 @@ fn resolve_value(
 
         VrlValue::Bytes(v) => {
             resolve_simple_type(
-                ValueData::StringValue(String::from_utf8_lossy(&v).to_string()),
+                ValueData::StringValue(String::from_utf8_lossy_owned(v.to_vec())),
                 column_name,
                 ColumnDataType::String,
             )?;
