@@ -156,6 +156,9 @@ impl ExecutionPlan for DistAnalyzeExec {
             while let Some(batch) = input_stream.next().await.transpose()? {
                 total_rows += batch.num_rows();
             }
+            // must drop input stream before starting collect metrics to make sure
+            // all metrics are collected(especially for MergeScanExec which collect metrics on drop stream)
+            drop(input_stream);
 
             create_output_batch(total_rows, captured_input, captured_schema, format, verbose)
         };
