@@ -146,6 +146,8 @@ pub struct ReadFormat {
     /// Field column id to their index in the projected schema (
     /// the schema of [Batch]).
     field_id_to_projected_index: HashMap<ColumnId, usize>,
+    /// Sequence number to override the sequence read from the SST.
+    override_sequence: Option<SequenceNumber>,
 }
 
 impl ReadFormat {
@@ -197,7 +199,13 @@ impl ReadFormat {
             field_id_to_index,
             projection_indices,
             field_id_to_projected_index,
+            override_sequence: None,
         }
+    }
+
+    /// Sets the sequence number to override.
+    pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
+        self.override_sequence = sequence;
     }
 
     /// Gets the arrow schema of the SST file.
@@ -218,12 +226,20 @@ impl ReadFormat {
         &self.projection_indices
     }
 
+    /// Creates a sequence array to override.
+    pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
+        self.override_sequence
+            .map(|seq| Arc::new(UInt64Array::from_value(seq, length)) as ArrayRef)
+    }
+
     /// Convert a arrow record batch into `batches`.
     ///
+    /// The length of `override_sequence_array` must be larger than the length of the record batch.
     /// Note that the `record_batch` may only contains a subset of columns if it is projected.
     pub fn convert_record_batch(
         &self,
         record_batch: &RecordBatch,
+        override_sequence_array: Option<&ArrayRef>,
         batches: &mut VecDeque<Batch>,
     ) -> Result<()> {
         debug_assert!(batches.is_empty());
@@ -246,10 +262,16 @@ impl ReadFormat {
             .take(FIXED_POS_COLUMN_NUM);
         // Safety: We have checked the column number.
         let op_type_array = fixed_pos_columns.next().unwrap();
-        let sequence_array = fixed_pos_columns.next().unwrap();
+        let mut sequence_array = fixed_pos_columns.next().unwrap();
         let pk_array = fixed_pos_columns.next().unwrap();
         let ts_array = fixed_pos_columns.next().unwrap();
         let field_batch_columns = self.get_field_batch_columns(record_batch)?;
+
+        // Override sequence array if provided.
+        if let Some(override_array) = override_sequence_array {
+            assert!(override_array.len() >= sequence_array.len());
+            sequence_array = override_array;
+        }
 
         // Compute primary key offsets.
         let pk_dict_array = pk_array
@@ -691,6 +713,32 @@ pub(crate) fn parquet_row_group_time_range(
     Some((Timestamp::new(min, unit), Timestamp::new(max, unit)))
 }
 
+/// Checks if sequence override is needed based on row group 0 statistics.
+pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
+    let num_columns = parquet_meta.file_metadata().schema_descr().num_columns();
+    if num_columns < FIXED_POS_COLUMN_NUM {
+        return false;
+    }
+
+    // The sequence column is the second-to-last column (before op_type)
+    let sequence_pos = num_columns - 2;
+
+    // Check row group 0
+    if let Some(row_group) = parquet_meta.row_groups().get(0) {
+        if let Some(stats) = row_group.column(sequence_pos).statistics() {
+            if let Statistics::Int64(value_stats) = stats {
+                if let (Some(min_val), Some(max_val)) =
+                    (value_stats.min_opt(), value_stats.max_opt())
+                {
+                    return *min_val == 0 && *max_val == 0;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::OpType;
@@ -775,9 +823,19 @@ mod tests {
     }
 
     fn new_batch(primary_key: &[u8], start_ts: i64, start_field: i64, num_rows: usize) -> Batch {
+        new_batch_with_sequence(primary_key, start_ts, start_field, num_rows, TEST_SEQUENCE)
+    }
+
+    fn new_batch_with_sequence(
+        primary_key: &[u8],
+        start_ts: i64,
+        start_field: i64,
+        num_rows: usize,
+        sequence: u64,
+    ) -> Batch {
         let ts_values = (0..num_rows).map(|i| start_ts + i as i64);
         let timestamps = Arc::new(TimestampMillisecondVector::from_values(ts_values));
-        let sequences = Arc::new(UInt64Vector::from_vec(vec![TEST_SEQUENCE; num_rows]));
+        let sequences = Arc::new(UInt64Vector::from_vec(vec![sequence; num_rows]));
         let op_types = Arc::new(UInt8Vector::from_vec(vec![TEST_OP_TYPE; num_rows]));
         let fields = vec![
             BatchColumn {
@@ -930,7 +988,7 @@ mod tests {
         let record_batch = RecordBatch::new_empty(arrow_schema);
         let mut batches = VecDeque::new();
         read_format
-            .convert_record_batch(&record_batch, &mut batches)
+            .convert_record_batch(&record_batch, None, &mut batches)
             .unwrap();
         assert!(batches.is_empty());
     }
@@ -957,11 +1015,52 @@ mod tests {
         let record_batch = RecordBatch::try_new(arrow_schema, columns).unwrap();
         let mut batches = VecDeque::new();
         read_format
-            .convert_record_batch(&record_batch, &mut batches)
+            .convert_record_batch(&record_batch, None, &mut batches)
             .unwrap();
 
         assert_eq!(
             vec![new_batch(b"one", 1, 1, 2), new_batch(b"two", 11, 10, 2)],
+            batches.into_iter().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn test_convert_record_batch_with_override_sequence() {
+        let metadata = build_test_region_metadata();
+        let column_ids: Vec<_> = metadata
+            .column_metadatas
+            .iter()
+            .map(|col| col.column_id)
+            .collect();
+        let read_format = ReadFormat::new(metadata, column_ids.iter().copied());
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
+            Arc::new(Int64Array::from(vec![2, 2, 11, 11])), // field0
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2, 11, 12])), // ts
+            build_test_pk_array(&[(b"one".to_vec(), 2), (b"two".to_vec(), 2)]), // primary key
+            Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; 4])), // sequence
+            Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 4])), // op type
+        ];
+        let arrow_schema = build_test_arrow_schema();
+        let record_batch = RecordBatch::try_new(arrow_schema, columns).unwrap();
+
+        // Create override sequence array with custom values
+        let override_sequence: u64 = 12345;
+        let override_sequence_array: ArrayRef =
+            Arc::new(UInt64Array::from_value(override_sequence, 4));
+
+        let mut batches = VecDeque::new();
+        read_format
+            .convert_record_batch(&record_batch, Some(&override_sequence_array), &mut batches)
+            .unwrap();
+
+        // Create expected batches with override sequence
+        let expected_batch1 = new_batch_with_sequence(b"one", 1, 1, 2, override_sequence);
+        let expected_batch2 = new_batch_with_sequence(b"two", 11, 10, 2, override_sequence);
+
+        assert_eq!(
+            vec![expected_batch1, expected_batch2],
             batches.into_iter().collect::<Vec<_>>(),
         );
     }
