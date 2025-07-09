@@ -616,6 +616,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     // labels
     let res = client
