@@ -95,7 +95,7 @@ mod tests {
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{col, lit, BinaryExpr, Expr, Operator};
     use datatypes::arrow;
-    use datatypes::arrow::array::RecordBatch;
+    use datatypes::arrow::array::{RecordBatch, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use crate::access_layer::{FilePathProvider, OperationType, RegionFilePathFactory};
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
-    use crate::read::BatchReader;
+    use crate::read::{BatchBuilder, BatchReader};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::file_purger::NoopFilePurger;
@@ -120,8 +120,8 @@ mod tests {
     use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
     use crate::test_util::sst_util::{
         assert_parquet_metadata_eq, build_test_binary_test_region_metadata, new_batch_by_range,
-        new_batch_with_binary, new_source, sst_file_handle, sst_file_handle_with_file_id,
-        sst_region_metadata,
+        new_batch_with_binary, new_batch_with_custom_sequence, new_source, sst_file_handle,
+        sst_file_handle_with_file_id, sst_region_metadata,
     };
     use crate::test_util::{check_reader_result, TestEnv};
 
@@ -894,5 +894,85 @@ mod tests {
         assert!(cached.contains_row_group(1));
         assert!(cached.contains_row_group(2));
         assert!(cached.contains_row_group(3));
+    }
+
+    #[tokio::test]
+    async fn test_read_with_override_sequence() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            file_id: handle.file_id(),
+        };
+        let metadata = Arc::new(sst_region_metadata());
+
+        // Create batches with sequence 0 to trigger override functionality
+        let batch1 = new_batch_with_custom_sequence(&["a", "d"], 0, 60, 0);
+        let batch2 = new_batch_with_custom_sequence(&["b", "f"], 0, 40, 0);
+        let source = new_source(&[batch1, batch2]);
+
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            NoopIndexBuilder,
+            file_path,
+        )
+        .await;
+
+        writer
+            .write_all(source, None, &write_opts)
+            .await
+            .unwrap()
+            .remove(0);
+
+        // Read without override sequence (should read sequence 0)
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone());
+        let mut reader = builder.build().await.unwrap();
+        let mut normal_batches = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            normal_batches.push(batch);
+        }
+
+        // Read with override sequence using FileMeta.sequence
+        let custom_sequence = 12345u64;
+        let file_meta = handle.meta_ref();
+        let mut override_file_meta = file_meta.clone();
+        override_file_meta.sequence = Some(std::num::NonZero::new(custom_sequence).unwrap());
+        let override_handle = FileHandle::new(
+            override_file_meta,
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+
+        let builder =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), override_handle, object_store.clone());
+        let mut reader = builder.build().await.unwrap();
+        let mut override_batches = Vec::new();
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            override_batches.push(batch);
+        }
+
+        // Compare the results
+        assert_eq!(normal_batches.len(), override_batches.len());
+        for (normal, override_batch) in normal_batches.into_iter().zip(override_batches.iter()) {
+            // Create expected batch with override sequence
+            let expected_batch = {
+                let num_rows = normal.num_rows();
+                let mut builder = BatchBuilder::from(normal);
+                builder
+                    .sequences_array(Arc::new(UInt64Array::from_value(custom_sequence, num_rows)))
+                    .unwrap();
+
+                builder.build().unwrap()
+            };
+
+            // Override batch should match expected batch
+            assert_eq!(*override_batch, expected_batch);
+        }
     }
 }
