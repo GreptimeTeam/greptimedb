@@ -95,3 +95,28 @@ TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
 TQL ANALYZE FORMAT TEXT (0, 10, '5s') test;
 
 drop table test;
+
+CREATE TABLE test2 (
+  "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+  "greptime_value" DOUBLE NULL,
+  "shard" STRING NULL INVERTED INDEX,
+  TIME INDEX ("greptime_timestamp"),
+  PRIMARY KEY ("shard")
+)
+PARTITION ON COLUMNS ("shard") (
+  shard <= '2',
+  shard > '2'
+);
+
+TQL EVAL sum(test2);
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE sum(test2);
+
+DROP TABLE test2;
