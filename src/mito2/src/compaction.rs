@@ -368,6 +368,7 @@ impl CompactionScheduler {
                     picker_output: picker_output.clone(),
                     start_time,
                     waiters,
+                    ttl,
                 };
 
                 let result = remote_job_scheduler

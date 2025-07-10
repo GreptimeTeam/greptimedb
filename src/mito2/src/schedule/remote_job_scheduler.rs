@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_telemetry::error;
+use common_time::TimeToLive;
 use serde::{Deserialize, Serialize};
 use snafu::{Location, ResultExt, Snafu};
 use store_api::storage::RegionId;
@@ -108,6 +109,7 @@ pub struct CompactionJob {
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
     pub start_time: Instant,
+    pub ttl: TimeToLive,
     /// Send the result of the compaction job to these waiters.
     pub waiters: Vec<OutputTx>,
 }

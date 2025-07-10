@@ -7379,6 +7379,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "dotenv",
+ "either",
  "futures",
  "humantime-serde",
  "index",
