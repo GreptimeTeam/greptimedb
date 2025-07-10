@@ -114,14 +114,16 @@ TQL ANALYZE (0, 10, '5s') test;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
+| 0_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+|_|_|_SortExec: expr=[k@2 ASC, l@3 ASC, j@1 ASC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+| 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -138,18 +140,24 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+| 0_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@0 ASC] REDACTED
+|_|_|_SortExec: expr=[k@2 ASC, l@3 ASC, j@0 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
 |_|_|_FilterExec: prom_rate(j_range,i,j,Int64(10000))@1 IS NOT NULL REDACTED
 |_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+| 1_| 1_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_FilterExec: prom_rate(j_range,i,j,Int64(10000))@1 IS NOT NULL REDACTED
+|_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+|_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
+|_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
@@ -169,9 +177,9 @@ TQL ANALYZE FORMAT JSON (0, 10, '5s') test;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
-| 1_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
-| 1_| 1_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
+| 0_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
+| 1_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
+| 1_| 1_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
 |_|_| Total rows: 0_|
 +-+-+-+
 
@@ -189,9 +197,9 @@ TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
-| 1_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
-| 1_| 1_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
+| 0_| 0_| {"name":"SortPreservingMergeExec","param":"[k@2 ASC, l@3 ASC, j@1 ASC]","output_rows":0,"REDACTED
+| 1_| 0_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
+| 1_| 1_| {"name":"PromInstantManipulateExec","param":"range=[0..10000], lookback=[300000], interval=[5000], time index=[j]","output_rows":0,"REDACTED
 |_|_| Total rows: 0_|
 +-+-+-+
 
@@ -207,20 +215,76 @@ TQL ANALYZE FORMAT TEXT (0, 10, '5s') test;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
-|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
+| 0_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+|_|_|_SortExec: expr=[k@2 ASC, l@3 ASC, j@1 ASC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [k@2 ASC, l@3 ASC, j@1 ASC] REDACTED
+| 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
 
 drop table test;
+
+Affected Rows: 0
+
+CREATE TABLE test2 (
+  "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+  "greptime_value" DOUBLE NULL,
+  "shard" STRING NULL INVERTED INDEX,
+  TIME INDEX ("greptime_timestamp"),
+  PRIMARY KEY ("shard")
+)
+PARTITION ON COLUMNS ("shard") (
+  shard <= '2',
+  shard > '2'
+);
+
+Affected Rows: 0
+
+TQL EVAL sum(test2);
+
+++
+++
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+TQL ANALYZE sum(test2);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(test2.greptime_value)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=Hash([greptime_timestamp@0], 20), input_partitions=20 REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(test2.greptime_value)] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_timestamp@0 as greptime_timestamp, greptime_value@1 as greptime_value] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["shard"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 1_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["shard"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
+DROP TABLE test2;
 
 Affected Rows: 0
 
