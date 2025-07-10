@@ -89,6 +89,15 @@ impl FlightRecordBatchStream {
                         warn!(e; "stop sending Flight data");
                         return;
                     }
+                    if let Some(metrics) = recordbatches
+                        .metrics()
+                        .and_then(|m| serde_json::to_string(&m).ok())
+                    {
+                        if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics))).await {
+                            warn!(e; "stop sending Flight data");
+                            return;
+                        }
+                    }
                 }
                 Err(e) => {
                     if e.status_code().should_log_error() {
