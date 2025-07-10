@@ -167,6 +167,7 @@ opentelemetry-proto = { version = "0.27", features = [
     "with-serde",
     "logs",
 ] }
+ordered-float = { version = "4.3", features = ["serde"] }
 parking_lot = "0.12"
 parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
@@ -228,6 +229,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
+vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 

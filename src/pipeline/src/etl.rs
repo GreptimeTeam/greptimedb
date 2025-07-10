@@ -19,21 +19,19 @@ pub mod processor;
 pub mod transform;
 pub mod value;
 
-use std::collections::BTreeMap;
-
 use api::v1::Row;
 use common_time::timestamp::TimeUnit;
 use itertools::Itertools;
 use processor::{Processor, Processors};
 use snafu::{ensure, OptionExt, ResultExt};
 use transform::Transforms;
-use value::Value;
+use vrl::core::Value as VrlValue;
 use yaml_rust::{Yaml, YamlLoader};
 
 use crate::dispatcher::{Dispatcher, Rule};
 use crate::error::{
-    AutoTransformOneTimestampSnafu, Error, InputValueMustBeObjectSnafu, IntermediateKeyIndexSnafu,
-    InvalidVersionNumberSnafu, Result, YamlLoadSnafu, YamlParseSnafu,
+    AutoTransformOneTimestampSnafu, Error, IntermediateKeyIndexSnafu, InvalidVersionNumberSnafu,
+    Result, YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
 use crate::etl::transform::transformer::greptime::values_to_row;
@@ -228,7 +226,7 @@ impl DispatchedTo {
 #[derive(Debug)]
 pub enum PipelineExecOutput {
     Transformed(TransformedOutput),
-    DispatchedTo(DispatchedTo, Value),
+    DispatchedTo(DispatchedTo, VrlValue),
 }
 
 #[derive(Debug)]
@@ -261,40 +259,6 @@ impl PipelineExecOutput {
     }
 }
 
-pub fn json_to_map(val: serde_json::Value) -> Result<Value> {
-    match val {
-        serde_json::Value::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
-            for (k, v) in map {
-                intermediate_state.insert(k, Value::try_from(v)?);
-            }
-            Ok(Value::Map(intermediate_state.into()))
-        }
-        _ => InputValueMustBeObjectSnafu.fail(),
-    }
-}
-
-pub fn json_array_to_map(val: Vec<serde_json::Value>) -> Result<Vec<Value>> {
-    val.into_iter().map(json_to_map).collect()
-}
-
-pub fn simd_json_to_map(val: simd_json::OwnedValue) -> Result<Value> {
-    match val {
-        simd_json::OwnedValue::Object(map) => {
-            let mut intermediate_state = BTreeMap::new();
-            for (k, v) in map.into_iter() {
-                intermediate_state.insert(k, Value::try_from(v)?);
-            }
-            Ok(Value::Map(intermediate_state.into()))
-        }
-        _ => InputValueMustBeObjectSnafu.fail(),
-    }
-}
-
-pub fn simd_json_array_to_map(val: Vec<simd_json::OwnedValue>) -> Result<Vec<Value>> {
-    val.into_iter().map(simd_json_to_map).collect()
-}
-
 impl Pipeline {
     fn is_v1(&self) -> bool {
         self.doc_version == PipelineDocVersion::V1
@@ -302,7 +266,7 @@ impl Pipeline {
 
     pub fn exec_mut(
         &self,
-        mut val: Value,
+        mut val: VrlValue,
         pipeline_ctx: &PipelineContext<'_>,
         schema_info: &mut SchemaInfo,
     ) -> Result<PipelineExecOutput> {
@@ -409,11 +373,14 @@ macro_rules! setup_pipeline {
 }
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::Rows;
     use greptime_proto::v1::value::ValueData;
     use greptime_proto::v1::{self, ColumnDataType, SemanticType};
+    use vrl::prelude::Bytes;
+    use vrl::value::KeyString;
 
     use super::*;
 
@@ -454,7 +421,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = json_to_map(input_value).unwrap();
+        let payload = input_value.into();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -515,9 +482,10 @@ transform:
             &pipeline_param,
             session::context::Channel::Unknown,
         );
-        let mut payload = BTreeMap::new();
-        payload.insert("message".to_string(), Value::String(message));
-        let payload = Value::Map(payload.into());
+        let payload = VrlValue::Object(BTreeMap::from([(
+            KeyString::from("message"),
+            VrlValue::Bytes(Bytes::from(message)),
+        )]));
 
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
@@ -613,7 +581,7 @@ transform:
             session::context::Channel::Unknown,
         );
 
-        let payload = json_to_map(input_value).unwrap();
+        let payload = input_value.into();
         let result = pipeline
             .exec_mut(payload, &pipeline_ctx, &mut schema_info)
             .unwrap()
@@ -666,7 +634,7 @@ transform:
             session::context::Channel::Unknown,
         );
         let schema = pipeline.schemas().unwrap().clone();
-        let result = json_to_map(input_value).unwrap();
+        let result = input_value.into();
 
         let row = pipeline
             .exec_mut(result, &pipeline_ctx, &mut schema_info)
@@ -732,7 +700,7 @@ transform:
         assert_eq!(
             dispatcher.rules[0],
             crate::dispatcher::Rule {
-                value: Value::String("http".to_string()),
+                value: VrlValue::Bytes(Bytes::from("http")),
                 table_suffix: "http_events".to_string(),
                 pipeline: None
             }
@@ -741,7 +709,7 @@ transform:
         assert_eq!(
             dispatcher.rules[1],
             crate::dispatcher::Rule {
-                value: Value::String("database".to_string()),
+                value: VrlValue::Bytes(Bytes::from("database")),
                 table_suffix: "db_events".to_string(),
                 pipeline: Some("database_pipeline".to_string()),
             }

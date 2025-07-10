@@ -128,6 +128,7 @@ tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true
 urlencoding = "2.1"
 uuid.workspace = true
+vrl.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]

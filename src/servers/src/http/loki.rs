@@ -25,6 +25,7 @@ use axum::extract::State;
 use axum::Extension;
 use axum_extra::TypedHeader;
 use bytes::Bytes;
+use chrono::DateTime;
 use common_query::prelude::GREPTIME_TIMESTAMP;
 use common_query::{Output, OutputData};
 use common_telemetry::{error, warn};
@@ -39,6 +40,7 @@ use prost::Message;
 use quoted_string::test_utils::TestSpec;
 use session::context::{Channel, QueryContext};
 use snafu::{ensure, OptionExt, ResultExt};
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     DecodeOtlpRequestSnafu, InvalidLokiLabelsSnafu, InvalidLokiPayloadSnafu, ParseJsonSnafu,
@@ -197,7 +199,7 @@ pub async fn loki_ingest(
 }
 
 /// This is the holder of the loki lines parsed from json or protobuf.
-/// The generic here is either [serde_json::Value] or [Vec<LabelPairAdapter>].
+/// The generic here is either [VrlValue] or [Vec<LabelPairAdapter>].
 /// Depending on the target destination, this can be converted to [LokiRawItem] or [LokiPipeline].
 pub struct LokiMiddleItem<T> {
     pub ts: i64,
@@ -218,7 +220,7 @@ pub struct LokiRawItem {
 
 /// This is the line item prepared for the pipeline engine.
 pub struct LokiPipeline {
-    pub map: pipeline::Value,
+    pub map: VrlValue,
 }
 
 /// This is the flow of the Loki ingestion.
@@ -255,7 +257,7 @@ pub struct LokiPipeline {
 /// +------------------+         +---------------------+
 fn extract_item<T>(content_type: ContentType, bytes: Bytes) -> Result<Box<dyn Iterator<Item = T>>>
 where
-    LokiMiddleItem<serde_json::Value>: Into<T>,
+    LokiMiddleItem<VrlValue>: Into<T>,
     LokiMiddleItem<Vec<LabelPairAdapter>>: Into<T>,
 {
     match content_type {
@@ -270,15 +272,14 @@ where
 }
 
 struct LokiJsonParser {
-    pub streams: VecDeque<serde_json::Value>,
+    pub streams: VecDeque<VrlValue>,
 }
 
 impl LokiJsonParser {
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
-        let payload: serde_json::Value =
-            serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
+        let payload: VrlValue = serde_json::from_slice(bytes.as_ref()).context(ParseJsonSnafu)?;
 
-        let serde_json::Value::Object(mut map) = payload else {
+        let VrlValue::Object(mut map) = payload else {
             return InvalidLokiPayloadSnafu {
                 msg: "payload is not an object",
             }
@@ -289,7 +290,7 @@ impl LokiJsonParser {
             msg: "missing streams",
         })?;
 
-        let serde_json::Value::Array(streams) = streams else {
+        let VrlValue::Array(streams) = streams else {
             return InvalidLokiPayloadSnafu {
                 msg: "streams is not an array",
             }
@@ -308,7 +309,7 @@ impl Iterator for LokiJsonParser {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(stream) = self.streams.pop_front() {
             // get lines from the map
-            let serde_json::Value::Object(mut map) = stream else {
+            let VrlValue::Object(mut map) = stream else {
                 warn!("stream is not an object, {:?}", stream);
                 continue;
             };
@@ -316,7 +317,7 @@ impl Iterator for LokiJsonParser {
                 warn!("missing lines on stream, {:?}", map);
                 continue;
             };
-            let serde_json::Value::Array(lines) = lines else {
+            let VrlValue::Array(lines) = lines else {
                 warn!("lines is not an array, {:?}", lines);
                 continue;
             };
@@ -325,13 +326,15 @@ impl Iterator for LokiJsonParser {
             let labels = map
                 .remove(LABEL_KEY)
                 .and_then(|m| match m {
-                    serde_json::Value::Object(labels) => Some(labels),
+                    VrlValue::Object(labels) => Some(labels),
                     _ => None,
                 })
                 .map(|m| {
                     m.into_iter()
                         .filter_map(|(k, v)| match v {
-                            serde_json::Value::String(v) => Some((k, v)),
+                            VrlValue::Bytes(v) => {
+                                Some((k.into(), String::from_utf8_lossy(&v).to_string()))
+                            }
                             _ => None,
                         })
                         .collect::<BTreeMap<String, String>>()
@@ -347,16 +350,16 @@ impl Iterator for LokiJsonParser {
 }
 
 struct JsonStreamItem {
-    pub lines: VecDeque<serde_json::Value>,
+    pub lines: VecDeque<VrlValue>,
     pub labels: Option<BTreeMap<String, String>>,
 }
 
 impl Iterator for JsonStreamItem {
-    type Item = LokiMiddleItem<serde_json::Value>;
+    type Item = LokiMiddleItem<VrlValue>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(line) = self.lines.pop_front() {
-            let serde_json::Value::Array(line) = line else {
+            let VrlValue::Array(line) = line else {
                 warn!("line is not an array, {:?}", line);
                 continue;
             };
@@ -364,11 +367,11 @@ impl Iterator for JsonStreamItem {
                 warn!("line is too short, {:?}", line);
                 continue;
             }
-            let mut line: VecDeque<serde_json::Value> = line.into();
+            let mut line: VecDeque<VrlValue> = line.into();
 
             // get ts
             let ts = line.pop_front().and_then(|ts| match ts {
-                serde_json::Value::String(ts) => ts.parse::<i64>().ok(),
+                VrlValue::Bytes(ts) => String::from_utf8_lossy(&ts).parse::<i64>().ok(),
                 _ => {
                     warn!("missing or invalid timestamp, {:?}", ts);
                     None
@@ -379,7 +382,7 @@ impl Iterator for JsonStreamItem {
             };
 
             let line_text = line.pop_front().and_then(|l| match l {
-                serde_json::Value::String(l) => Some(l),
+                VrlValue::Bytes(l) => Some(String::from_utf8_lossy(&l).to_string()),
                 _ => {
                     warn!("missing or invalid line, {:?}", l);
                     None
@@ -402,8 +405,8 @@ impl Iterator for JsonStreamItem {
     }
 }
 
-impl From<LokiMiddleItem<serde_json::Value>> for LokiRawItem {
-    fn from(val: LokiMiddleItem<serde_json::Value>) -> Self {
+impl From<LokiMiddleItem<VrlValue>> for LokiRawItem {
+    fn from(val: LokiMiddleItem<VrlValue>) -> Self {
         let LokiMiddleItem {
             ts,
             line,
@@ -413,13 +416,16 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiRawItem {
 
         let structured_metadata = structured_metadata
             .and_then(|m| match m {
-                serde_json::Value::Object(m) => Some(m),
+                VrlValue::Object(m) => Some(m),
                 _ => None,
             })
             .map(|m| {
                 m.into_iter()
                     .filter_map(|(k, v)| match v {
-                        serde_json::Value::String(v) => Some((k, Value::String(v.into()))),
+                        VrlValue::Bytes(bytes) => Some((
+                            k.into(),
+                            Value::String(String::from_utf8_lossy(&bytes).to_string().into()),
+                        )),
                         _ => None,
                     })
                     .collect::<BTreeMap<String, Value>>()
@@ -436,8 +442,8 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiRawItem {
     }
 }
 
-impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
-    fn from(value: LokiMiddleItem<serde_json::Value>) -> Self {
+impl From<LokiMiddleItem<VrlValue>> for LokiPipeline {
+    fn from(value: LokiMiddleItem<VrlValue>) -> Self {
         let LokiMiddleItem {
             ts,
             line,
@@ -447,37 +453,33 @@ impl From<LokiMiddleItem<serde_json::Value>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            GREPTIME_TIMESTAMP.to_string(),
-            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+            KeyString::from(GREPTIME_TIMESTAMP),
+            VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(
-            LOKI_LINE_COLUMN_NAME.to_string(),
-            pipeline::Value::String(line),
+            KeyString::from(LOKI_LINE_COLUMN_NAME),
+            VrlValue::Bytes(line.into()),
         );
 
-        if let Some(serde_json::Value::Object(m)) = structured_metadata {
+        if let Some(VrlValue::Object(m)) = structured_metadata {
             for (k, v) in m {
-                match pipeline::Value::try_from(v) {
-                    Ok(v) => {
-                        map.insert(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k), v);
-                    }
-                    Err(e) => {
-                        warn!("not a valid value, {:?}", e);
-                    }
-                }
+                map.insert(
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, k)),
+                    v,
+                );
             }
         }
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
-                    pipeline::Value::String(v),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k)),
+                    VrlValue::Bytes(v.into()),
                 );
             });
         }
 
         LokiPipeline {
-            map: pipeline::Value::Map(pipeline::Map::from(map)),
+            map: VrlValue::Object(map),
         }
     }
 }
@@ -584,12 +586,12 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
 
         let mut map = BTreeMap::new();
         map.insert(
-            GREPTIME_TIMESTAMP.to_string(),
-            pipeline::Value::Timestamp(pipeline::Timestamp::Nanosecond(ts)),
+            KeyString::from(GREPTIME_TIMESTAMP),
+            VrlValue::Timestamp(DateTime::from_timestamp_nanos(ts)),
         );
         map.insert(
-            LOKI_LINE_COLUMN_NAME.to_string(),
-            pipeline::Value::String(line),
+            KeyString::from(LOKI_LINE_COLUMN_NAME),
+            VrlValue::Bytes(line.into()),
         );
 
         structured_metadata
@@ -597,22 +599,22 @@ impl From<LokiMiddleItem<Vec<LabelPairAdapter>>> for LokiPipeline {
             .into_iter()
             .for_each(|d| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, d.name),
-                    pipeline::Value::String(d.value),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_METADATA_PREFIX, d.name)),
+                    VrlValue::Bytes(d.value.into()),
                 );
             });
 
         if let Some(v) = labels {
             v.into_iter().for_each(|(k, v)| {
                 map.insert(
-                    format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k),
-                    pipeline::Value::String(v),
+                    KeyString::from(format!("{}{}", LOKI_PIPELINE_LABEL_PREFIX, k)),
+                    VrlValue::Bytes(v.into()),
                 );
             });
         }
 
         LokiPipeline {
-            map: pipeline::Value::Map(pipeline::Map::from(map)),
+            map: VrlValue::Object(map),
         }
     }
 }
