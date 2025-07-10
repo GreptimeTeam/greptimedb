@@ -31,3 +31,24 @@ DROP TABLE test;
 
 Affected Rows: 0
 
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+ALTER TABLE my_table DROP COLUMN a;
+
+Error: 1004(InvalidArguments), Not allowed to remove index column a from table my_table
+
+DROP TABLE my_table;
+
+Affected Rows: 0
+
