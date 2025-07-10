@@ -74,7 +74,6 @@
               "orc-rust-0.6.0" = "sha256-uPG94OF5l6JxWbjiejqJ6Zz+vOX9hL3pamomz2hkrG8=";
               "otel-arrow-rust-0.1.0" = "sha256-PB6zInde/ASQR7fqMs44IhaXqMpKW5AILMZOnaPN2eY=";
               "pgwire-0.30.2" = "sha256-TJMYAleRrXp8nW5l/OXfHji+AgyBGsxUamrhMLn8hps=";
-              "promql-parser-0.5.1" = "sha256-5OYSL2iPKRS4hE8OoG6w93KtOBtKuwoGZYo/2iqcNps=";
               "rskafka-0.6.0" = "sha256-wjJ+FuHSBu5a5tSYq22ZrQGLHou/aIcsmUT0j1OinJw=";
               "sqlness-0.6.1" = "sha256-ZtUVLJ1U4A6mNR+iNvRtkhIPWHe2ZSJ+kt533B6vivQ=";
               "sqlparser-0.54.0-greptime" = "sha256-l2Szp9ytcbXJDyvYR+jKFwa+AYqtwZvFqQ3KzgGbH2A=";

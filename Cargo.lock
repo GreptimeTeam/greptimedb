@@ -2694,7 +2694,7 @@ dependencies = [
  "hex",
  "jsonb",
  "snafu 0.8.5",
- "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
+ "sqlparser 0.54.0-greptime",
 ]
 
 [[package]]
