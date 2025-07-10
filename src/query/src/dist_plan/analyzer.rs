@@ -266,6 +266,10 @@ impl PlanRewriter {
     }
 
     fn update_column_requirements(&mut self, plan: &LogicalPlan) {
+        debug!(
+            "PlanRewriter: update column requirements for plan: {plan}\n withcolumn_requirements: {:?}",
+            self.column_requirements
+        );
         let mut container = HashSet::new();
         for expr in plan.expressions() {
             // this method won't fail
@@ -275,6 +279,10 @@ impl PlanRewriter {
         for col in container {
             self.column_requirements.insert(col);
         }
+        debug!(
+            "PlanRewriter: updated column requirements: {:?}",
+            self.column_requirements
+        );
     }
 
     fn is_expanded(&self) -> bool {
