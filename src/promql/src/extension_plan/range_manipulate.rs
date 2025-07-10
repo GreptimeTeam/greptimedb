@@ -340,7 +340,14 @@ impl ExecutionPlan for RangeManipulateExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        self.input.required_input_distribution()
+        let input_requirement = self.input.required_input_distribution();
+        if input_requirement.is_empty() {
+            // if the input is EmptyMetric, its required_input_distribution() is empty so we can't
+            // use its input distribution.
+            vec![Distribution::UnspecifiedDistribution]
+        } else {
+            input_requirement
+        }
     }
 
     fn with_new_children(
