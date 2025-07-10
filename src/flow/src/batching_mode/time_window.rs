@@ -150,6 +150,8 @@ impl TimeWindowExpr {
             }
         }
 
+        // FAST PATH: if we have eval_time_original and eval_time_window_size,
+        // we can compute the bounds directly
         if let (Some(original), Some(window_size)) =
             (self.eval_time_original, self.eval_time_window_size)
         {
