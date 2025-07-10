@@ -645,10 +645,19 @@ impl TableMeta {
             msg: format!("Table {table_name} cannot add new columns {column_names:?}"),
         })?;
 
+        let partition_key_indices = self
+            .partition_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            // This unwrap is safe since we only add new columns.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
+
         // value_indices would be generated automatically.
         let _ = meta_builder
             .schema(Arc::new(new_schema))
-            .primary_key_indices(primary_key_indices);
+            .primary_key_indices(primary_key_indices)
+            .partition_key_indices(partition_key_indices);
 
         Ok(meta_builder)
     }
@@ -671,6 +680,14 @@ impl TableMeta {
                 ensure!(
                     !self.primary_key_indices.contains(&index),
                     error::RemoveColumnInIndexSnafu {
+                        column_name: *column_name,
+                        table_name,
+                    }
+                );
+
+                ensure!(
+                    !self.partition_key_indices.contains(&index),
+                    error::RemovePartitionColumnSnafu {
                         column_name: *column_name,
                         table_name,
                     }
@@ -725,9 +742,18 @@ impl TableMeta {
             .map(|name| new_schema.column_index_by_name(name).unwrap())
             .collect();
 
+        let partition_key_indices = self
+            .partition_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            // This unwrap is safe since we don't allow removing a partition key column.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
+
         let _ = meta_builder
             .schema(Arc::new(new_schema))
-            .primary_key_indices(primary_key_indices);
+            .primary_key_indices(primary_key_indices)
+            .partition_key_indices(partition_key_indices);
 
         Ok(meta_builder)
     }
@@ -1300,6 +1326,8 @@ fn unset_column_skipping_index_options(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
@@ -1308,6 +1336,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::Error;
 
     /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills, col2 int32]`.
     fn new_test_schema() -> Schema {
@@ -1385,6 +1414,11 @@ mod tests {
             ConcreteDataType::string_datatype(),
             true,
         );
+        let yet_another_field = ColumnSchema::new(
+            "yet_another_field_after_ts",
+            ConcreteDataType::int64_datatype(),
+            true,
+        );
         let alter_kind = AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -1396,6 +1430,14 @@ mod tests {
                 AddColumnRequest {
                     column_schema: new_field,
                     is_key: false,
+                    location: Some(AddColumnLocation::After {
+                        column_name: "ts".to_string(),
+                    }),
+                    add_if_not_exists: false,
+                },
+                AddColumnRequest {
+                    column_schema: yet_another_field,
+                    is_key: true,
                     location: Some(AddColumnLocation::After {
                         column_name: "ts".to_string(),
                     }),
@@ -1757,6 +1799,29 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_partition_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .partition_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        // Remove column in primary key.
+        let alter_kind = AlterKind::DropColumns {
+            names: vec![String::from("col1")],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_matches!(err, Error::RemovePartitionColumn { .. });
+    }
+
+    #[test]
     fn test_change_key_column_data_type() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::empty()
@@ -1821,6 +1886,8 @@ mod tests {
         let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
+            // partition col: col1, col2
+            .partition_key_indices(vec![0, 2])
             .engine("engine")
             .next_column_id(3)
             .build()
@@ -1836,11 +1903,19 @@ mod tests {
             .map(|column_schema| column_schema.name.clone())
             .collect();
         assert_eq!(
-            &["my_tag_first", "col1", "ts", "my_field_after_ts", "col2"],
+            &[
+                "my_tag_first",               // primary key column
+                "col1",                       // partition column
+                "ts",                         // timestamp column
+                "yet_another_field_after_ts", // primary key column
+                "my_field_after_ts",          // value column
+                "col2",                       // partition column
+            ],
             &names[..]
         );
-        assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
-        assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
+        assert_eq!(&[0, 1, 3], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[2, 4, 5], &new_meta.value_indices[..]);
+        assert_eq!(&[1, 5], &new_meta.partition_key_indices[..]);
     }
 
     #[test]
