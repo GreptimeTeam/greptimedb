@@ -333,9 +333,9 @@ impl Pipeline {
                         table_suffix,
                     }));
                 }
-                // continue v2 process, check ts column and set the rest fields with auto-transform
+                // continue v2 process, and set the rest fields with auto-transform
                 // if transformer presents, then ts has been set
-                values_to_row(schema_info, val, pipeline_ctx, Some(values))?
+                values_to_row(schema_info, val, pipeline_ctx, Some(values), false)?
             }
             TransformerMode::AutoTransform(ts_name, time_unit) => {
                 // infer ts from the context
@@ -347,7 +347,7 @@ impl Pipeline {
                 ));
                 let n_ctx =
                     PipelineContext::new(&def, pipeline_ctx.pipeline_param, pipeline_ctx.channel);
-                values_to_row(schema_info, val, &n_ctx, None)?
+                values_to_row(schema_info, val, &n_ctx, None, true)?
             }
         };
 
