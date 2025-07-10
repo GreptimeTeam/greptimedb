@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -143,7 +143,7 @@ pub struct MergeScanExec {
     metric: ExecutionPlanMetricsSet,
     properties: PlanProperties,
     /// Metrics from sub stages
-    sub_stage_metrics: Arc<Mutex<Vec<RecordBatchMetrics>>>,
+    sub_stage_metrics: Arc<Mutex<HashMap<RegionId, RecordBatchMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
     partition_cols: Vec<String>,
@@ -300,6 +300,7 @@ impl MergeScanExec {
                     })
                     .context(ExternalSnafu)?;
                 let do_get_cost = do_get_start.elapsed();
+                common_telemetry::info!("[DEBUG] request to region {:?} is sent", region_id,);
 
                 ready_timer.stop();
 
@@ -317,6 +318,18 @@ impl MergeScanExec {
                     if let Some(mut first_consume_timer) = first_consume_timer.take() {
                         first_consume_timer.stop();
                     }
+
+                    if let Some(metrics) = stream.metrics() {
+                        let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
+                        sub_stage_metrics.insert(region_id, metrics);
+                    } else {
+                        common_telemetry::info!(
+                            "[DEBUG] no metrics from region {:?}, batch size: {}",
+                            region_id,
+                            batch.num_rows()
+                        );
+                    }
+
                     yield Ok(batch);
                     // reset poll timer
                     poll_timer = Instant::now();
@@ -341,7 +354,13 @@ impl MergeScanExec {
                     metric.record_greptime_exec_cost(value as usize);
 
                     // record metrics from sub sgates
-                    sub_stage_metrics_moved.lock().unwrap().push(metrics);
+                    let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
+                    sub_stage_metrics.insert(region_id, metrics);
+                } else {
+                    common_telemetry::info!(
+                        "[DEBUG] no metrics from region {:?} in the end",
+                        region_id
+                    );
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
@@ -409,7 +428,12 @@ impl MergeScanExec {
     }
 
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
-        self.sub_stage_metrics.lock().unwrap().clone()
+        self.sub_stage_metrics
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn partition_count(&self) -> usize {
