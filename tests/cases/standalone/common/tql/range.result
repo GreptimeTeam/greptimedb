@@ -1,0 +1,201 @@
+-- Test sum(rate()) function combinations
+CREATE TABLE metrics (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    service STRING,
+    PRIMARY KEY (host, service)
+);
+
+Affected Rows: 0
+
+-- Insert test data with multiple time series
+INSERT INTO metrics VALUES
+    -- host1, service1
+    (0, 10, 'host1', 'service1'),
+    (60000, 20, 'host1', 'service1'),
+    (120000, 30, 'host1', 'service1'),
+    (180000, 40, 'host1', 'service1'),
+    -- host1, service2
+    (0, 5, 'host1', 'service2'),
+    (60000, 15, 'host1', 'service2'),
+    (120000, 25, 'host1', 'service2'),
+    (180000, 35, 'host1', 'service2'),
+    -- host2, service1
+    (0, 8, 'host2', 'service1'),
+    (60000, 18, 'host2', 'service1'),
+    (120000, 28, 'host2', 'service1'),
+    (180000, 38, 'host2', 'service1');
+
+Affected Rows: 12
+
+-- Test basic sum(rate()) - sum rate across all series
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics[1m]));
+
++---------------------+----------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:01:00 | 0.5                                          |
+| 1970-01-01T00:02:00 | 0.5                                          |
+| 1970-01-01T00:03:00 | 0.5                                          |
++---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with grouping by host
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum by(host) (rate(metrics[1m]));
+
++-------+---------------------+----------------------------------------------+
+| host  | ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++-------+---------------------+----------------------------------------------+
+| host1 | 1970-01-01T00:01:00 | 0.3333333333333333                           |
+| host1 | 1970-01-01T00:02:00 | 0.3333333333333333                           |
+| host1 | 1970-01-01T00:03:00 | 0.3333333333333333                           |
+| host2 | 1970-01-01T00:01:00 | 0.16666666666666666                          |
+| host2 | 1970-01-01T00:02:00 | 0.16666666666666666                          |
+| host2 | 1970-01-01T00:03:00 | 0.16666666666666666                          |
++-------+---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with grouping by service
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum by(service) (rate(metrics[1m]));
+
++----------+---------------------+----------------------------------------------+
+| service  | ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++----------+---------------------+----------------------------------------------+
+| service1 | 1970-01-01T00:01:00 | 0.3333333333333333                           |
+| service1 | 1970-01-01T00:02:00 | 0.3333333333333333                           |
+| service1 | 1970-01-01T00:03:00 | 0.3333333333333333                           |
+| service2 | 1970-01-01T00:01:00 | 0.16666666666666666                          |
+| service2 | 1970-01-01T00:02:00 | 0.16666666666666666                          |
+| service2 | 1970-01-01T00:03:00 | 0.16666666666666666                          |
++----------+---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with label filtering
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics{host="host1"}[1m]));
+
++---------------------+----------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:01:00 | 0.3333333333333333                           |
+| 1970-01-01T00:02:00 | 0.3333333333333333                           |
+| 1970-01-01T00:03:00 | 0.3333333333333333                           |
++---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with multiple label filters
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics{host="host1", service="service1"}[1m]));
+
++---------------------+----------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:01:00 | 0.16666666666666666                          |
+| 1970-01-01T00:02:00 | 0.16666666666666666                          |
+| 1970-01-01T00:03:00 | 0.16666666666666666                          |
++---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with regex label matching
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics{host=~"host.*"}[1m]));
+
++---------------------+----------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:01:00 | 0.5                                          |
+| 1970-01-01T00:02:00 | 0.5                                          |
+| 1970-01-01T00:03:00 | 0.5                                          |
++---------------------+----------------------------------------------+
+
+-- Test sum(rate()) with different time ranges
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics[30s]));
+
+++
+++
+
+-- Test sum(rate()) with longer evaluation window
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 240, '60s') sum(rate(metrics[1m]));
+
++---------------------+----------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:01:00 | 0.5                                          |
+| 1970-01-01T00:02:00 | 0.5                                          |
+| 1970-01-01T00:03:00 | 0.5                                          |
++---------------------+----------------------------------------------+
+
+-- Test sum(rate()) combined with arithmetic operations
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum(rate(metrics[1m])) * 100;
+
++---------------------+-------------------------------------------------------------+
+| ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) * Float64(100) |
++---------------------+-------------------------------------------------------------+
+| 1970-01-01T00:01:00 | 50.0                                                        |
+| 1970-01-01T00:02:00 | 50.0                                                        |
+| 1970-01-01T00:03:00 | 50.0                                                        |
++---------------------+-------------------------------------------------------------+
+
+-- Test sum(rate()) with grouping and arithmetic
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 180, '60s') sum by(host) (rate(metrics[1m])) * 60;
+
++-------+---------------------+------------------------------------------------------------+
+| host  | ts                  | sum(prom_rate(ts_range,val,ts,Int64(60000))) * Float64(60) |
++-------+---------------------+------------------------------------------------------------+
+| host1 | 1970-01-01T00:01:00 | 20.0                                                       |
+| host1 | 1970-01-01T00:02:00 | 20.0                                                       |
+| host1 | 1970-01-01T00:03:00 | 20.0                                                       |
+| host2 | 1970-01-01T00:01:00 | 10.0                                                       |
+| host2 | 1970-01-01T00:02:00 | 10.0                                                       |
+| host2 | 1970-01-01T00:03:00 | 10.0                                                       |
++-------+---------------------+------------------------------------------------------------+
+
+-- Test querying non-existent table
+TQL EVAL (0, 180, '60s') sum(rate(non_existent_table[1m]));
+
+++
+++
+
+-- Test querying non-existent label
+TQL EVAL (0, 180, '60s') sum(rate(metrics{non_existent_label="value"}[1m]));
+
+++
+++
+
+-- Test querying non-existent label value
+TQL EVAL (0, 180, '60s') sum(rate(metrics{host="non_existent_host"}[1m]));
+
+++
+++
+
+-- Test querying multiple non-existent labels
+TQL EVAL (0, 180, '60s') sum(rate(metrics{non_existent_label1="value1", non_existent_label2="value2"}[1m]));
+
+++
+++
+
+-- Test querying mix of existing and non-existent labels
+TQL EVAL (0, 180, '60s') sum(rate(metrics{host="host1", non_existent_label="value"}[1m]));
+
+++
+++
+
+-- Test querying non-existent table with non-existent labels
+TQL EVAL (0, 180, '60s') sum(rate(non_existent_table{non_existent_label="value"}[1m]));
+
+++
+++
+
+-- Test querying non-existent table with multiple non-existent labels
+TQL EVAL (0, 180, '60s') sum(rate(non_existent_table{label1="value1", label2="value2"}[1m]));
+
+++
+++
+
+DROP TABLE metrics;
+
+Affected Rows: 0
+
