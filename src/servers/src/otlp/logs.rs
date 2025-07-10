@@ -690,9 +690,7 @@ fn key_value_to_map(key_values: Vec<KeyValue>) -> BTreeMap<KeyString, VrlValue> 
             },
             None => VrlValue::Null,
         };
-        if value != VrlValue::Null {
-            map.insert(kv.key.into(), value);
-        }
+        map.insert(kv.key.into(), value);
     }
     map
 }
