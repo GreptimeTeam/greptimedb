@@ -915,9 +915,8 @@ impl RegionServerInner {
         request: RegionRequest,
     ) -> Result<RegionResponse> {
         let request_type = request.request_type();
-        let region_id_str = region_id.to_string();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
-            .with_label_values(&[&region_id_str, request_type])
+            .with_label_values(&[request_type])
             .start_timer();
 
         let region_change = match &request {
@@ -957,7 +956,7 @@ impl RegionServerInner {
                 // Update metrics
                 if matches!(region_change, RegionChange::Ingest) {
                     crate::metrics::REGION_CHANGED_ROW_COUNT
-                        .with_label_values(&[&region_id_str, request_type])
+                        .with_label_values(&[request_type])
                         .inc_by(result.affected_rows as u64);
                 }
                 // Sets corresponding region status to ready.
