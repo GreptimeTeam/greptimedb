@@ -156,7 +156,11 @@ impl TimeWindowExpr {
             (self.eval_time_original, self.eval_time_window_size)
         {
             // date_bin align current to lower bound
-            let time_diff_ns = current.sub(&original).unwrap().num_nanoseconds().unwrap();
+            let time_diff_ns = current.sub(&original).and_then(|s|s.num_nanoseconds()).with_context(||UnexpectedSnafu {
+                reason: format!(
+                    "Failed to compute time difference between current {current:?} and original {original:?}"
+                ),
+            })?;
 
             let window_size_ns = window_size.as_nanos() as i64;
 
