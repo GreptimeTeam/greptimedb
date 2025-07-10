@@ -2531,6 +2531,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tonic 0.12.3",
+ "tracing",
  "typetag",
  "uuid",
 ]
@@ -3806,6 +3807,7 @@ dependencies = [
  "tokio",
  "toml 0.8.19",
  "tonic 0.12.3",
+ "tracing",
 ]
 
 [[package]]
@@ -4794,6 +4796,7 @@ dependencies = [
  "toml 0.8.19",
  "tonic 0.12.3",
  "tower 0.5.2",
+ "tracing",
  "uuid",
 ]
 
@@ -7297,6 +7300,7 @@ dependencies = [
  "snafu 0.8.5",
  "store-api",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7445,6 +7449,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml 0.8.19",
+ "tracing",
  "uuid",
 ]
 
@@ -8524,6 +8529,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic 0.12.3",
+ "tracing",
 ]
 
 [[package]]
@@ -9925,6 +9931,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+ "tracing",
  "unescaper",
  "uuid",
 ]
@@ -11358,6 +11365,7 @@ dependencies = [
  "tonic-reflection",
  "tower 0.5.2",
  "tower-http 0.6.2",
+ "tracing",
  "urlencoding",
  "uuid",
  "zstd 0.13.2",
