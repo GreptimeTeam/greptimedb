@@ -96,6 +96,18 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Not allowed to remove partition column {} from table {}",
+        column_name,
+        table_name
+    ))]
+    RemovePartitionColumn {
+        column_name: String,
+        table_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Failed to build column descriptor for table: {}, column: {}",
         table_name,
         column_name,
@@ -193,6 +205,7 @@ impl ErrorExt for Error {
                 StatusCode::EngineExecuteQuery
             }
             Error::RemoveColumnInIndex { .. }
+            | Error::RemovePartitionColumn { .. }
             | Error::BuildColumnDescriptor { .. }
             | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
             Error::CastDefaultValue { source, .. } => source.status_code(),
