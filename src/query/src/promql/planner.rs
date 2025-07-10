@@ -716,17 +716,19 @@ impl PromPlanner {
             ..
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
-        if let Some(empty_plan) = self.setup_context().await? {
-            return Ok(empty_plan);
-        }
-
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
 
-        let normalize = self
-            .selector_to_series_normalize_plan(offset, matchers, true)
-            .await?;
+        // Some functions like rate may require special fields in the RangeManipulate plan
+        // so we can't skip RangeManipulate.
+        let normalize = match self.setup_context().await? {
+            Some(empty_plan) => empty_plan,
+            None => {
+                self.selector_to_series_normalize_plan(offset, matchers, true)
+                    .await?
+            }
+        };
         let manipulate = RangeManipulate::new(
             self.ctx.start,
             self.ctx.end,
