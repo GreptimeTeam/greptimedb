@@ -171,7 +171,7 @@ impl RegionRequester {
                 let flight_message = match flight_message_item {
                     Some(Ok(message)) => message,
                     Some(Err(e)) => {
-                        yield Err(e).map_err(BoxedError::new).context(ExternalSnafu);
+                        yield Err(BoxedError::new(e)).context(ExternalSnafu);
                         break;
                     }
                     None => break,
@@ -207,7 +207,7 @@ impl RegionRequester {
                                     break;
                                 }
                                 Err(e) => {
-                                    yield Err(e).map_err(BoxedError::new).context(ExternalSnafu);
+                                    yield Err(BoxedError::new(e)).context(ExternalSnafu);
                                     break;
                                 }
                             }
