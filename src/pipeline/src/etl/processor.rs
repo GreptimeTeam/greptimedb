@@ -19,6 +19,7 @@ pub mod decolorize;
 pub mod digest;
 pub mod dissect;
 pub mod epoch;
+pub mod filter;
 pub mod gsub;
 pub mod join;
 pub mod json_parse;
@@ -55,6 +56,7 @@ use crate::error::{
     Result, UnsupportedProcessorSnafu,
 };
 use crate::etl::field::{Field, Fields};
+use crate::etl::processor::filter::FilterProcessor;
 use crate::etl::processor::json_parse::JsonParseProcessor;
 use crate::etl::processor::select::SelectProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
@@ -146,6 +148,7 @@ pub enum ProcessorKind {
     Digest(DigestProcessor),
     Select(SelectProcessor),
     Vrl(VrlProcessor),
+    Filter(FilterProcessor),
 }
 
 #[derive(Debug, Default)]
@@ -226,6 +229,7 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         }
         vrl_processor::PROCESSOR_VRL => ProcessorKind::Vrl(VrlProcessor::try_from(value)?),
         select::PROCESSOR_SELECT => ProcessorKind::Select(SelectProcessor::try_from(value)?),
+        filter::PROCESSOR_FILTER => ProcessorKind::Filter(FilterProcessor::try_from(value)?),
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
 
