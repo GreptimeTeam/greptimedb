@@ -145,7 +145,9 @@ pub async fn remote_write(
         let output = prom_store_handler
             .write(reqs, temp_ctx, prom_store_with_metric_engine)
             .await?;
-        crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(cnt);
+        crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+            .with_label_values(&[db.as_str()])
+            .inc_by(cnt);
         cost += output.meta.cost;
     }
 

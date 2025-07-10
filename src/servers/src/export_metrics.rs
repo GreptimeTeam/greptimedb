@@ -269,7 +269,9 @@ pub async fn write_system_metric_by_handler(
         if let Err(e) = handler.write(requests, ctx.clone(), false).await {
             error!(e; "report export metrics by handler failed");
         } else {
-            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
+            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(samples as u64);
         }
     }
 }

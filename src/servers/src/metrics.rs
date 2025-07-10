@@ -26,6 +26,7 @@ use prometheus::{
     register_histogram, register_histogram_vec, register_int_counter, register_int_counter_vec,
     register_int_gauge, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
 };
+use session::context::QueryContext;
 use tonic::body::BoxBody;
 use tower::{Layer, Service};
 
@@ -48,6 +49,13 @@ pub(crate) const METRIC_SUCCESS_VALUE: &str = "success";
 pub(crate) const METRIC_FAILURE_VALUE: &str = "failure";
 
 lazy_static! {
+
+    pub static ref HTTP_REQUEST_COUNTER: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_http_request_counter",
+        "servers http request counter",
+        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL, METRIC_DB_LABEL]
+    ).unwrap();
+
     pub static ref METRIC_ERROR_COUNTER: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_error",
         "servers error",
@@ -114,9 +122,10 @@ lazy_static! {
     pub static ref METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED: Histogram = METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert"]);
         /// The samples count of Prometheus remote write.
-    pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
+    pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_prometheus_remote_write_samples",
-        "frontend prometheus remote write samples"
+        "frontend prometheus remote write samples",
+        &[METRIC_DB_LABEL]
     )
     .unwrap();
     /// Http prometheus read duration per database.
@@ -167,6 +176,8 @@ lazy_static! {
             &[METRIC_DB_LABEL, METRIC_RESULT_LABEL]
         )
         .unwrap();
+
+    /// Count of logs ingested into Loki.
     pub static ref METRIC_LOKI_LOGS_INGESTION_COUNTER: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_loki_logs_ingestion_counter",
         "servers loki logs ingestion counter",
@@ -187,9 +198,11 @@ lazy_static! {
             &[METRIC_DB_LABEL]
         )
         .unwrap();
+
+    /// Count of documents ingested into Elasticsearch logs.
     pub static ref METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_elasticsearch_logs_docs_count",
-        "servers elasticsearch logs docs count",
+        "servers elasticsearch ingest logs docs count",
         &[METRIC_DB_LABEL]
     )
     .unwrap();
@@ -252,13 +265,13 @@ lazy_static! {
     pub static ref METRIC_HTTP_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "greptime_servers_http_requests_total",
         "servers http requests total",
-        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL]
+        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL, METRIC_DB_LABEL]
     )
     .unwrap();
     pub static ref METRIC_HTTP_REQUESTS_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_servers_http_requests_elapsed",
         "servers http requests elapsed",
-        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL],
+        &[METRIC_METHOD_LABEL, METRIC_PATH_LABEL, METRIC_CODE_LABEL, METRIC_DB_LABEL],
         vec![0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 60.0, 300.0]
     )
     .unwrap();
@@ -352,19 +365,26 @@ where
 pub(crate) async fn http_metrics_layer(req: Request, next: Next) -> impl IntoResponse {
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
-        matched_path.as_str().to_owned()
+        matched_path.as_str().to_string()
     } else {
-        req.uri().path().to_owned()
+        req.uri().path().to_string()
     };
     let method = req.method().clone();
+
+    let db = req
+        .extensions()
+        .get::<QueryContext>()
+        .map(|ctx| ctx.get_db_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     let response = next.run(req).await;
 
     let latency = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-    let method_str = method.to_string();
+    let status = response.status();
+    let status = status.as_str();
+    let method_str = method.as_str();
 
-    let labels = [method_str.as_str(), path.as_str(), status.as_str()];
+    let labels = [method_str, &path, status, db.as_str()];
     METRIC_HTTP_REQUESTS_TOTAL.with_label_values(&labels).inc();
     METRIC_HTTP_REQUESTS_ELAPSED
         .with_label_values(&labels)
