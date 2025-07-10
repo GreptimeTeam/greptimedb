@@ -155,7 +155,23 @@ struct PlanRewriter {
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
     column_requirements: HashSet<Column>,
+    /// Whether to expand on next call
+    /// This is used to handle the case where a plan is transformed, but need to be expanded from it's
+    /// parent node. For example a Aggregate plan is split into two parts in frontend and datanode, and need
+    /// to be expanded from the parent node of the Aggregate plan.
     expand_on_next_call: bool,
+    /// Expanding on next partial/conditional/transformed commutative plan
+    /// This is used to handle the case where a plan is transformed, but still
+    /// need to push down as many node as possible before next partial/conditional/transformed commutative
+    /// plan. I.e.
+    /// ```
+    /// Limit:
+    ///     Sort:
+    /// ```
+    /// where `Limit` is partial commutative, and `Sort` is conditional commutative.
+    /// In this case, we need to expand the `Limit` plan,
+    /// so that we can push down the `Sort` plan as much as possible.
+    expand_on_next_part_cond_trans_commutative: bool,
     new_child_plan: Option<LogicalPlan>,
 }
 
@@ -177,16 +193,38 @@ impl PlanRewriter {
         {
             return true;
         }
+
         if self.expand_on_next_call {
             self.expand_on_next_call = false;
             return true;
         }
+
+        if self.expand_on_next_part_cond_trans_commutative {
+            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
+            match comm {
+                Commutativity::PartialCommutative => {
+                    // a small difference is that for partial commutative, we still need to
+                    // expand on next call(so `Limit` can be pushed down)
+                    self.expand_on_next_part_cond_trans_commutative = false;
+                    self.expand_on_next_call = true;
+                }
+                Commutativity::ConditionalCommutative(_)
+                | Commutativity::TransformedCommutative { .. } => {
+                    // for conditional commutative and transformed commutative, we can
+                    // expand now
+                    self.expand_on_next_part_cond_trans_commutative = false;
+                    return true;
+                }
+                _ => (),
+            }
+        }
+
         match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
                     self.update_column_requirements(&plan);
-                    self.expand_on_next_call = true;
+                    self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
             }
@@ -195,7 +233,7 @@ impl PlanRewriter {
                     && let Some(plan) = transformer(plan)
                 {
                     self.update_column_requirements(&plan);
-                    self.expand_on_next_call = true;
+                    self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
             }
