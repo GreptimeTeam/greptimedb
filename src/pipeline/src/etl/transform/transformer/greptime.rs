@@ -420,15 +420,17 @@ pub(crate) fn values_to_row(
     values: Value,
     pipeline_ctx: &PipelineContext<'_>,
     row: Option<Vec<GreptimeValue>>,
+    need_calc_ts: bool,
 ) -> Result<Row> {
     let mut row: Vec<GreptimeValue> =
         row.unwrap_or_else(|| Vec::with_capacity(schema_info.schema.len()));
     let custom_ts = pipeline_ctx.pipeline_definition.get_custom_ts();
 
-    // calculate timestamp value based on the channel
-    let ts = calc_ts(pipeline_ctx, &values)?;
-
-    row.push(GreptimeValue { value_data: ts });
+    if need_calc_ts {
+        // calculate timestamp value based on the channel
+        let ts = calc_ts(pipeline_ctx, &values)?;
+        row.push(GreptimeValue { value_data: ts });
+    }
 
     row.resize(schema_info.schema.len(), GreptimeValue { value_data: None });
 
@@ -608,7 +610,7 @@ fn identity_pipeline_inner(
             skip_error
         );
         let row = unwrap_or_continue_if_err!(
-            values_to_row(&mut schema_info, pipeline_map, pipeline_ctx, None),
+            values_to_row(&mut schema_info, pipeline_map, pipeline_ctx, None, true),
             skip_error
         );
 
