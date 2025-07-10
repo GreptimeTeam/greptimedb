@@ -11,3 +11,18 @@ SELECT * FROM test;
 ALTER TABLE test DROP COLUMN j;
 
 DROP TABLE test;
+
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+ALTER TABLE my_table DROP COLUMN a;
+
+DROP TABLE my_table;
