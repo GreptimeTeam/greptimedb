@@ -33,7 +33,7 @@ use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::info;
 use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
 use common_time::timezone::set_default_timezone;
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use frontend::frontend::Frontend;
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
@@ -102,7 +102,7 @@ impl App for Instance {
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
-    subcmd: SubCommand,
+    pub subcmd: SubCommand,
 }
 
 impl Command {
@@ -116,7 +116,7 @@ impl Command {
 }
 
 #[derive(Parser)]
-enum SubCommand {
+pub enum SubCommand {
     Start(StartCommand),
 }
 
@@ -153,7 +153,7 @@ pub struct StartCommand {
     #[clap(long)]
     postgres_addr: Option<String>,
     #[clap(short, long)]
-    config_file: Option<String>,
+    pub config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
     #[clap(long, value_delimiter = ',', num_args = 1..)]
@@ -169,7 +169,7 @@ pub struct StartCommand {
     #[clap(long)]
     disable_dashboard: Option<bool>,
     #[clap(long, default_value = "GREPTIMEDB_FRONTEND")]
-    env_prefix: String,
+    pub env_prefix: String,
 }
 
 impl StartCommand {
@@ -282,7 +282,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Frontend start command: {:#?}", self);

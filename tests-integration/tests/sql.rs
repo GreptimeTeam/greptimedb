@@ -152,6 +152,16 @@ pub async fn test_mysql_stmts(store_type: StorageType) {
 
     conn.execute("SET TRANSACTION READ ONLY").await.unwrap();
 
+    // empty statements
+    let err = conn.execute("      -------  ;").await.unwrap_err();
+    assert!(err.to_string().contains("empty statements"));
+    let err = conn.execute("----------\n;").await.unwrap_err();
+    assert!(err.to_string().contains("empty statements"));
+    let err = conn.execute("        ;").await.unwrap_err();
+    assert!(err.to_string().contains("empty statements"));
+    let err = conn.execute("    \n    ;").await.unwrap_err();
+    assert!(err.to_string().contains("empty statements"));
+
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
 }

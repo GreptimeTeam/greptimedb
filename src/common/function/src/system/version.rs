@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
-use std::{env, fmt};
 
 use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
@@ -52,13 +52,13 @@ impl Function for VersionFunction {
                     "{}-greptimedb-{}",
                     std::env::var("GREPTIMEDB_MYSQL_SERVER_VERSION")
                         .unwrap_or_else(|_| "8.4.2".to_string()),
-                    env!("CARGO_PKG_VERSION")
+                    common_version::version()
                 )
             }
             Channel::Postgres => {
-                format!("16.3-greptimedb-{}", env!("CARGO_PKG_VERSION"))
+                format!("16.3-greptimedb-{}", common_version::version())
             }
-            _ => env!("CARGO_PKG_VERSION").to_string(),
+            _ => common_version::version().to_string(),
         };
         let result = StringVector::from(vec![version]);
         Ok(Arc::new(result))

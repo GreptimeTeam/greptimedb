@@ -1374,6 +1374,7 @@ mod tests {
             options: Default::default(),
             created_on: Default::default(),
             partition_key_indices: Default::default(),
+            column_ids: Default::default(),
         };
 
         // construct RawTableInfo

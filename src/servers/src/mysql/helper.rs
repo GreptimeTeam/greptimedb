@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
+use common_sql::convert::sql_value_to_value;
 use common_time::Timestamp;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::LogicalPlan;
@@ -27,7 +28,6 @@ use itertools::Itertools;
 use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
-use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, DataFusionSnafu, Result};

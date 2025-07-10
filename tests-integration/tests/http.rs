@@ -616,6 +616,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     // labels
     let res = client
@@ -2405,14 +2416,19 @@ processors:
       ignore_missing: true
   - vrl:
       source: |
-        .log_id = .id
-        del(.id)
+        .from_source = "channel_2"
+        cond, err = .id1 > .id2
+        if (cond) {
+            .from_source = "channel_1"
+        }
+        del(.id1)
+        del(.id2)
         .
 
 transform:
   - fields:
-      - log_id
-    type: int32
+      - from_source
+    type: string
   - field: time
     type: time
     index: timestamp
@@ -2432,7 +2448,8 @@ transform:
     let data_body = r#"
 [
   {
-    "id": "2436",
+    "id1": 2436,
+    "id2": 123,
     "time": "2024-05-25 20:16:37.217"
   }
 ]
@@ -2449,7 +2466,7 @@ transform:
         "test_pipeline_with_vrl",
         &client,
         "select * from d_table",
-        "[[2436,1716668197217000000]]",
+        "[[\"channel_1\",1716668197217000000]]",
     )
     .await;
 

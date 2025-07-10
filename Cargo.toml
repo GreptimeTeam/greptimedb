@@ -30,6 +30,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/session",
+    "src/common/sql",
     "src/common/stat",
     "src/common/substrait",
     "src/common/telemetry",
@@ -133,6 +134,7 @@ deadpool = "0.12"
 deadpool-postgres = "0.14"
 derive_builder = "0.20"
 dotenv = "0.15"
+either = "1.15"
 etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
@@ -170,9 +172,7 @@ parquet = { version = "54.2", default-features = false, features = ["arrow", "as
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "0410e8b459dda7cb222ce9596f8bf3971bd07bd2", features = [
-    "ser",
-] }
+promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
@@ -223,6 +223,7 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
 tower = "0.5"
+tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
@@ -261,6 +262,7 @@ common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
+common-sql = { path = "src/common/sql" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }

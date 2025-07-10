@@ -694,7 +694,7 @@ mod tests {
         let read_format = ReadFormat::new_with_all_columns(metadata.clone());
         let mut batches = VecDeque::new();
         read_format
-            .convert_record_batch(&batch, &mut batches)
+            .convert_record_batch(&batch, None, &mut batches)
             .unwrap();
         if !dedup {
             assert_eq!(

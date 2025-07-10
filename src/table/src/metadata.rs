@@ -134,6 +134,8 @@ pub struct TableMeta {
     pub created_on: DateTime<Utc>,
     #[builder(default = "Vec::new()")]
     pub partition_key_indices: Vec<usize>,
+    #[builder(default = "Vec::new()")]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl TableMetaBuilder {
@@ -150,6 +152,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -178,6 +181,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -645,10 +649,19 @@ impl TableMeta {
             msg: format!("Table {table_name} cannot add new columns {column_names:?}"),
         })?;
 
+        let partition_key_indices = self
+            .partition_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            // This unwrap is safe since we only add new columns.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
+
         // value_indices would be generated automatically.
         let _ = meta_builder
             .schema(Arc::new(new_schema))
-            .primary_key_indices(primary_key_indices);
+            .primary_key_indices(primary_key_indices)
+            .partition_key_indices(partition_key_indices);
 
         Ok(meta_builder)
     }
@@ -671,6 +684,14 @@ impl TableMeta {
                 ensure!(
                     !self.primary_key_indices.contains(&index),
                     error::RemoveColumnInIndexSnafu {
+                        column_name: *column_name,
+                        table_name,
+                    }
+                );
+
+                ensure!(
+                    !self.partition_key_indices.contains(&index),
+                    error::RemovePartitionColumnSnafu {
                         column_name: *column_name,
                         table_name,
                     }
@@ -725,9 +746,18 @@ impl TableMeta {
             .map(|name| new_schema.column_index_by_name(name).unwrap())
             .collect();
 
+        let partition_key_indices = self
+            .partition_key_indices
+            .iter()
+            .map(|idx| table_schema.column_name_by_index(*idx))
+            // This unwrap is safe since we don't allow removing a partition key column.
+            .map(|name| new_schema.column_index_by_name(name).unwrap())
+            .collect();
+
         let _ = meta_builder
             .schema(Arc::new(new_schema))
-            .primary_key_indices(primary_key_indices);
+            .primary_key_indices(primary_key_indices)
+            .partition_key_indices(partition_key_indices);
 
         Ok(meta_builder)
     }
@@ -1088,7 +1118,7 @@ pub struct RawTableMeta {
     /// Engine type of this table. Usually in small case.
     pub engine: String,
     /// Next column id of a new column.
-    /// Deprecated. See https://github.com/GreptimeTeam/greptimedb/issues/2982
+    /// It's used to ensure all columns with the same name across all regions have the same column id.
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
@@ -1096,6 +1126,10 @@ pub struct RawTableMeta {
     /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
+    /// Map of column name to column id.
+    /// Note: This field may be empty for older versions that did not include this field.
+    #[serde(default)]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl From<TableMeta> for RawTableMeta {
@@ -1110,6 +1144,7 @@ impl From<TableMeta> for RawTableMeta {
             options: meta.options,
             created_on: meta.created_on,
             partition_key_indices: meta.partition_key_indices,
+            column_ids: meta.column_ids,
         }
     }
 }
@@ -1128,6 +1163,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             options: raw.options,
             created_on: raw.created_on,
             partition_key_indices: raw.partition_key_indices,
+            column_ids: raw.column_ids,
         })
     }
 }
@@ -1145,6 +1181,24 @@ pub struct RawTableInfo {
 }
 
 impl RawTableInfo {
+    /// Returns the map of column name to column id.
+    ///
+    /// Note: This method may return an empty map for older versions that did not include this field.
+    pub fn name_to_ids(&self) -> Option<HashMap<String, ColumnId>> {
+        if self.meta.column_ids.len() != self.meta.schema.column_schemas.len() {
+            None
+        } else {
+            Some(
+                self.meta
+                    .column_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| (self.meta.schema.column_schemas[index].name.clone(), *id))
+                    .collect(),
+            )
+        }
+    }
+
     /// Sort the columns in [RawTableInfo], logical tables require it.
     pub fn sort_columns(&mut self) {
         let column_schemas = &self.meta.schema.column_schemas;
@@ -1155,6 +1209,7 @@ impl RawTableInfo {
             .map(|index| column_schemas[*index].name.clone())
             .collect::<HashSet<_>>();
 
+        let name_to_ids = self.name_to_ids().unwrap_or_default();
         self.meta
             .schema
             .column_schemas
@@ -1165,6 +1220,7 @@ impl RawTableInfo {
         let mut timestamp_index = None;
         let mut value_indices =
             Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+        let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
         for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
@@ -1173,12 +1229,16 @@ impl RawTableInfo {
             } else {
                 value_indices.push(index);
             }
+            if let Some(id) = name_to_ids.get(&column_schema.name) {
+                column_ids.push(*id);
+            }
         }
 
         // Overwrite table meta
         self.meta.schema.timestamp_index = timestamp_index;
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
+        self.meta.column_ids = column_ids;
     }
 
     /// Extracts region options from table info.
@@ -1300,6 +1360,8 @@ fn unset_column_skipping_index_options(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
@@ -1308,6 +1370,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::Error;
 
     /// Create a test schema with 3 columns: `[col1 int32, ts timestampmills, col2 int32]`.
     fn new_test_schema() -> Schema {
@@ -1385,6 +1448,11 @@ mod tests {
             ConcreteDataType::string_datatype(),
             true,
         );
+        let yet_another_field = ColumnSchema::new(
+            "yet_another_field_after_ts",
+            ConcreteDataType::int64_datatype(),
+            true,
+        );
         let alter_kind = AlterKind::AddColumns {
             columns: vec![
                 AddColumnRequest {
@@ -1396,6 +1464,14 @@ mod tests {
                 AddColumnRequest {
                     column_schema: new_field,
                     is_key: false,
+                    location: Some(AddColumnLocation::After {
+                        column_name: "ts".to_string(),
+                    }),
+                    add_if_not_exists: false,
+                },
+                AddColumnRequest {
+                    column_schema: yet_another_field,
+                    is_key: true,
                     location: Some(AddColumnLocation::After {
                         column_name: "ts".to_string(),
                     }),
@@ -1757,6 +1833,29 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_partition_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .partition_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        // Remove column in primary key.
+        let alter_kind = AlterKind::DropColumns {
+            names: vec![String::from("col1")],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_matches!(err, Error::RemovePartitionColumn { .. });
+    }
+
+    #[test]
     fn test_change_key_column_data_type() {
         let schema = Arc::new(new_test_schema());
         let meta = TableMetaBuilder::empty()
@@ -1821,6 +1920,8 @@ mod tests {
         let meta = TableMetaBuilder::empty()
             .schema(schema)
             .primary_key_indices(vec![0])
+            // partition col: col1, col2
+            .partition_key_indices(vec![0, 2])
             .engine("engine")
             .next_column_id(3)
             .build()
@@ -1836,11 +1937,19 @@ mod tests {
             .map(|column_schema| column_schema.name.clone())
             .collect();
         assert_eq!(
-            &["my_tag_first", "col1", "ts", "my_field_after_ts", "col2"],
+            &[
+                "my_tag_first",               // primary key column
+                "col1",                       // partition column
+                "ts",                         // timestamp column
+                "yet_another_field_after_ts", // primary key column
+                "my_field_after_ts",          // value column
+                "col2",                       // partition column
+            ],
             &names[..]
         );
-        assert_eq!(&[0, 1], &new_meta.primary_key_indices[..]);
-        assert_eq!(&[2, 3, 4], &new_meta.value_indices[..]);
+        assert_eq!(&[0, 1, 3], &new_meta.primary_key_indices[..]);
+        assert_eq!(&[2, 4, 5], &new_meta.value_indices[..]);
+        assert_eq!(&[1, 5], &new_meta.partition_key_indices[..]);
     }
 
     #[test]

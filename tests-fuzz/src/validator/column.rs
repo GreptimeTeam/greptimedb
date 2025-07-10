@@ -126,7 +126,7 @@ impl PartialEq<Column> for ColumnEntry {
                 return false;
             }
         }
-        //TODO: Checks `semantic_type`
+        // TODO: Checks `semantic_type`
         match semantic_type(&self.semantic_type) {
             Some(SemanticType::Tag) => {
                 if !other

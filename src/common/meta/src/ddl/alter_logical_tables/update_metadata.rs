@@ -13,41 +13,35 @@
 // limitations under the License.
 
 use common_grpc_expr::alter_expr_to_request;
-use common_telemetry::warn;
 use itertools::Itertools;
 use snafu::ResultExt;
 use table::metadata::{RawTableInfo, TableInfo};
 
+use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
-use crate::ddl::physical_table_metadata;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::rpc::ddl::AlterTableTask;
+use crate::rpc::router::region_distribution;
 
 impl AlterLogicalTablesProcedure {
     pub(crate) async fn update_physical_table_metadata(&mut self) -> Result<()> {
-        if self.data.physical_columns.is_empty() {
-            warn!("No physical columns found, leaving the physical table's schema unchanged when altering logical tables");
-            return Ok(());
-        }
-
         // Safety: must exist.
         let physical_table_info = self.data.physical_table_info.as_ref().unwrap();
+        let physical_table_route = self.data.physical_table_route.as_ref().unwrap();
+        let region_distribution = region_distribution(&physical_table_route.region_routes);
 
-        // Generates new table info
-        let old_raw_table_info = physical_table_info.table_info.clone();
-        let new_raw_table_info = physical_table_metadata::build_new_physical_table_info(
-            old_raw_table_info,
+        // Updates physical table's metadata.
+        AlterLogicalTablesExecutor::on_alter_metadata(
+            self.data.physical_table_id,
+            &self.context.table_metadata_manager,
+            physical_table_info,
+            region_distribution,
             &self.data.physical_columns,
-        );
-
-        // Updates physical table's metadata, and we don't need to touch per-region settings.
-        self.context
-            .table_metadata_manager
-            .update_table_info(physical_table_info, None, new_raw_table_info)
-            .await?;
+        )
+        .await?;
 
         Ok(())
     }

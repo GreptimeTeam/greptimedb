@@ -52,7 +52,6 @@ common-version.workspace = true
 common-wal.workspace = true
 datanode.workspace = true
 datatypes.workspace = true
-either = "1.8"
 etcd-client.workspace = true
 file-engine.workspace = true
 flow.workspace = true

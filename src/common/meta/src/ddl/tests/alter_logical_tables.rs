@@ -23,17 +23,20 @@ use api::v1::{ColumnDataType, SemanticType};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
-use store_api::metric_engine_consts::MANIFEST_INFO_EXTENSION_KEY;
+use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
-use crate::ddl::test_util::datanode_handler::{DatanodeWatcher, NaiveDatanodeHandler};
+use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
 use crate::ddl::test_util::{
-    create_logical_table, create_physical_table, create_physical_table_metadata,
+    assert_column_name, create_logical_table, create_physical_table,
+    create_physical_table_metadata, get_raw_table_info, test_column_metadatas,
     test_create_physical_table_task,
 };
 use crate::error::Error::{AlterLogicalTablesInvalidArguments, TableNotFound};
@@ -93,6 +96,52 @@ fn make_alter_logical_table_rename_task(
 
     AlterTableTask {
         alter_table: alter_table.into(),
+    }
+}
+
+fn make_alters_request_handler(
+    column_metadatas: Vec<ColumnMetadata>,
+) -> impl Fn(Peer, RegionRequest) -> Result<RegionResponse> {
+    move |_peer: Peer, request: RegionRequest| {
+        if let region_request::Body::Alters(_) = request.body.unwrap() {
+            let mut response = RegionResponse::new(0);
+            // Default region id for physical table.
+            let region_id = RegionId::new(1000, 1);
+            response.extensions.insert(
+                MANIFEST_INFO_EXTENSION_KEY.to_string(),
+                RegionManifestInfo::encode_list(&[(
+                    region_id,
+                    RegionManifestInfo::metric(1, 0, 2, 0),
+                )])
+                .unwrap(),
+            );
+            response.extensions.insert(
+                ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
+                ColumnMetadata::encode_list(&column_metadatas).unwrap(),
+            );
+            return Ok(response);
+        }
+        Ok(RegionResponse::new(0))
+    }
+}
+
+fn assert_alters_request(
+    peer: Peer,
+    request: RegionRequest,
+    expected_peer_id: u64,
+    expected_region_ids: &[RegionId],
+) {
+    assert_eq!(peer.id, expected_peer_id,);
+    let Some(region_request::Body::Alters(req)) = request.body else {
+        unreachable!();
+    };
+    for (i, region_id) in expected_region_ids.iter().enumerate() {
+        assert_eq!(
+            req.requests[i].region_id,
+            *region_id,
+            "actual region id: {}",
+            RegionId::from_u64(req.requests[i].region_id)
+        );
     }
 }
 
@@ -205,15 +254,20 @@ async fn test_on_prepare() {
 
 #[tokio::test]
 async fn test_on_update_metadata() {
-    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let test_column_metadatas = test_column_metadatas(&["new_col", "mew_col"]);
+    let datanode_handler =
+        DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(test_column_metadatas));
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
     let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
-    create_logical_table(ddl_context.clone(), phy_id, "table3").await;
+    let logical_table1_id = create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    let logical_table2_id = create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    let logical_table3_id = create_logical_table(ddl_context.clone(), phy_id, "table3").await;
     create_logical_table(ddl_context.clone(), phy_id, "table4").await;
     create_logical_table(ddl_context.clone(), phy_id, "table5").await;
 
@@ -223,7 +277,7 @@ async fn test_on_update_metadata() {
         make_alter_logical_table_add_column_task(None, "table3", vec!["new_col".to_string()]),
     ];
 
-    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context);
+    let mut procedure = AlterLogicalTablesProcedure::new(tasks, phy_id, ddl_context.clone());
     let mut status = procedure.on_prepare().await.unwrap();
     assert_matches!(
         status,
@@ -255,18 +309,52 @@ async fn test_on_update_metadata() {
             clean_poisons: false
         }
     );
+    let (peer, request) = rx.try_recv().unwrap();
+    rx.try_recv().unwrap_err();
+    assert_alters_request(
+        peer,
+        request,
+        0,
+        &[
+            RegionId::new(logical_table1_id, 0),
+            RegionId::new(logical_table2_id, 0),
+            RegionId::new(logical_table3_id, 0),
+        ],
+    );
+
+    let table_info = get_raw_table_info(&ddl_context, phy_id).await;
+    assert_column_name(
+        &table_info,
+        &["ts", "value", "__table_id", "__tsid", "new_col", "mew_col"],
+    );
+    assert_eq!(
+        table_info.meta.column_ids,
+        vec![
+            0,
+            1,
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            2,
+            3
+        ]
+    );
 }
 
 #[tokio::test]
 async fn test_on_part_duplicate_alter_request() {
-    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    common_telemetry::init_default_ut_logging();
+    let (tx, mut rx) = mpsc::channel(8);
+    let column_metadatas = test_column_metadatas(&["col_0"]);
+    let handler =
+        DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
+    let node_manager = Arc::new(MockDatanodeManager::new(handler));
+    let mut ddl_context = new_ddl_context(node_manager);
 
     // Creates physical table
     let phy_id = create_physical_table(&ddl_context, "phy").await;
     // Creates 3 logical tables
-    create_logical_table(ddl_context.clone(), phy_id, "table1").await;
-    create_logical_table(ddl_context.clone(), phy_id, "table2").await;
+    let logical_table1_id = create_logical_table(ddl_context.clone(), phy_id, "table1").await;
+    let logical_table2_id = create_logical_table(ddl_context.clone(), phy_id, "table2").await;
 
     let tasks = vec![
         make_alter_logical_table_add_column_task(None, "table1", vec!["col_0".to_string()]),
@@ -305,6 +393,40 @@ async fn test_on_part_duplicate_alter_request() {
             clean_poisons: false
         }
     );
+    let (peer, request) = rx.try_recv().unwrap();
+    rx.try_recv().unwrap_err();
+    assert_alters_request(
+        peer,
+        request,
+        0,
+        &[
+            RegionId::new(logical_table1_id, 0),
+            RegionId::new(logical_table2_id, 0),
+        ],
+    );
+
+    let table_info = get_raw_table_info(&ddl_context, phy_id).await;
+    assert_column_name(
+        &table_info,
+        &["ts", "value", "__table_id", "__tsid", "col_0"],
+    );
+    assert_eq!(
+        table_info.meta.column_ids,
+        vec![
+            0,
+            1,
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            2
+        ]
+    );
+
+    let (tx, mut rx) = mpsc::channel(8);
+    let column_metadatas = test_column_metadatas(&["col_0", "new_col_1", "new_col_2"]);
+    let handler =
+        DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
+    let node_manager = Arc::new(MockDatanodeManager::new(handler));
+    ddl_context.node_manager = node_manager;
 
     // re-alter
     let tasks = vec![
@@ -355,6 +477,44 @@ async fn test_on_part_duplicate_alter_request() {
             persist: true,
             clean_poisons: false
         }
+    );
+
+    let (peer, request) = rx.try_recv().unwrap();
+    rx.try_recv().unwrap_err();
+    assert_alters_request(
+        peer,
+        request,
+        0,
+        &[
+            RegionId::new(logical_table1_id, 0),
+            RegionId::new(logical_table2_id, 0),
+        ],
+    );
+
+    let table_info = get_raw_table_info(&ddl_context, phy_id).await;
+    assert_column_name(
+        &table_info,
+        &[
+            "ts",
+            "value",
+            "__table_id",
+            "__tsid",
+            "col_0",
+            "new_col_1",
+            "new_col_2",
+        ],
+    );
+    assert_eq!(
+        table_info.meta.column_ids,
+        vec![
+            0,
+            1,
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            2,
+            3,
+            4,
+        ]
     );
 
     let table_name_keys = vec![
@@ -422,27 +582,13 @@ async fn test_on_part_duplicate_alter_request() {
     );
 }
 
-fn alters_request_handler(_peer: Peer, request: RegionRequest) -> Result<RegionResponse> {
-    if let region_request::Body::Alters(_) = request.body.unwrap() {
-        let mut response = RegionResponse::new(0);
-        // Default region id for physical table.
-        let region_id = RegionId::new(1000, 1);
-        response.extensions.insert(
-            MANIFEST_INFO_EXTENSION_KEY.to_string(),
-            RegionManifestInfo::encode_list(&[(region_id, RegionManifestInfo::metric(1, 0, 2, 0))])
-                .unwrap(),
-        );
-        return Ok(response);
-    }
-
-    Ok(RegionResponse::new(0))
-}
-
 #[tokio::test]
 async fn test_on_submit_alter_region_request() {
     common_telemetry::init_default_ut_logging();
     let (tx, mut rx) = mpsc::channel(8);
-    let handler = DatanodeWatcher::new(tx).with_handler(alters_request_handler);
+    let column_metadatas = test_column_metadatas(&["new_col", "mew_col"]);
+    let handler =
+        DatanodeWatcher::new(tx).with_handler(make_alters_request_handler(column_metadatas));
     let node_manager = Arc::new(MockDatanodeManager::new(handler));
     let ddl_context = new_ddl_context(node_manager);
 

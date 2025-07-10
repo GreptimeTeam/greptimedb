@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Display, Formatter};
+use std::ops::{Bound, RangeBounds};
 
 use serde::{Deserialize, Serialize};
 
@@ -303,6 +304,41 @@ impl TimestampRange {
     }
 }
 
+/// Create [TimestampRange] from a timestamp tuple.
+/// The tuple's two elements form the "start" and "end" (both inclusive) of the timestamp range.
+impl From<(Timestamp, Timestamp)> for TimestampRange {
+    fn from((start, end): (Timestamp, Timestamp)) -> Self {
+        if start > end {
+            Self::empty()
+        } else {
+            Self::new_inclusive(Some(start), Some(end))
+        }
+    }
+}
+
+/// Create [TimestampRange] from Rust's "range".
+impl<R: RangeBounds<Timestamp>> From<R> for TimestampRange {
+    fn from(r: R) -> Self {
+        let start = match r.start_bound() {
+            Bound::Included(x) => Some(*x),
+            Bound::Excluded(x) => x
+                .value()
+                .checked_sub(1)
+                .map(|v| Timestamp::new(v, x.unit())),
+            Bound::Unbounded => None,
+        };
+        let end = match r.end_bound() {
+            Bound::Included(x) => x
+                .value()
+                .checked_add(1)
+                .map(|v| Timestamp::new(v, x.unit())),
+            Bound::Excluded(x) => Some(*x),
+            Bound::Unbounded => None,
+        };
+        Self::from_optional(start, end)
+    }
+}
+
 /// Time range in milliseconds.
 pub type RangeMillis = GenericRange<TimestampMillis>;
 
@@ -544,5 +580,76 @@ mod tests {
             TimeUnit::Microsecond,
             TimeUnit::Nanosecond
         );
+    }
+
+    #[test]
+    fn test_from_timestamp_tuple() {
+        let timestamp_range: TimestampRange =
+            (Timestamp::new_millisecond(1), Timestamp::new_millisecond(3)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(
+                Some(Timestamp::new_millisecond(1)),
+                Some(Timestamp::new_millisecond(4))
+            )
+        );
+
+        let timestamp_range: TimestampRange =
+            (Timestamp::new_millisecond(1), Timestamp::new_millisecond(1)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(
+                Some(Timestamp::new_millisecond(1)),
+                Some(Timestamp::new_millisecond(2))
+            )
+        );
+
+        let timestamp_range: TimestampRange =
+            (Timestamp::new_second(1), Timestamp::new_millisecond(3)).into();
+        assert_eq!(timestamp_range, TimestampRange::empty());
+    }
+
+    #[test]
+    fn test_from_timestamp_range() {
+        let timestamp_range: TimestampRange =
+            (Timestamp::new_millisecond(1)..Timestamp::new_millisecond(3)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(
+                Some(Timestamp::new_millisecond(1)),
+                Some(Timestamp::new_millisecond(3))
+            )
+        );
+
+        let timestamp_range: TimestampRange =
+            (Timestamp::new_millisecond(1)..=Timestamp::new_millisecond(3)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(
+                Some(Timestamp::new_millisecond(1)),
+                Some(Timestamp::new_millisecond(4))
+            )
+        );
+
+        let timestamp_range: TimestampRange = (Timestamp::new_millisecond(1)..).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(Some(Timestamp::new_millisecond(1)), None)
+        );
+
+        let timestamp_range: TimestampRange = (..Timestamp::new_millisecond(3)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(None, Some(Timestamp::new_millisecond(3)))
+        );
+
+        let timestamp_range: TimestampRange = (..=Timestamp::new_millisecond(3)).into();
+        assert_eq!(
+            timestamp_range,
+            TimestampRange::from_optional(None, Some(Timestamp::new_millisecond(4)))
+        );
+
+        let timestamp_range: TimestampRange = (..).into();
+        assert_eq!(timestamp_range, TimestampRange::min_to_max(),);
     }
 }

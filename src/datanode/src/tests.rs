@@ -40,7 +40,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::error::Error;
+use crate::error::{Error, NotYetImplementedSnafu};
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
 
@@ -232,7 +232,9 @@ impl RegionEngine for MockRegionEngine {
         _region_id: RegionId,
         _request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        unimplemented!()
+        Err(BoxedError::new(
+            NotYetImplementedSnafu { what: "blah" }.build(),
+        ))
     }
 
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {

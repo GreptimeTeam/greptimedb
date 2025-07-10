@@ -27,14 +27,14 @@ lazy_static! {
     pub static ref HANDLE_REGION_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_datanode_handle_region_request_elapsed",
         "datanode handle region request elapsed",
-        &[REGION_ID, REGION_REQUEST_TYPE]
+        &[REGION_REQUEST_TYPE]
     )
     .unwrap();
     /// The number of rows in region request received by region server, labeled with request type.
     pub static ref REGION_CHANGED_ROW_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_datanode_region_changed_row_count",
         "datanode region changed row count",
-        &[REGION_ID, REGION_REQUEST_TYPE]
+        &[REGION_REQUEST_TYPE]
     )
     .unwrap();
     /// The elapsed time since the last received heartbeat.

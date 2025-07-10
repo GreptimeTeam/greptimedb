@@ -138,16 +138,26 @@ pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
     sst_file_handle_with_file_id(FileId::random(), start_ms, end_ms)
 }
 
-pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
+/// Creates a new batch with custom sequence for testing.
+pub fn new_batch_with_custom_sequence(
+    tags: &[&str],
+    start: usize,
+    end: usize,
+    sequence: u64,
+) -> Batch {
     assert!(end >= start);
     let pk = new_primary_key(tags);
     let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
-    let sequences = vec![1000; end - start];
+    let sequences = vec![sequence; end - start];
     let op_types = vec![OpType::Put; end - start];
     let field: Vec<_> = (start..end).map(|v| v as u64).collect();
     new_batch_builder(&pk, &timestamps, &sequences, &op_types, 2, &field)
         .build()
         .unwrap()
+}
+
+pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
+    new_batch_with_custom_sequence(tags, start, end, 1000)
 }
 
 pub fn new_batch_with_binary(tags: &[&str], start: usize, end: usize) -> Batch {
