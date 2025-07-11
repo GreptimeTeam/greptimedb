@@ -185,6 +185,9 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
         let value = match var_as[0] {
             "session.time_zone" | "time_zone" => query_context.timezone().to_string(),
             "system_time_zone" => system_timezone_name(),
+            "max_execution_time" | "session.max_execution_time" => {
+                query_context.query_timeout_as_millis().to_string()
+            }
             _ => VAR_VALUES
                 .get(var_as[0])
                 .map(|v| v.to_string())
