@@ -32,14 +32,14 @@ use crate::metrics::{
     StagerMetrics, INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_READ_BYTES_TOTAL,
     INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
 };
-use crate::sst::file::FileId;
+use crate::sst::file::RegionFileId;
 use crate::sst::index::store::{self, InstrumentedStore};
 
 type InstrumentedRangeReader = store::InstrumentedRangeReader<'static>;
 type InstrumentedAsyncWrite = store::InstrumentedAsyncWrite<'static, FuturesAsyncWriter>;
 
 pub(crate) type SstPuffinManager =
-    FsPuffinManager<Arc<BoundedStager<FileId>>, ObjectStorePuffinFileAccessor>;
+    FsPuffinManager<Arc<BoundedStager<RegionFileId>>, ObjectStorePuffinFileAccessor>;
 pub(crate) type SstPuffinReader = <SstPuffinManager as PuffinManager>::Reader;
 pub(crate) type SstPuffinWriter = <SstPuffinManager as PuffinManager>::Writer;
 pub(crate) type SstPuffinBlob = <SstPuffinReader as PuffinReader>::Blob;
@@ -52,7 +52,7 @@ const STAGING_DIR: &str = "staging";
 #[derive(Clone)]
 pub struct PuffinManagerFactory {
     /// The stager used by the puffin manager.
-    stager: Arc<BoundedStager<FileId>>,
+    stager: Arc<BoundedStager<RegionFileId>>,
 
     /// The size of the write buffer used to create object store.
     write_buffer_size: Option<usize>,
@@ -92,7 +92,7 @@ impl PuffinManagerFactory {
         SstPuffinManager::new(self.stager.clone(), puffin_file_accessor)
     }
 
-    pub(crate) async fn purge_stager(&self, file_id: FileId) -> Result<()> {
+    pub(crate) async fn purge_stager(&self, file_id: RegionFileId) -> Result<()> {
         self.stager
             .purge(&file_id)
             .await
@@ -142,9 +142,9 @@ impl ObjectStorePuffinFileAccessor {
 impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
     type Reader = InstrumentedRangeReader;
     type Writer = InstrumentedAsyncWrite;
-    type FileHandle = FileId;
+    type FileHandle = RegionFileId;
 
-    async fn reader(&self, handle: &FileId) -> PuffinResult<Self::Reader> {
+    async fn reader(&self, handle: &RegionFileId) -> PuffinResult<Self::Reader> {
         let file_path = self.path_provider.build_index_file_path(*handle);
         self.object_store
             .range_reader(
@@ -157,7 +157,7 @@ impl PuffinFileAccessor for ObjectStorePuffinFileAccessor {
             .context(puffin_error::ExternalSnafu)
     }
 
-    async fn writer(&self, handle: &FileId) -> PuffinResult<Self::Writer> {
+    async fn writer(&self, handle: &RegionFileId) -> PuffinResult<Self::Writer> {
         let file_path = self.path_provider.build_index_file_path(*handle);
         self.object_store
             .writer(
@@ -183,16 +183,17 @@ mod tests {
     use puffin::puffin_manager::{PuffinManager, PuffinReader, PuffinWriter, PutOptions};
 
     use super::*;
+    use crate::sst::file::{FileId, RegionFileId};
 
     struct TestFilePathProvider;
 
     impl FilePathProvider for TestFilePathProvider {
-        fn build_index_file_path(&self, file_id: FileId) -> String {
-            file_id.to_string()
+        fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+            file_id.file_id().to_string()
         }
 
-        fn build_sst_file_path(&self, file_id: FileId) -> String {
-            file_id.to_string()
+        fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+            file_id.file_id().to_string()
         }
     }
 
@@ -204,7 +205,7 @@ mod tests {
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let manager = factory.build(object_store, TestFilePathProvider);
 
-        let file_id = FileId::random();
+        let file_id = RegionFileId::new(0.into(), FileId::random());
         let blob_key = "blob-key";
         let dir_key = "dir-key";
         let raw_data = b"hello world!";

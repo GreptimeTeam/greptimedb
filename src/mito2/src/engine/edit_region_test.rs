@@ -165,7 +165,7 @@ async fn test_edit_region_fill_cache() {
     env.get_object_store()
         .unwrap()
         .write(
-            &format!("{}/{}.parquet", region.region_dir(), file_id),
+            &format!("{}/{}.parquet", region.table_dir(), file_id),
             b"x".as_slice(),
         )
         .await
@@ -215,7 +215,7 @@ async fn test_edit_region_concurrently() {
                 };
                 object_store
                     .write(
-                        &format!("{}/{}.parquet", self.region.region_dir(), file.file_id),
+                        &format!("{}/{}.parquet", self.region.table_dir(), file.file_id),
                         b"x".as_slice(),
                     )
                     .await

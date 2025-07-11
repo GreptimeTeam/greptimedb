@@ -59,7 +59,7 @@ use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
+    PathType, RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
@@ -635,7 +635,7 @@ impl TestEnv {
 ///
 /// It builds schema like `[tag_0, tag_1, ..., field_0, field_1, ..., ts]`.
 pub struct CreateRequestBuilder {
-    region_dir: String,
+    table_dir: String,
     tag_num: usize,
     field_num: usize,
     options: HashMap<String, String>,
@@ -650,7 +650,7 @@ pub struct CreateRequestBuilder {
 impl Default for CreateRequestBuilder {
     fn default() -> Self {
         CreateRequestBuilder {
-            region_dir: "test".to_string(),
+            table_dir: "test".to_string(),
             tag_num: 1,
             field_num: 1,
             options: HashMap::new(),
@@ -670,8 +670,8 @@ impl CreateRequestBuilder {
     }
 
     #[must_use]
-    pub fn region_dir(mut self, value: &str) -> Self {
-        self.region_dir = value.to_string();
+    pub fn table_dir(mut self, value: &str) -> Self {
+        self.table_dir = value.to_string();
         self
     }
 
@@ -772,7 +772,8 @@ impl CreateRequestBuilder {
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options,
-            region_dir: self.region_dir.clone(),
+            table_dir: self.table_dir.clone(),
+            path_type: PathType::Bare,
         }
     }
 }
@@ -1085,7 +1086,7 @@ pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_si
 pub async fn reopen_region(
     engine: &MitoEngine,
     region_id: RegionId,
-    region_dir: String,
+    table_dir: String,
     writable: bool,
     options: HashMap<String, String>,
 ) {
@@ -1101,9 +1102,10 @@ pub async fn reopen_region(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
                 options,
                 skip_wal_replay: false,
+                path_type: PathType::Bare,
             }),
         )
         .await

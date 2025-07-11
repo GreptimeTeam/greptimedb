@@ -115,7 +115,7 @@ impl FileRange {
         let prune_reader = if use_last_row_reader {
             // Row group is PUT only, use LastRowReader to skip unnecessary rows.
             let reader = RowGroupLastRowCachedReader::new(
-                self.file_handle().file_id(),
+                self.file_handle().file_id().file_id(),
                 self.row_group_idx,
                 self.context.reader_builder.cache_strategy().clone(),
                 RowGroupReader::new(self.context.clone(), parquet_reader),

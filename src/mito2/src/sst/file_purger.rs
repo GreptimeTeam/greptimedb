@@ -85,7 +85,7 @@ impl FilePurger for LocalFilePurger {
 
         // Remove meta of the file from cache.
         if let Some(cache) = &self.cache_manager {
-            cache.remove_parquet_meta_data(file_meta.region_id, file_meta.file_id);
+            cache.remove_parquet_meta_data(file_meta.file_id());
         }
 
         let cache_manager = self.cache_manager.clone();
@@ -125,11 +125,11 @@ impl FilePurger for LocalFilePurger {
             // Purges index content in the stager.
             if let Err(e) = sst_layer
                 .puffin_manager_factory()
-                .purge_stager(file_meta.file_id)
+                .purge_stager(file_meta.file_id())
                 .await
             {
                 error!(e; "Failed to purge stager with index file, file_id: {}, region: {}",
-                    file_meta.file_id, file_meta.region_id);
+                    file_meta.file_id(), file_meta.region_id);
             }
         })) {
             error!(e; "Failed to schedule the file purge request");
@@ -145,11 +145,13 @@ mod tests {
     use object_store::services::Fs;
     use object_store::ObjectStore;
     use smallvec::SmallVec;
+    use store_api::region_request::PathType;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::access_layer::AccessLayer;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
-    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType};
+    use crate::sst::file::{FileHandle, FileId, FileMeta, FileTimeRange, IndexType, RegionFileId};
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
@@ -161,9 +163,8 @@ mod tests {
         let dir = create_temp_dir("file-purge");
         let dir_path = dir.path().display().to_string();
         let builder = Fs::default().root(&dir_path);
-        let sst_file_id = FileId::random();
+        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
         let sst_dir = "table1";
-        let path = location::sst_file_path(sst_dir, sst_file_id);
 
         let index_aux_path = dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
@@ -174,23 +175,26 @@ mod tests {
             .unwrap();
 
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let scheduler = Arc::new(LocalScheduler::new(3));
         let layer = Arc::new(AccessLayer::new(
             sst_dir,
+            PathType::Bare,
             object_store.clone(),
             puffin_mgr,
             intm_mgr,
         ));
+        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
+        object_store.write(&path, vec![0; 4096]).await.unwrap();
+
+        let scheduler = Arc::new(LocalScheduler::new(3));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
         {
             let handle = FileHandle::new(
                 FileMeta {
-                    region_id: 0.into(),
-                    file_id: sst_file_id,
+                    region_id: sst_file_id.region_id(),
+                    file_id: sst_file_id.file_id(),
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,
@@ -218,7 +222,7 @@ mod tests {
         let dir = create_temp_dir("file-purge");
         let dir_path = dir.path().display().to_string();
         let builder = Fs::default().root(&dir_path);
-        let sst_file_id = FileId::random();
+        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
         let sst_dir = "table1";
 
         let index_aux_path = dir.path().join("index_aux");
@@ -229,31 +233,33 @@ mod tests {
             .await
             .unwrap();
 
-        let path = location::sst_file_path(sst_dir, sst_file_id);
         let object_store = ObjectStore::new(builder).unwrap().finish();
+
+        let layer = Arc::new(AccessLayer::new(
+            sst_dir,
+            PathType::Bare,
+            object_store.clone(),
+            puffin_mgr,
+            intm_mgr,
+        ));
+        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let index_path = location::index_file_path(sst_dir, sst_file_id);
+        let index_path = location::index_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store
             .write(&index_path, vec![0; 4096])
             .await
             .unwrap();
 
         let scheduler = Arc::new(LocalScheduler::new(3));
-        let layer = Arc::new(AccessLayer::new(
-            sst_dir,
-            object_store.clone(),
-            puffin_mgr,
-            intm_mgr,
-        ));
 
         let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
         {
             let handle = FileHandle::new(
                 FileMeta {
-                    region_id: 0.into(),
-                    file_id: sst_file_id,
+                    region_id: sst_file_id.region_id(),
+                    file_id: sst_file_id.file_id(),
                     time_range: FileTimeRange::default(),
                     level: 0,
                     file_size: 4096,

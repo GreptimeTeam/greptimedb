@@ -478,8 +478,11 @@ mod test {
     use std::collections::HashMap;
 
     use common_telemetry::info;
+    use mito2::sst::location::region_dir_from_table_dir;
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
-    use store_api::region_request::{RegionCloseRequest, RegionFlushRequest, RegionOpenRequest};
+    use store_api::region_request::{
+        PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest,
+    };
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -506,7 +509,8 @@ mod test {
             .collect();
         let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
             options: physical_region_option,
             skip_wal_replay: false,
         };
@@ -528,7 +532,8 @@ mod test {
         // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
             options: HashMap::new(),
             skip_wal_replay: false,
         };
@@ -582,7 +587,11 @@ mod test {
             .await
             .unwrap();
 
-        let path = format!("{}/metadata/", env.default_region_dir());
+        let path = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            physical_region_id,
+            PathType::Metadata,
+        );
         let object_store = env.get_object_store().unwrap();
         let list = object_store.list(&path).await.unwrap();
         // Delete parquet files in metadata region
@@ -601,7 +610,8 @@ mod test {
             .collect();
         let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
             options: physical_region_option,
             skip_wal_replay: false,
         };
@@ -627,7 +637,8 @@ mod test {
             .collect();
         let open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            region_dir: env.default_region_dir(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
             options: physical_region_option,
             skip_wal_replay: false,
         };

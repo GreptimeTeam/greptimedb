@@ -22,7 +22,8 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::{RegionEngine, RegionManifestInfo};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, RegionAlterRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -86,7 +87,7 @@ async fn test_sync_after_flush_region() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
         .handle_request(region_id, RegionRequest::Create(request))
@@ -105,7 +106,8 @@ async fn test_sync_after_flush_region() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
@@ -181,7 +183,7 @@ async fn test_sync_after_alter_region() {
         .await;
 
     let column_schemas = rows_schema(&request);
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
@@ -200,7 +202,8 @@ async fn test_sync_after_alter_region() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: Default::default(),
                 // Ensure the region is not replayed from the WAL.
                 skip_wal_replay: true,
