@@ -229,6 +229,7 @@ impl DispatchedTo {
 pub enum PipelineExecOutput {
     Transformed(TransformedOutput),
     DispatchedTo(DispatchedTo, Value),
+    Filtered,
 }
 
 #[derive(Debug)]
@@ -309,6 +310,10 @@ impl Pipeline {
         // process
         for processor in self.processors.iter() {
             val = processor.exec_mut(val)?;
+            if val.is_null() {
+                // line is filtered
+                return Ok(PipelineExecOutput::Filtered);
+            }
         }
 
         // dispatch, fast return if matched

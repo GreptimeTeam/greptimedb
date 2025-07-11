@@ -112,6 +112,7 @@ macro_rules! http_tests {
                 test_pipeline_with_hint_vrl,
                 test_pipeline_2,
                 test_pipeline_skip_error,
+                test_pipeline_filter,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -1939,6 +1940,78 @@ transform:
         &client,
         "select message, time from logs1",
         "[[\"good message\",1716668197217000000],[\"good message\",1716668197217000000],[\"good message\",1716668197217000000]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_filter(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_filter").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+  - filter:
+      field: name
+      targets:
+        - John
+transform:
+  - field: name
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+    "name": "John"
+  },
+  {
+    "time": "2024-05-25 20:16:37.218",
+    "name": "JoHN"
+  },
+  {
+    "time": "2024-05-25 20:16:37.328",
+    "name": "Jane"
+  }
+]
+"#;
+
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    validate_data(
+        "pipeline_filter",
+        &client,
+        "select * from logs1",
+        "[[\"Jane\",1716668197328000000]]",
     )
     .await;
 

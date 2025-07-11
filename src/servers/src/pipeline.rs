@@ -167,6 +167,9 @@ async fn run_custom_pipeline(
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
             }
+            PipelineExecOutput::Filtered => {
+                continue;
+            }
         }
     }
 
