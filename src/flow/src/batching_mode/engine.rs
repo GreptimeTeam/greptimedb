@@ -14,7 +14,7 @@
 
 //! Batching mode engine
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::flow::{DirtyWindowRequests, FlowResponse};
@@ -142,7 +142,7 @@ impl BatchingEngine {
 
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
-                let mut all_dirty_windows = vec![];
+                let mut all_dirty_windows = HashSet::new();
                 for src_table_name in src_table_names {
                     if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
@@ -155,7 +155,7 @@ impl BatchingEngine {
                                 .context(UnexpectedSnafu {
                                     reason: "Failed to eval start value",
                                 })?;
-                            all_dirty_windows.push(align_start);
+                            all_dirty_windows.insert(align_start);
                         }
                     }
                 }
