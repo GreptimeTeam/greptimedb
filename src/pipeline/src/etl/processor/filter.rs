@@ -14,6 +14,7 @@
 
 use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
+use vrl::prelude::Value as VrlValue;
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
@@ -23,7 +24,7 @@ use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, FIELDS_NAME, FIELD_NAME,
 };
-use crate::{Processor, Value};
+use crate::Processor;
 
 pub(crate) const PROCESSOR_FILTER: &str = "filter";
 
@@ -128,17 +129,17 @@ impl TryFrom<&yaml_rust::yaml::Hash> for FilterProcessor {
 }
 
 impl FilterProcessor {
-    fn match_target(&self, input: String) -> bool {
+    fn match_target(&self, input: &str) -> bool {
         let input = if self.case_insensitive {
-            input.to_lowercase()
+            &input.to_lowercase()
         } else {
             input
         };
 
         match &self.mode {
             MatchMode::SimpleMatch(op) => match op {
-                MatchOp::In => self.targets.contains(&input),
-                MatchOp::NotIn => !self.targets.contains(&input),
+                MatchOp::In => self.targets.contains(input),
+                MatchOp::NotIn => !self.targets.contains(input),
             },
         }
     }
@@ -153,15 +154,14 @@ impl Processor for FilterProcessor {
         true
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
-        let v_map = val.as_map_mut().context(ValueMustBeMapSnafu)?;
-
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             let index = field.input_field();
-            match v_map.get(index) {
-                Some(Value::String(s)) => {
-                    if self.match_target(s.clone()) {
-                        return Ok(Value::Null);
+            match val.get(index) {
+                Some(VrlValue::Bytes(b)) => {
+                    if self.match_target(&String::from_utf8_lossy(b)) {
+                        return Ok(VrlValue::Null);
                     }
                 }
                 Some(v) => {
@@ -182,10 +182,12 @@ impl Processor for FilterProcessor {
 #[cfg(test)]
 mod test {
     use ahash::HashSet;
+    use vrl::prelude::{Bytes, Value as VrlValue};
+    use vrl::value::{KeyString, ObjectMap};
 
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::filter::{FilterProcessor, MatchMode, MatchOp};
-    use crate::{Map, Processor, Value};
+    use crate::Processor;
 
     #[test]
     fn test_eq() {
@@ -196,12 +198,18 @@ mod test {
             targets: HashSet::from_iter(vec!["John".to_string()]),
         };
 
-        let val = Value::Map(Map::one("name", Value::String("John".to_string())));
+        let val = VrlValue::Object(ObjectMap::from_iter(vec![(
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("John")),
+        )]));
 
         let result = processor.exec_mut(val).unwrap();
-        assert_eq!(result, Value::Null);
+        assert_eq!(result, VrlValue::Null);
 
-        let val = Value::Map(Map::one("name", Value::String("Wick".to_string())));
+        let val = VrlValue::Object(ObjectMap::from_iter(vec![(
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("Wick")),
+        )]));
         let expect = val.clone();
         let result = processor.exec_mut(val).unwrap();
         assert_eq!(result, expect);
@@ -216,14 +224,20 @@ mod test {
             targets: HashSet::from_iter(vec!["John".to_string()]),
         };
 
-        let val = Value::Map(Map::one("name", Value::String("John".to_string())));
+        let val = VrlValue::Object(ObjectMap::from_iter(vec![(
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("John")),
+        )]));
         let expect = val.clone();
         let result = processor.exec_mut(val).unwrap();
         assert_eq!(result, expect);
 
-        let val = Value::Map(Map::one("name", Value::String("Wick".to_string())));
+        let val = VrlValue::Object(ObjectMap::from_iter(vec![(
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("Wick")),
+        )]));
         let result = processor.exec_mut(val).unwrap();
-        assert_eq!(result, Value::Null);
+        assert_eq!(result, VrlValue::Null);
     }
 
     #[test]
@@ -235,8 +249,11 @@ mod test {
             targets: HashSet::from_iter(vec!["john".to_string()]),
         };
 
-        let val = Value::Map(Map::one("name", Value::String("JoHN".to_string())));
+        let val = VrlValue::Object(ObjectMap::from_iter(vec![(
+            KeyString::from("name"),
+            VrlValue::Bytes(Bytes::from("JoHN")),
+        )]));
         let result = processor.exec_mut(val).unwrap();
-        assert_eq!(result, Value::Null);
+        assert_eq!(result, VrlValue::Null);
     }
 }
