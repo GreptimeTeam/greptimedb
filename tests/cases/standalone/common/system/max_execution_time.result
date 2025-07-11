@@ -1,0 +1,81 @@
+-- Test default values
+SELECT @@max_execution_time;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
+
+-- Test basic settings
+SET MAX_EXECUTION_TIME = 1000; -- Using global variable
+SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+SET SESSION MAX_EXECUTION_TIME = 2000; -- Using session variable
+SELECT @@session.max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+-- Test different formats
+SET @@SESSION.MAX_EXECUTION_TIME = 3000; -- Using session variable
+SELECT @@session.max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable @@SESSION.MAX_EXECUTION_TIME
+
+SET LOCAL MAX_EXECUTION_TIME = 4000; -- Using local variable
+SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+-- Test case insensitivity
+    -- set
+    set max_execution_time = 5000; -- Lowercase
+    SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    SET max_EXECUTION_time = 6000; -- Mixed case
+    SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    SET MAX_EXECUTION_TIME = 7000; -- Uppercase
+    SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    -- select
+    SET max_execution_time = 8000;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    SELECT @@max_execution_time; -- Lowercase
+    SET max_execution_time = 9000;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
+
+    SELECT @@max_Execution_time; -- Mixed case
+    SET max_execution_time = 10000;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_Execution_time"] has no type information
+
+-- Test the boundary
+    SELECT @@MAX_EXECUTION_TIME; -- Uppercase
+SET @@max_execution_time = 0; --minimum value for u64
+SELECT @@max_execution_time;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@MAX_EXECUTION_TIME"] has no type information
+
+SET @@max_execution_time = -1; -- Negative value (not allowed)
+SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
+
+SET @@max_execution_time = 18446744073709551615; -- Maximum value for u64
+SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
+
+SET @@max_execution_time = 18446744073709551616; -- Maximum value for u64 + 1 (out of range)
+SELECT @@max_execution_time;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
+
