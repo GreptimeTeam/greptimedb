@@ -1973,7 +1973,8 @@ processors:
         - "%Y-%m-%d %H:%M:%S%.3f"
   - filter:
       field: name
-      target: John
+      targets:
+        - John
 transform:
   - field: name
     type: string

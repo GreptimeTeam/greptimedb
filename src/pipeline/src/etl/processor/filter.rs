@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::{HashSet, HashSetExt};
 use snafu::OptionExt;
 
 use crate::error::{
@@ -20,7 +21,7 @@ use crate::error::{
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
-    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, FIELDS_NAME, FIELD_NAME,
+    yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, FIELDS_NAME, FIELD_NAME,
 };
 use crate::{Processor, Value};
 
@@ -29,7 +30,7 @@ pub(crate) const PROCESSOR_FILTER: &str = "filter";
 const MATCH_MODE_NAME: &str = "mode";
 const MATCH_OP_NAME: &str = "match_op";
 const CASE_INSENSITIVE_NAME: &str = "case_insensitive";
-const TARGET_NAME: &str = "target";
+const TARGETS_NAME: &str = "targets";
 
 #[derive(Debug)]
 enum MatchMode {
@@ -45,8 +46,8 @@ impl Default for MatchMode {
 #[derive(Debug, Default)]
 enum MatchOp {
     #[default]
-    Eq,
-    Ne,
+    In,
+    NotIn,
 }
 
 /// Filter out the whole line if matches.
@@ -57,7 +58,7 @@ pub struct FilterProcessor {
     fields: Fields,
     mode: MatchMode,
     case_insensitive: bool,
-    target: String,
+    targets: HashSet<String>,
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for FilterProcessor {
@@ -70,7 +71,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for FilterProcessor {
         let mut mode = MatchMode::default();
         let mut op = MatchOp::default();
         let mut case_insensitive = true;
-        let mut target = String::new();
+        let mut targets = HashSet::new();
 
         for (k, v) in value.iter() {
             let key = k
@@ -80,16 +81,23 @@ impl TryFrom<&yaml_rust::yaml::Hash> for FilterProcessor {
                 FIELD_NAME => fields = Fields::one(yaml_new_field(v, FIELD_NAME)?),
                 FIELDS_NAME => fields = yaml_new_fields(v, FIELDS_NAME)?,
                 MATCH_MODE_NAME => match yaml_string(v, MATCH_MODE_NAME)?.as_str() {
-                    "simple" => mode = MatchMode::SimpleMatch(MatchOp::Eq),
+                    "simple" => mode = MatchMode::SimpleMatch(MatchOp::In),
                     _ => {}
                 },
                 MATCH_OP_NAME => match yaml_string(v, MATCH_OP_NAME)?.as_str() {
-                    "eq" => op = MatchOp::Eq,
-                    "ne" => op = MatchOp::Ne,
+                    "in" => op = MatchOp::In,
+                    "not_in" => op = MatchOp::NotIn,
                     _ => {}
                 },
                 CASE_INSENSITIVE_NAME => case_insensitive = yaml_bool(v, CASE_INSENSITIVE_NAME)?,
-                TARGET_NAME => target = yaml_string(v, TARGET_NAME)?,
+                TARGETS_NAME => {
+                    yaml_strings(v, TARGETS_NAME)?
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .for_each(|s| {
+                            targets.insert(s);
+                        });
+                }
                 _ => {}
             }
         }
@@ -98,23 +106,23 @@ impl TryFrom<&yaml_rust::yaml::Hash> for FilterProcessor {
             mode = MatchMode::SimpleMatch(op);
         }
 
-        if target.is_empty() {
+        if targets.is_empty() {
             return ProcessorMissingFieldSnafu {
                 processor: PROCESSOR_FILTER,
-                field: TARGET_NAME.to_string(),
+                field: TARGETS_NAME.to_string(),
             }
             .fail();
         }
 
         if case_insensitive {
-            target = target.to_lowercase();
+            targets = targets.into_iter().map(|s| s.to_lowercase()).collect();
         }
 
         Ok(FilterProcessor {
             fields,
             mode,
             case_insensitive,
-            target,
+            targets,
         })
     }
 }
@@ -129,8 +137,8 @@ impl FilterProcessor {
 
         match &self.mode {
             MatchMode::SimpleMatch(op) => match op {
-                MatchOp::Eq => input == self.target,
-                MatchOp::Ne => input != self.target,
+                MatchOp::In => self.targets.contains(&input),
+                MatchOp::NotIn => !self.targets.contains(&input),
             },
         }
     }
@@ -173,6 +181,8 @@ impl Processor for FilterProcessor {
 
 #[cfg(test)]
 mod test {
+    use ahash::HashSet;
+
     use crate::etl::field::{Field, Fields};
     use crate::etl::processor::filter::{FilterProcessor, MatchMode, MatchOp};
     use crate::{Map, Processor, Value};
@@ -181,9 +191,9 @@ mod test {
     fn test_eq() {
         let processor = FilterProcessor {
             fields: Fields::one(Field::new("name", None)),
-            mode: MatchMode::SimpleMatch(MatchOp::Eq),
+            mode: MatchMode::SimpleMatch(MatchOp::In),
             case_insensitive: false,
-            target: "John".to_string(),
+            targets: HashSet::from_iter(vec!["John".to_string()]),
         };
 
         let val = Value::Map(Map::one("name", Value::String("John".to_string())));
@@ -201,9 +211,9 @@ mod test {
     fn test_ne() {
         let processor = FilterProcessor {
             fields: Fields::one(Field::new("name", None)),
-            mode: MatchMode::SimpleMatch(MatchOp::Ne),
+            mode: MatchMode::SimpleMatch(MatchOp::NotIn),
             case_insensitive: false,
-            target: "John".to_string(),
+            targets: HashSet::from_iter(vec!["John".to_string()]),
         };
 
         let val = Value::Map(Map::one("name", Value::String("John".to_string())));
@@ -220,9 +230,9 @@ mod test {
     fn test_case() {
         let processor = FilterProcessor {
             fields: Fields::one(Field::new("name", None)),
-            mode: MatchMode::SimpleMatch(MatchOp::Eq),
+            mode: MatchMode::SimpleMatch(MatchOp::In),
             case_insensitive: true,
-            target: "john".to_string(),
+            targets: HashSet::from_iter(vec!["john".to_string()]),
         };
 
         let val = Value::Map(Map::one("name", Value::String("JoHN".to_string())));
