@@ -16,8 +16,9 @@ use std::fmt;
 
 use serde::Serialize;
 use snafu::ResultExt;
-use sqlparser::ast::{Ident, Query as SpQuery};
+use sqlparser::ast::{Ident, ObjectName, Query as SpQuery};
 use sqlparser::keywords::Keyword;
+use sqlparser::parser::IsOptional;
 use sqlparser::tokenizer::Token;
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -40,8 +41,8 @@ pub enum CteContent {
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct HybridCte {
     pub name: Ident,
-    /// Column aliases for the CTE table
-    pub columns: Option<Vec<Ident>>,
+    /// Column aliases for the CTE table. Empty if not specified.
+    pub columns: Vec<ObjectName>,
     pub content: CteContent,
 }
 
@@ -66,9 +67,9 @@ impl fmt::Display for HybridCteWith {
             }
             write!(f, "{}", cte.name)?;
 
-            if let Some(columns) = &cte.columns {
+            if !cte.columns.is_empty() {
                 write!(f, " (")?;
-                for (j, col) in columns.iter().enumerate() {
+                for (j, col) in cte.columns.iter().enumerate() {
                     if j > 0 {
                         write!(f, ", ")?;
                     }
@@ -135,23 +136,10 @@ impl ParserContext<'_> {
         let name = Self::canonicalize_identifier(name);
 
         // Parse optional column list
-        let columns = if self.parser.consume_token(&Token::LParen) {
-            let mut columns = Vec::new();
-            loop {
-                let column = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
-                columns.push(Self::canonicalize_identifier(column));
-
-                if !self.parser.consume_token(&Token::Comma) {
-                    break;
-                }
-            }
-            self.parser
-                .expect_token(&Token::RParen)
-                .context(error::SyntaxSnafu)?;
-            Some(columns)
-        } else {
-            None
-        };
+        let columns = self
+            .parser
+            .parse_parenthesized_qualified_column_list(IsOptional::Optional, true)
+            .context(error::SyntaxSnafu)?;
 
         // Expect AS keyword
         self.parser
@@ -314,17 +302,11 @@ impl ParserContext<'_> {
                 break;
             }
 
-            // Skip optional column list
-            if self.parser.consume_token(&Token::LParen) {
-                let mut paren_depth = 1;
-                while paren_depth > 0 && self.parser.peek_token() != Token::EOF {
-                    match self.parser.next_token().token {
-                        Token::LParen => paren_depth += 1,
-                        Token::RParen => paren_depth -= 1,
-                        _ => {}
-                    }
-                }
-            }
+            // Parse optional column list
+            let _column_list = self
+                .parser
+                .parse_parenthesized_qualified_column_list(IsOptional::Optional, true)
+                .context(error::SyntaxSnafu)?;
 
             // Skip AS keyword
             if !self.parser.parse_keyword(Keyword::AS) {
@@ -451,20 +433,16 @@ mod tests {
         // First CTE should be SQL with column aliases
         let first_cte = &hybrid_cte.cte_tables[0];
         assert!(matches!(first_cte.content, CteContent::Sql(_)));
-        assert!(first_cte.columns.is_some());
-        let columns = first_cte.columns.as_ref().unwrap();
-        assert_eq!(columns.len(), 3);
-        assert_eq!(columns[0].value, "ts");
-        assert_eq!(columns[1].value, "value");
-        assert_eq!(columns[2].value, "label");
+        assert_eq!(first_cte.columns.len(), 3);
+        assert_eq!(first_cte.columns[0].0[0].value, "ts");
+        assert_eq!(first_cte.columns[1].0[0].value, "value");
+        assert_eq!(first_cte.columns[2].0[0].value, "label");
 
         // Second CTE should be TQL with column aliases
         let second_cte = &hybrid_cte.cte_tables[1];
         assert!(matches!(second_cte.content, CteContent::Tql(_)));
-        assert!(second_cte.columns.is_some());
-        let columns = second_cte.columns.as_ref().unwrap();
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].value, "time");
-        assert_eq!(columns[1].value, "metric_value");
+        assert_eq!(second_cte.columns.len(), 2);
+        assert_eq!(second_cte.columns[0].0[0].value, "time");
+        assert_eq!(second_cte.columns[1].0[0].value, "metric_value");
     }
 }
