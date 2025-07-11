@@ -50,50 +50,17 @@ impl TryFrom<Query> for SpQuery {
 
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // If there's a hybrid CTE, we need to handle it specially
-        let Some(hybrid_cte) = &self.hybrid_cte else {
-            return write!(f, "{}", self.inner);
-        };
-        write!(f, "WITH ")?;
+        if let Some(hybrid_cte) = &self.hybrid_cte {
+            // Delegate the WITH clause rendering to `HybridCteWith`
+            write!(f, "{} ", hybrid_cte)?;
 
-        if hybrid_cte.recursive {
-            write!(f, "RECURSIVE ")?;
+            // Display the main query without its WITH clause since we handled it above
+            let mut main_query = self.inner.clone();
+            main_query.with = None;
+            write!(f, "{}", main_query)
+        } else {
+            write!(f, "{}", self.inner)
         }
-
-        for (i, cte) in hybrid_cte.cte_tables.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{}", cte.name)?;
-
-            if let Some(columns) = &cte.columns {
-                write!(f, " (")?;
-                for (j, col) in columns.iter().enumerate() {
-                    if j > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", col)?;
-                }
-                write!(f, ")")?;
-            }
-
-            write!(f, " AS (")?;
-            match &cte.content {
-                crate::parsers::with_tql_parser::CteContent::Sql(query) => {
-                    write!(f, "{}", query)?;
-                }
-                crate::parsers::with_tql_parser::CteContent::Tql(tql) => {
-                    write!(f, "{}", tql)?;
-                }
-            }
-            write!(f, ")")?;
-        }
-        write!(f, " ")?;
-
-        // Display the main query without its WITH clause since we handled it above
-        let mut main_query = self.inner.clone();
-        main_query.with = None;
-        write!(f, "{}", main_query)
     }
 }
 
@@ -134,6 +101,12 @@ mod test {
             .unwrap()
             .to_string(),
             "SELECT * FROM abc LEFT JOIN bcd WHERE abc.a = 1 AND bcd.d = 7 AND abc.id = bcd.id"
+        );
+        assert_eq!(
+            create_query("WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte")
+                .unwrap()
+                .to_string(),
+            "WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte"
         );
     }
 }

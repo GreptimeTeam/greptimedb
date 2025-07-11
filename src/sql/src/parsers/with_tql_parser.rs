@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+
 use serde::Serialize;
 use snafu::ResultExt;
 use sqlparser::ast::{Ident, Query as SpQuery};
@@ -19,8 +21,9 @@ use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::Token;
 use sqlparser_derive::{Visit, VisitMut};
 
+use crate::dialect::GreptimeDbDialect;
 use crate::error::{self, Result};
-use crate::parser::ParserContext;
+use crate::parser::{ParseOptions, ParserContext};
 use crate::parsers::tql_parser;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
@@ -47,6 +50,42 @@ pub struct HybridCte {
 pub struct HybridCteWith {
     pub recursive: bool,
     pub cte_tables: Vec<HybridCte>,
+}
+
+impl fmt::Display for HybridCteWith {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WITH ")?;
+
+        if self.recursive {
+            write!(f, "RECURSIVE ")?;
+        }
+
+        for (i, cte) in self.cte_tables.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", cte.name)?;
+
+            if let Some(columns) = &cte.columns {
+                write!(f, " (")?;
+                for (j, col) in columns.iter().enumerate() {
+                    if j > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", col)?;
+                }
+                write!(f, ")")?;
+            }
+
+            write!(f, " AS (")?;
+            match &cte.content {
+                CteContent::Sql(query) => write!(f, "{}", query)?,
+                CteContent::Tql(tql) => write!(f, "{}", tql)?,
+            }
+            write!(f, ")")?;
+        }
+        Ok(())
+    }
 }
 
 /// Parser implementation for hybrid WITH clauses containing TQL
@@ -156,18 +195,13 @@ impl ParserContext<'_> {
     }
 
     /// Parse TQL content within a CTE by reusing the standard TQL parser.
+    ///
     /// This method consumes all tokens that belong to the TQL statement and
     /// stops right **before** the closing `)` of the CTE so that the caller
-    /// can handle it normally. Only `TQL EVAL` is supported inside CTEs –
-    /// other variants will return an error identical to the previous behaviour.
+    /// can handle it normally.
+    ///
+    /// Only `TQL EVAL` is supported inside CTEs.
     fn parse_tql_content_in_cte(&mut self) -> Result<Tql> {
-        // Collect all tokens that constitute the inner TQL statement so we
-        // can parse them with a fresh `ParserContext`, leveraging the shared
-        // implementation in `tql_parser.rs`.
-
-        use crate::dialect::GreptimeDbDialect;
-        use crate::parser::ParseOptions;
-
         let mut collected: Vec<Token> = Vec::new();
         let mut paren_depth = 0usize;
 
@@ -194,9 +228,7 @@ impl ParserContext<'_> {
                 Token::RParen => {
                     // This RParen must belong to a nested expression since
                     // `paren_depth > 0` here. Decrease depth accordingly.
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    }
+                    paren_depth = paren_depth.saturating_sub(1);
                 }
                 _ => {}
             }
