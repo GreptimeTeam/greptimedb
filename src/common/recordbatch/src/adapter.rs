@@ -305,7 +305,6 @@ impl Stream for RecordBatchStreamAdapter {
                 if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
                     &self.metrics_2
                 {
-                    common_telemetry::info!("[DEBUG] update partial resolved metrics");
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     self.metrics_2 = Metrics::PartialResolved(

@@ -54,7 +54,7 @@ use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as S
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
 use servers::grpc::FlightCompression;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
@@ -197,18 +197,13 @@ impl RegionServer {
     pub async fn handle_remote_read(
         &self,
         request: api::v1::region::QueryRequest,
+        query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
         let _permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
         };
-
-        let query_ctx: QueryContextRef = request
-            .header
-            .as_ref()
-            .map(|h| Arc::new(h.into()))
-            .unwrap_or_else(|| Arc::new(QueryContextBuilder::default().build()));
 
         let region_id = RegionId::from_u64(request.region_id);
         let provider = self.table_provider(region_id, Some(&query_ctx)).await?;
@@ -217,7 +212,7 @@ impl RegionServer {
         let decoder = self
             .inner
             .query_engine
-            .engine_context(query_ctx)
+            .engine_context(query_ctx.clone())
             .new_plan_decoder()
             .context(NewPlanDecoderSnafu)?;
 
@@ -227,11 +222,14 @@ impl RegionServer {
             .context(DecodeLogicalPlanSnafu)?;
 
         self.inner
-            .handle_read(QueryRequest {
-                header: request.header,
-                region_id,
-                plan,
-            })
+            .handle_read(
+                QueryRequest {
+                    header: request.header,
+                    region_id,
+                    plan,
+                },
+                query_ctx,
+            )
             .await
     }
 
@@ -246,6 +244,7 @@ impl RegionServer {
         let ctx: Option<session::context::QueryContext> = request.header.as_ref().map(|h| h.into());
 
         let provider = self.table_provider(request.region_id, ctx.as_ref()).await?;
+        let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
         struct RegionDataSourceInjector {
             source: Arc<dyn TableSource>,
@@ -274,7 +273,7 @@ impl RegionServer {
             .data;
 
         self.inner
-            .handle_read(QueryRequest { plan, ..request })
+            .handle_read(QueryRequest { plan, ..request }, query_ctx)
             .await
     }
 
@@ -588,9 +587,14 @@ impl FlightCraft for RegionServer {
             .as_ref()
             .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default();
+        let query_ctx = request
+            .header
+            .as_ref()
+            .map(|h| Arc::new(QueryContext::from(h)))
+            .unwrap_or(QueryContext::arc());
 
         let result = self
-            .handle_remote_read(request)
+            .handle_remote_read(request, query_ctx.clone())
             .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
             .await?;
 
@@ -598,6 +602,7 @@ impl FlightCraft for RegionServer {
             result,
             tracing_context,
             self.flight_compression,
+            query_ctx,
         ));
         Ok(Response::new(stream))
     }
@@ -1178,15 +1183,12 @@ impl RegionServerInner {
         Ok(())
     }
 
-    pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
+    pub async fn handle_read(
+        &self,
+        request: QueryRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
-
-        // Build query context from gRPC header
-        let query_ctx: QueryContextRef = request
-            .header
-            .as_ref()
-            .map(|h| Arc::new(h.into()))
-            .unwrap_or_else(|| QueryContextBuilder::default().build().into());
 
         let result = self
             .query_engine

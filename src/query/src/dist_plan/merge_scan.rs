@@ -300,7 +300,6 @@ impl MergeScanExec {
                     })
                     .context(ExternalSnafu)?;
                 let do_get_cost = do_get_start.elapsed();
-                common_telemetry::info!("[DEBUG] request to region {:?} is sent", region_id,);
 
                 ready_timer.stop();
 
@@ -322,12 +321,6 @@ impl MergeScanExec {
                     if let Some(metrics) = stream.metrics() {
                         let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
                         sub_stage_metrics.insert(region_id, metrics);
-                    } else {
-                        common_telemetry::info!(
-                            "[DEBUG] no metrics from region {:?}, batch size: {}",
-                            region_id,
-                            batch.num_rows()
-                        );
                     }
 
                     yield Ok(batch);
@@ -356,11 +349,6 @@ impl MergeScanExec {
                     // record metrics from sub sgates
                     let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
                     sub_stage_metrics.insert(region_id, metrics);
-                } else {
-                    common_telemetry::info!(
-                        "[DEBUG] no metrics from region {:?} in the end",
-                        region_id
-                    );
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
