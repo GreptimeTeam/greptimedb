@@ -251,11 +251,11 @@ pub enum AlterKind {
     UnsetTableOptions {
         keys: Vec<UnsetRegionOption>,
     },
-    SetIndex {
-        options: SetIndexOptions,
+    SetIndexes {
+        options: Vec<SetIndexOption>,
     },
-    UnsetIndex {
-        options: UnsetIndexOptions,
+    UnsetIndexes {
+        options: Vec<UnsetIndexOption>,
     },
     DropDefaults {
         names: Vec<String>,
@@ -263,7 +263,7 @@ pub enum AlterKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SetIndexOptions {
+pub enum SetIndexOption {
     Fulltext {
         column_name: String,
         options: FulltextOptions,
@@ -277,11 +277,33 @@ pub enum SetIndexOptions {
     },
 }
 
+impl SetIndexOption {
+    /// Returns the column name of the index option.
+    pub fn column_name(&self) -> &str {
+        match self {
+            SetIndexOption::Fulltext { column_name, .. } => column_name,
+            SetIndexOption::Inverted { column_name, .. } => column_name,
+            SetIndexOption::Skipping { column_name, .. } => column_name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UnsetIndexOptions {
+pub enum UnsetIndexOption {
     Fulltext { column_name: String },
     Inverted { column_name: String },
     Skipping { column_name: String },
+}
+
+impl UnsetIndexOption {
+    /// Returns the column name of the index option.
+    pub fn column_name(&self) -> &str {
+        match self {
+            UnsetIndexOption::Fulltext { column_name, .. } => column_name,
+            UnsetIndexOption::Inverted { column_name, .. } => column_name,
+            UnsetIndexOption::Skipping { column_name, .. } => column_name,
+        }
+    }
 }
 
 #[derive(Debug)]
