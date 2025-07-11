@@ -29,8 +29,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOptions,
-    UnsetIndexOptions,
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetDefaultRequest,
+    SetIndexOptions, UnsetIndexOptions,
 };
 
 use crate::error::{
@@ -200,6 +200,22 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                 })
                 .collect::<Result<Vec<_>>>()?;
             AlterKind::DropDefaults { names }
+        }
+        Kind::SetDefaults(o) => {
+            let defaults = o
+                .set_defaults
+                .into_iter()
+                .map(|col| {
+                    Ok(SetDefaultRequest {
+                        column_name: col.column_name,
+                        default_constraint: common_sql::convert::deserialize_expr(
+                            col.default_constraint.as_slice(),
+                        )
+                        .context(crate::error::SQLCommonSnafu)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            AlterKind::SetDefaults { defaults }
         }
     };
 

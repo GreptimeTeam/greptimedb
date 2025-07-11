@@ -615,6 +615,7 @@ impl RegionMetadataBuilder {
             AlterKind::DropDefaults { names } => {
                 self.drop_defaults(names)?;
             }
+            AlterKind::SetDefaults { columns } => self.set_defaults(&columns)?,
         }
         Ok(self)
     }
@@ -863,6 +864,46 @@ impl RegionMetadataBuilder {
         }
         Ok(())
     }
+
+    fn set_defaults(&mut self, set_defaults: &[crate::region_request::SetDefault]) -> Result<()> {
+        for set_default in set_defaults.iter() {
+            let meta = self
+                .column_metadatas
+                .iter_mut()
+                .find(|col| col.column_schema.name == set_default.name);
+            if let Some(meta) = meta {
+                let column_def = sqlparser::ast::ColumnOptionDef {
+                    name: None,
+                    option: sqlparser::ast::ColumnOption::Default(
+                        set_default.default_constraint.clone(),
+                    ),
+                };
+
+                let new_default_constraint =
+                    common_sql::default_constraint::parse_column_default_constraint(
+                        &meta.column_schema.name,
+                        &meta.column_schema.data_type,
+                        &[column_def],
+                        None,
+                    )
+                    .context(SQLCommonSnafu)?;
+                meta.column_schema = meta
+                    .column_schema
+                    .clone()
+                    .with_default_constraint(new_default_constraint)
+                    .with_context(|_| CastDefaultValueSnafu {
+                        reason: format!("Failed to set default : {set_default:?}"),
+                    })?;
+            } else {
+                return InvalidRegionRequestSnafu {
+                    region_id: self.region_id,
+                    err: format!("column {} not found", set_default.name),
+                }
+                .fail();
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Fields skipped in serialization.
@@ -1072,11 +1113,21 @@ pub enum MetadataError {
         #[snafu(source)]
         error: datatypes::error::Error,
     },
+
+    #[snafu(display("Sql common error"))]
+    SQLCommon {
+        source: common_sql::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for MetadataError {
     fn status_code(&self) -> StatusCode {
-        StatusCode::InvalidArguments
+        match self {
+            Self::SQLCommon { source, .. } => source.status_code(),
+            _ => StatusCode::InvalidArguments,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

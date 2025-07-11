@@ -109,6 +109,7 @@ fn create_proto_alter_kind(
         Kind::SetIndex(v) => Ok(Some(alter_request::Kind::SetIndex(v.clone()))),
         Kind::UnsetIndex(v) => Ok(Some(alter_request::Kind::UnsetIndex(v.clone()))),
         Kind::DropDefaults(v) => Ok(Some(alter_request::Kind::DropDefaults(v.clone()))),
+        Kind::SetDefaults(v) => Ok(Some(alter_request::Kind::SetDefaults(v.clone()))),
     }
 }
 
