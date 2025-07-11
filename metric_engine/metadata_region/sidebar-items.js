@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_PREFIX","REGION_PREFIX"],"fn":["decode_batch_stream","decode_record_batch_to_key","decode_record_batch_to_key_and_value"],"struct":["MetadataRegion"]};

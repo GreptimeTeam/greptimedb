@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["logs","metrics","traces"],"struct":["OtlpResponse"]};

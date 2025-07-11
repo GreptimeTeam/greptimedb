@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Commutativity"],"fn":["get_aggr_func","get_aggr_func_mut","is_all_aggr_exprs_steppable","partial_commutative_transformer","step_aggr_to_upper_aggr"],"struct":["Categorizer","TransformerAction"],"type":["StageTransformer","Transformer"]};

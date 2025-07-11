@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FILE_DIR"],"enum":["FileType"],"fn":["cache_file_path","parse_index_key"],"struct":["FileCache","IndexKey","IndexValue"],"type":["FileCacheRef"]};

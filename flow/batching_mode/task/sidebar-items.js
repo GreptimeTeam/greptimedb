@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["QueryType"],"fn":["build_primary_key_constraint","create_table_with_expr","determine_query_type"],"struct":["BatchingTask","TaskConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_all_table_info_values_by_table_ids"]};

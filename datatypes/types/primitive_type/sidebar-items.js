@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["define_logical_primitive_type","define_non_timestamp_primitive","impl_wrapper"],"struct":["Float32Type","Float64Type","Int16Type","Int32Type","Int64Type","Int8Type","OrdPrimitive","UInt16Type","UInt32Type","UInt64Type","UInt8Type"],"trait":["LogicalPrimitiveType","WrapperType"]};
