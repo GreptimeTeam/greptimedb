@@ -153,15 +153,7 @@ impl ParserContext<'_> {
 
                 Keyword::SELECT | Keyword::VALUES => self.parse_query(),
 
-                Keyword::WITH => {
-                    // Check if this WITH contains TQL before delegating to sqlparser
-                    if self.contains_tql_in_with()? {
-                        self.parse_with_tql()
-                    } else {
-                        // Fallback to normal sqlparser handling
-                        self.parse_query()
-                    }
-                }
+                Keyword::WITH => self.parse_with_tql(),
 
                 Keyword::ALTER => self.parse_alter(),
 

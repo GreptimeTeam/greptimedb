@@ -91,7 +91,7 @@ impl fmt::Display for HybridCteWith {
 
 /// Parser implementation for hybrid WITH clauses containing TQL
 impl ParserContext<'_> {
-    /// Parse a WITH clause that may contain TQL CTEs
+    /// Parse a WITH clause that may contain TQL CTEs or SQL CTEs.
     pub(crate) fn parse_with_tql(&mut self) -> Result<Statement> {
         // Consume the WITH token
         self.parser
@@ -257,93 +257,6 @@ impl ParserContext<'_> {
             .build()),
         }
     }
-
-    /// Check if a WITH clause contains TQL by lookahead parsing
-    pub(crate) fn contains_tql_in_with(&mut self) -> Result<bool> {
-        // Save the current parser position
-        let checkpoint = self.parser.index();
-
-        // Perform lookahead parsing to detect TQL
-        let has_tql = self.scan_for_tql_in_ctes().unwrap_or(false);
-
-        // Restore parser position by creating a new parser with the original SQL
-        // and advancing to the checkpoint position
-        let mut new_parser = sqlparser::parser::Parser::new(&sqlparser::dialect::GenericDialect {})
-            .try_with_sql(self.sql)
-            .context(error::SyntaxSnafu)?;
-
-        // Advance to the checkpoint position
-        for _ in 0..checkpoint {
-            if new_parser.peek_token() == Token::EOF {
-                break;
-            }
-            new_parser.next_token();
-        }
-
-        self.parser = new_parser;
-
-        Ok(has_tql)
-    }
-
-    /// Scan through CTE definitions looking for TQL keywords
-    fn scan_for_tql_in_ctes(&mut self) -> Result<bool> {
-        // Consume WITH
-        if !self.parser.parse_keyword(Keyword::WITH) {
-            return Ok(false);
-        }
-
-        // Skip RECURSIVE if present
-        let _ = self.parser.parse_keyword(Keyword::RECURSIVE);
-
-        // Scan through CTEs
-        loop {
-            // Skip CTE name
-            if self.parser.parse_identifier().is_err() {
-                break;
-            }
-
-            // Parse optional column list
-            let _column_list = self
-                .parser
-                .parse_parenthesized_qualified_column_list(IsOptional::Optional, true)
-                .context(error::SyntaxSnafu)?;
-
-            // Skip AS keyword
-            if !self.parser.parse_keyword(Keyword::AS) {
-                break;
-            }
-
-            // Check content inside parentheses
-            if self.parser.consume_token(&Token::LParen) {
-                // Look for TQL keyword
-                if let Token::Word(w) = &self.parser.peek_token().token {
-                    if w.keyword == Keyword::NoKeyword
-                        && w.quote_style.is_none()
-                        && w.value.to_uppercase() == tql_parser::TQL
-                    {
-                        return Ok(true);
-                    }
-                }
-
-                // Skip to matching closing parenthesis
-                let mut paren_depth = 1;
-                while paren_depth > 0 && self.parser.peek_token() != Token::EOF {
-                    match self.parser.next_token().token {
-                        Token::LParen => paren_depth += 1,
-                        Token::RParen => paren_depth -= 1,
-                        _ => {}
-                    }
-                }
-            }
-
-            // Check for comma to continue to next CTE
-            if !self.parser.consume_token(&Token::Comma) {
-                break;
-            }
-        }
-
-        Ok(false)
-    }
 }
 
 #[cfg(test)]
@@ -353,21 +266,6 @@ mod tests {
     use crate::parsers::with_tql_parser::CteContent;
     use crate::statements::statement::Statement;
     use crate::statements::tql::Tql;
-
-    #[test]
-    fn test_tql_detection() {
-        // this should detect TQL
-        let sql = "WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte";
-        let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
-        let has_tql = parser.contains_tql_in_with().unwrap();
-        assert!(has_tql);
-
-        // normal SQL doesn't trigger TQL detection
-        let sql_normal = "WITH normal_cte AS (SELECT * FROM my_table) SELECT * FROM normal_cte";
-        let mut parser_normal = ParserContext::new(&GreptimeDbDialect {}, sql_normal).unwrap();
-        let has_tql_normal = parser_normal.contains_tql_in_with().unwrap();
-        assert!(!has_tql_normal);
-    }
 
     #[test]
     fn test_parse_hybrid_cte_with_parentheses_in_query() {
