@@ -17,3 +17,5 @@ pub mod count_hash;
 #[cfg(feature = "geo")]
 pub mod geo;
 pub mod vector;
+
+pub mod aggr_wrapper;
