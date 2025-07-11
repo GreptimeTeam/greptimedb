@@ -21,6 +21,7 @@ pub mod error;
 pub mod file_format;
 pub mod lister;
 pub mod object_store;
+pub mod parquet_writer;
 pub mod share_buffer;
 #[cfg(test)]
 pub mod test_util;

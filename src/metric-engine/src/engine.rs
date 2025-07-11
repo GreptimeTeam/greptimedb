@@ -387,7 +387,7 @@ impl MetricEngine {
             data_region,
             state: state.clone(),
             config,
-            row_modifier: RowModifier::new(),
+            row_modifier: RowModifier::default(),
             flush_task: RepeatedTask::new(
                 flush_interval,
                 Box::new(FlushMetadataRegionTask {

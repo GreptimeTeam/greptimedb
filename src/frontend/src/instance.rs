@@ -39,9 +39,12 @@ use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
@@ -56,6 +59,7 @@ use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
 use operator::statement::{StatementExecutor, StatementExecutorRef};
+use partition::manager::PartitionRuleManagerRef;
 use pipeline::pipeline_operator::PipelineOperator;
 use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
@@ -169,6 +173,22 @@ impl Instance {
 
     pub fn process_manager(&self) -> &ProcessManagerRef {
         &self.process_manager
+    }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        self.inserter.node_manager()
+    }
+
+    pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
+        self.inserter.partition_manager()
+    }
+
+    pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
+        self.statement_executor.cache_invalidator()
+    }
+
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        self.statement_executor.procedure_executor()
     }
 }
 
