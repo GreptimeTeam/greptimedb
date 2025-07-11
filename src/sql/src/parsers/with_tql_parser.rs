@@ -24,7 +24,7 @@ use crate::parser::ParserContext;
 use crate::parsers::tql_parser;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
-use crate::statements::tql::{Tql, TqlEval};
+use crate::statements::tql::Tql;
 
 /// Content of a CTE - either SQL or TQL
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -145,10 +145,6 @@ impl ParserContext<'_> {
                 && w.quote_style.is_none()
                 && w.value.to_uppercase() == tql_parser::TQL
             {
-                // Parse as TQL - consume the TQL keyword first
-                let _ = self.parser.next_token();
-
-                // Parse the TQL statement content
                 let tql = self.parse_tql_content_in_cte()?;
                 return Ok(CteContent::Tql(tql));
             }
@@ -159,195 +155,87 @@ impl ParserContext<'_> {
         Ok(CteContent::Sql(sql_query))
     }
 
-    /// Parse TQL content within CTE context (after TQL keyword is consumed)
+    /// Parse TQL content within a CTE by reusing the standard TQL parser.
+    /// This method consumes all tokens that belong to the TQL statement and
+    /// stops right **before** the closing `)` of the CTE so that the caller
+    /// can handle it normally. Only `TQL EVAL` is supported inside CTEs –
+    /// other variants will return an error identical to the previous behaviour.
     fn parse_tql_content_in_cte(&mut self) -> Result<Tql> {
-        // Check what type of TQL statement this is
-        if let Token::Word(w) = &self.parser.peek_token().token {
-            let uppercase = w.value.to_uppercase();
-            match w.keyword {
-                Keyword::NoKeyword
-                    if (uppercase == "EVAL" || uppercase == "EVALUATE")
-                        && w.quote_style.is_none() =>
-                {
-                    // Consume EVAL/EVALUATE keyword
-                    let _ = self.parser.next_token();
+        // Collect all tokens that constitute the inner TQL statement so we
+        // can parse them with a fresh `ParserContext`, leveraging the shared
+        // implementation in `tql_parser.rs`.
 
-                    // Parse the TQL parameters and query
-                    let tql_eval = self.parse_tql_eval_in_cte()?;
-                    Ok(Tql::Eval(tql_eval))
-                }
-                Keyword::EXPLAIN => {
-                    // For now, only support EVAL in CTEs
-                    Err(error::InvalidSqlSnafu {
-                        msg: "TQL EXPLAIN is not supported in CTEs".to_string(),
-                    }
-                    .build())
-                }
-                Keyword::ANALYZE => {
-                    // For now, only support EVAL in CTEs
-                    Err(error::InvalidSqlSnafu {
-                        msg: "TQL ANALYZE is not supported in CTEs".to_string(),
-                    }
-                    .build())
-                }
-                _ => Err(error::InvalidSqlSnafu {
-                    msg: format!("Unknown TQL statement type: {}", w.value),
-                }
-                .build()),
-            }
-        } else {
-            Err(error::InvalidSqlSnafu {
-                msg: "Expected TQL statement type (EVAL, EXPLAIN, ANALYZE)".to_string(),
-            }
-            .build())
-        }
-    }
+        use crate::dialect::GreptimeDbDialect;
+        use crate::parser::ParseOptions;
 
-    /// Parse TQL EVAL parameters within CTE context
-    fn parse_tql_eval_in_cte(&mut self) -> Result<TqlEval> {
-        // Parse parameters
-        let (start, end, step, lookback) = if self.parser.consume_token(&Token::LParen) {
-            // Parse start parameter
-            let start = self.parse_tql_param_value(&[Token::Comma])?;
+        let mut collected: Vec<Token> = Vec::new();
+        let mut paren_depth = 0usize;
 
-            // Parse end parameter
-            let end = self.parse_tql_param_value(&[Token::Comma])?;
+        loop {
+            let token_with_span = self.parser.peek_token();
 
-            // Parse step parameter
-            let step = self.parse_tql_param_value(&[Token::Comma, Token::RParen])?;
-
-            // Check if there's a lookback parameter
-            let lookback = if self.parser.peek_token().token == Token::Comma {
-                self.parser.next_token(); // consume comma
-                Some(self.parse_tql_param_value(&[Token::RParen])?)
-            } else {
-                None
-            };
-
-            // The closing paren should already be consumed by parse_tql_param_value
-
-            (start, end, step, lookback)
-        } else {
-            // No parameters, use defaults
-            ("0".to_string(), "0".to_string(), "5m".to_string(), None)
-        };
-
-        // Parse the query part - everything remaining until we hit the end of the CTE content
-        let query = self.parse_tql_query_in_cte()?;
-
-        Ok(TqlEval {
-            start,
-            end,
-            step,
-            lookback,
-            query,
-        })
-    }
-
-    /// Parse a single TQL parameter value
-    fn parse_tql_param_value(&mut self, delimiters: &[Token]) -> Result<String> {
-        let mut tokens = Vec::new();
-
-        // Collect tokens until we hit a delimiter
-        while !delimiters.contains(&self.parser.peek_token().token)
-            && self.parser.peek_token().token != Token::EOF
-        {
-            tokens.push(self.parser.next_token().token);
-        }
-
-        // Consume the delimiter
-        for delimiter in delimiters {
-            if self.parser.consume_token(delimiter) {
-                break;
-            }
-        }
-
-        // Convert tokens to string value
-        if tokens.is_empty() {
-            return Err(error::InvalidSqlSnafu {
-                msg: "Expected parameter value".to_string(),
-            }
-            .build());
-        }
-
-        let value = match &tokens[0] {
-            Token::Number(n, _) => n.clone(),
-            Token::SingleQuotedString(s) | Token::DoubleQuotedString(s) => s.clone(),
-            Token::Word(w) => w.value.clone(),
-            _ => {
+            // Guard against unexpected EOF
+            if token_with_span.token == Token::EOF {
                 return Err(error::InvalidSqlSnafu {
-                    msg: "Invalid parameter value format".to_string(),
+                    msg: "Unexpected end of input while parsing TQL inside CTE".to_string(),
                 }
                 .build());
             }
-        };
 
-        Ok(value)
-    }
-
-    /// Parse TQL query within CTE context
-    fn parse_tql_query_in_cte(&mut self) -> Result<String> {
-        // Skip any whitespace or commas
-        while matches!(
-            self.parser.peek_token().token,
-            Token::Comma | Token::Whitespace(_)
-        ) {
-            self.parser.next_token();
-        }
-
-        // Get the starting position for extracting the query text
-        let start_token = self.parser.peek_token();
-        if start_token.token == Token::EOF {
-            return Err(error::InvalidSqlSnafu {
-                msg: "Empty TQL query".to_string(),
+            // Stop **before** the closing parenthesis that ends the CTE
+            if token_with_span.token == Token::RParen && paren_depth == 0 {
+                break;
             }
-            .build());
-        }
 
-        let _start_location = start_token.span.start;
-
-        // Collect tokens until we find the closing parenthesis of the CTE
-        // We need to be careful not to consume the closing paren
-        let mut query_tokens = Vec::new();
-        let mut paren_depth = 0;
-
-        while self.parser.peek_token().token != Token::EOF {
-            let token = &self.parser.peek_token().token;
-
-            match token {
-                Token::LParen => {
-                    paren_depth += 1;
-                    query_tokens.push(self.parser.next_token());
-                }
-                Token::RParen if paren_depth > 0 => {
-                    paren_depth -= 1;
-                    query_tokens.push(self.parser.next_token());
-                }
+            // Consume the token and push it into our buffer
+            let consumed = self.parser.next_token();
+            match consumed.token {
+                Token::LParen => paren_depth += 1,
                 Token::RParen => {
-                    // This is the closing paren of the CTE - don't consume it
-                    break;
+                    // This RParen must belong to a nested expression since
+                    // `paren_depth > 0` here. Decrease depth accordingly.
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
                 }
-                _ => {
-                    query_tokens.push(self.parser.next_token());
-                }
+                _ => {}
             }
+
+            collected.push(consumed.token);
         }
 
-        if query_tokens.is_empty() {
-            return Err(error::InvalidSqlSnafu {
-                msg: "Empty TQL query".to_string(),
-            }
-            .build());
-        }
-
-        // Convert tokens back to string
-        let query = query_tokens
+        // Re-construct the SQL string of the isolated TQL statement.
+        let tql_string = collected
             .iter()
-            .map(|t| t.to_string())
+            .map(|tok| tok.to_string())
             .collect::<Vec<_>>()
             .join(" ");
 
-        Ok(query.trim().to_string())
+        // Use the shared parser to turn it into a `Statement`.
+        let mut stmts = ParserContext::create_with_dialect(
+            &tql_string,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )?;
+
+        if stmts.len() != 1 {
+            return Err(error::InvalidSqlSnafu {
+                msg: "Expected a single TQL statement inside CTE".to_string(),
+            }
+            .build());
+        }
+
+        match stmts.remove(0) {
+            Statement::Tql(Tql::Eval(eval)) => Ok(Tql::Eval(eval)),
+            Statement::Tql(_) => Err(error::InvalidSqlSnafu {
+                msg: "Only TQL EVAL is supported in CTEs".to_string(),
+            }
+            .build()),
+            _ => Err(error::InvalidSqlSnafu {
+                msg: "Expected a TQL statement inside CTE".to_string(),
+            }
+            .build()),
+        }
     }
 
     /// Check if a WITH clause contains TQL by lookahead parsing
