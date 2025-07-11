@@ -20,8 +20,11 @@ use std::task::{Context, Poll};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_error::ext::BoxedError;
+use common_meta::cluster::{NodeInfo, NodeInfoKey, Role as ClusterRole};
+use common_meta::distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS;
 use common_meta::kv_backend::{KvBackend, ResettableKvBackendRef};
 use common_meta::peer::{Peer, PeerLookupService};
+use common_meta::rpc::store::RangeRequest;
 use common_meta::{util, DatanodeId, FlownodeId};
 use common_time::util as time_util;
 use common_workload::DatanodeWorkloadType;
@@ -31,10 +34,19 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{Error, KvBackendSnafu, Result};
 use crate::key::{DatanodeLeaseKey, FlownodeLeaseKey, LeaseValue};
 
-fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseValue) -> bool {
-    move |v: &LeaseValue| {
-        ((time_util::current_time_millis() - v.timestamp_millis) as u64)
-            < lease_secs.saturating_mul(1000)
+enum Value<'a> {
+    LeaseValue(&'a LeaseValue),
+    NodeInfo(&'a NodeInfo),
+}
+
+fn build_lease_filter(lease_secs: u64) -> impl Fn(Value) -> bool {
+    move |value: Value| {
+        let active_time = match value {
+            Value::LeaseValue(lease_value) => lease_value.timestamp_millis,
+            Value::NodeInfo(node_info) => node_info.last_activity_ts,
+        };
+
+        ((time_util::current_time_millis() - active_time) as u64) < lease_secs.saturating_mul(1000)
     }
 }
 
@@ -91,7 +103,7 @@ pub async fn lookup_datanode_peer(
         return Ok(None);
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
-    let is_alive = lease_filter(&lease_value);
+    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -155,7 +167,7 @@ where
             let condition = this.condition;
             let key_prefix = std::mem::take(&mut this.key_prefix);
             let fut = filter(key_prefix, this.meta_peer_client, move |v| {
-                lease_filter(v) && condition.unwrap_or(|_| true)(v)
+                lease_filter(Value::LeaseValue(v)) && condition.unwrap_or(|_| true)(v)
             });
 
             this.inner_future = Some(Box::pin(fut));
@@ -192,7 +204,7 @@ pub async fn lookup_flownode_peer(
     };
     let lease_value: LeaseValue = kv.value.try_into()?;
 
-    let is_alive = lease_filter(&lease_value);
+    let is_alive = lease_filter(Value::LeaseValue(&lease_value));
     if is_alive {
         Ok(Some(Peer {
             id: lease_key.node_id,
@@ -201,6 +213,29 @@ pub async fn lookup_flownode_peer(
     } else {
         Ok(None)
     }
+}
+
+/// Lookup all alive frontends from the memory backend, only return if it's alive under given `lease_secs`.
+pub async fn lookup_frontends(
+    meta_peer_client: &MetaPeerClientRef,
+    lease_secs: u64,
+) -> Result<Vec<Peer>> {
+    let range_request =
+        RangeRequest::new().with_prefix(NodeInfoKey::key_prefix_with_role(ClusterRole::Frontend));
+
+    let response = meta_peer_client.range(range_request).await?;
+    let lease_filter = build_lease_filter(lease_secs);
+
+    let mut peers = Vec::with_capacity(response.kvs.len());
+    for kv in response.kvs {
+        let node_info = NodeInfo::try_from(kv.value).context(KvBackendSnafu)?;
+        let is_alive = lease_filter(Value::NodeInfo(&node_info));
+        if is_alive {
+            peers.push(node_info.peer);
+        }
+    }
+
+    Ok(peers)
 }
 
 /// Find all alive flownodes
@@ -269,6 +304,17 @@ impl PeerLookupService for MetaPeerLookupService {
             .await
             .map_err(BoxedError::new)
             .context(common_meta::error::ExternalSnafu)
+    }
+    async fn active_frontends(&self) -> common_meta::error::Result<Vec<Peer>> {
+        // Get the active frontends within the last heartbeat interval.
+        lookup_frontends(
+            &self.meta_peer_client,
+            // TODO(zyy17): How to get the heartbeat interval of the frontend if it uses a custom heartbeat interval?
+            FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
+        )
+        .await
+        .map_err(BoxedError::new)
+        .context(common_meta::error::ExternalSnafu)
     }
 }
 

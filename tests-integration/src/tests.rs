@@ -44,6 +44,6 @@ impl MockDistributedInstance {
 
 pub async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
     let builder = GreptimeDbClusterBuilder::new(test_name).await;
-    let cluster = builder.build().await;
+    let cluster = builder.build(false).await;
     MockDistributedInstance(cluster)
 }

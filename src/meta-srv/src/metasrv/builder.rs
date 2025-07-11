@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
+use common_event_recorder::EventRecorderImpl;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -47,6 +48,7 @@ use snafu::{ensure, ResultExt};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -190,6 +192,13 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+
+        // Builds the event recorder to record important events and persist them as the system table.
+        let event_recorder = Arc::new(EventRecorderImpl::new(
+            Box::new(EventHandlerImpl::new(meta_peer_client.clone())),
+            options.event_recorder.clone(),
+        ));
+
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
@@ -322,6 +331,7 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 cache_invalidator.clone(),
             ),
+            event_recorder,
         ));
         region_migration_manager.try_start()?;
         let region_supervisor_selector = plugins
