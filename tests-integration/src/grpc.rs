@@ -882,11 +882,14 @@ CREATE TABLE {table_name} (
             let region_id = RegionId::new(table_id, *region);
 
             let stream = region_server
-                .handle_remote_read(RegionQueryRequest {
-                    region_id: region_id.as_u64(),
-                    plan: plan.to_vec(),
-                    ..Default::default()
-                })
+                .handle_remote_read(
+                    RegionQueryRequest {
+                        region_id: region_id.as_u64(),
+                        plan: plan.to_vec(),
+                        ..Default::default()
+                    },
+                    QueryContext::arc(),
+                )
                 .await
                 .unwrap();
 

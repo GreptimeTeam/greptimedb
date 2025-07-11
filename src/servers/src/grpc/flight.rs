@@ -36,6 +36,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::{future, ready, Stream};
 use futures_util::{StreamExt, TryStreamExt};
 use prost::Message;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, ResultExt};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
@@ -188,6 +189,7 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
+        let query_ctx = QueryContext::arc();
 
         // The Grpc protocol pass query by Flight. It needs to be wrapped under a span, in order to record stream
         let span = info_span!(
@@ -202,6 +204,7 @@ impl FlightCraft for GreptimeRequestHandler {
                 output,
                 TracingContext::from_current_span(),
                 flight_compression,
+                query_ctx,
             );
             Ok(Response::new(stream))
         }
@@ -371,15 +374,25 @@ fn to_flight_data_stream(
     output: Output,
     tracing_context: TracingContext,
     flight_compression: FlightCompression,
+    query_ctx: QueryContextRef,
 ) -> TonicStream<FlightData> {
     match output.data {
         OutputData::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(stream, tracing_context, flight_compression);
+            let stream = FlightRecordBatchStream::new(
+                stream,
+                tracing_context,
+                flight_compression,
+                query_ctx,
+            );
             Box::pin(stream) as _
         }
         OutputData::RecordBatches(x) => {
-            let stream =
-                FlightRecordBatchStream::new(x.as_stream(), tracing_context, flight_compression);
+            let stream = FlightRecordBatchStream::new(
+                x.as_stream(),
+                tracing_context,
+                flight_compression,
+                query_ctx,
+            );
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {

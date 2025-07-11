@@ -222,6 +222,7 @@ pub struct RecordBatchStreamAdapter {
 enum Metrics {
     Unavailable,
     Unresolved(Arc<dyn ExecutionPlan>),
+    PartialResolved(Arc<dyn ExecutionPlan>, RecordBatchMetrics),
     Resolved(RecordBatchMetrics),
 }
 
@@ -275,7 +276,9 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         match &self.metrics_2 {
-            Metrics::Resolved(metrics) => Some(metrics.clone()),
+            Metrics::Resolved(metrics) | Metrics::PartialResolved(_, metrics) => {
+                Some(metrics.clone())
+            }
             Metrics::Unavailable | Metrics::Unresolved(_) => None,
         }
     }
@@ -299,13 +302,25 @@ impl Stream for RecordBatchStreamAdapter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {
                 let df_record_batch = df_record_batch?;
+                if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
+                    &self.metrics_2
+                {
+                    let mut metric_collector = MetricCollector::new(self.explain_verbose);
+                    accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    self.metrics_2 = Metrics::PartialResolved(
+                        df_plan.clone(),
+                        metric_collector.record_batch_metrics,
+                    );
+                }
                 Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
                     self.schema(),
                     df_record_batch,
                 )))
             }
             Poll::Ready(None) => {
-                if let Metrics::Unresolved(df_plan) = &self.metrics_2 {
+                if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
+                    &self.metrics_2
+                {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
