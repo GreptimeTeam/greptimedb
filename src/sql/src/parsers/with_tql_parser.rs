@@ -16,7 +16,10 @@ use std::fmt;
 
 use serde::Serialize;
 use snafu::ResultExt;
-use sqlparser::ast::{Ident, ObjectName, Query as SpQuery};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{
+    Cte, Ident, ObjectName, Query as SpQuery, TableAlias, TableAliasColumnDef, With,
+};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::IsOptional;
 use sqlparser::tokenizer::Token;
@@ -102,11 +105,31 @@ impl ParserContext<'_> {
         let recursive = self.parser.parse_keyword(Keyword::RECURSIVE);
 
         // Parse the CTE list
-        let mut cte_tables = Vec::new();
+        let mut tql_cte_tables = Vec::new();
+        let mut sql_cte_tables = Vec::new();
 
         loop {
             let cte = self.parse_hybrid_cte()?;
-            cte_tables.push(cte);
+            match cte.content {
+                CteContent::Sql(body) => sql_cte_tables.push(Cte {
+                    alias: TableAlias {
+                        name: cte.name,
+                        columns: cte
+                            .columns
+                            .into_iter()
+                            .map(|col| TableAliasColumnDef {
+                                name: col.0[0].clone(),
+                                data_type: None,
+                            })
+                            .collect(),
+                    },
+                    query: body,
+                    from: None,
+                    materialized: None,
+                    closing_paren_token: AttachedToken::empty(),
+                }),
+                CteContent::Tql(_) => tql_cte_tables.push(cte),
+            }
 
             if !self.parser.consume_token(&Token::Comma) {
                 break;
@@ -119,12 +142,17 @@ impl ParserContext<'_> {
         // Convert the hybrid CTEs to a standard query with hybrid metadata
         let hybrid_cte = HybridCteWith {
             recursive,
-            cte_tables,
+            cte_tables: tql_cte_tables,
         };
 
         // Create a Query statement with hybrid CTE metadata
         let mut query = Query::try_from(*main_query)?;
         query.hybrid_cte = Some(hybrid_cte);
+        query.inner.with = Some(With {
+            recursive,
+            cte_tables: sql_cte_tables,
+            with_token: AttachedToken::empty(),
+        });
 
         Ok(Statement::Query(Box::new(query)))
     }
@@ -326,18 +354,10 @@ mod tests {
             panic!("Expected Query statement");
         };
         let hybrid_cte = query.hybrid_cte.as_ref().unwrap();
-        assert_eq!(hybrid_cte.cte_tables.len(), 2);
+        assert_eq!(hybrid_cte.cte_tables.len(), 1); // only TQL CTE presents here
 
-        // First CTE should be SQL with column aliases
-        let first_cte = &hybrid_cte.cte_tables[0];
-        assert!(matches!(first_cte.content, CteContent::Sql(_)));
-        assert_eq!(first_cte.columns.len(), 3);
-        assert_eq!(first_cte.columns[0].0[0].value, "ts");
-        assert_eq!(first_cte.columns[1].0[0].value, "value");
-        assert_eq!(first_cte.columns[2].0[0].value, "label");
-
-        // Second CTE should be TQL with column aliases
-        let second_cte = &hybrid_cte.cte_tables[1];
+        // First CTE should be TQL with column aliases
+        let second_cte = &hybrid_cte.cte_tables[0];
         assert!(matches!(second_cte.content, CteContent::Tql(_)));
         assert_eq!(second_cte.columns.len(), 2);
         assert_eq!(second_cte.columns[0].0[0].value, "time");
