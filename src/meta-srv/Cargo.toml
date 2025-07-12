@@ -20,6 +20,9 @@ local-ip-address.workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+axum-macros.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -77,6 +80,7 @@ tokio-stream = { workspace = true, features = ["net"] }
 toml.workspace = true
 tonic.workspace = true
 tower.workspace = true
+tower-http.workspace = true
 typetag.workspace = true
 url = "2.3"
 uuid.workspace = true
@@ -87,6 +91,7 @@ client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
+hyper = "0.14"
 session.workspace = true
 tracing = "0.1"
 tracing-subscriber.workspace = true
