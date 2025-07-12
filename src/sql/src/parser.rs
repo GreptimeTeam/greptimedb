@@ -151,7 +151,9 @@ impl ParserContext<'_> {
 
                 Keyword::REPLACE => self.parse_replace(),
 
-                Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
+                Keyword::SELECT | Keyword::VALUES => self.parse_query(),
+
+                Keyword::WITH => self.parse_with_tql(),
 
                 Keyword::ALTER => self.parse_alter(),
 

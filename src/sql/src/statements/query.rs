@@ -19,19 +19,24 @@ use sqlparser::ast::Query as SpQuery;
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::Error;
+use crate::parsers::with_tql_parser::HybridCteWith;
 
-/// Query statement instance.
+/// A wrapper around [`Query`] from sqlparser-rs to add support for hybrid CTEs
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct Query {
     pub inner: SpQuery,
+    /// Hybrid CTE containing both SQL and TQL CTEs
+    pub hybrid_cte: Option<HybridCteWith>,
 }
 
-/// Automatically converts from sqlparser Query instance to SqlQuery.
 impl TryFrom<SpQuery> for Query {
     type Error = Error;
 
-    fn try_from(q: SpQuery) -> Result<Self, Self::Error> {
-        Ok(Query { inner: q })
+    fn try_from(inner: SpQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inner,
+            hybrid_cte: None,
+        })
     }
 }
 
@@ -45,8 +50,17 @@ impl TryFrom<Query> for SpQuery {
 
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner)?;
-        Ok(())
+        if let Some(hybrid_cte) = &self.hybrid_cte {
+            // Delegate the WITH clause rendering to `HybridCteWith`
+            write!(f, "{} ", hybrid_cte)?;
+
+            // Display the main query without its WITH clause since we handled it above
+            let mut main_query = self.inner.clone();
+            main_query.with = None;
+            write!(f, "{}", main_query)
+        } else {
+            write!(f, "{}", self.inner)
+        }
     }
 }
 
@@ -87,6 +101,12 @@ mod test {
             .unwrap()
             .to_string(),
             "SELECT * FROM abc LEFT JOIN bcd WHERE abc.a = 1 AND bcd.d = 7 AND abc.id = bcd.id"
+        );
+        assert_eq!(
+            create_query("WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte")
+                .unwrap()
+                .to_string(),
+            "WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte"
         );
     }
 }
