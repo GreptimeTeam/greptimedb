@@ -45,6 +45,7 @@ impl Inserter {
     ) -> error::Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
+        let db_name = table_info.get_db_string();
         let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["decode_request"])
             .start_timer();
@@ -126,7 +127,9 @@ impl Inserter {
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
             if let Ok(rows) = result {
-                crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows as u64);
+                crate::metrics::DIST_INGEST_ROW_COUNT
+                    .with_label_values(&[db_name.as_str()])
+                    .inc_by(rows as u64);
             }
             return result;
         }
@@ -233,7 +236,9 @@ impl Inserter {
         for res in region_responses {
             rows_inserted += res?.affected_rows;
         }
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
+        crate::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[db_name.as_str()])
+            .inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
 

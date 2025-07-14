@@ -31,9 +31,10 @@ lazy_static! {
         "table operator alter table"
     )
     .unwrap();
-    pub static ref DIST_INGEST_ROW_COUNT: IntCounter = register_int_counter!(
+    pub static ref DIST_INGEST_ROW_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_table_operator_ingest_rows",
-        "table operator ingest rows"
+        "table operator ingest rows",
+        &["db"]
     )
     .unwrap();
     pub static ref DIST_MIRROR_ROW_COUNT: IntCounter = register_int_counter!(
