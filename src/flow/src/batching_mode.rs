@@ -35,25 +35,25 @@ pub struct BatchingModeOptions {
     pub slow_query_threshold: Duration,
     /// The minimum duration between two queries execution by batching mode task
     #[serde(with = "humantime_serde")]
-    pub min_refresh_duration: Duration,
+    pub experimental_min_refresh_duration: Duration,
     /// The gRPC connection timeout
     #[serde(with = "humantime_serde")]
     pub grpc_conn_timeout: Duration,
     /// The gRPC max retry number
-    pub grpc_max_retries: u32,
+    pub experimental_grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
     /// if failed to find available frontend after frontend_scan_timeout elapsed, return error
     /// which prevent flownode from starting
     #[serde(with = "humantime_serde")]
-    pub frontend_scan_timeout: Duration,
+    pub experimental_frontend_scan_timeout: Duration,
     /// Frontend activity timeout
     /// if frontend is down(not sending heartbeat) for more than frontend_activity_timeout, it will be removed from the list that flownode use to connect
     #[serde(with = "humantime_serde")]
-    pub frontend_activity_timeout: Duration,
+    pub experimental_frontend_activity_timeout: Duration,
     /// Maximum number of filters allowed in a single query
-    pub max_filter_num_per_query: usize,
+    pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
-    pub time_window_merge_threshold: usize,
+    pub experimental_time_window_merge_threshold: usize,
 }
 
 impl Default for BatchingModeOptions {
@@ -61,13 +61,13 @@ impl Default for BatchingModeOptions {
         Self {
             query_timeout: Duration::from_secs(10 * 60),
             slow_query_threshold: Duration::from_secs(60),
-            min_refresh_duration: Duration::new(5, 0),
+            experimental_min_refresh_duration: Duration::new(5, 0),
             grpc_conn_timeout: Duration::from_secs(5),
-            grpc_max_retries: 3,
-            frontend_scan_timeout: Duration::from_secs(30),
-            frontend_activity_timeout: Duration::from_secs(60),
-            max_filter_num_per_query: 20,
-            time_window_merge_threshold: 3,
+            experimental_grpc_max_retries: 3,
+            experimental_frontend_scan_timeout: Duration::from_secs(30),
+            experimental_frontend_activity_timeout: Duration::from_secs(60),
+            experimental_max_filter_num_per_query: 20,
+            experimental_time_window_merge_threshold: 3,
         }
     }
 }

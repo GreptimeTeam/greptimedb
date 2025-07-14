@@ -8,28 +8,28 @@ node_id = 14
 ## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
 #+num_workers=0
 [flow.batching_mode]
-## The default batching engine query timeout is 10 minutes
+## The default batching engine query timeout is 10 minutes.
 #+query_timeout="600s"
 ## will output a warn log for any query that runs for more that this threshold
 #+slow_query_threshold="60s"
 ## The minimum duration between two queries execution by batching mode task
-#+min_refresh_duration="5s"
+#+experimental_min_refresh_duration="5s"
 ## The gRPC connection timeout
 #+grpc_conn_timeout="5s"
 ## The gRPC max retry number
-#+grpc_max_retries=3
+#+experimental_grpc_max_retries=3
 ## Flow wait for available frontend timeout,
 ## if failed to find available frontend after frontend_scan_timeout elapsed, return error
 ## which prevent flownode from starting
-#+frontend_scan_timeout="30s"
+#+experimental_frontend_scan_timeout="30s"
 ## Frontend activity timeout
 ## if frontend is down(not sending heartbeat) for more than frontend_activity_timeout,
 ## it will be removed from the list that flownode use to connect
-#+frontend_activity_timeout="60s"
+#+experimental_frontend_activity_timeout="60s"
 ## Maximum number of filters allowed in a single query
-#+max_filter_num_per_query=20
+#+experimental_max_filter_num_per_query=20
 ## Time window merge distance
-#+time_window_merge_threshold=3
+#+experimental_time_window_merge_threshold=3
 
 ## The gRPC server options.
 [grpc]

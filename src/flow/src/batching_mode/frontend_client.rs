@@ -220,7 +220,7 @@ impl FrontendClient {
 
         let mut interval = tokio::time::interval(batch_opts.grpc_conn_timeout);
         interval.tick().await;
-        for retry in 0..batch_opts.grpc_max_retries {
+        for retry in 0..batch_opts.experimental_grpc_max_retries {
             let mut frontends = self.scan_for_frontend().await?;
             let now_in_ms = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -235,7 +235,9 @@ impl FrontendClient {
                 // filter out frontend that have been down for more than 1 min
                 .filter(|(_, node_info)| {
                     node_info.last_activity_ts
-                        + batch_opts.frontend_activity_timeout.as_millis() as i64
+                        + batch_opts
+                            .experimental_frontend_activity_timeout
+                            .as_millis() as i64
                         > now_in_ms
                 })
             {
@@ -360,7 +362,7 @@ impl FrontendClient {
                 db.database
                     .handle_with_retry(
                         req.clone(),
-                        batch_opts.grpc_max_retries,
+                        batch_opts.experimental_grpc_max_retries,
                         &[(QUERY_PARALLELISM_HINT, &query.parallelism.to_string())],
                     )
                     .await

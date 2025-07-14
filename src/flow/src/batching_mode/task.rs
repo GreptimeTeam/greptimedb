@@ -457,7 +457,7 @@ impl BatchingTask {
                 .with_label_values(&[&flow_id_str])
                 .inc();
 
-            let min_refresh = self.config.batch_opts.min_refresh_duration;
+            let min_refresh = self.config.batch_opts.experimental_min_refresh_duration;
 
             let new_query = match self.gen_insert_plan(&engine, None).await {
                 Ok(new_query) => new_query,
@@ -492,7 +492,7 @@ impl BatchingTask {
                             &time_window_size,
                             min_refresh,
                             Some(self.config.batch_opts.query_timeout),
-                            self.config.batch_opts.max_filter_num_per_query,
+                            self.config.batch_opts.experimental_max_filter_num_per_query,
                         )
                     };
                     tokio::time::sleep_until(sleep_until).await;
@@ -628,7 +628,8 @@ impl BatchingTask {
                 &col_name,
                 Some(l),
                 window_size,
-                max_window_cnt.unwrap_or(self.config.batch_opts.max_filter_num_per_query),
+                max_window_cnt
+                    .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query),
                 self.config.flow_id,
                 Some(self),
             )?;

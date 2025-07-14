@@ -439,8 +439,14 @@ struct ConsistentCheckTask {
 impl ConsistentCheckTask {
     async fn start_check_task(engine: &Arc<FlowDualEngine>) -> Result<Self, Error> {
         let engine = engine.clone();
-        let min_refresh_duration = engine.batching_engine().batch_opts.min_refresh_duration;
-        let frontend_scan_timeout = engine.batching_engine().batch_opts.frontend_scan_timeout;
+        let min_refresh_duration = engine
+            .batching_engine()
+            .batch_opts
+            .experimental_min_refresh_duration;
+        let frontend_scan_timeout = engine
+            .batching_engine()
+            .batch_opts
+            .experimental_frontend_scan_timeout;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
