@@ -140,8 +140,8 @@ impl StateMergeHelper {
 
             let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
                 aggr_expr,
-                &aggr_plan.input.schema(),
-                &aggr_plan.input.schema().as_arrow(),
+                aggr_plan.input.schema(),
+                aggr_plan.input.schema().as_arrow(),
                 &Default::default(),
             )?;
 

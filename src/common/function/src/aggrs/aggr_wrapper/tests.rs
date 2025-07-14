@@ -478,7 +478,6 @@ async fn test_avg_udaf() {
     let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&res.upper, &ctx.state())
         .await
-        .inspect_err(|e| println!("Error creating physical plan: {}", e))
         .unwrap();
     let aggr_exec = phy_aggr_merge_plan
         .as_any()
