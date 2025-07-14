@@ -252,6 +252,10 @@ impl AggregateUDFImpl for StateWrapper {
         self.name.as_str()
     }
 
+    fn is_nullable(&self) -> bool {
+        self.inner.is_nullable()
+    }
+
     /// Return state_fields as the output struct type.
     ///
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
@@ -424,6 +428,10 @@ impl AggregateUDFImpl for MergeWrapper {
     }
     fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    fn is_nullable(&self) -> bool {
+        self.inner.is_nullable()
     }
 
     /// Notice here the `arg_types` is actually the `state_fields`'s data types,

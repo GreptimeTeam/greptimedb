@@ -42,6 +42,7 @@ use futures::{Stream, StreamExt as _};
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::aggrs::count_hash::CountHash;
 
 #[derive(Debug)]
 pub struct MockInputExec {
@@ -580,6 +581,27 @@ async fn test_udaf_correct_eval_result() {
                 Some(3),
             ]))],
             expected_output: ScalarValue::Float64(Some(2.0)),
+            distinct: false,
+            filter: None,
+            order_by: None,
+            null_treatment: None,
+        },
+        TestCase {
+            func: Arc::new(CountHash::udf_impl()),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "number",
+                DataType::Int64,
+                true,
+            )])),
+            input: vec![Arc::new(Int64Array::from(vec![
+                Some(1),
+                Some(2),
+                None,
+                Some(3),
+                Some(3),
+                Some(3),
+            ]))],
+            expected_output: ScalarValue::Int64(Some(4)),
             distinct: false,
             filter: None,
             order_by: None,
