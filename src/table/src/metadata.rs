@@ -284,7 +284,7 @@ impl TableMeta {
         requests: &[SetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut set_index_options = HashMap::with_capacity(requests.len());
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::with_capacity(requests.len());
         for request in requests {
             let column_name = request.column_name();
             table_schema
@@ -293,14 +293,19 @@ impl TableMeta {
                     column_name,
                     table_name,
                 })?;
-            set_index_options.insert(column_name, request);
+            set_index_options
+                .entry(column_name)
+                .or_default()
+                .push(request);
         }
 
         let mut meta_builder = self.new_meta_builder();
         let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
         for mut column in table_schema.column_schemas().iter().cloned() {
             if let Some(request) = set_index_options.get(column.name.as_str()) {
-                self.set_index(&mut column, request)?;
+                for request in request {
+                    self.set_index(&mut column, request)?;
+                }
             }
             columns.push(column);
         }
@@ -339,7 +344,7 @@ impl TableMeta {
         requests: &[UnsetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut set_index_options = HashMap::with_capacity(requests.len());
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::with_capacity(requests.len());
         for request in requests {
             let column_name = request.column_name();
             table_schema
@@ -348,14 +353,19 @@ impl TableMeta {
                     column_name,
                     table_name,
                 })?;
-            set_index_options.insert(column_name, request);
+            set_index_options
+                .entry(column_name)
+                .or_default()
+                .push(request);
         }
 
         let mut meta_builder = self.new_meta_builder();
         let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
         for mut column in table_schema.column_schemas().iter().cloned() {
             if let Some(request) = set_index_options.get(column.name.as_str()) {
-                self.unset_index(&mut column, request)?;
+                for request in request {
+                    self.unset_index(&mut column, request)?;
+                }
             }
             columns.push(column);
         }
