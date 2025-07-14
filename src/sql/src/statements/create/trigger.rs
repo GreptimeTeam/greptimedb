@@ -62,7 +62,7 @@ impl Display for NotifyChannel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self.channel_type {
             ChannelType::Webhook(webhook) => {
-                write!(f, "WEBHOOK {} URL {}", self.name, webhook.url)?;
+                write!(f, "WEBHOOK {} URL '{}'", self.name, webhook.url)?;
                 if !webhook.options.is_empty() {
                     let options = webhook.options.kv_pairs();
                     write!(f, " WITH ({})", format_list_comma!(options))?;
