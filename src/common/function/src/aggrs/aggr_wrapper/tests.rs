@@ -38,11 +38,17 @@ use datafusion_expr::sqlparser::ast::NullTreatment;
 use datafusion_expr::{Aggregate, Expr, LogicalPlan, SortExpr, TableScan};
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+use datatypes::arrow_array::StringArray;
 use futures::{Stream, StreamExt as _};
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::aggrs::approximate::hll::HllState;
+use crate::aggrs::approximate::uddsketch::UddSketchState;
 use crate::aggrs::count_hash::CountHash;
+use crate::function::Function as _;
+use crate::scalars::hll_count::HllCalcFunction;
+use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 
 #[derive(Debug)]
 pub struct MockInputExec {
@@ -538,14 +544,17 @@ async fn test_avg_udaf() {
 async fn test_udaf_correct_eval_result() {
     struct TestCase {
         func: Arc<AggregateUDF>,
+        args: Vec<Expr>,
         input_schema: SchemaRef,
         input: Vec<ArrayRef>,
-        expected_output: ScalarValue,
+        expected_output: Option<ScalarValue>,
+        expected_fn: Option<ExpectedFn>,
         distinct: bool,
         filter: Option<Box<Expr>>,
         order_by: Option<Vec<SortExpr>>,
         null_treatment: Option<NullTreatment>,
     }
+    type ExpectedFn = fn(ArrayRef) -> bool;
 
     let test_cases = vec![
         TestCase {
@@ -555,13 +564,15 @@ async fn test_udaf_correct_eval_result() {
                 DataType::Int64,
                 true,
             )])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
             input: vec![Arc::new(Int64Array::from(vec![
                 Some(1),
                 Some(2),
                 None,
                 Some(3),
             ]))],
-            expected_output: ScalarValue::Int64(Some(6)),
+            expected_output: Some(ScalarValue::Int64(Some(6))),
+            expected_fn: None,
             distinct: false,
             filter: None,
             order_by: None,
@@ -574,13 +585,15 @@ async fn test_udaf_correct_eval_result() {
                 DataType::Int64,
                 true,
             )])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
             input: vec![Arc::new(Int64Array::from(vec![
                 Some(1),
                 Some(2),
                 None,
                 Some(3),
             ]))],
-            expected_output: ScalarValue::Float64(Some(2.0)),
+            expected_output: Some(ScalarValue::Float64(Some(2.0))),
+            expected_fn: None,
             distinct: false,
             filter: None,
             order_by: None,
@@ -593,6 +606,7 @@ async fn test_udaf_correct_eval_result() {
                 DataType::Int64,
                 true,
             )])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
             input: vec![Arc::new(Int64Array::from(vec![
                 Some(1),
                 Some(2),
@@ -601,12 +615,85 @@ async fn test_udaf_correct_eval_result() {
                 Some(3),
                 Some(3),
             ]))],
-            expected_output: ScalarValue::Int64(Some(4)),
+            expected_output: Some(ScalarValue::Int64(Some(4))),
+            expected_fn: None,
             distinct: false,
             filter: None,
             order_by: None,
             null_treatment: None,
         },
+        TestCase {
+            func: Arc::new(UddSketchState::state_udf_impl()),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "number",
+                DataType::Float64,
+                true,
+            )])),
+            args: vec![
+                Expr::Literal(ScalarValue::Int64(Some(128))),
+                Expr::Literal(ScalarValue::Float64(Some(0.05))),
+                Expr::Column(Column::new_unqualified("number")),
+            ],
+            input: vec![Arc::new(Float64Array::from(vec![
+                Some(1.),
+                Some(2.),
+                None,
+                Some(3.),
+                Some(3.),
+                Some(3.),
+            ]))],
+            expected_output: None,
+            expected_fn: Some(|arr| {
+                let percent = ScalarValue::Float64(Some(0.5)).to_array().unwrap();
+                let percent = datatypes::vectors::Helper::try_into_vector(percent).unwrap();
+                let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
+                let udd_calc = UddSketchCalcFunction;
+                let res = udd_calc
+                    .eval(&Default::default(), &vec![percent, state])
+                    .unwrap();
+                let binding = res.to_arrow_array();
+                let res_arr = binding.as_any().downcast_ref::<Float64Array>().unwrap();
+                assert!(res_arr.len() == 1);
+                assert!((res_arr.value(0) - 2.856578984907706f64).abs() <= f64::EPSILON);
+                true
+            }),
+            distinct: false,
+            filter: None,
+            order_by: None,
+            null_treatment: None,
+        },
+        TestCase {
+            func: Arc::new(HllState::state_udf_impl()),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "word",
+                DataType::Utf8,
+                true,
+            )])),
+            args: vec![Expr::Column(Column::new_unqualified("word"))],
+            input: vec![Arc::new(StringArray::from(vec![
+                Some("foo"),
+                Some("bar"),
+                None,
+                Some("baz"),
+                Some("baz"),
+            ]))],
+            expected_output: None,
+            expected_fn: Some(|arr| {
+                let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
+                let hll_calc = HllCalcFunction;
+                let res = hll_calc.eval(&Default::default(), &vec![state]).unwrap();
+                let binding = res.to_arrow_array();
+                let res_arr = binding.as_any().downcast_ref::<UInt64Array>().unwrap();
+                assert!(res_arr.len() == 1);
+                assert_eq!(res_arr.value(0), 3);
+                true
+            }),
+            distinct: false,
+            filter: None,
+            order_by: None,
+            null_treatment: None,
+        },
+        // TODO(discord9): udd_merge/hll_merge/geo_path/quantile_aggr tests
     ];
     let test_table_ref = TableReference::bare("TestTable");
 
@@ -628,12 +715,7 @@ async fn test_udaf_correct_eval_result() {
             .unwrap(),
         );
 
-        let args = case
-            .input_schema
-            .fields()
-            .iter()
-            .map(|f| Expr::Column(Column::new(Some(test_table_ref.clone()), f.name())))
-            .collect::<Vec<_>>();
+        let args = case.args;
 
         let aggr_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
             case.func.clone(),
@@ -666,9 +748,15 @@ async fn test_udaf_correct_eval_result() {
             assert_eq!(unsplit_batch.num_columns(), 1);
             assert_eq!(unsplit_batch.num_rows(), 1);
             let unsplit_col = unsplit_batch.column(0);
-            assert_eq!(unsplit_col.data_type(), &case.expected_output.data_type());
-            assert_eq!(unsplit_col.len(), 1);
-            assert_eq!(unsplit_col, &case.expected_output.to_array().unwrap());
+            if let Some(expected_output) = &case.expected_output {
+                assert_eq!(unsplit_col.data_type(), &expected_output.data_type());
+                assert_eq!(unsplit_col.len(), 1);
+                assert_eq!(unsplit_col, &expected_output.to_array().unwrap());
+            }
+
+            if let Some(expected_fn) = &case.expected_fn {
+                assert!(expected_fn(unsplit_col.clone()));
+            }
         }
         let LogicalPlan::Aggregate(aggr_plan) = aggr_plan else {
             panic!("Expected Aggregate plan");
@@ -689,10 +777,16 @@ async fn test_udaf_correct_eval_result() {
             let split_batch = &split_res[0];
             assert_eq!(split_batch.num_columns(), 1);
             assert_eq!(split_batch.num_rows(), 1);
-            let state_col = split_batch.column(0);
-            assert_eq!(state_col.data_type(), &case.expected_output.data_type());
-            assert_eq!(state_col.len(), 1);
-            assert_eq!(state_col, &case.expected_output.to_array().unwrap());
+            let split_col = split_batch.column(0);
+            if let Some(expected_output) = &case.expected_output {
+                assert_eq!(split_col.data_type(), &expected_output.data_type());
+                assert_eq!(split_col.len(), 1);
+                assert_eq!(split_col, &expected_output.to_array().unwrap());
+            }
+
+            if let Some(expected_fn) = &case.expected_fn {
+                assert!(expected_fn(split_col.clone()));
+            }
         }
     }
 }
