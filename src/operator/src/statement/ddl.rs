@@ -66,6 +66,8 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::parser::{ParseOptions, ParserContext};
+#[cfg(feature = "enterprise")]
+use sql::statements::alter::trigger::AlterTrigger;
 use sql::statements::alter::{AlterDatabase, AlterTable};
 #[cfg(feature = "enterprise")]
 use sql::statements::create::trigger::CreateTrigger;
@@ -1332,6 +1334,19 @@ impl StatementExecutor {
             .context(error::InvalidateTableCacheSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[tracing::instrument(skip_all)]
+    pub async fn alter_trigger(
+        &self,
+        _alter_expr: AlterTrigger,
+        _query_context: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "alter trigger",
+        }
+        .fail()
     }
 
     #[tracing::instrument(skip_all)]

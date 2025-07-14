@@ -273,6 +273,11 @@ impl StatementExecutor {
                 self.alter_database(alter_database, query_ctx).await
             }
 
+            #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(alter_trigger) => {
+                self.alter_trigger(alter_trigger, query_ctx).await
+            }
+
             Statement::DropTable(stmt) => {
                 let mut table_names = Vec::with_capacity(stmt.table_names().len());
                 for table_name_stmt in stmt.table_names() {

@@ -83,6 +83,9 @@ pub enum Statement {
     AlterTable(AlterTable),
     /// ALTER DATABASE
     AlterDatabase(AlterDatabase),
+    /// ALTER TRIGGER
+    #[cfg(feature = "enterprise")]
+    AlterTrigger(crate::statements::alter::trigger::AlterTrigger),
     // Databases.
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
@@ -204,6 +207,9 @@ impl Statement {
             | Statement::Admin(_) => false,
 
             #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(_) => false,
+
+            #[cfg(feature = "enterprise")]
             Statement::CreateTrigger(_) | Statement::DropTrigger(_) => false,
         }
     }
@@ -230,6 +236,8 @@ impl Display for Statement {
             Statement::CreateDatabase(s) => s.fmt(f),
             Statement::AlterTable(s) => s.fmt(f),
             Statement::AlterDatabase(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::AlterTrigger(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),
             Statement::ShowTables(s) => s.fmt(f),
             Statement::ShowTableStatus(s) => s.fmt(f),
