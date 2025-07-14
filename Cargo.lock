@@ -2320,6 +2320,7 @@ dependencies = [
  "snafu 0.8.5",
  "store-api",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

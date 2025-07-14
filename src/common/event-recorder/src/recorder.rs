@@ -33,6 +33,7 @@ use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{MismatchedSchemaSnafu, Result};
 
@@ -291,6 +292,7 @@ struct EventProcessor {
     event_handler: Box<dyn EventHandler>,
     max_retry_times: u64,
     process_interval: Duration,
+    cancel_token: CancellationToken,
 }
 
 impl EventProcessor {
@@ -305,6 +307,7 @@ impl EventProcessor {
             event_handler,
             max_retry_times,
             process_interval,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -335,6 +338,10 @@ impl EventProcessor {
                         self.flush_events_to_handler(&mut buffer).await;
                         break;
                     }
+                }
+                // Cancel the processor through the cancel token.
+                _ = self.cancel_token.cancelled() => {
+                    break;
                 }
                 // When the interval is triggered, flush the buffer and send the events to the event handler.
                 _ = interval.tick() => {

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 api.workspace = true
 async-trait.workspace = true
+backon.workspace = true
 client.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -18,7 +19,7 @@ serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
-backon.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true
