@@ -17,7 +17,7 @@
 //! i.e. for a aggregate function `foo`, we will have a state function `foo_state` and a merge function `foo_merge`.
 //!
 //! `foo_state` i's input args is the same as `foo`'s, and its output is a state object.
-//! Note that `foo_state` might have multiple output columns(might need special handling in the future).
+//! Note that `foo_state` might have multiple output columns, so it's a struct array.
 //! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
 //!
 
@@ -54,20 +54,9 @@ pub fn aggr_merge_func_name(aggr_name: &str) -> String {
 /// A wrapper to make an aggregate function out of the state and merge functions of the original aggregate function.
 /// It contains the original aggregate function, the state functions, and the merge function.
 ///
-/// Notice state functions may have multiple output columns, and the merge function is used to merge the states of the state functions.
+/// Notice state functions may have multiple output columns, so it's return type is always a struct array, and the merge function is used to merge the states of the state functions.
 #[derive(Debug, Clone)]
-pub struct StateMergeHelper {
-    /// The original aggregate function.
-    original: AggregateUDF,
-    /// The state functions of the aggregate function.
-    /// Each state function corresponds to a state in the state field of the original aggregate function.
-    state_function: StateWrapper,
-    /// The merge function of the aggregate function.
-    /// It is used to merge the states of the state functions.
-    ///
-    /// merge function doesn't need to be ser/de by datafusion, so it can carry more data than just a name like state function does.
-    merge_function: MergeWrapper,
-}
+pub struct StateMergeHelper;
 
 /// A struct to hold the two aggregate plans, one for the state function(lower) and one for the merge function(upper).
 #[allow(unused)]
@@ -191,18 +180,6 @@ impl StateMergeHelper {
             lower: lower_plan,
             upper: upper_plan,
         })
-    }
-
-    pub fn original(&self) -> &AggregateUDF {
-        &self.original
-    }
-
-    pub fn state_function(&self) -> &StateWrapper {
-        &self.state_function
-    }
-
-    pub fn merge_function(&self) -> &MergeWrapper {
-        &self.merge_function
     }
 }
 
