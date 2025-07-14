@@ -649,7 +649,7 @@ async fn test_udaf_correct_eval_result() {
                 let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
                 let udd_calc = UddSketchCalcFunction;
                 let res = udd_calc
-                    .eval(&Default::default(), &vec![percent, state])
+                    .eval(&Default::default(), &[percent, state])
                     .unwrap();
                 let binding = res.to_arrow_array();
                 let res_arr = binding.as_any().downcast_ref::<Float64Array>().unwrap();
@@ -681,7 +681,7 @@ async fn test_udaf_correct_eval_result() {
             expected_fn: Some(|arr| {
                 let state = datatypes::vectors::Helper::try_into_vector(arr).unwrap();
                 let hll_calc = HllCalcFunction;
-                let res = hll_calc.eval(&Default::default(), &vec![state]).unwrap();
+                let res = hll_calc.eval(&Default::default(), &[state]).unwrap();
                 let binding = res.to_arrow_array();
                 let res_arr = binding.as_any().downcast_ref::<UInt64Array>().unwrap();
                 assert!(res_arr.len() == 1);
@@ -723,7 +723,7 @@ async fn test_udaf_correct_eval_result() {
             case.distinct,
             case.filter,
             case.order_by,
-            case.null_treatment.clone(),
+            case.null_treatment,
         ));
 
         let aggr_plan = LogicalPlan::Aggregate(
