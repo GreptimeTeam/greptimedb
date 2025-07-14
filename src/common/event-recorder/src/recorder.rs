@@ -25,6 +25,7 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use async_trait::async_trait;
+use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -51,7 +52,7 @@ pub type EventRecorderRef = Arc<dyn EventRecorder>;
 static EVENTS_TABLE_TTL: OnceLock<String> = OnceLock::new();
 
 /// The time interval for flushing batched events to the event handler.
-pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
 // The default TTL for the events table.
 const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
 // The capacity of the tokio channel for transmitting events to background processor.
@@ -244,7 +245,7 @@ impl EventRecorderImpl {
         let processor = EventProcessor::new(
             rx,
             event_handler,
-            DEFAULT_FLUSH_INTERVAL,
+            DEFAULT_FLUSH_INTERVAL_SECONDS,
             DEFAULT_MAX_RETRY_TIMES,
         );
 
@@ -348,30 +349,35 @@ impl EventProcessor {
         if !buffer.is_empty() {
             debug!("Flushing {} events to the event handler", buffer.len());
 
-            // Use the fixed interval to retry the failed events.
-            let mut retry = 1;
-            while retry <= self.max_retry_times {
-                if let Err(e) = self.event_handler.handle(buffer).await {
-                    error!(
-                        e; "Failed to handle events, retrying... ({}/{})",
-                        retry, self.max_retry_times
-                    );
-                    retry += 1;
-                    sleep(Duration::from_millis(
-                        self.process_interval.as_millis() as u64 / self.max_retry_times,
-                    ))
-                    .await;
-                } else {
-                    debug!("Successfully handled {} events", buffer.len());
-                    break;
-                }
+            let mut backoff = ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(
+                    DEFAULT_FLUSH_INTERVAL_SECONDS.as_millis() as u64 / self.max_retry_times,
+                ))
+                .with_max_delay(Duration::from_millis(
+                    DEFAULT_FLUSH_INTERVAL_SECONDS.as_millis() as u64,
+                ))
+                .with_max_times(self.max_retry_times as usize)
+                .build();
 
-                if retry > self.max_retry_times {
-                    warn!(
-                        "Failed to handle {} events after {} retries",
-                        buffer.len(),
-                        self.max_retry_times
-                    );
+            loop {
+                match self.event_handler.handle(buffer).await {
+                    Ok(()) => {
+                        debug!("Successfully handled {} events", buffer.len());
+                        break;
+                    }
+                    Err(e) => {
+                        if let Some(d) = backoff.next() {
+                            warn!(e; "Failed to handle events, retrying...");
+                            sleep(d).await;
+                            continue;
+                        } else {
+                            warn!(
+                                e;"Failed to handle events after {} retries",
+                                self.max_retry_times
+                            );
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -431,7 +437,7 @@ mod tests {
         event_recorder.record(Box::new(TestEvent {}));
 
         // Sleep for a while to let the background task process the event.
-        sleep(DEFAULT_FLUSH_INTERVAL * 2).await;
+        sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
 
         let handle = event_recorder.handle.take().unwrap();
 

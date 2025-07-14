@@ -2308,6 +2308,7 @@ version = "0.16.0"
 dependencies = [
  "api",
  "async-trait",
+ "backon",
  "client",
  "common-error",
  "common-macro",
