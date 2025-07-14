@@ -28,7 +28,7 @@ use hyper::HeaderMap;
 use lazy_static::lazy_static;
 use object_pool::Pool;
 use pipeline::util::to_pipeline_version;
-use pipeline::{ContextReq, PipelineDefinition};
+use pipeline::PipelineDefinition;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext};
@@ -38,6 +38,7 @@ use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::http::PromValidationMode;
+use crate::prom_row_builder::TablesBuilder;
 use crate::prom_store::{snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -132,8 +133,13 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let req =
-        decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor).await?;
+    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+
+    let req = if processor.use_pipeline {
+        processor.exec_pipeline().await?
+    } else {
+        req.as_insert_requests()
+    };
 
     let mut cost = 0;
     for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
@@ -204,12 +210,12 @@ fn try_decompress(is_zstd: bool, body: &[u8]) -> Result<Bytes> {
     }))
 }
 
-async fn decode_remote_write_request(
+pub fn decode_remote_write_request(
     is_zstd: bool,
     body: Bytes,
     prom_validation_mode: PromValidationMode,
     processor: &mut PromSeriesProcessor,
-) -> Result<ContextReq> {
+) -> Result<TablesBuilder> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
 
     // due to vmagent's limitation, there is a chance that vmagent is
@@ -230,12 +236,7 @@ async fn decode_remote_write_request(
     request
         .merge(buf, prom_validation_mode, processor)
         .context(error::DecodePromRemoteRequestSnafu)?;
-
-    if processor.use_pipeline {
-        processor.exec_pipeline().await
-    } else {
-        Ok(request.as_row_insert_requests())
-    }
+    Ok(std::mem::take(&mut request.table_data))
 }
 
 async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
