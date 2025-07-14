@@ -31,7 +31,7 @@ use crate::error::{
 struct PartialRegionMetadata<'a> {
     column_metadatas: &'a [ColumnMetadata],
     primary_key: &'a [u32],
-    region_id: TableId,
+    table_id: TableId,
 }
 
 impl<'a> From<&'a RegionMetadata> for PartialRegionMetadata<'a> {
@@ -39,7 +39,7 @@ impl<'a> From<&'a RegionMetadata> for PartialRegionMetadata<'a> {
         Self {
             column_metadatas: &region_metadata.column_metadatas,
             primary_key: &region_metadata.primary_key,
-            region_id: region_metadata.region_id.table_id(),
+            table_id: region_metadata.region_id.table_id(),
         }
     }
 }
