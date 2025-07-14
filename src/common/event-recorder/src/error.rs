@@ -28,13 +28,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Keyvalue backend error"))]
-    KvBackend {
-        source: common_meta::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Mismatched schema, expected: {:?}, actual: {:?}", expected, actual))]
     MismatchedSchema {
         #[snafu(implicit)]
@@ -50,7 +43,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::MismatchedSchema { .. } => StatusCode::InvalidArguments,
-            Error::NoAvailableFrontend { .. } | Error::KvBackend { .. } => StatusCode::Internal,
+            Error::NoAvailableFrontend { .. } => StatusCode::Internal,
         }
     }
 
