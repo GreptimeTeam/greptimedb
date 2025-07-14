@@ -1220,7 +1220,7 @@ impl RawTableInfo {
         let mut primary_key_indices = Vec::with_capacity(primary_keys.len());
         let mut timestamp_index = None;
         let mut value_indices =
-            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len());
         let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
         for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
