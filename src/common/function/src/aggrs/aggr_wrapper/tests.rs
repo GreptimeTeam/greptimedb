@@ -14,15 +14,17 @@
 
 use std::any::Any;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use arrow::array::{Float64Array, Int64Array, UInt64Array};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::physical_plan::aggregates::AggregateExec;
@@ -32,10 +34,11 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::AggregateFunction;
-use datafusion_expr::{Aggregate, Expr, LogicalPlan, TableScan};
+use datafusion_expr::sqlparser::ast::NullTreatment;
+use datafusion_expr::{Aggregate, Expr, LogicalPlan, SortExpr, TableScan};
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
-use futures::Stream;
+use futures::{Stream, StreamExt as _};
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -137,12 +140,16 @@ impl RecordBatchStream for MockStream {
 #[derive(Debug)]
 struct DummyTableProvider {
     schema: Arc<arrow_schema::Schema>,
+    record_batch: Mutex<Option<RecordBatch>>,
 }
 
 impl DummyTableProvider {
     #[allow(unused)]
-    pub fn new(schema: Arc<arrow_schema::Schema>) -> Self {
-        Self { schema }
+    pub fn new(schema: Arc<arrow_schema::Schema>, record_batch: Option<RecordBatch>) -> Self {
+        Self {
+            schema,
+            record_batch: Mutex::new(record_batch),
+        }
     }
 }
 
@@ -154,6 +161,7 @@ impl Default for DummyTableProvider {
                 DataType::Int64,
                 true,
             )])),
+            record_batch: Mutex::new(None),
         }
     }
 }
@@ -179,7 +187,14 @@ impl TableProvider for DummyTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(MockInputExec::new(vec![], self.schema.clone())))
+        let input: Vec<RecordBatch> = self
+            .record_batch
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|r| vec![r])
+            .unwrap_or_default();
+        Ok(Arc::new(MockInputExec::new(input, self.schema.clone())))
     }
 }
 
@@ -236,7 +251,7 @@ async fn test_sum_udaf() {
     )
     .recompute_schema()
     .unwrap();
-    assert_eq!(res.lower.as_ref(), &expected_lower_plan);
+    assert_eq!(res.lower_state.as_ref(), &expected_lower_plan);
 
     let expected_merge_plan = LogicalPlan::Aggregate(
         Aggregate::try_new(
@@ -275,10 +290,10 @@ async fn test_sum_udaf() {
         )
         .unwrap(),
     );
-    assert_eq!(res.upper.as_ref(), &expected_merge_plan);
+    assert_eq!(res.upper_merge.as_ref(), &expected_merge_plan);
 
     let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
-        .create_physical_plan(&res.lower, &ctx.state())
+        .create_physical_plan(&res.lower_state, &ctx.state())
         .await
         .unwrap();
     let aggr_exec = phy_aggr_state_plan
@@ -302,7 +317,7 @@ async fn test_sum_udaf() {
         eval_res,
         ScalarValue::Struct(Arc::new(
             StructArray::try_new(
-                vec![Field::new("col_0", DataType::Int64, true)].into(),
+                vec![Field::new("sum[sum]", DataType::Int64, true)].into(),
                 vec![Arc::new(Int64Array::from(vec![Some(6)]))],
                 None,
             )
@@ -311,7 +326,7 @@ async fn test_sum_udaf() {
     );
 
     let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
-        .create_physical_plan(&res.upper, &ctx.state())
+        .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
     let aggr_exec = phy_aggr_merge_plan
@@ -324,7 +339,7 @@ async fn test_sum_udaf() {
     let merge_input =
         vec![Arc::new(Int64Array::from(vec![Some(6), Some(42), None])) as arrow::array::ArrayRef];
     let merge_input_struct_arr = StructArray::try_new(
-        vec![Field::new("state[0]", DataType::Int64, true)].into(),
+        vec![Field::new("sum[sum]", DataType::Int64, true)].into(),
         merge_input,
         None,
     )
@@ -383,9 +398,9 @@ async fn test_avg_udaf() {
     let coerced_aggr_state_plan = TypeCoercion::new()
         .analyze(expected_aggr_state_plan.clone(), &Default::default())
         .unwrap();
-    assert_eq!(res.lower.as_ref(), &coerced_aggr_state_plan);
+    assert_eq!(res.lower_state.as_ref(), &coerced_aggr_state_plan);
     assert_eq!(
-        res.lower.schema().as_arrow(),
+        res.lower_state.schema().as_arrow(),
         &arrow_schema::Schema::new(vec![Field::new(
             "__avg_state(number)",
             DataType::Struct(
@@ -434,7 +449,7 @@ async fn test_avg_udaf() {
         )
         .unwrap(),
     );
-    assert_eq!(res.upper.as_ref(), &expected_merge_plan);
+    assert_eq!(res.upper_merge.as_ref(), &expected_merge_plan);
 
     let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
@@ -461,8 +476,8 @@ async fn test_avg_udaf() {
     let expected = Arc::new(
         StructArray::try_new(
             vec![
-                Field::new("col_0", DataType::UInt64, true),
-                Field::new("col_1", DataType::Float64, true),
+                Field::new("avg[count]", DataType::UInt64, true),
+                Field::new("avg[sum]", DataType::Float64, true),
             ]
             .into(),
             vec![
@@ -476,7 +491,7 @@ async fn test_avg_udaf() {
     assert_eq!(eval_res, ScalarValue::Struct(expected));
 
     let phy_aggr_merge_plan = DefaultPhysicalPlanner::default()
-        .create_physical_plan(&res.upper, &ctx.state())
+        .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
     let aggr_exec = phy_aggr_merge_plan
@@ -493,8 +508,8 @@ async fn test_avg_udaf() {
     ];
     let merge_input_struct_arr = StructArray::try_new(
         vec![
-            Field::new("state[0]", DataType::UInt64, true),
-            Field::new("state[1]", DataType::Float64, true),
+            Field::new("avg[count]", DataType::UInt64, true),
+            Field::new("avg[sum]", DataType::Float64, true),
         ]
         .into(),
         merge_input,
@@ -513,4 +528,161 @@ async fn test_avg_udaf() {
     let merge_eval_res = merge_accum.evaluate().unwrap();
     // the merge function returns the average, which is 132 / 45
     assert_eq!(merge_eval_res, ScalarValue::Float64(Some(132. / 45_f64)));
+}
+
+/// For testing whether the UDAF state fields are correctly implemented.
+/// esp. for our own custom UDAF's state fields.
+/// By compare eval results before and after split to state/merge functions.
+#[tokio::test]
+async fn test_udaf_correct_eval_result() {
+    struct TestCase {
+        func: Arc<AggregateUDF>,
+        input_schema: SchemaRef,
+        input: Vec<ArrayRef>,
+        expected_output: ScalarValue,
+        distinct: bool,
+        filter: Option<Box<Expr>>,
+        order_by: Option<Vec<SortExpr>>,
+        null_treatment: Option<NullTreatment>,
+    }
+
+    let test_cases = vec![
+        TestCase {
+            func: sum_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "number",
+                DataType::Int64,
+                true,
+            )])),
+            input: vec![Arc::new(Int64Array::from(vec![
+                Some(1),
+                Some(2),
+                None,
+                Some(3),
+            ]))],
+            expected_output: ScalarValue::Int64(Some(6)),
+            distinct: false,
+            filter: None,
+            order_by: None,
+            null_treatment: None,
+        },
+        TestCase {
+            func: avg_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![Field::new(
+                "number",
+                DataType::Int64,
+                true,
+            )])),
+            input: vec![Arc::new(Int64Array::from(vec![
+                Some(1),
+                Some(2),
+                None,
+                Some(3),
+            ]))],
+            expected_output: ScalarValue::Float64(Some(2.0)),
+            distinct: false,
+            filter: None,
+            order_by: None,
+            null_treatment: None,
+        },
+    ];
+    let test_table_ref = TableReference::bare("TestTable");
+
+    for case in test_cases {
+        let ctx = SessionContext::new();
+        let table_provider = DummyTableProvider::new(
+            case.input_schema.clone(),
+            Some(RecordBatch::try_new(case.input_schema.clone(), case.input.clone()).unwrap()),
+        );
+        let table_source = DefaultTableSource::new(Arc::new(table_provider));
+        let logical_plan = LogicalPlan::TableScan(
+            TableScan::try_new(
+                test_table_ref.clone(),
+                Arc::new(table_source),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap(),
+        );
+
+        let args = case
+            .input_schema
+            .fields()
+            .iter()
+            .map(|f| Expr::Column(Column::new(Some(test_table_ref.clone()), f.name())))
+            .collect::<Vec<_>>();
+
+        let aggr_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
+            case.func.clone(),
+            args,
+            case.distinct,
+            case.filter,
+            case.order_by,
+            case.null_treatment.clone(),
+        ));
+
+        let aggr_plan = LogicalPlan::Aggregate(
+            Aggregate::try_new(Arc::new(logical_plan), vec![], vec![aggr_expr]).unwrap(),
+        );
+
+        // make sure the aggr_plan is type coerced
+        let aggr_plan = TypeCoercion::new()
+            .analyze(aggr_plan, &Default::default())
+            .unwrap();
+
+        // first eval the original aggregate function
+        let phy_full_aggr_plan = DefaultPhysicalPlanner::default()
+            .create_physical_plan(&aggr_plan, &ctx.state())
+            .await
+            .unwrap();
+
+        {
+            let unsplit_result = execute_phy_plan(&phy_full_aggr_plan).await.unwrap();
+            assert_eq!(unsplit_result.len(), 1);
+            let unsplit_batch = &unsplit_result[0];
+            assert_eq!(unsplit_batch.num_columns(), 1);
+            assert_eq!(unsplit_batch.num_rows(), 1);
+            let unsplit_col = unsplit_batch.column(0);
+            assert_eq!(unsplit_col.data_type(), &case.expected_output.data_type());
+            assert_eq!(unsplit_col.len(), 1);
+            assert_eq!(unsplit_col, &case.expected_output.to_array().unwrap());
+        }
+        let LogicalPlan::Aggregate(aggr_plan) = aggr_plan else {
+            panic!("Expected Aggregate plan");
+        };
+        let split_plan = StateMergeHelper::split_aggr_node(aggr_plan).unwrap();
+
+        let phy_upper_plan = DefaultPhysicalPlanner::default()
+            .create_physical_plan(&split_plan.upper_merge, &ctx.state())
+            .await
+            .unwrap();
+
+        // since upper plan use lower plan as input, execute upper plan should also execute lower plan
+        // which should give the same result as the original aggregate function
+        {
+            let split_res = execute_phy_plan(&phy_upper_plan).await.unwrap();
+
+            assert_eq!(split_res.len(), 1);
+            let split_batch = &split_res[0];
+            assert_eq!(split_batch.num_columns(), 1);
+            assert_eq!(split_batch.num_rows(), 1);
+            let state_col = split_batch.column(0);
+            assert_eq!(state_col.data_type(), &case.expected_output.data_type());
+            assert_eq!(state_col.len(), 1);
+            assert_eq!(state_col, &case.expected_output.to_array().unwrap());
+        }
+    }
+}
+
+async fn execute_phy_plan(
+    phy_plan: &Arc<dyn ExecutionPlan>,
+) -> datafusion_common::Result<Vec<RecordBatch>> {
+    let task_ctx = Arc::new(TaskContext::default());
+    let mut stream = phy_plan.execute(0, task_ctx)?;
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next().await {
+        batches.push(batch?);
+    }
+    Ok(batches)
 }

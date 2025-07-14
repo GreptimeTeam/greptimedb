@@ -24,6 +24,7 @@
 use std::sync::Arc;
 
 use arrow::array::StructArray;
+use arrow_schema::Fields;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
@@ -62,8 +63,10 @@ pub struct StateMergeHelper;
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct StepAggrPlan {
-    upper: Arc<LogicalPlan>,
-    lower: Arc<LogicalPlan>,
+    /// Upper merge plan, which is the aggregate plan that merges the states of the state function.
+    pub upper_merge: Arc<LogicalPlan>,
+    /// Lower state plan, which is the aggregate plan that computes the state of the aggregate function.
+    pub lower_state: Arc<LogicalPlan>,
 }
 
 pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
@@ -162,7 +165,6 @@ impl StateMergeHelper {
         // update aggregate's output schema
         let lower_plan = Arc::new(lower_plan.recompute_schema()?);
 
-        // TODO: modify upper aggr's schema to use the state function's return type.
         let mut upper = aggr_plan.clone();
         upper.aggr_expr = upper_aggr_exprs;
         upper.input = lower_plan.clone();
@@ -177,8 +179,8 @@ impl StateMergeHelper {
         }
 
         Ok(StepAggrPlan {
-            lower: lower_plan,
-            upper: upper_plan,
+            lower_state: lower_plan,
+            upper_merge: upper_plan,
         })
     }
 }
@@ -225,7 +227,7 @@ impl AggregateUDFImpl for StateWrapper {
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         // fix and recover proper acc args for the original aggregate function.
-
+        let state_type = acc_args.return_type.clone();
         let inner = {
             let old_return_type = self.deduce_aggr_return_type(&acc_args)?;
             let acc_args = datafusion_expr::function::AccumulatorArgs {
@@ -240,7 +242,7 @@ impl AggregateUDFImpl for StateWrapper {
             };
             self.inner.accumulator(acc_args)?
         };
-        Ok(Box::new(StateAccum::new(inner)))
+        Ok(Box::new(StateAccum::new(inner, state_type)?))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -299,27 +301,36 @@ impl AggregateUDFImpl for StateWrapper {
 #[derive(Debug)]
 pub struct StateAccum {
     inner: Box<dyn Accumulator>,
+    state_fields: Fields,
 }
 
 impl StateAccum {
-    pub fn new(inner: Box<dyn Accumulator>) -> Self {
-        Self { inner }
+    pub fn new(
+        inner: Box<dyn Accumulator>,
+        state_type: DataType,
+    ) -> datafusion_common::Result<Self> {
+        let DataType::Struct(fields) = state_type else {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "Expected a struct type for state, got: {:?}",
+                state_type
+            )));
+        };
+        Ok(Self {
+            inner,
+            state_fields: fields,
+        })
     }
 }
 
 impl Accumulator for StateAccum {
     fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
         let state = self.inner.state()?;
-        let fields = state
-            .iter()
-            .enumerate()
-            .map(|(i, s)| Field::new(format!("col_{i}"), s.data_type(), true))
-            .collect::<Vec<_>>();
+
         let array = state
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
-        let struct_array = StructArray::try_new(fields.into(), array, None)?;
+        let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 
@@ -386,10 +397,26 @@ impl MergeWrapper {
 impl AggregateUDFImpl for MergeWrapper {
     fn accumulator<'a, 'b>(
         &'a self,
-        _acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
+        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        if acc_args.schema.fields().len() != 1
+            || !matches!(acc_args.schema.field(0).data_type(), DataType::Struct(_))
+        {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "Expected one struct type as input, got: {:?}",
+                acc_args.schema
+            )));
+        }
+        let input_type = acc_args.schema.field(0).data_type();
+        let DataType::Struct(fields) = input_type else {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "Expected a struct type for input, got: {:?}",
+                input_type
+            )));
+        };
+
         let inner_accum = self.original_phy_expr.create_accumulator()?;
-        Ok(Box::new(MergeAccum::new(inner_accum)))
+        Ok(Box::new(MergeAccum::new(inner_accum, fields)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -437,11 +464,15 @@ impl AggregateUDFImpl for MergeWrapper {
 #[derive(Debug)]
 pub struct MergeAccum {
     inner: Box<dyn Accumulator>,
+    state_fields: Fields,
 }
 
 impl MergeAccum {
-    pub fn new(inner: Box<dyn Accumulator>) -> Self {
-        Self { inner }
+    pub fn new(inner: Box<dyn Accumulator>, state_fields: &Fields) -> Self {
+        Self {
+            inner,
+            state_fields: state_fields.clone(),
+        }
     }
 }
 
@@ -468,7 +499,16 @@ impl Accumulator for MergeAccum {
                     value.data_type()
                 ))
             })?;
-        // the input struct array's naming is irrelevant, only the order of the columns matters.
+        let fields = struct_arr.fields();
+        if fields != &self.state_fields {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "Expected state fields: {:?}, got: {:?}",
+                self.state_fields, fields
+            )));
+        }
+
+        // now fields should be the same, so we can merge the batch
+        // by pass the columns as order should be the same
         let state_columns = struct_arr.columns();
         self.inner.merge_batch(state_columns)
     }
