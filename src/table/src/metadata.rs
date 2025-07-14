@@ -38,6 +38,7 @@ use crate::requests::{
     AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
     UnsetIndexOptions,
 };
+use crate::table_reference::TableReference;
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -1225,6 +1226,7 @@ impl RawTableInfo {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
             } else if column_schema.is_time_index() {
+                value_indices.push(index);
                 timestamp_index = Some(index);
             } else {
                 value_indices.push(index);
@@ -1246,6 +1248,15 @@ impl RawTableInfo {
     /// All "region options" are actually a copy of table options for redundancy.
     pub fn to_region_options(&self) -> HashMap<String, String> {
         HashMap::from(&self.meta.options)
+    }
+
+    /// Returns the table reference.
+    pub fn table_ref(&self) -> TableReference {
+        TableReference::full(
+            self.catalog_name.as_str(),
+            self.schema_name.as_str(),
+            self.name.as_str(),
+        )
     }
 }
 
