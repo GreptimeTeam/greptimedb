@@ -37,8 +37,6 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
-mod type_lookup;
-
 /// Returns the name of the state function for the given aggregate function name.
 /// The state function is used to compute the state of the aggregate function.
 /// The state function's name is in the format `__<aggr_name>_state
@@ -172,7 +170,7 @@ impl StateMergeHelper {
         lower.aggr_expr = lower_aggr_exprs;
         let lower_plan = LogicalPlan::Aggregate(lower);
 
-        // udpate aggregate's output schema
+        // update aggregate's output schema
         let lower_plan = Arc::new(lower_plan.recompute_schema()?);
 
         // TODO: modify upper aggr's schema to use the state function's return type.
