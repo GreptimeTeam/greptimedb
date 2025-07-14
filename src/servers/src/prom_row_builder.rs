@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::string::ToString;
 
-use ahash::HashMap;
 use api::prom_store::remote::Sample;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, RowInsertRequest, Rows, SemanticType, Value};
@@ -36,9 +36,9 @@ pub struct PromCtx {
 
 /// [TablesBuilder] serves as an intermediate container to build [RowInsertRequests].
 #[derive(Default, Debug)]
-pub(crate) struct TablesBuilder {
+pub struct TablesBuilder {
     // schema -> table -> table_builder
-    tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
+    pub tables: HashMap<PromCtx, HashMap<String, TableBuilder>>,
 }
 
 impl Clear for TablesBuilder {
@@ -95,7 +95,7 @@ impl TablesBuilder {
 
 /// Builder for one table.
 #[derive(Debug)]
-pub(crate) struct TableBuilder {
+pub struct TableBuilder {
     /// Column schemas.
     schema: Vec<ColumnSchema>,
     /// Rows written.
@@ -195,7 +195,7 @@ impl TableBuilder {
     }
 
     /// Converts [TableBuilder] to [RowInsertRequest] and clears buffered data.
-    pub(crate) fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
+    pub fn as_row_insert_request(&mut self, table_name: String) -> RowInsertRequest {
         let mut rows = std::mem::take(&mut self.rows);
         let schema = std::mem::take(&mut self.schema);
         let col_num = schema.len();
@@ -209,6 +209,13 @@ impl TableBuilder {
             table_name,
             rows: Some(Rows { schema, rows }),
         }
+    }
+
+    pub fn tags(&self) -> impl Iterator<Item = &String> {
+        self.schema
+            .iter()
+            .filter(|v| v.semantic_type == SemanticType::Tag as i32)
+            .map(|c| &c.column_name)
     }
 }
 
