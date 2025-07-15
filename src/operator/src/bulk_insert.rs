@@ -195,11 +195,16 @@ impl Inserter {
                             let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["encode"])
                                 .start_timer();
-                            let (flight_data, rest) = FlightEncoder::default()
+                            let mut iter = FlightEncoder::default()
                                 .encode(FlightMessage::RecordBatch(batch))
-                                .split_off_first();
+                                .into_iter();
+                            let Some(flight_data) = iter.next() else {
+                                // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
+                                // at least one element.
+                                unreachable!()
+                            };
                             ensure!(
-                                rest.is_empty(),
+                                iter.next().is_none(),
                                 error::NotSupportedSnafu {
                                     feat: "bulk insert RecordBatch with dictionary arrays",
                                 }

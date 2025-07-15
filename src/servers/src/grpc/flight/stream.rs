@@ -141,9 +141,13 @@ impl Stream for FlightRecordBatchStream {
                 }
                 Poll::Ready(Some(result)) => match result {
                     Ok(flight_message) => {
-                        let flight_data = this.encoder.encode(flight_message);
-                        let (first, rest) = flight_data.split_off_first();
-                        this.buffer.extend(rest);
+                        let mut iter = this.encoder.encode(flight_message).into_iter();
+                        let Some(first) = iter.next() else {
+                            // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
+                            // at least one element.
+                            unreachable!()
+                        };
+                        this.buffer.extend(iter);
                         Poll::Ready(Some(Ok(first)))
                     }
                     Err(e) => {
