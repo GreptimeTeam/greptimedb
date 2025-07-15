@@ -42,6 +42,7 @@ use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{
@@ -176,8 +177,9 @@ impl GreptimeRequestHandler {
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);
-                if result_sender.try_send(result).is_err() {
-                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
+                if let Err(e)= result_sender.try_send(result)
+                    && let TrySendError::Closed(_) = e {
+                    warn!(r#""DoPut" client with request_id {} maybe unreachable, abort handling its message"#, request_id);
                     break;
                 }
             }
