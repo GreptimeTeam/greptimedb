@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -40,6 +41,7 @@ pub struct FlightRecordBatchStream {
     join_handle: JoinHandle<()>,
     done: bool,
     encoder: FlightEncoder,
+    buffer: VecDeque<FlightData>,
 }
 
 impl FlightRecordBatchStream {
@@ -64,6 +66,7 @@ impl FlightRecordBatchStream {
             join_handle,
             done: false,
             encoder,
+            buffer: VecDeque::new(),
         }
     }
 
@@ -128,6 +131,9 @@ impl Stream for FlightRecordBatchStream {
         if *this.done {
             Poll::Ready(None)
         } else {
+            if let Some(x) = this.buffer.pop_front() {
+                return Poll::Ready(Some(Ok(x)));
+            }
             match this.rx.poll_next(cx) {
                 Poll::Ready(None) => {
                     *this.done = true;
@@ -136,7 +142,9 @@ impl Stream for FlightRecordBatchStream {
                 Poll::Ready(Some(result)) => match result {
                     Ok(flight_message) => {
                         let flight_data = this.encoder.encode(flight_message);
-                        Poll::Ready(Some(Ok(flight_data)))
+                        let (first, rest) = flight_data.split_off_first();
+                        this.buffer.extend(rest);
+                        Poll::Ready(Some(Ok(first)))
                     }
                     Err(e) => {
                         *this.done = true;
@@ -191,7 +199,7 @@ mod test {
         let decoder = &mut FlightDecoder::default();
         let mut flight_messages = raw_data
             .into_iter()
-            .map(|x| decoder.try_decode(&x).unwrap())
+            .map(|x| decoder.try_decode(&x).unwrap().unwrap())
             .collect::<Vec<FlightMessage>>();
         assert_eq!(flight_messages.len(), 2);
 

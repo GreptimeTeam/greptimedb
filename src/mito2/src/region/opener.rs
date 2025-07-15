@@ -652,7 +652,13 @@ where
         for bulk_entry in entry.bulk_entries {
             let part = BulkPart::try_from(bulk_entry)?;
             rows_replayed += part.num_rows();
-            region_write_ctx.push_bulk(OptionOutputTx::none(), part);
+            ensure!(
+                region_write_ctx.push_bulk(OptionOutputTx::none(), part),
+                RegionCorruptedSnafu {
+                    region_id,
+                    reason: "unable to replay memtable with bulk entries",
+                }
+            );
         }
 
         // set next_entry_id and write to memtable.

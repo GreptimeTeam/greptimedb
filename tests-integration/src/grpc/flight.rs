@@ -140,7 +140,7 @@ mod test {
         let schema = record_batches[0].schema.arrow_schema().clone();
 
         let stream = futures::stream::once(async move {
-            let mut schema_data = FlightEncoder::default().encode(FlightMessage::Schema(schema));
+            let mut schema_data = FlightEncoder::default().encode_schema(schema.as_ref());
             let metadata = DoPutMetadata::new(0);
             schema_data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
             // first message in "DoPut" stream should carry table name in flight descriptor
@@ -154,13 +154,15 @@ mod test {
         .chain(
             tokio_stream::iter(record_batches)
                 .enumerate()
-                .map(|(i, x)| {
+                .flat_map(|(i, x)| {
                     let mut encoder = FlightEncoder::default();
                     let message = FlightMessage::RecordBatch(x.into_df_record_batch());
                     let mut data = encoder.encode(message);
                     let metadata = DoPutMetadata::new((i + 1) as i64);
-                    data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
-                    data
+                    data.iter_mut().for_each(|x| {
+                        x.app_metadata = serde_json::to_vec(&metadata).unwrap().into()
+                    });
+                    tokio_stream::iter(data)
                 })
                 .boxed(),
         )
