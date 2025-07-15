@@ -719,14 +719,13 @@ impl RegionMetadataBuilder {
     }
 
     fn set_indexes(&mut self, options: Vec<SetIndexOption>) -> Result<()> {
-        let mut index_options = options
-            .into_iter()
-            .map(|option| (option.column_name().clone(), option))
-            .collect::<HashMap<_, _>>();
-
-        for column_meta in self.column_metadatas.iter_mut() {
-            if let Some(option) = index_options.remove(&column_meta.column_schema.name) {
-                Self::set_index(column_meta, option)?;
+        for option in options {
+            if let Some(column_metadata) = self
+                .column_metadatas
+                .iter_mut()
+                .find(|c| c.column_schema.name == *option.column_name())
+            {
+                Self::set_index(column_metadata, option)?;
             }
         }
 
@@ -734,14 +733,13 @@ impl RegionMetadataBuilder {
     }
 
     fn unset_indexes(&mut self, options: Vec<UnsetIndexOption>) -> Result<()> {
-        let mut index_options = options
-            .into_iter()
-            .map(|option| (option.column_name().clone(), option))
-            .collect::<HashMap<_, _>>();
-
-        for column_meta in self.column_metadatas.iter_mut() {
-            if let Some(option) = index_options.remove(&column_meta.column_schema.name) {
-                Self::unset_index(column_meta, option)?;
+        for option in options {
+            if let Some(column_metadata) = self
+                .column_metadatas
+                .iter_mut()
+                .find(|c| c.column_schema.name == *option.column_name())
+            {
+                Self::unset_index(column_metadata, option)?;
             }
         }
 
