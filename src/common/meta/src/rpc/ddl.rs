@@ -96,7 +96,7 @@ impl DdlTask {
     /// Creates a [`DdlTask`] to create a table.
     pub fn new_create_table(
         expr: CreateTableExpr,
-        partitions: Vec<Partition>,
+        partitions: Option<Partition>,
         table_info: RawTableInfo,
     ) -> Self {
         DdlTask::CreateTable(CreateTableTask::new(expr, partitions, table_info))
@@ -107,7 +107,7 @@ impl DdlTask {
         DdlTask::CreateLogicalTables(
             table_data
                 .into_iter()
-                .map(|(expr, table_info)| CreateTableTask::new(expr, Vec::new(), table_info))
+                .map(|(expr, table_info)| CreateTableTask::new(expr, None, table_info))
                 .collect(),
         )
     }
@@ -606,7 +606,10 @@ impl From<DropTableTask> for PbDropTableTask {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
-    pub partitions: Vec<Partition>,
+    /// The partitions of the table.
+    ///
+    /// If the table is created with a single region (not partitioned), this field is `None`.
+    pub partitions: Option<Partition>,
     pub table_info: RawTableInfo,
 }
 
@@ -620,7 +623,7 @@ impl TryFrom<PbCreateTableTask> for CreateTableTask {
             pb.create_table.context(error::InvalidProtoMsgSnafu {
                 err_msg: "expected create table",
             })?,
-            pb.partitions,
+            pb.partitions.first().cloned(),
             table_info,
         ))
     }
@@ -633,7 +636,10 @@ impl TryFrom<CreateTableTask> for PbCreateTableTask {
         Ok(PbCreateTableTask {
             table_info: serde_json::to_vec(&task.table_info).context(error::SerdeJsonSnafu)?,
             create_table: Some(task.create_table),
-            partitions: task.partitions,
+            partitions: match task.partitions {
+                Some(p) => vec![p],
+                None => vec![],
+            },
         })
     }
 }
@@ -641,7 +647,7 @@ impl TryFrom<CreateTableTask> for PbCreateTableTask {
 impl CreateTableTask {
     pub fn new(
         expr: CreateTableExpr,
-        partitions: Vec<Partition>,
+        partitions: Option<Partition>,
         table_info: RawTableInfo,
     ) -> CreateTableTask {
         CreateTableTask {
@@ -701,7 +707,10 @@ impl Serialize for CreateTableTask {
 
         let pb = PbCreateTableTask {
             create_table: Some(self.create_table.clone()),
-            partitions: self.partitions.clone(),
+            partitions: match &self.partitions {
+                Some(p) => vec![p.clone()],
+                None => vec![],
+            },
             table_info,
         };
         let buf = pb.encode_to_vec();
@@ -1315,7 +1324,7 @@ mod tests {
         let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
         let task = CreateTableTask::new(
             CreateTableExpr::default(),
-            Vec::new(),
+            None,
             RawTableInfo::from(table_info),
         );
 
@@ -1411,8 +1420,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut create_table_task =
-            CreateTableTask::new(create_table_expr, Vec::new(), raw_table_info);
+        let mut create_table_task = CreateTableTask::new(create_table_expr, None, raw_table_info);
 
         // Call the sort_columns method
         create_table_task.sort_columns();

@@ -21,7 +21,6 @@ pub mod flownode_handler;
 use std::assert_matches::assert_matches;
 use std::collections::HashMap;
 
-use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, SemanticType};
 use common_procedure::Status;
 use datatypes::prelude::ConcreteDataType;
@@ -145,10 +144,7 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: None,
         table_info,
     }
 }
@@ -183,10 +179,7 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: None,
         table_info,
     }
 }

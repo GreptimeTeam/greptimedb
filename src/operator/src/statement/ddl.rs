@@ -1389,12 +1389,11 @@ impl StatementExecutor {
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
-        partitions: Vec<Partition>,
+        partitions: Option<Partition>,
         table_info: RawTableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let partitions = partitions.into_iter().map(Into::into).collect();
-
+        let partitions = partitions.map(|p| p.into()); // to PbPartition
         let request = SubmitDdlTaskRequest {
             query_context,
             task: DdlTask::new_create_table(create_table, partitions, table_info),
@@ -1590,7 +1589,7 @@ fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
     query_ctx: &QueryContextRef,
-) -> Result<(Vec<MetaPartition>, Vec<String>)> {
+) -> Result<(Option<MetaPartition>, Vec<String>)> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
     let partition_columns = find_partition_columns(&partitions)?;
@@ -1600,23 +1599,26 @@ fn parse_partitions(
     // Validates partition
     let mut exprs = vec![];
     for partition in &partition_entries {
-        for bound in partition {
-            if let PartitionBound::Expr(expr) = bound {
-                exprs.push(expr.clone());
-            }
+        if let PartitionBound::Expr(expr) = partition {
+            exprs.push(expr.clone());
         }
     }
     MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs, true)
         .context(InvalidPartitionSnafu)?;
 
-    Ok((
-        partition_entries
-            .into_iter()
-            .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
-            .collect::<std::result::Result<_, _>>()
+    let meta_partition = if partition_entries.is_empty() {
+        None
+    } else {
+        Some(
+            MetaPartition::try_from(PartitionDef::new(
+                partition_columns.clone(),
+                partition_entries,
+            ))
             .context(DeserializePartitionSnafu)?,
-        partition_columns,
-    ))
+        )
+    };
+
+    Ok((meta_partition, partition_columns))
 }
 
 fn create_table_info(
@@ -1727,7 +1729,7 @@ fn find_partition_entries(
     partitions: &Option<Partitions>,
     partition_columns: &[String],
     query_ctx: &QueryContextRef,
-) -> Result<Vec<Vec<PartitionBound>>> {
+) -> Result<Vec<PartitionBound>> {
     let entries = if let Some(partitions) = partitions {
         // extract concrete data type of partition columns
         let column_defs = partition_columns
@@ -1756,17 +1758,17 @@ fn find_partition_entries(
         for partition in &partitions.exprs {
             let partition_expr =
                 convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
-            partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
+            partition_exprs.push(PartitionBound::Expr(partition_expr));
         }
 
         // fallback for no expr
         if partition_exprs.is_empty() {
-            partition_exprs.push(vec![PartitionBound::MaxValue]);
+            partition_exprs.push(PartitionBound::MaxValue);
         }
 
         partition_exprs
     } else {
-        vec![vec![PartitionBound::MaxValue]]
+        vec![PartitionBound::MaxValue]
     };
     Ok(entries)
 }

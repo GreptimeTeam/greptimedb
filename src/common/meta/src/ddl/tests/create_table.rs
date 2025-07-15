@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
-use api::v1::meta::{Partition, Peer};
+use api::v1::meta::Peer;
 use api::v1::region::{region_request, RegionRequest};
 use api::v1::{ColumnDataType, SemanticType};
 use common_error::ext::ErrorExt;
@@ -141,10 +141,7 @@ pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: None,
         table_info,
     }
 }
@@ -218,7 +215,7 @@ async fn test_on_prepare_with_no_partition_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let ddl_context = new_ddl_context(node_manager);
     let mut task = test_create_table_task("foo");
-    task.partitions = vec![];
+    task.partitions = None;
     task.create_table.create_if_not_exists = true;
     let mut procedure = CreateTableProcedure::new(task, ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();

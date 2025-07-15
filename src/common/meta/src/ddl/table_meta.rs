@@ -113,15 +113,19 @@ impl TableMetadataAllocator {
         table_id: TableId,
         task: &CreateTableTask,
     ) -> Result<PhysicalTableRouteValue> {
-        let regions = task.partitions.len();
+        let num_regions = task
+            .partitions
+            .as_ref()
+            .map(|p| p.value_list.len())
+            .unwrap_or(1);
         ensure!(
-            regions > 0,
+            num_regions > 0,
             error::UnexpectedSnafu {
                 err_msg: "The number of partitions must be greater than 0"
             }
         );
 
-        let peers = self.peer_allocator.alloc(regions).await?;
+        let peers = self.peer_allocator.alloc(num_regions).await?;
         debug!("Allocated peers {:?} for table {}", peers, table_id);
         let region_routes = task
             .partitions

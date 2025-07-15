@@ -391,6 +391,9 @@ impl From<Region> for PbRegion {
     }
 }
 
+/// Serialized version of `PartitionDef`.
+///
+/// Represent the entire partition part of one table
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Partition {
     #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
