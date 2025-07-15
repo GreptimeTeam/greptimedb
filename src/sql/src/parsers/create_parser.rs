@@ -209,6 +209,14 @@ impl<'a> ParserContext<'a> {
                 }
             );
         }
+        if let Some(append_mode) = options.get("append_mode") {
+            if append_mode == "true" && options.contains_key("merge_mode") {
+                return InvalidDatabaseOptionSnafu {
+                    key: "merge_mode".to_string(),
+                }
+                .fail();
+            }
+        }
 
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,

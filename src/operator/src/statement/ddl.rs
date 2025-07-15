@@ -107,7 +107,7 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let (catalog, schema, table) = table_idents_to_full_name(&stmt.name, &ctx)
+        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
 

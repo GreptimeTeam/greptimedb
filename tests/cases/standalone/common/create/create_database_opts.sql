@@ -28,9 +28,20 @@ use mydb;
 
 SHOW FULL DATABASES;
 
-CREATE TABLE test(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
+CREATE TABLE test1(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
 
-SHOW CREATE TABLE test;
+SHOW CREATE TABLE test1;
+
+CREATE TABLE test2(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX) WITH (
+       'append_mode'='true',
+       'merge_mode'='',
+       'skip_wal'='false');
+
+SHOW CREATE TABLE test2;
+
+INSERT INTO test2 VALUES('host1', 1.0, '2023-10-01 00:00:00');
+
+SELECT * FROM test2;
 
 USE public;
 

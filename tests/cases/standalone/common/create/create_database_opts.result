@@ -21,6 +21,7 @@ SHOW FULL DATABASES;
 | greptime_private   |            |
 | information_schema |            |
 | mydb               | 'ttl'='1h' |
+|                    |            |
 | public             |            |
 +--------------------+------------+
 
@@ -85,25 +86,30 @@ Affected Rows: 0
 
 SHOW FULL DATABASES;
 
-+--------------------+------------------------------------------------------------------------------------------------------------------+
-| Database           | Options                                                                                                          |
-+--------------------+------------------------------------------------------------------------------------------------------------------+
-| greptime_private   |                                                                                                                  |
-| information_schema |                                                                                                                  |
-| mydb               | 'ttl'='1h''append_mode'='false' 'skip_wal'='true' 'merge_mode'='last_non_null' 'memtable.type'='partition_tree'  |
-| public             |                                                                                                                  |
-+--------------------+------------------------------------------------------------------------------------------------------------------+
++--------------------+----------------------------------+
+| Database           | Options                          |
++--------------------+----------------------------------+
+| greptime_private   |                                  |
+| information_schema |                                  |
+| mydb               | 'ttl'='1h'                       |
+|                    | 'memtable.type'='partition_tree' |
+|                    | 'skip_wal'='true'                |
+|                    | 'merge_mode'='last_non_null'     |
+|                    | 'append_mode'='false'            |
+|                    |                                  |
+| public             |                                  |
++--------------------+----------------------------------+
 
-CREATE TABLE test(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
+CREATE TABLE test1(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
-SHOW CREATE TABLE test;
+SHOW CREATE TABLE test1;
 
 +-------+---------------------------------------+
 | Table | Create Table                          |
 +-------+---------------------------------------+
-| test  | CREATE TABLE IF NOT EXISTS "test" (   |
+| test1 | CREATE TABLE IF NOT EXISTS "test1" (  |
 |       |   "host" STRING NULL,                 |
 |       |   "cpu" DOUBLE NULL,                  |
 |       |   "ts" TIMESTAMP(3) NOT NULL,         |
@@ -119,6 +125,47 @@ SHOW CREATE TABLE test;
 |       |   ttl = '1h'                          |
 |       | )                                     |
 +-------+---------------------------------------+
+
+CREATE TABLE test2(host STRING, cpu DOUBLE, ts TIMESTAMP TIME INDEX) WITH (
+       'append_mode'='true',
+       'merge_mode'='',
+       'skip_wal'='false');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE test2;
+
++-------+---------------------------------------+
+| Table | Create Table                          |
++-------+---------------------------------------+
+| test2 | CREATE TABLE IF NOT EXISTS "test2" (  |
+|       |   "host" STRING NULL,                 |
+|       |   "cpu" DOUBLE NULL,                  |
+|       |   "ts" TIMESTAMP(3) NOT NULL,         |
+|       |   TIME INDEX ("ts")                   |
+|       | )                                     |
+|       |                                       |
+|       | ENGINE=mito                           |
+|       | WITH(                                 |
+|       |   append_mode = 'true',               |
+|       |   'memtable.type' = 'partition_tree', |
+|       |   merge_mode = '',                    |
+|       |   skip_wal = 'false',                 |
+|       |   ttl = '1h'                          |
+|       | )                                     |
++-------+---------------------------------------+
+
+INSERT INTO test2 VALUES('host1', 1.0, '2023-10-01 00:00:00');
+
+Affected Rows: 1
+
+SELECT * FROM test2;
+
++-------+-----+---------------------+
+| host  | cpu | ts                  |
++-------+-----+---------------------+
+| host1 | 1.0 | 2023-10-01T00:00:00 |
++-------+-----+---------------------+
 
 USE public;
 
