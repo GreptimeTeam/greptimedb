@@ -16,9 +16,10 @@
 //!
 //! i.e. for a aggregate function `foo`, we will have a state function `foo_state` and a merge function `foo_merge`.
 //!
-//! `foo_state` i's input args is the same as `foo`'s, and its output is a state object.
-//! Note that `foo_state` might have multiple output columns, so it's a struct array.
-//! `foo_merge`'s input args is the same as `foo_state`'s, and its output is the same as `foo`'s.
+//! `foo_state`'s input args is the same as `foo`'s, and its output is a state object.
+//! Note that `foo_state` might have multiple output columns, so it's a struct array
+//! that each output column is a struct field.
+//! `foo_merge`'s input arg is the same as `foo_state`'s output, and its output is the same as `foo`'s input.
 //!
 
 use std::sync::Arc;
@@ -84,23 +85,25 @@ pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFun
 impl StateMergeHelper {
     /// Split an aggregate plan into two aggregate plans, one for the state function and one for the merge function.
     pub fn split_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<StepAggrPlan> {
-        let aggr_plan = {
+        let aggr = {
             // certain aggr func need type coercion to work correctly, so we need to analyze the plan first.
-            if let LogicalPlan::Aggregate(aggr) = TypeCoercion::new().analyze(
+            let aggr_plan = TypeCoercion::new().analyze(
                 LogicalPlan::Aggregate(aggr_plan).clone(),
                 &Default::default(),
-            )? {
+            )?;
+            if let LogicalPlan::Aggregate(aggr) = aggr_plan {
                 aggr
             } else {
-                return Err(datafusion_common::DataFusionError::Internal(
-                    "Expected an Aggregate plan".to_string(),
-                ));
+                return Err(datafusion_common::DataFusionError::Internal(format!(
+                    "Failed to coerce expressions in aggregate plan, expected Aggregate, got: {:?}",
+                    aggr_plan
+                )));
             }
         };
         let mut lower_aggr_exprs = vec![];
         let mut upper_aggr_exprs = vec![];
 
-        for aggr_expr in aggr_plan.aggr_expr.iter() {
+        for aggr_expr in aggr.aggr_expr.iter() {
             let Some(aggr_func) = get_aggr_func(aggr_expr) else {
                 return Err(datafusion_common::DataFusionError::NotImplemented(format!(
                     "Unsupported aggregate expression for step aggr optimize: {:?}",
@@ -111,7 +114,7 @@ impl StateMergeHelper {
             let original_input_types = aggr_func
                 .args
                 .iter()
-                .map(|e| e.get_type(&aggr_plan.input.schema()))
+                .map(|e| e.get_type(&aggr.input.schema()))
                 .collect::<Result<Vec<_>, _>>()?;
 
             // first create the state function from the original aggregate function.
@@ -132,8 +135,8 @@ impl StateMergeHelper {
 
             let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
                 aggr_expr,
-                aggr_plan.input.schema(),
-                aggr_plan.input.schema().as_arrow(),
+                aggr.input.schema(),
+                aggr.input.schema().as_arrow(),
                 &Default::default(),
             )?;
 
@@ -158,23 +161,24 @@ impl StateMergeHelper {
             upper_aggr_exprs.push(expr);
         }
 
-        let mut lower = aggr_plan.clone();
+        let mut lower = aggr.clone();
         lower.aggr_expr = lower_aggr_exprs;
         let lower_plan = LogicalPlan::Aggregate(lower);
 
         // update aggregate's output schema
         let lower_plan = Arc::new(lower_plan.recompute_schema()?);
 
-        let mut upper = aggr_plan.clone();
+        let mut upper = aggr.clone();
+        let aggr_plan = LogicalPlan::Aggregate(aggr);
         upper.aggr_expr = upper_aggr_exprs;
         upper.input = lower_plan.clone();
         // upper schema's output schema should be the same as the original aggregate plan's output schema
         let upper_check = upper.clone();
         let upper_plan = Arc::new(LogicalPlan::Aggregate(upper_check).recompute_schema()?);
-        if *upper_plan.schema() != aggr_plan.schema {
+        if *upper_plan.schema() != *aggr_plan.schema() {
             return Err(datafusion_common::DataFusionError::Internal(format!(
-                "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: {:?} != {:?}",
-                upper_plan.schema(), aggr_plan.schema
+                 "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: \n[transformed]:{}\n[   original]{}",
+                upper_plan.schema(), aggr_plan.schema()
             )));
         }
 
