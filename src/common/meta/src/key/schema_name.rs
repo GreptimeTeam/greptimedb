@@ -58,12 +58,17 @@ impl Default for SchemaNameKey<'_> {
 pub struct SchemaNameValue {
     #[serde(default)]
     pub ttl: Option<DatabaseTimeToLive>,
+    #[serde(default)]
+    pub extra_options: HashMap<String, String>,
 }
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ttl) = self.ttl.map(|i| i.to_string()) {
-            write!(f, "ttl='{}'", ttl)?;
+            write!(f, "'ttl'='{}'", ttl)?;
+        }
+        for (k, v) in self.extra_options.iter() {
+            write!(f, "'{k}'='{v}' ")?;
         }
 
         Ok(())
@@ -87,7 +92,18 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
             })
             .transpose()?
             .map(|ttl| ttl.into());
-        Ok(Self { ttl })
+        let extra_options = value
+            .iter()
+            .filter_map(|(k, v)| {
+                if k == OPT_KEY_TTL {
+                    None
+                } else {
+                    Some((k.clone(), v.clone()))
+                }
+            })
+            .collect();
+
+        Ok(Self { ttl, extra_options })
     }
 }
 

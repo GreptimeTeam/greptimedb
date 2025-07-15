@@ -12490,6 +12490,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "lazy_static",
+ "once_cell",
  "parquet",
  "paste",
  "serde",

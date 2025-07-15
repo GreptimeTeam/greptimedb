@@ -29,7 +29,7 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
-use table::requests::validate_table_option;
+use table::requests::{validate_database_option, validate_table_option};
 
 use crate::ast::{ColumnDef, Ident};
 use crate::error::{
@@ -57,12 +57,6 @@ pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
-
-const DB_OPT_KEY_TTL: &str = "ttl";
-
-fn validate_database_option(key: &str) -> bool {
-    [DB_OPT_KEY_TTL].contains(&key)
-}
 
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
