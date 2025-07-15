@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use futures::future::join_all;
@@ -246,8 +246,6 @@ impl CreateTableProcedure {
             }
         }
 
-        self.creator.data.state = CreateTableState::CreateMetadata;
-
         let mut results = join_all(create_region_tasks)
             .await
             .into_iter()
@@ -261,6 +259,7 @@ impl CreateTableProcedure {
             warn!("creating table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
         }
 
+        self.creator.data.state = CreateTableState::CreateMetadata;
         Ok(Status::executing(true))
     }
 
@@ -268,8 +267,9 @@ impl CreateTableProcedure {
     ///
     /// Abort(not-retry):
     /// - Failed to create table metadata.
-    async fn on_create_metadata(&mut self) -> Result<Status> {
+    async fn on_create_metadata(&mut self, pid: ProcedureId) -> Result<Status> {
         let table_id = self.table_id();
+        let table_ref = self.creator.data.table_ref();
         let manager = &self.context.table_metadata_manager;
 
         let mut raw_table_info = self.table_info().clone();
@@ -289,7 +289,10 @@ impl CreateTableProcedure {
         self.context
             .register_failure_detectors(detecting_regions)
             .await;
-        info!("Created table metadata for table {table_id}");
+        info!(
+            "Successfully created table: {}, table_id: {}, procedure_id: {}",
+            table_ref, table_id, pid
+        );
 
         self.creator.opening_regions.clear();
         Ok(Status::done_with_output(table_id))
@@ -317,7 +320,7 @@ impl Procedure for CreateTableProcedure {
         Ok(())
     }
 
-    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+    async fn execute(&mut self, ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.creator.data.state;
 
         let _timer = metrics::METRIC_META_PROCEDURE_CREATE_TABLE
@@ -327,7 +330,7 @@ impl Procedure for CreateTableProcedure {
         match state {
             CreateTableState::Prepare => self.on_prepare().await,
             CreateTableState::DatanodeCreateRegions => self.on_datanode_create_regions().await,
-            CreateTableState::CreateMetadata => self.on_create_metadata().await,
+            CreateTableState::CreateMetadata => self.on_create_metadata(ctx.procedure_id).await,
         }
         .map_err(map_to_procedure_error)
     }

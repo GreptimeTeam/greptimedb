@@ -227,7 +227,6 @@ impl AlterTableProcedure {
     }
 
     fn handle_alter_region_response(&mut self, mut results: Vec<RegionResponse>) -> Result<()> {
-        self.data.state = AlterTableState::UpdateMetadata;
         if let Some(column_metadatas) =
             extract_column_metadatas(&mut results, TABLE_COLUMN_METADATA_EXTENSION_KEY)?
         {
@@ -235,7 +234,7 @@ impl AlterTableProcedure {
         } else {
             warn!("altering table result doesn't contains extension key `{TABLE_COLUMN_METADATA_EXTENSION_KEY}`,leaving the table's column metadata unchanged");
         }
-
+        self.data.state = AlterTableState::UpdateMetadata;
         Ok(())
     }
 
