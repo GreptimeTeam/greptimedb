@@ -202,6 +202,9 @@ fn validate_events(events: &[&Box<dyn Event>]) -> Result<()> {
 pub trait EventRecorder: Send + Sync + 'static {
     /// Records an event for persistence and processing by [EventHandler].
     fn record(&self, event: Box<dyn Event>);
+
+    /// Cancels the event recorder.
+    fn cancel(&self);
 }
 
 /// EventHandler trait defines the interface for how to handle the event.
@@ -231,8 +234,10 @@ impl Default for EventRecorderOptions {
 pub struct EventRecorderImpl {
     // The channel to send the events to the background processor.
     tx: Sender<Box<dyn Event>>,
+    // The cancel token to cancel the background processor.
+    cancel_token: CancellationToken,
     // The background processor to process the events.
-    pub(crate) handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl EventRecorderImpl {
@@ -240,15 +245,21 @@ impl EventRecorderImpl {
         info!("Creating event recorder with options: {:?}", opts);
 
         let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
+        let cancel_token = CancellationToken::new();
 
-        let mut recorder = Self { tx, handle: None };
+        let mut recorder = Self {
+            tx,
+            handle: None,
+            cancel_token: cancel_token.clone(),
+        };
 
         let processor = EventProcessor::new(
             rx,
             event_handler,
             DEFAULT_FLUSH_INTERVAL_SECONDS,
             DEFAULT_MAX_RETRY_TIMES,
-        );
+        )
+        .with_cancel_token(cancel_token);
 
         // Spawn a background task to process the events.
         let handle = tokio::spawn(async move {
@@ -275,6 +286,11 @@ impl EventRecorder for EventRecorderImpl {
         if let Err(e) = self.tx.try_send(event) {
             error!("Failed to send event to the background processor: {}", e);
         }
+    }
+
+    // Cancels the event recorder. It will cancel the background processor.
+    fn cancel(&self) {
+        self.cancel_token.cancel();
     }
 }
 
@@ -311,6 +327,11 @@ impl EventProcessor {
         }
     }
 
+    fn with_cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = cancel_token;
+        self
+    }
+
     async fn process(mut self, buffer_size: usize) {
         info!("Start the background processor in event recorder to handle the received events.");
 
@@ -341,6 +362,8 @@ impl EventProcessor {
                 }
                 // Cancel the processor through the cancel token.
                 _ = self.cancel_token.cancelled() => {
+                    warn!("Received a cancel signal, flushing the buffer and exiting the loop");
+                    self.flush_events_to_handler(&mut buffer).await;
                     break;
                 }
                 // When the interval is triggered, flush the buffer and send the events to the event handler.
@@ -358,7 +381,7 @@ impl EventProcessor {
 
             let mut backoff = ExponentialBuilder::default()
                 .with_min_delay(Duration::from_millis(
-                    DEFAULT_FLUSH_INTERVAL_SECONDS.as_millis() as u64 / self.max_retry_times,
+                    DEFAULT_FLUSH_INTERVAL_SECONDS.as_millis() as u64 / self.max_retry_times.max(1),
                 ))
                 .with_max_delay(Duration::from_millis(
                     DEFAULT_FLUSH_INTERVAL_SECONDS.as_millis() as u64,
@@ -443,14 +466,53 @@ mod tests {
         );
         event_recorder.record(Box::new(TestEvent {}));
 
+        // Cancel the event recorder to flush the buffer.
+        event_recorder.cancel();
+
         // Sleep for a while to let the background task process the event.
-        sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
+        sleep(Duration::from_millis(100)).await;
 
-        let handle = event_recorder.handle.take().unwrap();
+        if let Some(handle) = event_recorder.handle.take() {
+            assert!(handle.await.is_ok());
+        }
+    }
 
-        // Abort the background task.
-        handle.abort();
+    struct TestEventHandlerImplShouldPanic {}
 
-        assert!(!handle.await.unwrap_err().is_panic());
+    #[async_trait]
+    impl EventHandler for TestEventHandlerImplShouldPanic {
+        async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
+            let event = events
+                .first()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TestEvent>()
+                .unwrap();
+            assert_eq!(
+                event.json_payload().unwrap(),
+                "{\"procedure_id\": \"should_panic\"}"
+            );
+            assert_eq!(event.event_type(), "should_panic");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_event_recorder_should_panic() {
+        let mut event_recorder = EventRecorderImpl::new(
+            Box::new(TestEventHandlerImplShouldPanic {}),
+            EventRecorderOptions::default(),
+        );
+
+        event_recorder.record(Box::new(TestEvent {}));
+
+        // Cancel the event recorder to flush the buffer.
+        event_recorder.cancel();
+
+        sleep(Duration::from_millis(100)).await;
+
+        if let Some(handle) = event_recorder.handle.take() {
+            assert!(handle.await.unwrap_err().is_panic());
+        }
     }
 }
