@@ -159,8 +159,9 @@ impl RegionRequester {
             ));
 
             let mut buffered_message: Option<FlightMessage> = None;
+            let mut stream_ended = false;
 
-            loop {
+            while !stream_ended {
                 // get the next message from the buffered message or read from the flight message stream
                 let flight_message_item = if let Some(msg) = buffered_message.take() {
                     Some(Ok(msg))
@@ -212,7 +213,8 @@ impl RegionRequester {
                                 }
                             }
                         } else {
-                            // the loop will break in the next iteration
+                            // the stream has ended
+                            stream_ended = true;
                         }
 
                         yield result_to_yield;
