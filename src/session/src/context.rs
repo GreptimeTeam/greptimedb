@@ -525,10 +525,10 @@ pub enum Channel {
     Influx = 7,
     Opentsdb = 8,
     Loki = 9,
-    ElasticSearch = 10,
+    Elasticsearch = 10,
     Jaeger = 11,
     Log = 12,
-    PromQL = 13,
+    Promql = 13,
 }
 
 impl From<u32> for Channel {
@@ -543,10 +543,10 @@ impl From<u32> for Channel {
             7 => Self::Influx,
             8 => Self::Opentsdb,
             9 => Self::Loki,
-            10 => Self::ElasticSearch,
+            10 => Self::Elasticsearch,
             11 => Self::Jaeger,
             12 => Self::Log,
-            13 => Self::PromQL,
+            13 => Self::Promql,
             _ => Self::Unknown,
         }
     }
@@ -580,10 +580,10 @@ impl AsRef<str> for Channel {
             Channel::Influx => "influx",
             Channel::Opentsdb => "opentsdb",
             Channel::Loki => "loki",
-            Channel::ElasticSearch => "elasticsearch",
+            Channel::Elasticsearch => "elasticsearch",
             Channel::Jaeger => "jaeger",
             Channel::Log => "log",
-            Channel::PromQL => "promql",
+            Channel::Promql => "promql",
             Channel::Unknown => "unknown",
         }
     }

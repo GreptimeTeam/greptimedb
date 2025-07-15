@@ -133,7 +133,7 @@ async fn do_handle_bulk_api(
     );
 
     // The `schema` is already set in the query_ctx in auth process.
-    query_ctx.set_channel(Channel::ElasticSearch);
+    query_ctx.set_channel(Channel::Elasticsearch);
 
     let db = query_ctx.current_schema();
 
