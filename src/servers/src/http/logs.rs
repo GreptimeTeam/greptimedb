@@ -35,7 +35,7 @@ pub async fn logs(
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_LOGS_ELAPSED
