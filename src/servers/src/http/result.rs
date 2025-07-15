@@ -19,5 +19,6 @@ pub(crate) mod greptime_manage_resp;
 pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 pub(crate) mod json_result;
+pub(crate) mod null_result;
 pub(crate) mod prometheus_resp;
 pub(crate) mod table_result;

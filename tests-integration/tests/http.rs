@@ -480,6 +480,14 @@ pub async fn test_sql_api(store_type: StorageType) {
         body,
         "cpu,ts,host\r\nFloat64,TimestampMillisecond,String\r\n66.6,0,\"host, \"\"name\"\r\n"
     );
+    // test null format
+    let res = client
+        .get("/v1/sql?format=null&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    assert!(body.contains("1 rows in set."));
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
