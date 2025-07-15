@@ -446,6 +446,7 @@ pub fn extract_column_metadatas(
         .collect::<Vec<_>>();
 
     if schemas.is_empty() {
+        warn!("extract_column_metadatas: no extension key `{key}` found in results");
         return Ok(None);
     }
 
