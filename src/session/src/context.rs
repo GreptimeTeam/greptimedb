@@ -518,17 +518,17 @@ pub enum Channel {
 
     Mysql = 1,
     Postgres = 2,
-    Httpsql = 3,
+    HttpSql = 3,
     Prometheus = 4,
     Otlp = 5,
     Grpc = 6,
     Influx = 7,
     Opentsdb = 8,
     Loki = 9,
-    Elasticsearch = 10,
+    ElasticSearch = 10,
     Jaeger = 11,
     Log = 12,
-    Promql = 13,
+    PromQL = 13,
 }
 
 impl From<u32> for Channel {
@@ -536,17 +536,17 @@ impl From<u32> for Channel {
         match value {
             1 => Self::Mysql,
             2 => Self::Postgres,
-            3 => Self::Httpsql,
+            3 => Self::HttpSql,
             4 => Self::Prometheus,
             5 => Self::Otlp,
             6 => Self::Grpc,
             7 => Self::Influx,
             8 => Self::Opentsdb,
             9 => Self::Loki,
-            10 => Self::Elasticsearch,
+            10 => Self::ElasticSearch,
             11 => Self::Jaeger,
             12 => Self::Log,
-            13 => Self::Promql,
+            13 => Self::PromQL,
             _ => Self::Unknown,
         }
     }
@@ -573,17 +573,17 @@ impl AsRef<str> for Channel {
         match self {
             Channel::Mysql => "mysql",
             Channel::Postgres => "postgres",
-            Channel::Httpsql => "http",
+            Channel::HttpSql => "httpsql",
             Channel::Prometheus => "prometheus",
             Channel::Otlp => "otlp",
             Channel::Grpc => "grpc",
             Channel::Influx => "influx",
             Channel::Opentsdb => "opentsdb",
             Channel::Loki => "loki",
-            Channel::Elasticsearch => "elasticsearch",
+            Channel::ElasticSearch => "elasticsearch",
             Channel::Jaeger => "jaeger",
             Channel::Log => "log",
-            Channel::Promql => "promql",
+            Channel::PromQL => "promql",
             Channel::Unknown => "unknown",
         }
     }
