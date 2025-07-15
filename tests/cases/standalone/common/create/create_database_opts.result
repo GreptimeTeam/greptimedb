@@ -92,10 +92,10 @@ SHOW FULL DATABASES;
 | greptime_private   |                                  |
 | information_schema |                                  |
 | mydb               | 'ttl'='1h'                       |
-|                    | 'memtable.type'='partition_tree' |
-|                    | 'skip_wal'='true'                |
-|                    | 'merge_mode'='last_non_null'     |
 |                    | 'append_mode'='false'            |
+|                    | 'memtable.type'='partition_tree' |
+|                    | 'merge_mode'='last_non_null'     |
+|                    | 'skip_wal'='true'                |
 |                    |                                  |
 | public             |                                  |
 +--------------------+----------------------------------+

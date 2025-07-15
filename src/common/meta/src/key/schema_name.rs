@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -59,7 +59,7 @@ pub struct SchemaNameValue {
     #[serde(default)]
     pub ttl: Option<DatabaseTimeToLive>,
     #[serde(default)]
-    pub extra_options: HashMap<String, String>,
+    pub extra_options: BTreeMap<String, String>,
 }
 
 impl Display for SchemaNameValue {
@@ -451,7 +451,7 @@ mod tests {
             parsed,
             Some(SchemaNameValue {
                 ttl: Some(Duration::from_secs(10).into()),
-                extra_options: HashMap::new(),
+                extra_options: BTreeMap::new(),
             })
         );
 
@@ -466,7 +466,7 @@ mod tests {
         // Simulate new format: ttl + extra_options
         let json = r#"{"ttl":"15s","extra_options":{"foo":"bar","baz":"qux"}}"#;
         let parsed = SchemaNameValue::try_from_raw_value(json.as_bytes()).unwrap();
-        let mut expected_options = HashMap::new();
+        let mut expected_options = BTreeMap::new();
         expected_options.insert("foo".to_string(), "bar".to_string());
         expected_options.insert("baz".to_string(), "qux".to_string());
         assert_eq!(
