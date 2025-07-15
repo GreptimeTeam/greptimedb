@@ -467,9 +467,12 @@ mod tests {
 
         let plan_str = get_plan_string(&physical_plan).join("\n");
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
-        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"hello world\", probes: [\"hello\", \"world\"]"));
+        assert!(plan_str.contains(
+            "MatchesConstTerm(text@0, term: \"hello world\", probes: [\"hello\", \"world\"]"
+        ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
-        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]"));
+        assert!(plan_str
+            .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]"));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"there\", probes: [\"there\"]"));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"42\", probes: [\"42\"]"));
         assert!(!plan_str.contains("matches_term"))
