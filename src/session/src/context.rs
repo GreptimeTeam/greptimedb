@@ -564,21 +564,27 @@ impl Channel {
 
 impl Display for Channel {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+impl AsRef<str> for Channel {
+    fn as_ref(&self) -> &str {
         match self {
-            Channel::Mysql => write!(f, "mysql"),
-            Channel::Postgres => write!(f, "postgres"),
-            Channel::Httpsql => write!(f, "http"),
-            Channel::Prometheus => write!(f, "prometheus"),
-            Channel::Otlp => write!(f, "otlp"),
-            Channel::Grpc => write!(f, "grpc"),
-            Channel::Influx => write!(f, "influx"),
-            Channel::Opentsdb => write!(f, "opentsdb"),
-            Channel::Loki => write!(f, "loki"),
-            Channel::Elasticsearch => write!(f, "elasticsearch"),
-            Channel::Jaeger => write!(f, "jaeger"),
-            Channel::Log => write!(f, "log"),
-            Channel::Promql => write!(f, "promql"),
-            Channel::Unknown => write!(f, "unknown"),
+            Channel::Mysql => "mysql",
+            Channel::Postgres => "postgres",
+            Channel::Httpsql => "http",
+            Channel::Prometheus => "prometheus",
+            Channel::Otlp => "otlp",
+            Channel::Grpc => "grpc",
+            Channel::Influx => "influx",
+            Channel::Opentsdb => "opentsdb",
+            Channel::Loki => "loki",
+            Channel::Elasticsearch => "elasticsearch",
+            Channel::Jaeger => "jaeger",
+            Channel::Log => "log",
+            Channel::Promql => "promql",
+            Channel::Unknown => "unknown",
         }
     }
 }
