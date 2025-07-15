@@ -77,6 +77,11 @@ pub fn build_oss_backend(
 
     let op = ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
+        .layer(
+            object_store::layers::RetryLayer::new()
+                .with_jitter()
+                .with_notify(object_store::util::PrintDetailedError),
+        )
         .layer(object_store::layers::LoggingLayer::default())
         .layer(object_store::layers::TracingLayer)
         .layer(object_store::layers::build_prometheus_metrics_layer(true))

@@ -16,15 +16,14 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use object_store::factory::new_raw_object_store;
-use object_store::layers::{LruCacheLayer, RetryInterceptor, RetryLayer};
+use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
-use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers};
+use object_store::util::{clean_temp_dir, join_dir, with_instrument_layers, PrintDetailedError};
 use object_store::{
-    Access, Error, ObjectStore, ObjectStoreBuilder, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR,
+    Access, ObjectStore, ObjectStoreBuilder, ATOMIC_WRITE_DIR, OLD_ATOMIC_WRITE_DIR,
 };
 use snafu::prelude::*;
 
@@ -174,14 +173,5 @@ async fn build_cache_layer(
         Ok(Some(cache_layer))
     } else {
         Ok(None)
-    }
-}
-
-struct PrintDetailedError;
-
-// PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.
-impl RetryInterceptor for PrintDetailedError {
-    fn intercept(&self, err: &Error, dur: Duration) {
-        warn!("Retry after {}s, error: {:#?}", dur.as_secs_f64(), err);
     }
 }

@@ -85,6 +85,11 @@ pub fn build_s3_backend(
     // TODO(weny): Consider finding a better way to eliminate duplicate code.
     Ok(ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
+        .layer(
+            object_store::layers::RetryLayer::new()
+                .with_jitter()
+                .with_notify(object_store::util::PrintDetailedError),
+        )
         .layer(object_store::layers::LoggingLayer::new(
             DefaultLoggingInterceptor,
         ))
