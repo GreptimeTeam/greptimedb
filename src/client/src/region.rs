@@ -163,19 +163,70 @@ impl RegionRequester {
             let _span = tracing_context.attach(common_telemetry::tracing::info_span!(
                 "poll_flight_data_stream"
             ));
-            while let Some(flight_message) = flight_message_stream.next().await {
-                let flight_message = flight_message
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
+
+            let mut buffered_message: Option<FlightMessage> = None;
+            let mut stream_ended = false;
+
+            while !stream_ended {
+                // get the next message from the buffered message or read from the flight message stream
+                let flight_message_item = if let Some(msg) = buffered_message.take() {
+                    Some(Ok(msg))
+                } else {
+                    flight_message_stream.next().await
+                };
+
+                let flight_message = match flight_message_item {
+                    Some(Ok(message)) => message,
+                    Some(Err(e)) => {
+                        yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                        break;
+                    }
+                    None => break,
+                };
 
                 match flight_message {
                     FlightMessage::RecordBatch(record_batch) => {
-                        yield RecordBatch::try_from_df_record_batch(
+                        let result_to_yield = RecordBatch::try_from_df_record_batch(
                             schema_cloned.clone(),
                             record_batch,
-                        )
+                        );
+
+                        // get the next message from the stream. normally it should be a metrics message.
+                        if let Some(next_flight_message_result) = flight_message_stream.next().await
+                        {
+                            match next_flight_message_result {
+                                Ok(FlightMessage::Metrics(s)) => {
+                                    let m = serde_json::from_str(&s).ok().map(Arc::new);
+                                    metrics_ref.swap(m);
+                                }
+                                Ok(FlightMessage::RecordBatch(rb)) => {
+                                    // for some reason it's not a metrics message, so we need to buffer this record batch
+                                    // and yield it in the next iteration.
+                                    buffered_message = Some(FlightMessage::RecordBatch(rb));
+                                }
+                                Ok(_) => {
+                                    yield IllegalFlightMessagesSnafu {
+                                        reason: "A RecordBatch message can only be succeeded by a Metrics message or another RecordBatch message"
+                                    }
+                                    .fail()
+                                    .map_err(BoxedError::new)
+                                    .context(ExternalSnafu);
+                                    break;
+                                }
+                                Err(e) => {
+                                    yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                                    break;
+                                }
+                            }
+                        } else {
+                            // the stream has ended
+                            stream_ended = true;
+                        }
+
+                        yield result_to_yield;
                     }
                     FlightMessage::Metrics(s) => {
+                        // just a branch in case of some metrics message comes after other things.
                         let m = serde_json::from_str(&s).ok().map(Arc::new);
                         metrics_ref.swap(m);
                         break;
