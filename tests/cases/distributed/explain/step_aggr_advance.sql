@@ -33,3 +33,5 @@ tql explain (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr_optimize_not[2m]));
 
 -- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
+
+drop table aggr_optimize_not;
