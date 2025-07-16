@@ -1,81 +1,202 @@
 -- Test default values
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
 -- Test basic settings
-SET MAX_EXECUTION_TIME = 1000; -- Using global variable
+-- SQLNESS PROTOCOL MYSQL
+ -- Using global variable
+SET MAX_EXECUTION_TIME = 1000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
-SET SESSION MAX_EXECUTION_TIME = 2000; -- Using session variable
+-- Using session variable
+-- SQLNESS PROTOCOL MYSQL
+SET SESSION MAX_EXECUTION_TIME = 2000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@session.max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
++-------------------------------+
+| @@session.max_execution_time; |
++-------------------------------+
+| 0                             |
++-------------------------------+
 
 -- Test different formats
-SET @@SESSION.MAX_EXECUTION_TIME = 3000; -- Using session variable
+-- Using session variable
+-- SQLNESS PROTOCOL MYSQL
+SET @@SESSION.MAX_EXECUTION_TIME = 3000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@session.max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable @@SESSION.MAX_EXECUTION_TIME
++-------------------------------+
+| @@session.max_execution_time; |
++-------------------------------+
+| 0                             |
++-------------------------------+
 
-SET LOCAL MAX_EXECUTION_TIME = 4000; -- Using local variable
+-- Using local variable
+-- SQLNESS PROTOCOL MYSQL
+SET LOCAL MAX_EXECUTION_TIME = 4000;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
 -- Test case insensitivity
     -- set
-    set max_execution_time = 5000; -- Lowercase
-    SELECT @@max_execution_time;
+    -- Lowercase
+    -- SQLNESS PROTOCOL MYSQL
+    set max_execution_time = 5000;
 
 Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
 
-    SET max_EXECUTION_time = 6000; -- Mixed case
+    -- SQLNESS PROTOCOL MYSQL
     SELECT @@max_execution_time;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
+
+    -- Mixed case
+    -- SQLNESS PROTOCOL MYSQL
+    SET max_EXECUTION_time = 6000;
 
 Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
 
-    SET MAX_EXECUTION_TIME = 7000; -- Uppercase
+    -- SQLNESS PROTOCOL MYSQL
     SELECT @@max_execution_time;
 
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
+
+    -- Uppercase
+    -- SQLNESS PROTOCOL MYSQL
+    SET MAX_EXECUTION_TIME = 7000;
+
 Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    -- SQLNESS PROTOCOL MYSQL
+    SELECT @@max_execution_time;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
 
     -- select
+    -- Lowercase
+    -- SQLNESS PROTOCOL MYSQL
     SET max_execution_time = 8000;
 
 Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
 
-    SELECT @@max_execution_time; -- Lowercase
-    SET max_execution_time = 9000;
+    -- SQLNESS PROTOCOL MYSQL
+    SELECT @@max_execution_time;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_execution_time"] has no type information
 
-    SELECT @@max_Execution_time; -- Mixed case
-    SET max_execution_time = 10000;
+    -- Mixed case
+    -- SQLNESS PROTOCOL MYSQL
+    SET max_execution_time = 9000;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    -- SQLNESS PROTOCOL MYSQL
+    SELECT @@max_Execution_time;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@max_Execution_time"] has no type information
 
--- Test the boundary
-    SELECT @@MAX_EXECUTION_TIME; -- Uppercase
-SET @@max_execution_time = 0; --minimum value for u64
-SELECT @@max_execution_time;
+    -- Uppercase
+    -- SQLNESS PROTOCOL MYSQL
+    SET max_execution_time = 10000;
+
+Error: 1001(Unsupported), Not supported: Unsupported set variable MAX_EXECUTION_TIME
+
+    -- SQLNESS PROTOCOL MYSQL
+    SELECT @@MAX_EXECUTION_TIME;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: variable ["@@MAX_EXECUTION_TIME"] has no type information
 
-SET @@max_execution_time = -1; -- Negative value (not allowed)
+-- Test the boundary
+--minimum value for u64
+-- SQLNESS PROTOCOL MYSQL
+SET @@max_execution_time = 0;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
-SET @@max_execution_time = 18446744073709551615; -- Maximum value for u64
+-- Negative value (not allowed)
+-- SQLNESS PROTOCOL MYSQL
+SET @@max_execution_time = -1;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
-SET @@max_execution_time = 18446744073709551616; -- Maximum value for u64 + 1 (out of range)
+-- Maximum value for u64
+-- SQLNESS PROTOCOL MYSQL
+SET @@max_execution_time = 18446744073709551615;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT @@max_execution_time;
 
-Error: 1001(Unsupported), Not supported: Unsupported set variable @@MAX_EXECUTION_TIME
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
+
+-- Maximum value for u64 + 1 (out of range)
+-- SQLNESS PROTOCOL MYSQL
+SET @@max_execution_time = 18446744073709551616;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT @@max_execution_time;
+
++-----------------------+
+| @@max_execution_time; |
++-----------------------+
+| 0                     |
++-----------------------+
 
