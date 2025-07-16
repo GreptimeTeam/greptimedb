@@ -4,11 +4,12 @@ use sqlparser::ast::Ident;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, DuplicateClauseSnafu, Result};
+use crate::error::{self, DuplicateClauseSnafu, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::trigger::{ANNOTATIONS, LABELS, NOTIFY, ON};
 use crate::statements::alter::trigger::{AnnotationOperations, LabelOperations};
 use crate::statements::statement::Statement;
+use crate::statements::OptionMap;
 
 /// Some keywords about trigger.
 pub const RENAME: &str = "RENAME";
@@ -81,27 +82,21 @@ impl<'a> ParserContext<'a> {
                     let (query, interval) = self.parse_trigger_on(true)?;
                     ensure!(
                         new_query_and_interval.is_none(),
-                        error::DuplicateClauseSnafu { clause: ON }
+                        DuplicateClauseSnafu { clause: ON }
                     );
                     new_query_and_interval.replace((query, interval));
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
                     let labels = self.parse_trigger_labels(true)?;
-                    ensure!(
-                        label_ops.is_none(),
-                        error::DuplicateClauseSnafu {
-                            clause: "LABELS OR SET LABELS"
-                        }
-                    );
-                    label_ops.replace(LabelOperations::ReplaceAll(labels));
+                    check_and_set_labels(&mut label_ops, labels)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                     self.parser.next_token();
                     let annotations = self.parse_trigger_annotations(true)?;
                     ensure!(
                         annotation_ops.is_none(),
-                        error::DuplicateClauseSnafu {
+                        DuplicateClauseSnafu {
                             clause: "ANNOTATIONS OR SET ANNOTATIONS"
                         }
                     );
@@ -119,20 +114,14 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(true)?;
-                            ensure!(
-                                label_ops.is_none(),
-                                error::DuplicateClauseSnafu {
-                                    clause: "LABELS OR SET LABELS"
-                                }
-                            );
-                            label_ops.replace(LabelOperations::ReplaceAll(labels));
+                            check_and_set_labels(&mut label_ops, labels)?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
                             ensure!(
                                 annotation_ops.is_none(),
-                                error::DuplicateClauseSnafu {
+                                DuplicateClauseSnafu {
                                     clause: "ANNOTATIONS OR SET ANNOTATIONS"
                                 }
                             );
@@ -401,6 +390,23 @@ impl<'a> ParserContext<'a> {
             .context(error::SyntaxSnafu)?;
 
         Ok(notify_names)
+    }
+}
+
+fn check_and_set_labels(label_ops: &mut Option<LabelOperations>, labels: OptionMap) -> Result<()> {
+    match label_ops {
+        Some(LabelOperations::ReplaceAll(_)) => DuplicateClauseSnafu {
+            clause: "LABELS or SET LABELS",
+        }
+        .fail(),
+        Some(LabelOperations::PartialChanges(_)) => InvalidSqlSnafu {
+            msg: "SET LABELS cannot be used with ADD/MODIFY/DROP LABELS",
+        }
+        .fail(),
+        None => {
+            *label_ops = Some(LabelOperations::ReplaceAll(labels));
+            Ok(())
+        }
     }
 }
 
