@@ -139,20 +139,20 @@ mod tests {
 SELECT *
 FROM
 t
-WHERE a = 
+WHERE a =
 1
 ",
             r"SELECT *
 FROM
 t
-WHERE a = 
+WHERE a =
 1
 ",
             r"
 SELECT *
 FROM
 t
-WHERE a = 
+WHERE a =
 1",
         ];
 

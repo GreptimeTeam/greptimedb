@@ -264,7 +264,10 @@ mod tests {
         ]);
         let add_labels = LabelChange::Add(add_labels.into());
         let remove_labels = LabelChange::Drop(vec!["k3".to_string(), "k4".to_string()]);
-        let label_operations = Some(LabelOperations::PartialChanges(vec![add_labels, remove_labels]));
+        let label_operations = Some(LabelOperations::PartialChanges(vec![
+            add_labels,
+            remove_labels,
+        ]));
 
         let set_annotations = HashMap::from([
             ("a1".to_string(), "v1".to_string()),
