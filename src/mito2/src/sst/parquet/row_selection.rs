@@ -431,7 +431,7 @@ impl RowGroupSelection {
 /// other:     NYNNNNNNY
 ///
 /// returned:  NNNNNNNNY     (modified)
-///            NNNNNNNNYYNYN (orignal)
+///            NNNNNNNNYYNYN (original)
 fn intersect_row_selections(left: &RowSelection, right: &RowSelection) -> RowSelection {
     let mut l_iter = left.iter().copied().peekable();
     let mut r_iter = right.iter().copied().peekable();
