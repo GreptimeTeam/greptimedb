@@ -488,6 +488,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let body = &res.text().await;
     assert!(body.contains("1 rows in set."));
+    assert!(body.ends_with("sec.\n"));
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;

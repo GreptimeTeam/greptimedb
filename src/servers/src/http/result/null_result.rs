@@ -99,7 +99,8 @@ impl IntoResponse for NullResponse {
                 let _ = writeln!(body, "{} rows in set.", rows);
             }
         }
-        let _ = writeln!(body, "Elapsed: {} ms.", self.execution_time_ms);
+        let elapsed_secs = (self.execution_time_ms as f64) / 1000.0;
+        let _ = writeln!(body, "Elapsed: {:.3} sec.", elapsed_secs);
 
         let mut resp = (
             [(
@@ -158,6 +159,6 @@ mod tests {
         let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
         let body = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body.contains("42 rows in set."));
-        assert!(body.contains("Elapsed: 1234 ms."));
+        assert!(body.contains("Elapsed: 1.234 sec."));
     }
 }
