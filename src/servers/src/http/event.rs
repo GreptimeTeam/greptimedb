@@ -178,7 +178,7 @@ pub async fn query_pipeline(
 
     let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     let (pipeline, pipeline_version) = handler
@@ -223,7 +223,7 @@ pub async fn add_pipeline(
         }
     );
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     let content_type = "yaml";
@@ -268,7 +268,7 @@ pub async fn delete_pipeline(
 
     let version = to_pipeline_version(Some(&version_str)).context(PipelineSnafu)?;
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     handler
@@ -519,7 +519,7 @@ pub async fn pipeline_dryrun(
 ) -> Result<Response> {
     let handler = log_state.log_handler;
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     match check_pipeline_dryrun_params_valid(&payload) {
@@ -644,7 +644,7 @@ pub async fn log_ingester(
 
     let value = extract_pipeline_value_by_content_type(content_type, payload, ignore_errors)?;
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
     let value = log_state

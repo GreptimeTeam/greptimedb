@@ -91,7 +91,7 @@ pub async fn sql(
     }
     let db = query_ctx.get_db_string();
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::HttpSql);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
@@ -298,7 +298,7 @@ pub async fn promql(
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Promql);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED

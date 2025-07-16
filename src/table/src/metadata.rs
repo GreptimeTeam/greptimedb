@@ -1051,6 +1051,10 @@ impl TableInfo {
         common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
     }
 
+    pub fn get_db_string(&self) -> String {
+        common_catalog::build_db_string(&self.catalog_name, &self.schema_name)
+    }
+
     /// Returns true when the table is the metric engine's physical table.
     pub fn is_physical_table(&self) -> bool {
         self.meta

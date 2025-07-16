@@ -424,7 +424,9 @@ impl Inserter {
             .into_iter()
             .map(|resp| resp.map(|r| r.affected_rows))
             .sum::<Result<AffectedRows>>()?;
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows as u64);
+        crate::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()])
+            .inc_by(affected_rows as u64);
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
             OutputMeta::new_with_cost(write_cost as _),
