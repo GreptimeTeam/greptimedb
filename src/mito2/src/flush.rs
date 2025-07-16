@@ -42,7 +42,7 @@ use crate::region::version::{VersionControlData, VersionControlRef};
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
@@ -223,7 +223,7 @@ pub(crate) struct RegionFlushTask {
     /// Flush result senders.
     pub(crate) senders: Vec<OutputTx>,
     /// Request sender to notify the worker.
-    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+    pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
 
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) listener: WorkerListener,
@@ -441,7 +441,11 @@ impl RegionFlushTask {
 
     /// Notify flush job status.
     async fn send_worker_request(&self, request: WorkerRequest) {
-        if let Err(e) = self.request_sender.send(request).await {
+        if let Err(e) = self
+            .request_sender
+            .send(WorkerRequestWithTime::new(request))
+            .await
+        {
             error!(
                 "Failed to notify flush job status for region {}, request: {:?}",
                 self.region_id, e.0

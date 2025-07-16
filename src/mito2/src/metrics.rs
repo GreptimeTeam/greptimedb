@@ -428,6 +428,18 @@ lazy_static! {
         ).unwrap();
 }
 
+// Use another block to avoid reaching the recursion limit.
+lazy_static! {
+    /// Time waiting for requests to be handled by the region worker.
+    pub static ref REQUEST_WAIT_TIME: Histogram = register_histogram!(
+            "greptime_mito_request_wait_time",
+            "mito request wait time before being handled by region worker",
+            // 0.001 ~ 10000
+            exponential_buckets(0.001, 10.0, 8).unwrap(),
+        )
+        .unwrap();
+}
+
 /// Stager notifier to collect metrics.
 pub struct StagerMetrics {
     cache_hit: IntCounter,
