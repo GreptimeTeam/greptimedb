@@ -431,6 +431,11 @@ lazy_static! {
             "mito stalled write request in each worker",
             &[WORKER_LABEL]
         ).unwrap();
+    /// Total number of stalled write requests.
+    pub static ref WRITE_STALL_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_write_stall_total",
+        "Total number of stalled write requests"
+    ).unwrap();
     /// Time waiting for requests to be handled by the region worker.
     pub static ref REQUEST_WAIT_TIME: HistogramVec = register_histogram_vec!(
             "greptime_mito_request_wait_time",

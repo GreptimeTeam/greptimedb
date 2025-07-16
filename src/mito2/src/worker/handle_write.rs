@@ -27,7 +27,9 @@ use store_api::storage::RegionId;
 
 use crate::error::{InvalidRequestSnafu, RegionStateSnafu, RejectWriteSnafu, Result};
 use crate::metrics;
-use crate::metrics::{WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED};
+use crate::metrics::{
+    WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
+};
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
@@ -57,8 +59,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            self.stalling_count
-                .add((write_requests.len() + bulk_requests.len()) as i64);
+            let stalled_count = (write_requests.len() + bulk_requests.len()) as i64;
+            self.stalling_count.add(stalled_count);
+            WRITE_STALL_TOTAL.inc_by(stalled_count as u64);
             self.stalled_requests.append(write_requests, bulk_requests);
             self.listener.on_write_stall();
             return;
@@ -254,6 +257,7 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id
                         );
                         self.stalling_count.add(1);
+                        WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push(sender_req);
                         continue;
                     }
@@ -356,6 +360,7 @@ impl<S> RegionWorkerLoop<S> {
                             region.region_id
                         );
                         self.stalling_count.add(1);
+                        WRITE_STALL_TOTAL.inc();
                         self.stalled_requests.push_bulk(bulk_req);
                         continue;
                     }
