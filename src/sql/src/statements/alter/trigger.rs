@@ -105,6 +105,22 @@ pub enum LabelOperations {
     PartialChanges(Vec<LabelChange>),
 }
 
+impl LabelOperations {
+    /// Insert a partial change into the label operations.
+    ///
+    /// Returns `true` if the change was inserted, `false` if the operation is
+    /// `ReplaceAll`.
+    pub fn insert_partial_change(&mut self, change: LabelChange) -> bool {
+        match self {
+            LabelOperations::ReplaceAll(_) => false,
+            LabelOperations::PartialChanges(changes) => {
+                changes.push(change);
+                true
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum LabelChange {
     /// Add operation will add new labels.

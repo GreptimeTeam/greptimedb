@@ -1,12 +1,13 @@
 #![allow(dead_code)]
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, Result};
+use crate::error::{self, DuplicateClauseSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::trigger::{ANNOTATIONS, LABELS, NOTIFY, ON};
+use crate::statements::alter::trigger::{AnnotationOperations, LabelOperations};
 use crate::statements::statement::Statement;
 
 /// Some keywords about trigger.
@@ -43,11 +44,11 @@ impl<'a> ParserContext<'a> {
     pub(super) fn parse_alter_trigger(&mut self) -> Result<Statement> {
         let _trigger_name = self.intern_parse_table_name()?;
 
-        let mut may_new_trigger_name = None;
-        let mut may_new_query = None;
-        let mut may_new_interval = None;
-        let mut may_new_labels = None;
-        let mut may_new_annotations = None;
+        let mut new_trigger_name = None;
+        let mut new_query_and_interval = None;
+        let mut label_ops: Option<LabelOperations> = None;
+        let mut annotation_ops: Option<AnnotationOperations> = None;
+
         let mut new_notify_channels = None;
 
         let mut may_add_labels = None;
@@ -67,23 +68,44 @@ impl<'a> ParserContext<'a> {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(RENAME) => {
                     self.parser.next_token();
                     let name = self.parse_rename_to(true)?;
-                    may_new_trigger_name.replace(name);
+                    ensure!(
+                        new_trigger_name.is_none(),
+                        DuplicateClauseSnafu {
+                            clause: "RENAME TO"
+                        }
+                    );
+                    new_trigger_name.replace(name);
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ON) => {
                     self.parser.next_token();
                     let (query, interval) = self.parse_trigger_on(true)?;
-                    may_new_query.replace(query);
-                    may_new_interval.replace(interval);
+                    ensure!(
+                        new_query_and_interval.is_none(),
+                        error::DuplicateClauseSnafu { clause: ON }
+                    );
+                    new_query_and_interval.replace((query, interval));
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
                     let labels = self.parse_trigger_labels(true)?;
-                    may_new_labels.replace(labels);
+                    ensure!(
+                        label_ops.is_none(),
+                        error::DuplicateClauseSnafu {
+                            clause: "LABELS OR SET LABELS"
+                        }
+                    );
+                    label_ops.replace(LabelOperations::ReplaceAll(labels));
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                     self.parser.next_token();
                     let annotations = self.parse_trigger_annotations(true)?;
-                    may_new_annotations.replace(annotations);
+                    ensure!(
+                        annotation_ops.is_none(),
+                        error::DuplicateClauseSnafu {
+                            clause: "ANNOTATIONS OR SET ANNOTATIONS"
+                        }
+                    );
+                    annotation_ops.replace(AnnotationOperations::ReplaceAll(annotations));
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                     self.parser.next_token();
@@ -97,12 +119,24 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(true)?;
-                            may_new_labels.replace(labels);
+                            ensure!(
+                                label_ops.is_none(),
+                                error::DuplicateClauseSnafu {
+                                    clause: "LABELS OR SET LABELS"
+                                }
+                            );
+                            label_ops.replace(LabelOperations::ReplaceAll(labels));
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
-                            may_new_labels.replace(annotations);
+                            ensure!(
+                                annotation_ops.is_none(),
+                                error::DuplicateClauseSnafu {
+                                    clause: "ANNOTATIONS OR SET ANNOTATIONS"
+                                }
+                            );
+                            annotation_ops.replace(AnnotationOperations::ReplaceAll(annotations));
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
