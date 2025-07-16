@@ -27,6 +27,7 @@ use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
 use pin_project::{pin_project, pinned_drop};
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use tokio::task::JoinHandle;
 
@@ -49,10 +50,12 @@ impl FlightRecordBatchStream {
         recordbatches: SendableRecordBatchStream,
         tracing_context: TracingContext,
         compression: FlightCompression,
+        query_ctx: QueryContextRef,
     ) -> Self {
+        let should_send_partial_metrics = query_ctx.explain_verbose();
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle = common_runtime::spawn_global(async move {
-            Self::flight_data_stream(recordbatches, tx)
+            Self::flight_data_stream(recordbatches, tx, should_send_partial_metrics)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
                 .await
         });
@@ -73,6 +76,7 @@ impl FlightRecordBatchStream {
     async fn flight_data_stream(
         mut recordbatches: SendableRecordBatchStream,
         mut tx: Sender<TonicResult<FlightMessage>>,
+        should_send_partial_metrics: bool,
     ) {
         let schema = recordbatches.schema().arrow_schema().clone();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
@@ -91,6 +95,17 @@ impl FlightRecordBatchStream {
                     {
                         warn!(e; "stop sending Flight data");
                         return;
+                    }
+                    if should_send_partial_metrics {
+                        if let Some(metrics) = recordbatches
+                            .metrics()
+                            .and_then(|m| serde_json::to_string(&m).ok())
+                        {
+                            if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics))).await {
+                                warn!(e; "stop sending Flight data");
+                                return;
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -171,6 +186,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures::StreamExt;
+    use session::context::QueryContext;
 
     use super::*;
 
@@ -192,6 +208,7 @@ mod test {
             recordbatches,
             TracingContext::default(),
             FlightCompression::default(),
+            QueryContext::arc(),
         );
 
         let mut raw_data = Vec::with_capacity(2);
