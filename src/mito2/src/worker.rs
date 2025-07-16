@@ -39,7 +39,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use prometheus::IntGauge;
+use prometheus::{Histogram, IntGauge};
 use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -471,6 +471,7 @@ impl<S: LogStore> WorkerStarter<S> {
             flush_receiver: self.flush_receiver,
             stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
+            request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
         };
@@ -716,6 +717,8 @@ struct RegionWorkerLoop<S> {
     stalled_count: IntGauge,
     /// Gauge of regions in the worker.
     region_count: IntGauge,
+    /// Histogram of request wait time for this worker.
+    request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
@@ -758,7 +761,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         Some(request_with_time) => {
                             // Observe the wait time
                             let wait_time = request_with_time.created_at.elapsed();
-                            REQUEST_WAIT_TIME.observe(wait_time.as_secs_f64());
+                            self.request_wait_time.observe(wait_time.as_secs_f64());
 
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
@@ -806,7 +809,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     Ok(request_with_time) => {
                         // Observe the wait time
                         let wait_time = request_with_time.created_at.elapsed();
-                        REQUEST_WAIT_TIME.observe(wait_time.as_secs_f64());
+                        self.request_wait_time.observe(wait_time.as_secs_f64());
 
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),

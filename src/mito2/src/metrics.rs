@@ -431,9 +431,10 @@ lazy_static! {
 // Use another block to avoid reaching the recursion limit.
 lazy_static! {
     /// Time waiting for requests to be handled by the region worker.
-    pub static ref REQUEST_WAIT_TIME: Histogram = register_histogram!(
+    pub static ref REQUEST_WAIT_TIME: HistogramVec = register_histogram_vec!(
             "greptime_mito_request_wait_time",
             "mito request wait time before being handled by region worker",
+            &[WORKER_LABEL],
             // 0.001 ~ 10000
             exponential_buckets(0.001, 10.0, 8).unwrap(),
         )
