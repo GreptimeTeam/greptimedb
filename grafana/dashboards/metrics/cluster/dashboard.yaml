@@ -659,37 +659,37 @@ groups:
           description: Read QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{instance=~"$datanode", operation="read"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{instance=~"$datanode", operation=~"read|Reader::read"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
         - title: Read P99 per Instance
           type: timeseries
           description: Read P99 per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode",operation="read"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode",operation=~"read|Reader::read"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-{{scheme}}'
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
         - title: Write QPS per Instance
           type: timeseries
           description: Write QPS per Instance.
           unit: ops
           queries:
-            - expr: sum by(instance, pod, scheme) (rate(opendal_operation_duration_seconds_count{instance=~"$datanode", operation="write"}[$__rate_interval]))
+            - expr: sum by(instance, pod, scheme, operation) (rate(opendal_operation_duration_seconds_count{instance=~"$datanode", operation=~"write|Writer::write|Writer::close"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-{{scheme}}'
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
         - title: Write P99 per Instance
           type: timeseries
           description: Write P99 per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode", operation="write"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode", operation =~ "Writer::write|Writer::close|write"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
@@ -729,7 +729,7 @@ groups:
           description: Other Request P99 per Instance.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode", operation!~"read|write|list"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{instance=~"$datanode", operation!~"read|write|list|Writer::write|Writer::close|Reader::read"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
