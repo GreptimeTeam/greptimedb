@@ -204,7 +204,7 @@ pub trait EventRecorder: Send + Sync + 'static {
     fn record(&self, event: Box<dyn Event>);
 
     /// Cancels the event recorder.
-    fn cancel(&self);
+    fn close(&self);
 }
 
 /// EventHandler trait defines the interface for how to handle the event.
@@ -288,8 +288,8 @@ impl EventRecorder for EventRecorderImpl {
         }
     }
 
-    // Cancels the event recorder. It will cancel the background processor.
-    fn cancel(&self) {
+    // Closes the event recorder. It will stop the background processor and flush the buffer.
+    fn close(&self) {
         self.cancel_token.cancel();
     }
 }
@@ -345,7 +345,7 @@ impl EventProcessor {
                         debug!("Received event: {:?}", maybe_event);
 
                         if buffer.len() >= buffer_size {
-                            warn!(
+                            debug!(
                                 "Flushing events to the event handler because the buffer is full with {} events",
                                 buffer.len()
                             );
@@ -402,7 +402,7 @@ impl EventProcessor {
                             continue;
                         } else {
                             warn!(
-                                e;"Failed to handle events after {} retries",
+                                e; "Failed to handle events after {} retries",
                                 self.max_retry_times
                             );
                             break;
@@ -467,7 +467,7 @@ mod tests {
         event_recorder.record(Box::new(TestEvent {}));
 
         // Cancel the event recorder to flush the buffer.
-        event_recorder.cancel();
+        event_recorder.close();
 
         // Sleep for a while to let the background task process the event.
         sleep(Duration::from_millis(100)).await;
@@ -488,6 +488,8 @@ mod tests {
                 .as_any()
                 .downcast_ref::<TestEvent>()
                 .unwrap();
+
+            // Set the incorrect payload and event type to trigger the panic.
             assert_eq!(
                 event.json_payload().unwrap(),
                 "{\"procedure_id\": \"should_panic\"}"
@@ -506,9 +508,10 @@ mod tests {
 
         event_recorder.record(Box::new(TestEvent {}));
 
-        // Cancel the event recorder to flush the buffer.
-        event_recorder.cancel();
+        // Close the event recorder to flush the buffer.
+        event_recorder.close();
 
+        // Sleep for a while to let the background task process the event.
         sleep(Duration::from_millis(100)).await;
 
         if let Some(handle) = event_recorder.handle.take() {
