@@ -27,7 +27,7 @@ use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableInfoRef;
 use table::TableRef;
@@ -53,7 +53,10 @@ impl Inserter {
         // Build region server requests
         let message = decoder
             .try_decode(&data)
-            .context(error::DecodeFlightDataSnafu)?;
+            .context(error::DecodeFlightDataSnafu)?
+            .context(error::NotSupportedSnafu {
+                feat: "bulk insert RecordBatch with dictionary arrays",
+            })?;
         let FlightMessage::RecordBatch(record_batch) = message else {
             return Ok(0);
         };
@@ -195,8 +198,20 @@ impl Inserter {
                             let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["encode"])
                                 .start_timer();
-                            let flight_data =
-                                FlightEncoder::default().encode(FlightMessage::RecordBatch(batch));
+                            let mut iter = FlightEncoder::default()
+                                .encode(FlightMessage::RecordBatch(batch))
+                                .into_iter();
+                            let Some(flight_data) = iter.next() else {
+                                // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
+                                // at least one element.
+                                unreachable!()
+                            };
+                            ensure!(
+                                iter.next().is_none(),
+                                error::NotSupportedSnafu {
+                                    feat: "bulk insert RecordBatch with dictionary arrays",
+                                }
+                            );
                             encode_timer.observe_duration();
                             (flight_data.data_header, flight_data.data_body)
                         };

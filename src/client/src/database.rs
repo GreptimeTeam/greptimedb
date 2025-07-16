@@ -42,7 +42,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -355,7 +355,10 @@ impl Database {
         let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
             flight_data
                 .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))
+                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))?
+                .context(IllegalFlightMessagesSnafu {
+                    reason: "none message",
+                })
         });
 
         let Some(first_flight_message) = flight_message_stream.next().await else {

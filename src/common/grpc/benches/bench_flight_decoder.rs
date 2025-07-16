@@ -84,9 +84,12 @@ fn prepare_random_record_batch(
 fn prepare_flight_data(num_rows: usize) -> (FlightData, FlightData) {
     let schema = schema();
     let mut encoder = FlightEncoder::default();
-    let schema_data = encoder.encode(FlightMessage::Schema(schema.clone()));
+    let schema_data = encoder.encode_schema(schema.as_ref());
     let rb = prepare_random_record_batch(schema, num_rows);
-    let rb_data = encoder.encode(FlightMessage::RecordBatch(rb));
+    let [rb_data] = encoder
+        .encode(FlightMessage::RecordBatch(rb))
+        .try_into()
+        .unwrap();
     (schema_data, rb_data)
 }
 
@@ -96,7 +99,7 @@ fn decode_flight_data_from_protobuf(schema: &Bytes, payload: &Bytes) -> DfRecord
     let mut decoder = FlightDecoder::default();
     let _schema = decoder.try_decode(&schema).unwrap();
     let message = decoder.try_decode(&payload).unwrap();
-    let FlightMessage::RecordBatch(batch) = message else {
+    let Some(FlightMessage::RecordBatch(batch)) = message else {
         unreachable!("unexpected message");
     };
     batch

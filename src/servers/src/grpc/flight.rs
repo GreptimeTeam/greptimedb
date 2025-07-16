@@ -383,9 +383,12 @@ fn to_flight_data_stream(
             Box::pin(stream) as _
         }
         OutputData::AffectedRows(rows) => {
-            let stream = tokio_stream::once(Ok(
-                FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
-            ));
+            let stream = tokio_stream::iter(
+                FlightEncoder::default()
+                    .encode(FlightMessage::AffectedRows(rows))
+                    .into_iter()
+                    .map(Ok),
+            );
             Box::pin(stream) as _
         }
     }
