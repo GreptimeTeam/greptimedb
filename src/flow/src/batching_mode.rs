@@ -16,6 +16,8 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 pub(crate) mod engine;
 pub(crate) mod frontend_client;
 mod state;
@@ -23,27 +25,49 @@ mod task;
 mod time_window;
 mod utils;
 
-/// TODO(discord9): make those constants configurable
-/// The default batching engine query timeout is 10 minutes
-pub const DEFAULT_BATCHING_ENGINE_QUERY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BatchingModeOptions {
+    /// The default batching engine query timeout is 10 minutes
+    #[serde(with = "humantime_serde")]
+    pub query_timeout: Duration,
+    /// will output a warn log for any query that runs for more that this threshold
+    #[serde(with = "humantime_serde")]
+    pub slow_query_threshold: Duration,
+    /// The minimum duration between two queries execution by batching mode task
+    #[serde(with = "humantime_serde")]
+    pub experimental_min_refresh_duration: Duration,
+    /// The gRPC connection timeout
+    #[serde(with = "humantime_serde")]
+    pub grpc_conn_timeout: Duration,
+    /// The gRPC max retry number
+    pub experimental_grpc_max_retries: u32,
+    /// Flow wait for available frontend timeout,
+    /// if failed to find available frontend after frontend_scan_timeout elapsed, return error
+    /// which prevent flownode from starting
+    #[serde(with = "humantime_serde")]
+    pub experimental_frontend_scan_timeout: Duration,
+    /// Frontend activity timeout
+    /// if frontend is down(not sending heartbeat) for more than frontend_activity_timeout, it will be removed from the list that flownode use to connect
+    #[serde(with = "humantime_serde")]
+    pub experimental_frontend_activity_timeout: Duration,
+    /// Maximum number of filters allowed in a single query
+    pub experimental_max_filter_num_per_query: usize,
+    /// Time window merge distance
+    pub experimental_time_window_merge_threshold: usize,
+}
 
-/// will output a warn log for any query that runs for more that 1 minutes, and also every 1 minutes when that query is still running
-pub const SLOW_QUERY_THRESHOLD: Duration = Duration::from_secs(60);
-
-/// The minimum duration between two queries execution by batching mode task
-pub const MIN_REFRESH_DURATION: Duration = Duration::new(5, 0);
-
-/// Grpc connection timeout
-const GRPC_CONN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Grpc max retry number
-const GRPC_MAX_RETRIES: u32 = 3;
-
-/// Flow wait for available frontend timeout,
-/// if failed to find available frontend after FRONTEND_SCAN_TIMEOUT elapsed, return error
-/// which should prevent flownode from starting
-pub const FRONTEND_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Frontend activity timeout
-/// if frontend is down(not sending heartbeat) for more than FRONTEND_ACTIVITY_TIMEOUT, it will be removed from the list that flownode use to connect
-pub const FRONTEND_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+impl Default for BatchingModeOptions {
+    fn default() -> Self {
+        Self {
+            query_timeout: Duration::from_secs(10 * 60),
+            slow_query_threshold: Duration::from_secs(60),
+            experimental_min_refresh_duration: Duration::new(5, 0),
+            grpc_conn_timeout: Duration::from_secs(5),
+            experimental_grpc_max_retries: 3,
+            experimental_frontend_scan_timeout: Duration::from_secs(30),
+            experimental_frontend_activity_timeout: Duration::from_secs(60),
+            experimental_max_filter_num_per_query: 20,
+            experimental_time_window_merge_threshold: 3,
+        }
+    }
+}

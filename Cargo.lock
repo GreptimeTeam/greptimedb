@@ -4688,6 +4688,7 @@ dependencies = [
  "get-size2",
  "greptime-proto",
  "http 1.1.0",
+ "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "meta-client",
