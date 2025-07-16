@@ -284,7 +284,7 @@ impl TableMeta {
         requests: &[SetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::with_capacity(requests.len());
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::new();
         for request in requests {
             let column_name = request.column_name();
             table_schema
@@ -344,7 +344,7 @@ impl TableMeta {
         requests: &[UnsetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::with_capacity(requests.len());
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::new();
         for request in requests {
             let column_name = request.column_name();
             table_schema

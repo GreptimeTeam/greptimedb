@@ -719,13 +719,19 @@ impl RegionMetadataBuilder {
     }
 
     fn set_indexes(&mut self, options: Vec<SetIndexOption>) -> Result<()> {
-        for option in options {
-            if let Some(column_metadata) = self
-                .column_metadatas
-                .iter_mut()
-                .find(|c| c.column_schema.name == *option.column_name())
-            {
-                Self::set_index(column_metadata, option)?;
+        let mut set_index_map: HashMap<_, Vec<_>> = HashMap::new();
+        for option in &options {
+            set_index_map
+                .entry(option.column_name())
+                .or_default()
+                .push(option);
+        }
+
+        for column_metadata in self.column_metadatas.iter_mut() {
+            if let Some(options) = set_index_map.remove(&column_metadata.column_schema.name) {
+                for option in options {
+                    Self::set_index(column_metadata, option)?;
+                }
             }
         }
 
@@ -733,20 +739,26 @@ impl RegionMetadataBuilder {
     }
 
     fn unset_indexes(&mut self, options: Vec<UnsetIndexOption>) -> Result<()> {
-        for option in options {
-            if let Some(column_metadata) = self
-                .column_metadatas
-                .iter_mut()
-                .find(|c| c.column_schema.name == *option.column_name())
-            {
-                Self::unset_index(column_metadata, option)?;
+        let mut unset_index_map: HashMap<_, Vec<_>> = HashMap::new();
+        for option in &options {
+            unset_index_map
+                .entry(option.column_name())
+                .or_default()
+                .push(option);
+        }
+
+        for column_metadata in self.column_metadatas.iter_mut() {
+            if let Some(options) = unset_index_map.remove(&column_metadata.column_schema.name) {
+                for option in options {
+                    Self::unset_index(column_metadata, option)?;
+                }
             }
         }
 
         Ok(())
     }
 
-    fn set_index(column_metadata: &mut ColumnMetadata, options: SetIndexOption) -> Result<()> {
+    fn set_index(column_metadata: &mut ColumnMetadata, options: &SetIndexOption) -> Result<()> {
         match options {
             SetIndexOption::Fulltext {
                 column_name,
@@ -781,7 +793,7 @@ impl RegionMetadataBuilder {
             } => {
                 column_metadata
                     .column_schema
-                    .set_skipping_options(&options)
+                    .set_skipping_options(options)
                     .context(UnsetSkippingIndexOptionsSnafu { column_name })?;
             }
         }
@@ -789,7 +801,7 @@ impl RegionMetadataBuilder {
         Ok(())
     }
 
-    fn unset_index(column_metadata: &mut ColumnMetadata, options: UnsetIndexOption) -> Result<()> {
+    fn unset_index(column_metadata: &mut ColumnMetadata, options: &UnsetIndexOption) -> Result<()> {
         match options {
             UnsetIndexOption::Fulltext { column_name } => {
                 ensure!(
@@ -1099,8 +1111,8 @@ impl ErrorExt for MetadataError {
 /// * case_sensitive
 fn set_column_fulltext_options(
     column_meta: &mut ColumnMetadata,
-    column_name: String,
-    options: FulltextOptions,
+    column_name: &str,
+    options: &FulltextOptions,
     current_options: Option<FulltextOptions>,
 ) -> Result<()> {
     if let Some(current_options) = current_options {
@@ -1117,7 +1129,7 @@ fn set_column_fulltext_options(
 
     column_meta
         .column_schema
-        .set_fulltext_options(&options)
+        .set_fulltext_options(options)
         .context(SetFulltextOptionsSnafu { column_name })?;
 
     Ok(())
@@ -1125,7 +1137,7 @@ fn set_column_fulltext_options(
 
 fn unset_column_fulltext_options(
     column_meta: &mut ColumnMetadata,
-    column_name: String,
+    column_name: &str,
     current_options: Option<FulltextOptions>,
 ) -> Result<()> {
     if let Some(mut current_options) = current_options
