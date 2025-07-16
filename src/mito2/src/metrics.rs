@@ -94,12 +94,7 @@ lazy_static! {
 
 
     // ------ Write related metrics
-    /// Number of stalled write requests in each worker.
-    pub static ref WRITE_STALL_TOTAL: IntGaugeVec = register_int_gauge_vec!(
-            "greptime_mito_write_stall_total",
-            "mito stalled write request in each worker",
-            &[WORKER_LABEL]
-        ).unwrap();
+    //
     /// Counter of rejected write requests.
     pub static ref WRITE_REJECT_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_write_reject_total", "mito write reject total").unwrap();
@@ -430,6 +425,12 @@ lazy_static! {
 
 // Use another block to avoid reaching the recursion limit.
 lazy_static! {
+    /// Number of stalling write requests in each worker.
+    pub static ref WRITE_STALLING: IntGaugeVec = register_int_gauge_vec!(
+            "greptime_mito_write_stalling_count",
+            "mito stalled write request in each worker",
+            &[WORKER_LABEL]
+        ).unwrap();
     /// Time waiting for requests to be handled by the region worker.
     pub static ref REQUEST_WAIT_TIME: HistogramVec = register_histogram_vec!(
             "greptime_mito_request_wait_time",

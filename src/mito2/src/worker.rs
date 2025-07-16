@@ -58,7 +58,7 @@ use crate::error;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALL_TOTAL};
+use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
@@ -469,7 +469,7 @@ impl<S: LogStore> WorkerStarter<S> {
             last_periodical_check_millis: now,
             flush_sender: self.flush_sender,
             flush_receiver: self.flush_receiver,
-            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
+            stalling_count: WRITE_STALLING.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
             request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
@@ -713,8 +713,8 @@ struct RegionWorkerLoop<S> {
     flush_sender: watch::Sender<()>,
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
-    /// Gauge of stalled request count.
-    stalled_count: IntGauge,
+    /// Gauge of stalling request count.
+    stalling_count: IntGauge,
     /// Gauge of regions in the worker.
     region_count: IntGauge,
     /// Histogram of request wait time for this worker.

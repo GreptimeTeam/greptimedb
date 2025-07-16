@@ -57,7 +57,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            self.stalled_count
+            self.stalling_count
                 .add((write_requests.len() + bulk_requests.len()) as i64);
             self.stalled_requests.append(write_requests, bulk_requests);
             self.listener.on_write_stall();
@@ -161,7 +161,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_stalled_requests(&mut self) {
         // Handle stalled requests.
         let stalled = std::mem::take(&mut self.stalled_requests);
-        self.stalled_count.sub(stalled.stalled_count() as i64);
+        self.stalling_count.sub(stalled.stalled_count() as i64);
         // We already stalled these requests, don't stall them again.
         for (_, (_, mut requests, mut bulk)) in stalled.requests {
             self.handle_write_requests(&mut requests, &mut bulk, false)
@@ -172,7 +172,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Rejects all stalled requests.
     pub(crate) fn reject_stalled_requests(&mut self) {
         let stalled = std::mem::take(&mut self.stalled_requests);
-        self.stalled_count.sub(stalled.stalled_count() as i64);
+        self.stalling_count.sub(stalled.stalled_count() as i64);
         for (_, (_, mut requests, mut bulk)) in stalled.requests {
             reject_write_requests(&mut requests, &mut bulk);
         }
@@ -182,7 +182,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn reject_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Rejects stalled requests for region {}", region_id);
         let (mut requests, mut bulk) = self.stalled_requests.remove(region_id);
-        self.stalled_count.sub((requests.len() + bulk.len()) as i64);
+        self.stalling_count
+            .sub((requests.len() + bulk.len()) as i64);
         reject_write_requests(&mut requests, &mut bulk);
     }
 
@@ -190,7 +191,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_region_stalled_requests(&mut self, region_id: &RegionId) {
         debug!("Handles stalled requests for region {}", region_id);
         let (mut requests, mut bulk) = self.stalled_requests.remove(region_id);
-        self.stalled_count.sub((requests.len() + bulk.len()) as i64);
+        self.stalling_count
+            .sub((requests.len() + bulk.len()) as i64);
         self.handle_write_requests(&mut requests, &mut bulk, true)
             .await;
     }
@@ -251,7 +253,7 @@ impl<S> RegionWorkerLoop<S> {
                             "Region {} is altering, add request to pending writes",
                             region.region_id
                         );
-                        self.stalled_count.add(1);
+                        self.stalling_count.add(1);
                         self.stalled_requests.push(sender_req);
                         continue;
                     }
@@ -353,7 +355,7 @@ impl<S> RegionWorkerLoop<S> {
                             "Region {} is altering, add request to pending writes",
                             region.region_id
                         );
-                        self.stalled_count.add(1);
+                        self.stalling_count.add(1);
                         self.stalled_requests.push_bulk(bulk_req);
                         continue;
                     }
