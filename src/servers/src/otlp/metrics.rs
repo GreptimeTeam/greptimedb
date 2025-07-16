@@ -117,7 +117,9 @@ fn encode_metrics(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
-    let name = &metric.name;
+    // replace . with _
+    // see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
+    let name = metric.name.replace(".", "_");
     // metadata is not used in prometheus
 
     // note that we don't store description or unit, we might want to deal with
@@ -125,16 +127,16 @@ fn encode_metrics(
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(table_writer, name, gauge, resource_attrs, scope_attrs)?;
+                encode_gauge(table_writer, &name, gauge, resource_attrs, scope_attrs)?;
             }
             metric::Data::Sum(sum) => {
-                encode_sum(table_writer, name, sum, resource_attrs, scope_attrs)?;
+                encode_sum(table_writer, &name, sum, resource_attrs, scope_attrs)?;
             }
             metric::Data::Summary(summary) => {
-                encode_summary(table_writer, name, summary, resource_attrs, scope_attrs)?;
+                encode_summary(table_writer, &name, summary, resource_attrs, scope_attrs)?;
             }
             metric::Data::Histogram(hist) => {
-                encode_histogram(table_writer, name, hist, resource_attrs, scope_attrs)?;
+                encode_histogram(table_writer, &name, hist, resource_attrs, scope_attrs)?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
             metric::Data::ExponentialHistogram(_hist) => {}
@@ -150,25 +152,23 @@ fn write_attributes(
     attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     if let Some(attrs) = attrs {
-        let table_tags = attrs.iter().filter_map(|attr| {
-            if !DEFAULT_ATTRS_HASHSET.contains(&attr.key) {
-                return None;
-            }
+        let tags = attrs
+            .iter()
+            // only keep promoted attributes
+            .filter(|attr| DEFAULT_ATTRS_HASHSET.contains(&attr.key))
+            .filter_map(|attr| {
+                attr.value
+                    .as_ref()
+                    .and_then(|v| v.value.as_ref())
+                    .and_then(|val| match val {
+                        any_value::Value::StringValue(s) => Some((attr.key.clone(), s.clone())),
+                        any_value::Value::IntValue(v) => Some((attr.key.clone(), v.to_string())),
+                        any_value::Value::DoubleValue(v) => Some((attr.key.clone(), v.to_string())),
+                        _ => None, // TODO(sunng87): allow different type of values
+                    })
+            });
 
-            if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
-                let key = attr.key.clone();
-                match val {
-                    any_value::Value::StringValue(s) => Some((key, s.to_string())),
-                    any_value::Value::IntValue(v) => Some((key, v.to_string())),
-                    any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
-                    _ => None, // TODO(sunng87): allow different type of values
-                }
-            } else {
-                None
-            }
-        });
-
-        row_writer::write_tags(writer, table_tags, row)?;
+        row_writer::write_tags(writer, tags, row)?;
     }
     Ok(())
 }
