@@ -397,6 +397,7 @@ lazy_static! {
 
 }
 
+// Use another block to avoid reaching the recursion limit.
 lazy_static! {
     /// Counter for compaction input file size.
     pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
@@ -421,10 +422,7 @@ lazy_static! {
         "greptime_mito_memtable_field_builder_count",
         "active field builder count in TimeSeriesMemtable",
         ).unwrap();
-}
 
-// Use another block to avoid reaching the recursion limit.
-lazy_static! {
     /// Number of stalling write requests in each worker.
     pub static ref WRITE_STALLING: IntGaugeVec = register_int_gauge_vec!(
             "greptime_mito_write_stalling_count",
