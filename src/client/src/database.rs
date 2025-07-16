@@ -250,12 +250,18 @@ impl Database {
                         retries += 1;
                         warn!("Retrying {} times with error = {:?}", retries, err);
                         continue;
+                    } else {
+                        error!(
+                            err; "Failed to send request to grpc handle, retries = {}, not retryable error, aborting",
+                            retries
+                        );
+                        return Err(err.into());
                     }
                 }
                 (Err(err), false) => {
                     error!(
-                        "Failed to send request to grpc handle after {} retries, error = {:?}",
-                        retries, err
+                        err; "Failed to send request to grpc handle after {} retries",
+                        retries,
                     );
                     return Err(err.into());
                 }
