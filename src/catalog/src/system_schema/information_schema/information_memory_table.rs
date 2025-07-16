@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
 
 use crate::system_schema::information_schema::table_names::*;
@@ -367,28 +368,18 @@ pub(super) fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>
 
         TRIGGERS => (
             vec![
-                string_column("TRIGGER_CATALOG"),
-                string_column("TRIGGER_SCHEMA"),
                 string_column("TRIGGER_NAME"),
-                string_column("EVENT_MANIPULATION"),
-                string_column("EVENT_OBJECT_CATALOG"),
-                string_column("EVENT_OBJECT_SCHEMA"),
-                string_column("EVENT_OBJECT_TABLE"),
-                bigint_column("ACTION_ORDER"),
-                string_column("ACTION_CONDITION"),
-                string_column("ACTION_STATEMENT"),
-                string_column("ACTION_ORIENTATION"),
-                string_column("ACTION_TIMING"),
-                string_column("ACTION_REFERENCE_OLD_TABLE"),
-                string_column("ACTION_REFERENCE_NEW_TABLE"),
-                string_column("ACTION_REFERENCE_OLD_ROW"),
-                string_column("ACTION_REFERENCE_NEW_ROW"),
-                timestamp_micro_column("CREATED"),
-                string_column("SQL_MODE"),
-                string_column("DEFINER"),
-                string_column("CHARACTER_SET_CLIENT"),
-                string_column("COLLATION_CONNECTION"),
-                string_column("DATABASE_COLLATION"),
+                ColumnSchema::new(
+                    "trigger_id",
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                string_column("TRIGGER_DEFINITION"),
+                ColumnSchema::new(
+                    "flownode_id",
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
             ],
             vec![],
         ),
