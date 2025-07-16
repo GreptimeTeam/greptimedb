@@ -264,7 +264,9 @@ impl Categorizer {
                         return commutativity;
                     }
                 }
-                Commutativity::Commutative
+                // all group by expressions are partition columns can push down, unless
+                // another push down is already in progress.
+                Commutativity::ConditionalCommutative(None)
             }
             LogicalPlan::Sort(_) => {
                 if partition_cols.is_empty() {
