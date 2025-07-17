@@ -110,4 +110,36 @@ tql analyze sum(aggr_optimize_not);
 
 -- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
 
+CREATE TABLE IF NOT EXISTS aggr_optimize_not_count (
+  a STRING NULL,
+  b STRING NULL,
+  c STRING NULL,
+  d STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (a, b, c, d)
+)
+PARTITION ON COLUMNS (a, b, c) (
+      a < 'b',
+      a >= 'b',
+);
+
+-- Case 6: Test average rate (sum/count like)
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not[2m]))/sum by (a, b, c) (rate(aggr_optimize_not_count[2m]));
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize_not[2m]))/sum by (a, b, c) (rate(aggr_optimize_not_count[2m]));
+
+drop table aggr_optimize_not_count;
+
 drop table aggr_optimize_not;
