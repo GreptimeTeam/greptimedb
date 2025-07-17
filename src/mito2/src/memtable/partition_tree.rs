@@ -176,6 +176,7 @@ impl Memtable for PartitionTreeMemtable {
         .fail()
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
@@ -304,6 +305,16 @@ impl PartitionTreeMemtable {
         self.num_rows.fetch_add(metrics.num_rows, Ordering::SeqCst);
         self.max_sequence
             .fetch_max(metrics.max_sequence, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub fn iter(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+        sequence: Option<SequenceNumber>,
+    ) -> Result<BoxedBatchIterator> {
+        self.tree.read(projection, predicate, sequence)
     }
 }
 

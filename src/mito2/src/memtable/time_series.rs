@@ -261,6 +261,7 @@ impl Memtable for TimeSeriesMemtable {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,

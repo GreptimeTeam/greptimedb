@@ -82,6 +82,7 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         _projection: Option<&[ColumnId]>,

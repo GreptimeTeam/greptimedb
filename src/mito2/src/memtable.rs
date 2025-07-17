@@ -163,6 +163,10 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
     /// `filters` are the predicates to be pushed down to memtable.
+    ///
+    /// # Note
+    /// This method should only be used for tests.
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,

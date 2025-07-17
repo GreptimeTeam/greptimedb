@@ -236,6 +236,7 @@ impl Memtable for SimpleBulkMemtable {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,

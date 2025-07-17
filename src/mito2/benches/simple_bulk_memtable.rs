@@ -190,7 +190,7 @@ fn bench_memtable_write_performance(c: &mut Criterion) {
             |memtable| {
                 let data = vec![(1i64, 1.0f64, "test".to_string())];
                 let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
-                black_box(memtable.write(&kvs).unwrap())
+                memtable.write(&kvs).unwrap();
             },
         )
     });
@@ -203,7 +203,7 @@ fn bench_memtable_write_performance(c: &mut Criterion) {
                     .map(|i| (i as i64, i as f64, format!("value_{}", i)))
                     .collect();
                 let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
-                black_box(memtable.write(&kvs).unwrap())
+                memtable.write(&kvs).unwrap();
             },
         )
     });
