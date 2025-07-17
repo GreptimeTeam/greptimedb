@@ -88,7 +88,7 @@ pub(crate) fn check_column_metadatas_consistent(
 /// will be marked for reconciliation.
 ///
 /// Returns the region ids that need to be reconciled.
-pub(crate) fn resolve_column_metadatas_with_use_metasrv_strategy(
+pub(crate) fn resolve_column_metadatas_with_metasrv(
     column_metadatas: &[ColumnMetadata],
     region_metadatas: &[RegionMetadata],
 ) -> Result<Vec<RegionId>> {
@@ -134,7 +134,7 @@ pub(crate) fn resolve_column_metadatas_with_use_metasrv_strategy(
 /// due to the poison mechanism, making the highest schema version a safe choice.
 ///
 /// Returns the resolved column metadata and the region ids that need to be reconciled.
-pub(crate) fn resolve_column_metadatas_with_use_latest_strategy(
+pub(crate) fn resolve_column_metadatas_with_latest(
     region_metadatas: &[RegionMetadata],
 ) -> Result<(Vec<ColumnMetadata>, Vec<RegionId>)> {
     let is_same_table = region_metadatas
@@ -202,15 +202,14 @@ pub(crate) fn build_column_metadata_from_table_info(
     column_schemas
         .iter()
         .map(|column_schema| {
-            let column_id =
-                *name_to_ids
-                    .get(column_schema.name.as_str())
-                    .context(UnexpectedSnafu {
-                        err_msg: format!(
-                            "Column name {} not found in name_to_ids",
-                            column_schema.name
-                        ),
-                    })?;
+            let column_id = *name_to_ids
+                .get(column_schema.name.as_str())
+                .with_context(|| UnexpectedSnafu {
+                    err_msg: format!(
+                        "Column name {} not found in name_to_ids",
+                        column_schema.name
+                    ),
+                })?;
 
             let semantic_type = if primary_names.contains(&column_schema.name.as_str()) {
                 SemanticType::Tag
@@ -246,14 +245,10 @@ pub(crate) fn check_column_metadata_invariants(
     let old_primary_keys = column_metadatas
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
-        .map(|c| (c.column_schema.name.as_str(), c.column_id))
-        .collect::<HashMap<_, _>>();
+        .map(|c| (c.column_schema.name.as_str(), c.column_id));
 
     for (name, id) in old_primary_keys {
-        if !new_primary_keys.contains_key(name) {
-            return false;
-        }
-        if new_primary_keys.get(name).unwrap() != &id {
+        if new_primary_keys.get(name) != Some(&id) {
             return false;
         }
     }
@@ -669,11 +664,9 @@ mod tests {
             semantic_type: SemanticType::Field,
             column_id: 3,
         });
-        let result = resolve_column_metadatas_with_use_metasrv_strategy(
-            &metasrv_column_metadatas,
-            &[region_metadata1],
-        )
-        .unwrap();
+        let result =
+            resolve_column_metadatas_with_metasrv(&metasrv_column_metadatas, &[region_metadata1])
+                .unwrap();
 
         assert_eq!(result, vec![RegionId::new(1024, 0)]);
     }
@@ -694,11 +687,7 @@ mod tests {
         region_metadata2.schema_version = 2;
 
         let (resolved_column_metadatas, region_ids) =
-            resolve_column_metadatas_with_use_latest_strategy(&[
-                region_metadata1,
-                region_metadata2,
-            ])
-            .unwrap();
+            resolve_column_metadatas_with_latest(&[region_metadata1, region_metadata2]).unwrap();
         assert_eq!(region_ids, vec![RegionId::new(1024, 0)]);
         assert_eq!(resolved_column_metadatas, new_column_metadatas);
     }
