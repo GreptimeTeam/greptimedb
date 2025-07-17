@@ -1146,7 +1146,7 @@ impl Server for HttpServer {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {
             if tx.send(()).is_err() {
-                info!("Receiver dropped, the HTTP server has already existed");
+                info!("Receiver dropped, the HTTP server has already exited");
             }
         }
         info!("Shutdown HTTP server");
