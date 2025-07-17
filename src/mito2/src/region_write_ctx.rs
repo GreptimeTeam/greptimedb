@@ -252,15 +252,24 @@ impl RegionWriteCtx {
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
 
-    pub(crate) fn push_bulk(&mut self, sender: OptionOutputTx, mut bulk: BulkPart) {
+    pub(crate) fn push_bulk(&mut self, sender: OptionOutputTx, mut bulk: BulkPart) -> bool {
+        bulk.sequence = self.next_sequence;
+        let entry = match BulkWalEntry::try_from(&bulk) {
+            Ok(entry) => entry,
+            Err(e) => {
+                sender.send(Err(e));
+                return false;
+            }
+        };
+
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
-        bulk.sequence = self.next_sequence;
 
         // Add bulk wal entry
-        self.wal_entry.bulk_entries.push(BulkWalEntry::from(&bulk));
+        self.wal_entry.bulk_entries.push(entry);
         self.next_sequence += bulk.num_rows() as u64;
         self.bulk_parts.push(bulk);
+        true
     }
 
     pub(crate) async fn write_bulk(&mut self) {

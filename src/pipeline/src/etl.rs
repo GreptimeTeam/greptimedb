@@ -498,9 +498,6 @@ transform:
             .into_transformed()
             .unwrap();
 
-        // println!("[DEBUG]schema_info: {:?}", schema_info.schema);
-        // println!("[DEBUG]re: {:?}", result.0.values);
-
         assert_eq!(schema_info.schema.len(), result.0.values.len());
         let test = vec![
             (

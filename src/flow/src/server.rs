@@ -360,6 +360,7 @@ impl FlownodeBuilder {
             self.flow_metadata_manager.clone(),
             self.table_meta.clone(),
             self.catalog_manager.clone(),
+            self.opts.flow.batching_mode.clone(),
         ));
         let dual = FlowDualEngine::new(
             manager.clone(),

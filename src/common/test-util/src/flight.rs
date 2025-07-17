@@ -19,8 +19,10 @@ use common_recordbatch::DfRecordBatch;
 /// Encodes record batch to a Schema message and a RecordBatch message.
 pub fn encode_to_flight_data(rb: DfRecordBatch) -> (FlightData, FlightData) {
     let mut encoder = FlightEncoder::default();
-    (
-        encoder.encode(FlightMessage::Schema(rb.schema())),
-        encoder.encode(FlightMessage::RecordBatch(rb)),
-    )
+    let schema = encoder.encode_schema(rb.schema_ref().as_ref());
+    let [data] = encoder
+        .encode(FlightMessage::RecordBatch(rb))
+        .try_into()
+        .unwrap();
+    (schema, data)
 }

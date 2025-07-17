@@ -48,6 +48,7 @@ futures.workspace = true
 get-size2 = "0.1.2"
 greptime-proto.workspace = true
 http.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true

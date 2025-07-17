@@ -374,6 +374,7 @@ impl StartCommand {
             meta_client.clone(),
             flow_auth_header,
             opts.query.clone(),
+            opts.flow.batching_mode.clone(),
         );
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(
