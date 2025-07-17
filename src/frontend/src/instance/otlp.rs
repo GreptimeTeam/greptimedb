@@ -71,12 +71,12 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
-            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table.to_string())
+            self.handle_metric_row_inserts(requests, ctx, physical_table.to_string())
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
         } else {
-            self.handle_row_inserts(requests, ctx.clone(), false, false)
+            self.handle_row_inserts(requests, ctx, false, false)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
