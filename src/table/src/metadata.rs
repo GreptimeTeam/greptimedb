@@ -38,6 +38,7 @@ use crate::requests::{
     AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
     UnsetIndexOptions,
 };
+use crate::table_reference::TableReference;
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -1113,7 +1114,8 @@ pub struct RawTableMeta {
     /// The indices of columns in primary key. Note that the index of timestamp column
     /// is not included. Order matters to this array.
     pub primary_key_indices: Vec<usize>,
-    ///  The indices of columns in value. Order doesn't matter to this array.
+    ///  The indices of columns in value. The index of timestamp column is included.
+    /// Order doesn't matter to this array.
     pub value_indices: Vec<usize>,
     /// Engine type of this table. Usually in small case.
     pub engine: String,
@@ -1219,12 +1221,13 @@ impl RawTableInfo {
         let mut primary_key_indices = Vec::with_capacity(primary_keys.len());
         let mut timestamp_index = None;
         let mut value_indices =
-            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len());
         let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
         for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
             } else if column_schema.is_time_index() {
+                value_indices.push(index);
                 timestamp_index = Some(index);
             } else {
                 value_indices.push(index);
@@ -1246,6 +1249,15 @@ impl RawTableInfo {
     /// All "region options" are actually a copy of table options for redundancy.
     pub fn to_region_options(&self) -> HashMap<String, String> {
         HashMap::from(&self.meta.options)
+    }
+
+    /// Returns the table reference.
+    pub fn table_ref(&self) -> TableReference {
+        TableReference::full(
+            self.catalog_name.as_str(),
+            self.schema_name.as_str(),
+            self.name.as_str(),
+        )
     }
 }
 
