@@ -177,16 +177,12 @@ fn print_anonymous_usage_data_disclaimer() {
 }
 
 /// Format uptime duration into a general time range string
-/// Returns privacy-friendly descriptions like "minutes", "hours", "days", etc.
+/// Returns privacy-friendly descriptions like "hours", "days", etc.
 fn format_uptime() -> String {
     let uptime_duration = START_TIME.elapsed().unwrap_or(Duration::ZERO);
     let total_seconds = uptime_duration.as_secs();
 
-    if total_seconds < 60 {
-        "seconds".to_string()
-    } else if total_seconds < 3600 {
-        "minutes".to_string()
-    } else if total_seconds < 86400 {
+    if total_seconds < 86400 {
         "hours".to_string()
     } else if total_seconds < 604800 {
         "days".to_string()
@@ -516,9 +512,7 @@ mod tests {
         assert!(!uptime.is_empty());
         // Should be a valid general time range (no specific numbers)
         assert!(
-            uptime == "seconds"
-                || uptime == "minutes"
-                || uptime == "hours"
+            uptime == "hours"
                 || uptime == "days"
                 || uptime == "weeks"
                 || uptime == "months"
