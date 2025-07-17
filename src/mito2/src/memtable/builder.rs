@@ -125,7 +125,7 @@ impl StringBuilder {
     }
 
     #[inline]
-    fn next_offset(&self) -> i32 {
+    pub fn next_offset(&self) -> i32 {
         i32::try_from(self.value_builder.len()).expect("byte array offset overflow")
     }
 

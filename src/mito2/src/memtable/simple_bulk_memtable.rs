@@ -199,7 +199,7 @@ impl Memtable for SimpleBulkMemtable {
         let extend_timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["bulk_extend"])
             .start_timer();
-        series.extend(ts, OpType::Put as u8, sequence, fields.into_iter())?;
+        series.extend(ts, OpType::Put as u8, sequence, fields)?;
         extend_timer.observe_duration();
 
         self.update_stats(WriteMetrics {

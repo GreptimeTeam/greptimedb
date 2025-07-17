@@ -740,8 +740,12 @@ impl Series {
         ts_v: VectorRef,
         op_type_v: u8,
         sequence_v: u64,
-        fields: impl Iterator<Item = VectorRef>,
+        fields: Vec<VectorRef>,
     ) -> Result<()> {
+        if !self.active.can_accommodate(&fields)? {
+            let region_metadata = self.region_metadata.clone();
+            self.freeze(&region_metadata);
+        }
         self.active.extend(ts_v, op_type_v, sequence_v, fields)
     }
 
@@ -883,13 +887,42 @@ impl ValueBuilder {
         size
     }
 
+    /// Checks if current value builder have sufficient space to accommodate `fields`.
+    /// Returns false if there is no space to accommodate fields due to offset overflow.
+    pub(crate) fn can_accommodate(&self, fields: &[VectorRef]) -> Result<bool> {
+        for (field_src, field_dest) in fields.iter().zip(self.fields.iter()) {
+            let Some(builder) = field_dest else {
+                continue;
+            };
+            let FieldBuilder::String(builder) = builder else {
+                continue;
+            };
+            let array = field_src.to_arrow_array();
+            let string_array = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .with_context(|| error::InvalidBatchSnafu {
+                    reason: format!(
+                        "Field type mismatch, expecting String, given: {}",
+                        field_src.data_type()
+                    ),
+                })?;
+            let space_needed = string_array.value_data().len() as i32;
+            // offset may overflow
+            if builder.next_offset().checked_add(space_needed).is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn extend(
         &mut self,
         ts_v: VectorRef,
         op_type: u8,
         sequence: u64,
-        fields: impl Iterator<Item = VectorRef>,
-    ) -> error::Result<()> {
+        fields: Vec<VectorRef>,
+    ) -> Result<()> {
         let num_rows_before = self.timestamp.len();
         let num_rows_to_write = ts_v.len();
         self.timestamp.reserve(num_rows_to_write);
@@ -940,7 +973,9 @@ impl ValueBuilder {
         self.sequence
             .extend(iter::repeat_n(sequence, num_rows_to_write));
 
-        for (field_idx, (field_src, field_dest)) in fields.zip(self.fields.iter_mut()).enumerate() {
+        for (field_idx, (field_src, field_dest)) in
+            fields.into_iter().zip(self.fields.iter_mut()).enumerate()
+        {
             let builder = field_dest.get_or_insert_with(|| {
                 let mut field_builder =
                     FieldBuilder::create(&self.field_types[field_idx], INITIAL_BUILDER_CAPACITY);
