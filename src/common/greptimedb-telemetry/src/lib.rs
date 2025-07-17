@@ -16,8 +16,8 @@ use std::env;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, SystemTime};
 
 use common_runtime::error::{Error, Result};
 use common_runtime::{BoxedTaskFunction, RepeatedTask, TaskFunction};
@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 pub const TELEMETRY_URL: &str = "https://telemetry.greptimestats.com/db/otel/statistics";
 /// The local installation uuid cache file
 const UUID_FILE_NAME: &str = ".greptimedb-telemetry-uuid";
+
+/// System start time for uptime calculation
+static START_TIME: LazyLock<SystemTime> = LazyLock::new(SystemTime::now);
 
 /// The default interval of reporting telemetry data to greptime cloud
 pub static TELEMETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
@@ -103,6 +106,8 @@ struct StatisticData {
     pub nodes: Option<i32>,
     /// The local installation uuid
     pub uuid: String,
+    /// System uptime range (e.g., "hours", "days", "weeks")
+    pub uptime: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -169,6 +174,29 @@ fn print_anonymous_usage_data_disclaimer() {
     info!(
         "To learn more about this anonymous program and how to deactivate it if you don't want to participate, please visit the following URL: ");
     info!("https://docs.greptime.com/reference/telemetry");
+}
+
+/// Format uptime duration into a general time range string
+/// Returns privacy-friendly descriptions like "minutes", "hours", "days", etc.
+fn format_uptime() -> String {
+    let uptime_duration = START_TIME.elapsed().unwrap_or(Duration::ZERO);
+    let total_seconds = uptime_duration.as_secs();
+
+    if total_seconds < 60 {
+        "seconds".to_string()
+    } else if total_seconds < 3600 {
+        "minutes".to_string()
+    } else if total_seconds < 86400 {
+        "hours".to_string()
+    } else if total_seconds < 604800 {
+        "days".to_string()
+    } else if total_seconds < 2629746 {
+        "weeks".to_string()
+    } else if total_seconds < 31556952 {
+        "months".to_string()
+    } else {
+        "years".to_string()
+    }
 }
 
 pub fn default_get_uuid(working_home: &Option<String>) -> Option<String> {
@@ -260,6 +288,7 @@ impl GreptimeDBTelemetry {
                     mode: self.statistics.get_mode(),
                     nodes: self.statistics.get_nodes().await,
                     uuid,
+                    uptime: format_uptime(),
                 };
 
                 if let Some(client) = self.client.as_ref() {
@@ -294,7 +323,9 @@ mod tests {
     use reqwest::{Client, Response};
     use tokio::spawn;
 
-    use crate::{default_get_uuid, Collector, GreptimeDBTelemetry, Mode, StatisticData};
+    use crate::{
+        default_get_uuid, format_uptime, Collector, GreptimeDBTelemetry, Mode, StatisticData,
+    };
 
     static COUNT: AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -438,6 +469,7 @@ mod tests {
         assert_eq!(build_info().commit, body.git_commit);
         assert_eq!(Mode::Standalone, body.mode);
         assert_eq!(1, body.nodes.unwrap());
+        assert!(!body.uptime.is_empty());
 
         let failed_statistic = Box::new(FailedStatistic);
         let failed_report = GreptimeDBTelemetry::new(
@@ -476,5 +508,21 @@ mod tests {
         assert!(uuid.is_some());
         assert_eq!(uuid, default_get_uuid(&Some(working_home.clone())));
         assert_eq!(uuid, default_get_uuid(&Some(working_home)));
+    }
+
+    #[test]
+    fn test_format_uptime() {
+        let uptime = format_uptime();
+        assert!(!uptime.is_empty());
+        // Should be a valid general time range (no specific numbers)
+        assert!(
+            uptime == "seconds"
+                || uptime == "minutes"
+                || uptime == "hours"
+                || uptime == "days"
+                || uptime == "weeks"
+                || uptime == "months"
+                || uptime == "years"
+        );
     }
 }
