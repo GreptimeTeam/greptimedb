@@ -44,6 +44,7 @@ const DISK_SIZE: &str = "disk_size";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
 const SST_SIZE: &str = "sst_size";
+const SST_NUM: &str = "sst_num";
 const INDEX_SIZE: &str = "index_size";
 const ENGINE: &str = "engine";
 const REGION_ROLE: &str = "region_role";
@@ -87,6 +88,7 @@ impl InformationSchemaRegionStatistics {
             ColumnSchema::new(MEMTABLE_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MANIFEST_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(SST_SIZE, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(SST_NUM, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(INDEX_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(REGION_ROLE, ConcreteDataType::string_datatype(), true),
@@ -149,6 +151,7 @@ struct InformationSchemaRegionStatisticsBuilder {
     memtable_sizes: UInt64VectorBuilder,
     manifest_sizes: UInt64VectorBuilder,
     sst_sizes: UInt64VectorBuilder,
+    sst_nums: UInt64VectorBuilder,
     index_sizes: UInt64VectorBuilder,
     engines: StringVectorBuilder,
     region_roles: StringVectorBuilder,
@@ -167,6 +170,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             memtable_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             manifest_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             sst_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            sst_nums: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             index_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             region_roles: StringVectorBuilder::with_capacity(INIT_CAPACITY),
@@ -197,6 +201,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
             (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
             (SST_SIZE, &Value::from(region_stat.sst_size)),
+            (SST_NUM, &Value::from(region_stat.sst_num)),
             (INDEX_SIZE, &Value::from(region_stat.index_size)),
             (ENGINE, &Value::from(region_stat.engine.as_str())),
             (REGION_ROLE, &Value::from(region_stat.role.to_string())),
@@ -215,6 +220,7 @@ impl InformationSchemaRegionStatisticsBuilder {
         self.memtable_sizes.push(Some(region_stat.memtable_size));
         self.manifest_sizes.push(Some(region_stat.manifest_size));
         self.sst_sizes.push(Some(region_stat.sst_size));
+        self.sst_nums.push(Some(region_stat.sst_num));
         self.index_sizes.push(Some(region_stat.index_size));
         self.engines.push(Some(&region_stat.engine));
         self.region_roles.push(Some(&region_stat.role.to_string()));
@@ -230,6 +236,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),
             Arc::new(self.sst_sizes.finish()),
+            Arc::new(self.sst_nums.finish()),
             Arc::new(self.index_sizes.finish()),
             Arc::new(self.engines.finish()),
             Arc::new(self.region_roles.finish()),
