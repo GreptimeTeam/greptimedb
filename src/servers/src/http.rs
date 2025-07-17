@@ -69,6 +69,7 @@ use crate::http::result::error_result::ErrorResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::result::json_result::JsonResponse;
+use crate::http::result::null_result::NullResponse;
 use crate::interceptor::LogIngestInterceptorRef;
 use crate::metrics::http_metrics_layer;
 use crate::metrics_handler::MetricsHandler;
@@ -332,6 +333,7 @@ pub enum ResponseFormat {
     GreptimedbV1,
     InfluxdbV1,
     Json,
+    Null,
 }
 
 impl ResponseFormat {
@@ -345,6 +347,7 @@ impl ResponseFormat {
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
             "json" => Some(ResponseFormat::Json),
+            "null" => Some(ResponseFormat::Null),
             _ => None,
         }
     }
@@ -357,6 +360,7 @@ impl ResponseFormat {
             ResponseFormat::GreptimedbV1 => "greptimedb_v1",
             ResponseFormat::InfluxdbV1 => "influxdb_v1",
             ResponseFormat::Json => "json",
+            ResponseFormat::Null => "null",
         }
     }
 }
@@ -414,6 +418,7 @@ pub enum HttpResponse {
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
     Json(JsonResponse),
+    Null(NullResponse),
 }
 
 impl HttpResponse {
@@ -425,6 +430,7 @@ impl HttpResponse {
             HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Json(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Null(resp) => resp.with_execution_time(execution_time).into(),
             HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
@@ -468,6 +474,7 @@ impl IntoResponse for HttpResponse {
             HttpResponse::GreptimedbV1(resp) => resp.into_response(),
             HttpResponse::InfluxdbV1(resp) => resp.into_response(),
             HttpResponse::Json(resp) => resp.into_response(),
+            HttpResponse::Null(resp) => resp.into_response(),
             HttpResponse::Error(resp) => resp.into_response(),
         }
     }
@@ -512,6 +519,12 @@ impl From<InfluxdbV1Response> for HttpResponse {
 impl From<JsonResponse> for HttpResponse {
     fn from(value: JsonResponse) -> Self {
         HttpResponse::Json(value)
+    }
+}
+
+impl From<NullResponse> for HttpResponse {
+    fn from(value: NullResponse) -> Self {
+        HttpResponse::Null(value)
     }
 }
 
@@ -1520,6 +1533,7 @@ mod test {
             ResponseFormat::Table,
             ResponseFormat::Arrow,
             ResponseFormat::Json,
+            ResponseFormat::Null,
         ] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
@@ -1533,6 +1547,7 @@ mod test {
                 ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
                 ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
                 ResponseFormat::Json => JsonResponse::from_output(outputs).await,
+                ResponseFormat::Null => NullResponse::from_output(outputs).await,
             };
 
             match json_resp {
@@ -1617,6 +1632,10 @@ mod test {
                     }
                 }
 
+                HttpResponse::Null(resp) => {
+                    assert_eq!(resp.rows(), 4);
+                }
+
                 HttpResponse::Error(err) => unreachable!("{err:?}"),
             }
         }
@@ -1648,6 +1667,7 @@ mod test {
             Some(ResponseFormat::InfluxdbV1)
         );
         assert_eq!(ResponseFormat::parse("json"), Some(ResponseFormat::Json));
+        assert_eq!(ResponseFormat::parse("null"), Some(ResponseFormat::Null));
 
         // invalid formats
         assert_eq!(ResponseFormat::parse("invalid"), None);
@@ -1662,5 +1682,7 @@ mod test {
         assert_eq!(ResponseFormat::GreptimedbV1.as_str(), "greptimedb_v1");
         assert_eq!(ResponseFormat::InfluxdbV1.as_str(), "influxdb_v1");
         assert_eq!(ResponseFormat::Json.as_str(), "json");
+        assert_eq!(ResponseFormat::Null.as_str(), "null");
+        assert_eq!(ResponseFormat::default().as_str(), "greptimedb_v1");
     }
 }

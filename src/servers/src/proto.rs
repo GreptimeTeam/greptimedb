@@ -442,10 +442,11 @@ impl PromSeriesProcessor {
 
         // run pipeline
         let mut req = ContextReq::default();
-        for (table_name, pipeline_maps) in self.table_values.iter_mut() {
+        let table_values = std::mem::take(&mut self.table_values);
+        for (table_name, pipeline_maps) in table_values.into_iter() {
             let pipeline_req = PipelineIngestRequest {
-                table: table_name.clone(),
-                values: pipeline_maps.clone(),
+                table: table_name,
+                values: pipeline_maps,
             };
             let row_req =
                 run_pipeline(handler, &pipeline_ctx, pipeline_req, query_ctx, true).await?;

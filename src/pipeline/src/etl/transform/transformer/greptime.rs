@@ -374,6 +374,12 @@ fn calc_ts(p_ctx: &PipelineContext, values: &VrlValue) -> Result<Option<ValueDat
     }
 }
 
+/// `need_calc_ts` happens in two cases:
+/// 1. full greptime_identity
+/// 2. auto-transform without transformer
+///
+/// if transform is present in custom pipeline in v2 mode
+/// we dont need to calc ts again, nor do we need to check ts column name
 pub(crate) fn values_to_row(
     schema_info: &mut SchemaInfo,
     values: VrlValue,
@@ -401,7 +407,7 @@ pub(crate) fn values_to_row(
     let values = values.into_object().context(ValueMustBeMapSnafu)?;
 
     for (column_name, value) in values {
-        if column_name.as_str() == ts_column_name {
+        if need_calc_ts && column_name.as_str() == ts_column_name {
             continue;
         }
 

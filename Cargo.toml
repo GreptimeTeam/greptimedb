@@ -13,6 +13,7 @@ members = [
     "src/common/datasource",
     "src/common/decimal",
     "src/common/error",
+    "src/common/event-recorder",
     "src/common/frontend",
     "src/common/function",
     "src/common/greptimedb-telemetry",
@@ -247,6 +248,7 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
+common-event-recorder = { path = "src/common/event-recorder" }
 common-frontend = { path = "src/common/frontend" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
