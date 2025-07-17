@@ -782,6 +782,13 @@ impl Series {
         };
         Ok(&self.frozen[0])
     }
+
+    pub(crate) fn read_to_values(&self) -> Vec<Values> {
+        let mut res = Vec::with_capacity(self.frozen.len() + 1);
+        res.extend(self.frozen.iter().cloned());
+        res.push(self.active.finish_cloned());
+        res
+    }
 }
 
 /// `ValueBuilder` holds all the vector builders for field columns.
@@ -971,6 +978,58 @@ impl ValueBuilder {
         debug_assert_eq!(sequence_len, self.op_type.len());
         debug_assert_eq!(sequence_len, self.timestamp.len());
         sequence_len
+    }
+
+    fn finish_cloned(&self) -> Values {
+        let num_rows = self.sequence.len();
+        let fields = self
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if let Some(v) = v {
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
+                    v.finish_cloned()
+                } else {
+                    let mut single_null = self.field_types[i].create_mutable_vector(num_rows);
+                    single_null.push_nulls(num_rows);
+                    single_null.to_vector()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let sequence = Arc::new(UInt64Vector::from_vec(self.sequence.clone()));
+        let op_type = Arc::new(UInt8Vector::from_vec(self.op_type.clone()));
+        let timestamp: VectorRef = match self.timestamp_type {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
+                Arc::new(TimestampSecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+                Arc::new(TimestampMillisecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+                Arc::new(TimestampMicrosecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+                Arc::new(TimestampNanosecondVector::from_vec(self.timestamp.clone()))
+            }
+            _ => unreachable!(),
+        };
+
+        if cfg!(debug_assertions) {
+            debug_assert_eq!(timestamp.len(), sequence.len());
+            debug_assert_eq!(timestamp.len(), op_type.len());
+            for field in &fields {
+                debug_assert_eq!(timestamp.len(), field.len());
+            }
+        }
+
+        Values {
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+        }
     }
 }
 
