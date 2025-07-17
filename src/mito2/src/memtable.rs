@@ -26,7 +26,6 @@ pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
-use table::predicate::Predicate;
 
 use crate::config::MitoConfig;
 use crate::error::Result;
@@ -170,7 +169,7 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
+        predicate: Option<table::predicate::Predicate>,
         sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator>;
 

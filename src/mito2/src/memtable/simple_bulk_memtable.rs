@@ -27,7 +27,6 @@ use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
-use table::predicate::Predicate;
 
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
@@ -217,7 +216,7 @@ impl Memtable for SimpleBulkMemtable {
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        _predicate: Option<table::predicate::Predicate>,
         sequence: Option<SequenceNumber>,
     ) -> error::Result<BoxedBatchIterator> {
         let iter = self.create_iter(projection, sequence)?.build()?;
