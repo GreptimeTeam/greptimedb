@@ -5,14 +5,13 @@ use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use mito2::error;
-use mito2::memtable::simple_bulk_memtable::{BatchIterBuilder, SimpleBulkMemtable};
-use mito2::memtable::{KeyValues, Memtable, MemtableRangeContext, MemtableRanges};
+use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
+use mito2::memtable::{KeyValues, Memtable};
 use mito2::read::scan_region::PredicateGroup;
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::SequenceNumber;
 
 fn new_test_metadata() -> Arc<store_api::metadata::RegionMetadata> {
     let mut builder = RegionMetadataBuilder::new(1.into());
@@ -82,62 +81,6 @@ fn build_key_values(
     KeyValues::new(metadata, mutation).unwrap()
 }
 
-// Sequential version for benchmarking comparison
-fn ranges_sequential(
-    memtable: &SimpleBulkMemtable,
-    projection: Option<&[ColumnId]>,
-    predicate: PredicateGroup,
-    sequence: Option<SequenceNumber>,
-) -> error::Result<MemtableRanges> {
-    use itertools::Itertools;
-
-    let projection = Arc::new(memtable.build_projection(projection));
-    let values = memtable.series.read().unwrap().read_to_values();
-    let contexts = values
-        .into_iter()
-        .filter_map(|v| {
-            let filtered = match v
-                .to_batch(&[], &memtable.region_metadata, &projection, memtable.dedup)
-                .and_then(|mut b| {
-                    b.filter_by_sequence(sequence)?;
-                    Ok(b)
-                }) {
-                Ok(filtered) => filtered,
-                Err(e) => {
-                    return Some(Err(e));
-                }
-            };
-            if filtered.is_empty() {
-                None
-            } else {
-                Some(Ok(filtered))
-            }
-        })
-        .map_ok(|batch| {
-            let builder = BatchIterBuilder {
-                batch,
-                merge_mode: memtable.merge_mode,
-            };
-            Arc::new(MemtableRangeContext::new(
-                memtable.id,
-                Box::new(builder),
-                predicate.clone(),
-            ))
-        })
-        .collect::<error::Result<Vec<_>>>()?;
-
-    let ranges = contexts
-        .into_iter()
-        .enumerate()
-        .map(|(idx, context)| (idx, mito2::memtable::MemtableRange::new(context)))
-        .collect();
-
-    Ok(MemtableRanges {
-        ranges,
-        stats: memtable.stats(),
-    })
-}
-
 fn create_large_memtable() -> SimpleBulkMemtable {
     let memtable = new_test_memtable(false, MergeMode::LastRow);
 
@@ -154,7 +97,7 @@ fn create_large_memtable() -> SimpleBulkMemtable {
             .collect();
 
         memtable
-            .write(&build_key_values(&memtable.region_metadata, i, &data))
+            .write(&build_key_values(&memtable.region_metadata(), i, &data))
             .unwrap();
     }
 
@@ -172,7 +115,13 @@ fn bench_ranges_parallel_vs_sequential(c: &mut Criterion) {
     });
 
     group.bench_function("sequential", |b| {
-        b.iter(|| black_box(ranges_sequential(&memtable, None, predicate.clone(), None).unwrap()))
+        b.iter(|| {
+            black_box(
+                memtable
+                    .ranges_sequential(None, predicate.clone(), None)
+                    .unwrap(),
+            )
+        })
     });
 
     group.finish();
@@ -198,7 +147,9 @@ fn bench_ranges_with_projection(c: &mut Criterion) {
     group.bench_function("sequential_with_projection", |b| {
         b.iter(|| {
             black_box(
-                ranges_sequential(&memtable, Some(&projection), predicate.clone(), None).unwrap(),
+                memtable
+                    .ranges_sequential(Some(&projection), predicate.clone(), None)
+                    .unwrap(),
             )
         })
     });
@@ -219,7 +170,11 @@ fn bench_ranges_with_sequence_filter(c: &mut Criterion) {
 
     group.bench_function("sequential_with_sequence_filter", |b| {
         b.iter(|| {
-            black_box(ranges_sequential(&memtable, None, predicate.clone(), sequence).unwrap())
+            black_box(
+                memtable
+                    .ranges_sequential(None, predicate.clone(), sequence)
+                    .unwrap(),
+            )
         })
     });
 
@@ -234,7 +189,7 @@ fn bench_memtable_write_performance(c: &mut Criterion) {
             || new_test_memtable(false, MergeMode::LastRow),
             |memtable| {
                 let data = vec![(1i64, 1.0f64, "test".to_string())];
-                let kvs = build_key_values(&memtable.region_metadata, 0, &data);
+                let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
                 black_box(memtable.write(&kvs).unwrap())
             },
         )
@@ -247,7 +202,7 @@ fn bench_memtable_write_performance(c: &mut Criterion) {
                 let data: Vec<_> = (0..1000)
                     .map(|i| (i as i64, i as f64, format!("value_{}", i)))
                     .collect();
-                let kvs = build_key_values(&memtable.region_metadata, 0, &data);
+                let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
                 black_box(memtable.write(&kvs).unwrap())
             },
         )

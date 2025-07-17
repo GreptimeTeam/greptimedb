@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "test")]
+mod test_only;
+
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -42,16 +45,16 @@ use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
 pub struct SimpleBulkMemtable {
-    pub id: MemtableId,
-    pub region_metadata: RegionMetadataRef,
+    id: MemtableId,
+    region_metadata: RegionMetadataRef,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
-    pub dedup: bool,
-    pub merge_mode: MergeMode,
+    dedup: bool,
+    merge_mode: MergeMode,
     num_rows: AtomicUsize,
-    pub series: RwLock<Series>,
+    series: RwLock<Series>,
 }
 
 impl Drop for SimpleBulkMemtable {
@@ -89,7 +92,7 @@ impl SimpleBulkMemtable {
         }
     }
 
-    pub fn build_projection(&self, projection: Option<&[ColumnId]>) -> HashSet<ColumnId> {
+    fn build_projection(&self, projection: Option<&[ColumnId]>) -> HashSet<ColumnId> {
         if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
