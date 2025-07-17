@@ -60,6 +60,7 @@ prometheus.workspace = true
 prost.workspace = true
 puffin.workspace = true
 rand.workspace = true
+rayon = "1.10"
 regex = "1.5"
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
@@ -83,7 +84,7 @@ uuid.workspace = true
 common-function.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
-criterion = "0.4"
+criterion = { version = "0.4", features = ["html_reports"] }
 dotenv.workspace = true
 log-store.workspace = true
 mito-codec = { workspace = true, features = ["testing"] }
@@ -106,5 +107,10 @@ required-features = ["test"]
 
 [[bench]]
 name = "bench_compaction_picker"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "simple_bulk_memtable"
 harness = false
 required-features = ["test"]

@@ -19,8 +19,8 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
-use itertools::Itertools;
 use mito_codec::key_values::KeyValue;
+use rayon::prelude::*;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -42,16 +42,16 @@ use crate::region::options::MergeMode;
 use crate::{error, metrics};
 
 pub struct SimpleBulkMemtable {
-    id: MemtableId,
-    region_metadata: RegionMetadataRef,
+    pub id: MemtableId,
+    pub region_metadata: RegionMetadataRef,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
-    dedup: bool,
-    merge_mode: MergeMode,
+    pub dedup: bool,
+    pub merge_mode: MergeMode,
     num_rows: AtomicUsize,
-    series: RwLock<Series>,
+    pub series: RwLock<Series>,
 }
 
 impl Drop for SimpleBulkMemtable {
@@ -61,7 +61,7 @@ impl Drop for SimpleBulkMemtable {
 }
 
 impl SimpleBulkMemtable {
-    pub(crate) fn new(
+    pub fn new(
         id: MemtableId,
         region_metadata: RegionMetadataRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
@@ -89,7 +89,7 @@ impl SimpleBulkMemtable {
         }
     }
 
-    fn build_projection(&self, projection: Option<&[ColumnId]>) -> HashSet<ColumnId> {
+    pub fn build_projection(&self, projection: Option<&[ColumnId]>) -> HashSet<ColumnId> {
         if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -258,7 +258,7 @@ impl Memtable for SimpleBulkMemtable {
         let projection = Arc::new(self.build_projection(projection));
         let values = self.series.read().unwrap().read_to_values();
         let contexts = values
-            .into_iter()
+            .into_par_iter()
             .filter_map(|v| {
                 let filtered = match v
                     .to_batch(&[], &self.region_metadata, &projection, self.dedup)
@@ -277,16 +277,18 @@ impl Memtable for SimpleBulkMemtable {
                     Some(Ok(filtered))
                 }
             })
-            .map_ok(|batch| {
-                let builder = BatchIterBuilder {
-                    batch,
-                    merge_mode: self.merge_mode,
-                };
-                Arc::new(MemtableRangeContext::new(
-                    self.id,
-                    Box::new(builder),
-                    predicate.clone(),
-                ))
+            .map(|result| {
+                result.map(|batch| {
+                    let builder = BatchIterBuilder {
+                        batch,
+                        merge_mode: self.merge_mode,
+                    };
+                    Arc::new(MemtableRangeContext::new(
+                        self.id,
+                        Box::new(builder),
+                        predicate.clone(),
+                    ))
+                })
             })
             .collect::<error::Result<Vec<_>>>()?;
 
@@ -357,9 +359,9 @@ impl Memtable for SimpleBulkMemtable {
 }
 
 #[derive(Clone)]
-struct BatchIterBuilder {
-    batch: Batch,
-    merge_mode: MergeMode,
+pub struct BatchIterBuilder {
+    pub batch: Batch,
+    pub merge_mode: MergeMode,
 }
 
 impl IterBuilder for BatchIterBuilder {

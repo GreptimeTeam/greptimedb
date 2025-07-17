@@ -43,7 +43,7 @@ use crate::sst::file::FileTimeRange;
 mod builder;
 pub mod bulk;
 pub mod partition_tree;
-mod simple_bulk_memtable;
+pub mod simple_bulk_memtable;
 mod stats;
 pub mod time_partition;
 pub mod time_series;
@@ -81,7 +81,7 @@ pub struct MemtableStats {
     /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
-    num_rows: usize,
+    pub num_rows: usize,
     /// Total number of ranges in the memtable.
     num_ranges: usize,
     /// The maximum sequence number in the memtable.

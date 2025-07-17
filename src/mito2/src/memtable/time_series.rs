@@ -679,7 +679,7 @@ fn prune_primary_key(
 }
 
 /// A `Series` holds a list of field values of some given primary key.
-pub(crate) struct Series {
+pub struct Series {
     pk_cache: Option<Vec<Value>>,
     active: ValueBuilder,
     frozen: Vec<Values>,
@@ -783,7 +783,7 @@ impl Series {
         Ok(&self.frozen[0])
     }
 
-    pub(crate) fn read_to_values(&self) -> Vec<Values> {
+    pub fn read_to_values(&self) -> Vec<Values> {
         let mut res = Vec::with_capacity(self.frozen.len() + 1);
         res.extend(self.frozen.iter().cloned());
         res.push(self.active.finish_cloned());
@@ -1035,7 +1035,7 @@ impl ValueBuilder {
 
 /// [Values] holds an immutable vectors of field columns, including `sequence` and `op_type`.
 #[derive(Clone)]
-pub(crate) struct Values {
+pub struct Values {
     timestamp: VectorRef,
     sequence: Arc<UInt64Vector>,
     op_type: Arc<UInt8Vector>,
