@@ -42,7 +42,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -250,12 +250,18 @@ impl Database {
                         retries += 1;
                         warn!("Retrying {} times with error = {:?}", retries, err);
                         continue;
+                    } else {
+                        error!(
+                            err; "Failed to send request to grpc handle, retries = {}, not retryable error, aborting",
+                            retries
+                        );
+                        return Err(err.into());
                     }
                 }
                 (Err(err), false) => {
                     error!(
-                        "Failed to send request to grpc handle after {} retries, error = {:?}",
-                        retries, err
+                        err; "Failed to send request to grpc handle after {} retries",
+                        retries,
                     );
                     return Err(err.into());
                 }
@@ -355,7 +361,10 @@ impl Database {
         let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
             flight_data
                 .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))
+                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))?
+                .context(IllegalFlightMessagesSnafu {
+                    reason: "none message",
+                })
         });
 
         let Some(first_flight_message) = flight_message_stream.next().await else {
