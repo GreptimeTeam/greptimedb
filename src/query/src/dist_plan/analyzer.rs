@@ -19,7 +19,7 @@ use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
 use datafusion_common::Column;
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
@@ -154,7 +154,8 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
-    column_requirements: HashSet<Column>,
+    /// use stack count as scope to determine column requirements is needed or not
+    column_requirements: Vec<(HashSet<Column>, usize)>,
     /// Whether to expand on next call
     /// This is used to handle the case where a plan is transformed, but need to be expanded from it's
     /// parent node. For example a Aggregate plan is split into two parts in frontend and datanode, and need
@@ -267,7 +268,7 @@ impl PlanRewriter {
 
     fn update_column_requirements(&mut self, plan: &LogicalPlan) {
         debug!(
-            "PlanRewriter: update column requirements for plan: {plan}\n withcolumn_requirements: {:?}",
+            "PlanRewriter: update column requirements for plan: {plan}\n with old column_requirements: {:?}",
             self.column_requirements
         );
         let mut container = HashSet::new();
@@ -276,9 +277,7 @@ impl PlanRewriter {
             let _ = expr_to_columns(&expr, &mut container);
         }
 
-        for col in container {
-            self.column_requirements.insert(col);
-        }
+        self.column_requirements.push((container, self.level));
         debug!(
             "PlanRewriter: updated column requirements: {:?}",
             self.column_requirements
@@ -342,9 +341,15 @@ impl PlanRewriter {
         }
         // store schema before expand
         let schema = on_node.schema().clone();
-        let mut rewriter =
-            EnforceDistRequirementRewriter::new(std::mem::take(&mut self.column_requirements));
+        let mut rewriter = EnforceDistRequirementRewriter::new(
+            std::mem::take(&mut self.column_requirements),
+            self.level,
+        );
+        debug!("PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}");
         on_node = on_node.rewrite(&mut rewriter)?.data;
+        debug!(
+            "PlanRewriter: after enforced column requirements for node: {on_node} with rewriter: {rewriter:?}"
+        );
 
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
@@ -380,14 +385,30 @@ impl PlanRewriter {
 /// Requirements enforced by this rewriter:
 /// - Enforce column requirements for `LogicalPlan::Projection` nodes. Makes sure the
 ///   required columns are available in the sub plan.
+///
+/// TODO: make this aware of stack depth and scope of column requirements.
+#[derive(Debug)]
 struct EnforceDistRequirementRewriter {
-    column_requirements: HashSet<Column>,
+    // TODO: only enforce column requirements after the expanding node in question
+    column_requirements: Vec<(HashSet<Column>, usize)>,
+    /// only apply column requirements >= `cur_level`
+    /// this is used to avoid applying column requirements that are not needed
+    /// for the current node, i.e. the node is not in the scope of the column requirements
+    /// i.e, for this plan:
+    /// ```
+    /// Aggregate: min(t.number)
+    ///   Projection: t.number
+    /// ```
+    /// when on `Projection` node, we don't need to apply the column requirements of `Aggregate` node
+    /// because the `Projection` node is not in the scope of the `Aggregate` node
+    cur_level: usize,
 }
 
 impl EnforceDistRequirementRewriter {
-    fn new(column_requirements: HashSet<Column>) -> Self {
+    fn new(column_requirements: Vec<(HashSet<Column>, usize)>, cur_level: usize) -> Self {
         Self {
             column_requirements,
+            cur_level,
         }
     }
 }
@@ -396,44 +417,54 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        // only add column requirements for the topmost node
-        let mut column_requirements = std::mem::take(&mut self.column_requirements);
-        if column_requirements.is_empty() {
-            return Ok(Transformed::no(node));
-        }
+        // first get all applicable column requirements
+        let mut applicable_column_requirements = self
+            .column_requirements
+            .iter()
+            .filter(|(_, level)| *level >= self.cur_level)
+            .map(|(cols, _)| cols.clone())
+            .reduce(|mut acc, cols| {
+                acc.extend(cols);
+                acc
+            })
+            .unwrap_or_default();
+
+        debug!(
+            "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
+            self.cur_level,
+            applicable_column_requirements,
+            node
+        );
+
+        // make sure all projection applicable scope has the required columns
         if let LogicalPlan::Projection(ref projection) = node {
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
-                column_requirements.remove(&column);
+                applicable_column_requirements.remove(&column);
             }
-            if column_requirements.is_empty() {
+            if applicable_column_requirements.is_empty() {
+                self.cur_level += 1;
                 return Ok(Transformed::no(node));
             }
 
             let mut new_exprs = projection.expr.clone();
-            for col in &column_requirements {
+            for col in &applicable_column_requirements {
                 new_exprs.push(Expr::Column(col.clone()));
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
-            Ok(Transformed::yes(new_node))
-        } else {
-            // if the topmost node is not a projection, we need to add a new projection node
-            let mut new_proj_exprs = vec![];
-            // first add output of the node
-            for (qualifier, field) in node.schema().iter() {
-                new_proj_exprs.push(Expr::Column(Column::new(qualifier.cloned(), field.name())));
-            }
-            // then add the column requirements
-            for col in &self.column_requirements {
-                new_proj_exprs.push(Expr::Column(col.clone()));
-            }
-            let new_projection = LogicalPlanBuilder::from(node)
-                .project(new_proj_exprs)?
-                .build()?;
-            Ok(Transformed::yes(new_projection))
+            debug!(
+                "EnforceDistRequirementRewriter: added missing columns {:?} to projection node from old node: \n{node}\n Making new node: \n{new_node}",
+                applicable_column_requirements
+            );
+
+            self.cur_level += 1;
+            return Ok(Transformed::new(new_node, true, TreeNodeRecursion::Stop));
         }
+
+        self.cur_level += 1;
+        return Ok(Transformed::no(node));
     }
 
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
@@ -475,7 +506,16 @@ impl TreeNodeRewriter for PlanRewriter {
         self.maybe_set_partitions(&node);
 
         let Some(parent) = self.get_parent() else {
-            let node = self.expand(node)?;
+            debug!("Plan Rewriter: expand now for no parent found for node: {node}");
+            let node = self.expand(node);
+            debug!(
+                "PlanRewriter: expanded plan: {}",
+                match &node {
+                    Ok(n) => n.to_string(),
+                    Err(e) => format!("Error expanding plan: {e}"),
+                }
+            );
+            let node = node?;
             self.pop_stack();
             return Ok(Transformed::yes(node));
         };
@@ -549,6 +589,37 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        println!("result: {result}");
+        let expected = [
+            "Projection: min(t.number)",
+            "  MergeScan [is_placeholder=false]",
+        ]
+        .join("\n");
+        assert_eq!(expected, result.to_string());
+    }
+
+    #[test]
+    fn expand_step_proj_then_sort() {
+        let numbers_table = NumbersTable::table(0);
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .project(vec![Expr::Column(Column::new(
+                Some(TableReference::bare("t")),
+                "number",
+            ))])
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        dbg!(&result);
+        println!("result: {result}");
         let expected = [
             "Projection: min(t.number)",
             "  MergeScan [is_placeholder=false]",
