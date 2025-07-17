@@ -355,6 +355,63 @@ tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 |_|_| Total rows: 0_|
 +-+-+-+
 
+-- Case 5: a simple sum
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain sum(aggr_optimize_not);
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                      |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: aggr_optimize_not.greptime_timestamp ASC NULLS LAST                                                                                                                                                                 |
+|               |   Aggregate: groupBy=[[aggr_optimize_not.greptime_timestamp]], aggr=[[sum(aggr_optimize_not.greptime_value)]]                                                                                                             |
+|               |     Projection: aggr_optimize_not.greptime_timestamp, aggr_optimize_not.greptime_value                                                                                                                                    |
+|               |       MergeSort: aggr_optimize_not.a ASC NULLS FIRST, aggr_optimize_not.b ASC NULLS FIRST, aggr_optimize_not.c ASC NULLS FIRST, aggr_optimize_not.d ASC NULLS FIRST, aggr_optimize_not.greptime_timestamp ASC NULLS FIRST |
+|               |         MergeScan [is_placeholder=false]                                                                                                                                                                                  |
+| physical_plan | SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST]                                                                                                                                                            |
+|               |   SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                      |
+|               |     AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)]                                                                                  |
+|               |       CoalesceBatchesExec: target_batch_size=8192                                                                                                                                                                         |
+|               |         RepartitionExec: partitioning=REDACTED
+|               |           AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)]                                                                                     |
+|               |             ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value]                                                                                                         |
+|               |               MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze sum(aggr_optimize_not);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [greptime_timestamp@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[greptime_timestamp@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[sum(aggr_optimize_not.greptime_value)] REDACTED
+|_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+| 1_| 1_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
+|_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_|
+|_|_| Total rows: 0_|
++-+-+-+
+
 -- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
 drop table aggr_optimize_not;
 

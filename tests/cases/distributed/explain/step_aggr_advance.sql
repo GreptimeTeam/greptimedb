@@ -93,6 +93,21 @@ tql explain (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not[2m]));
 
+-- Case 5: a simple sum
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain sum(aggr_optimize_not);
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze sum(aggr_optimize_not);
+
 -- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
 
 drop table aggr_optimize_not;
