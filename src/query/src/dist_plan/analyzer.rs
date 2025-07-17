@@ -417,7 +417,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             }
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
-            return Ok(Transformed::yes(new_node));
+            Ok(Transformed::yes(new_node))
         } else {
             // if the topmost node is not a projection, we need to add a new projection node
             let mut new_proj_exprs = vec![];
@@ -432,7 +432,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             let new_projection = LogicalPlanBuilder::from(node)
                 .project(new_proj_exprs)?
                 .build()?;
-            return Ok(Transformed::yes(new_projection));
+            Ok(Transformed::yes(new_projection))
         }
     }
 
