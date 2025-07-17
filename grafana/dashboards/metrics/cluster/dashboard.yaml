@@ -693,7 +693,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]'
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]'
         - title: List QPS per Instance
           type: timeseries
           description: List QPS per Instance.

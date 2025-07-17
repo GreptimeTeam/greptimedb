@@ -6259,7 +6259,7 @@
               "editorMode": "code",
               "expr": "histogram_quantile(0.99, sum by(instance, pod, le, scheme, operation) (rate(opendal_operation_duration_seconds_bucket{ operation =~ \"Writer::write|Writer::close|write\"}[$__rate_interval])))",
               "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]",
+              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{scheme}}]-[{{operation}}]",
               "range": true,
               "refId": "A"
             }
