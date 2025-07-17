@@ -13,11 +13,10 @@ PARTITION ON COLUMNS (a, b, c) (
       a >= 'b',
 );
 
+-- Case 0: group by columns are the same as partition columns.
 -- This query shouldn't push down aggregation even if group by columns are partitioned.
 -- because sort is already pushed down.
 -- If it does, it will cause a wrong result.
-tql eval (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr_optimize_not[2m]));
-
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -63,6 +62,36 @@ tql explain (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optim
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 tql analyze (1752591864, 1752592164, '30s') avg by (a) (max_over_time(aggr_optimize_not[2m]));
+
+-- Case 3: group by columns are superset of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m]));
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time(aggr_optimize_not[2m]));
+
+-- Case 4: group by columns are not prefix of partition columns.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+tql explain (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not[2m]));
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+tql analyze (1752591864, 1752592164, '30s') min by (b, c, d) (max_over_time(aggr_optimize_not[2m]));
 
 -- TODO(discord9): more cases for aggr push down interacting with partitioning&tql
 
