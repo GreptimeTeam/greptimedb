@@ -460,7 +460,8 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             );
 
             self.cur_level += 1;
-            return Ok(Transformed::new(new_node, true, TreeNodeRecursion::Stop));
+            // still need to continue for next projection if applicable
+            return Ok(Transformed::yes(new_node));
         }
 
         self.cur_level += 1;
