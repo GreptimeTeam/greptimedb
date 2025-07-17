@@ -20,6 +20,7 @@ use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
+use regex::Regex;
 
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
@@ -31,6 +32,13 @@ const APPROXIMATE_COLUMN_COUNT: usize = 8;
 const COUNT_TABLE_SUFFIX: &str = "_count";
 const SUM_TABLE_SUFFIX: &str = "_sum";
 
+const JOB_KEY: &str = "job";
+const INSTANCE_KEY: &str = "instance";
+
+const UNDERSCORE: &str = "_";
+
+// see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
+// instance and job alias to service.instance.id and service.name that we need to keep
 const DEFAULT_ATTRS: [&str; 21] = [
     "instance",
     "job",
@@ -58,6 +66,7 @@ const DEFAULT_ATTRS: [&str; 21] = [
 lazy_static! {
     static ref DEFAULT_ATTRS_HASHSET: HashSet<String> =
         HashSet::from_iter(DEFAULT_ATTRS.iter().map(|s| s.to_string()));
+    static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
@@ -75,23 +84,19 @@ pub fn to_grpc_insert_requests(
     for resource in &request.resource_metrics {
         let resource_attrs = resource.resource.as_ref().map(|r| {
             let mut attrs = r.attributes.clone();
-            let mut additional = Vec::new();
-
             for kv in &r.attributes {
-                match kv.key.as_str() {
-                    KEY_SERVICE_NAME => additional.push(KeyValue {
-                        key: "job".to_string(),
+                if kv.key == KEY_SERVICE_NAME {
+                    attrs.push(KeyValue {
+                        key: JOB_KEY.to_string(),
                         value: kv.value.clone(),
-                    }),
-                    KEY_SERVICE_INSTANCE_ID => additional.push(KeyValue {
-                        key: "instance".to_string(),
+                    });
+                } else if kv.key == KEY_SERVICE_INSTANCE_ID {
+                    attrs.push(KeyValue {
+                        key: INSTANCE_KEY.to_string(),
                         value: kv.value.clone(),
-                    }),
-                    _ => {}
+                    });
                 }
             }
-
-            attrs.extend(additional);
             attrs
         });
 
@@ -111,16 +116,28 @@ pub fn to_grpc_insert_requests(
     Ok(table_writer.into_row_insert_requests())
 }
 
+// replace . with _
+// see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
+fn normalize_metric_name(name: &str) -> String {
+    let name = INVALID_METRIC_NAME.replace_all(name, UNDERSCORE);
+
+    if let Some((_, first)) = name.char_indices().next()
+        && first >= '0'
+        && first <= '9'
+    {
+        format!("_{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
-    // replace . with _
-    // see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
-    let name = metric.name.replace(".", "_");
-    // metadata is not used in prometheus
+    let name = normalize_metric_name(&metric.name);
 
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
@@ -155,6 +172,7 @@ fn write_attributes(
         let tags = attrs
             .iter()
             // only keep promoted attributes
+            // TODO(shuiyisong): we need to allow user to configure the wanted attributes
             .filter(|attr| DEFAULT_ATTRS_HASHSET.contains(&attr.key))
             .filter_map(|attr| {
                 attr.value
@@ -545,21 +563,14 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 6);
+        assert_eq!(table.num_columns(), 2);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "greptime_value",
-            ]
+            vec!["greptime_timestamp", "greptime_value",]
         );
     }
 
@@ -596,21 +607,14 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 6);
+        assert_eq!(table.num_columns(), 2);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "greptime_value"
-            ]
+            vec!["greptime_timestamp", "greptime_value"]
         );
     }
 
@@ -647,23 +651,38 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 7);
+        assert_eq!(table.num_columns(), 3);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "greptime_p90",
-                "greptime_p95",
-                "greptime_count"
-            ]
+            vec!["greptime_timestamp", "quantile", "greptime_value",]
+        );
+
+        let table = tables.get_or_default_table_data("datamon_count", 0, 0);
+        assert_eq!(table.num_rows(), 1);
+        assert_eq!(table.num_columns(), 2);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec!["greptime_timestamp", "greptime_value",]
+        );
+
+        let table = tables.get_or_default_table_data("datamon_sum", 0, 0);
+        assert_eq!(table.num_rows(), 1);
+        assert_eq!(table.num_columns(), 2);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec!["greptime_timestamp", "greptime_value",]
         );
     }
 
@@ -702,60 +721,46 @@ mod tests {
         // bucket table
         let bucket_table = tables.get_or_default_table_data("histo_bucket", 0, 0);
         assert_eq!(bucket_table.num_rows(), 5);
-        assert_eq!(bucket_table.num_columns(), 7);
+        assert_eq!(bucket_table.num_columns(), 3);
         assert_eq!(
             bucket_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "le",
-                "greptime_value",
-            ]
+            vec!["greptime_timestamp", "le", "greptime_value",]
         );
 
         let sum_table = tables.get_or_default_table_data("histo_sum", 0, 0);
         assert_eq!(sum_table.num_rows(), 1);
-        assert_eq!(sum_table.num_columns(), 6);
+        assert_eq!(sum_table.num_columns(), 2);
         assert_eq!(
             sum_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "greptime_value",
-            ]
+            vec!["greptime_timestamp", "greptime_value",]
         );
 
         let count_table = tables.get_or_default_table_data("histo_count", 0, 0);
         assert_eq!(count_table.num_rows(), 1);
-        assert_eq!(count_table.num_columns(), 6);
+        assert_eq!(count_table.num_columns(), 2);
         assert_eq!(
             count_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec![
-                "resource",
-                "scope",
-                "metadata",
-                "host",
-                "greptime_timestamp",
-                "greptime_value",
-            ]
+            vec!["greptime_timestamp", "greptime_value",]
         );
+    }
+
+    #[test]
+    fn test_normalize_otlp_name() {
+        assert_eq!(normalize_metric_name("test.123"), "test_123");
+        assert_eq!(normalize_metric_name("test_123"), "test_123");
+        assert_eq!(normalize_metric_name("test._123"), "test__123");
+        assert_eq!(normalize_metric_name("123_test"), "_123_test");
     }
 }
