@@ -237,7 +237,8 @@ fn create_output_batch(
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
                 builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
             }
-            return Ok(TreeNodeRecursion::Stop);
+            // might have multiple merge scans, so continue
+            return Ok(TreeNodeRecursion::Continue);
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
