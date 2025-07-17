@@ -1114,7 +1114,8 @@ pub struct RawTableMeta {
     /// The indices of columns in primary key. Note that the index of timestamp column
     /// is not included. Order matters to this array.
     pub primary_key_indices: Vec<usize>,
-    ///  The indices of columns in value. Order doesn't matter to this array.
+    ///  The indices of columns in value. The index of timestamp column is included.
+    /// Order doesn't matter to this array.
     pub value_indices: Vec<usize>,
     /// Engine type of this table. Usually in small case.
     pub engine: String,
