@@ -369,7 +369,6 @@ impl PlanRewriter {
                 Expr::Column(Column::new(qualifier.cloned(), field.name()))
             }))?
             .build()?;
-        dbg!(&node);
 
         Ok(node)
     }
@@ -550,8 +549,12 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        dbg!(&result);
-        println!("Expanded plan: {}", result.to_string());
+        let expected = [
+            "Projection: min(t.number)",
+            "  MergeScan [is_placeholder=false]",
+        ]
+        .join("\n");
+        assert_eq!(expected, result.to_string());
     }
 
     #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
