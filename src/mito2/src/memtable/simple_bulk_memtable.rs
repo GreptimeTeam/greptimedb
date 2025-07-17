@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "test")]
+#[cfg(any(test, feature = "test"))]
 mod test_only;
 
 use std::collections::HashSet;
@@ -380,7 +380,7 @@ mod tests {
     use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
     use common_recordbatch::DfRecordBatch;
     use common_time::Timestamp;
-    use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
+    use datatypes::arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::{ScalarVector, Vector};
@@ -388,9 +388,11 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::TimestampMillisecondVector;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::SequenceNumber;
+    use store_api::storage::{RegionId, SequenceNumber};
 
     use super::*;
+    use crate::read::merge::MergeReaderBuilder;
+    use crate::read::Source;
     use crate::region::options::MergeMode;
     use crate::test_util::column_metadata_to_column_schema;
 
@@ -685,5 +687,95 @@ mod tests {
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
         assert_eq!(1.0, batch.fields()[0].data.get(0).as_f64_lossy().unwrap());
+    }
+
+    fn rb_with_large_string(
+        ts: i64,
+        string_len: i32,
+        region_meta: &RegionMetadataRef,
+    ) -> RecordBatch {
+        let schema = region_meta.schema.arrow_schema().clone();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from_iter_values(
+                    ["a".repeat(string_len as usize).to_string()].into_iter(),
+                )) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    [ts].into_iter(),
+                )) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_write_read_large_string() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![]);
+        let region_meta = Arc::new(builder.build().unwrap());
+        let memtable =
+            SimpleBulkMemtable::new(0, region_meta.clone(), None, true, MergeMode::LastRow);
+        memtable
+            .write_bulk(BulkPart {
+                batch: rb_with_large_string(0, i32::MAX, &region_meta),
+                max_ts: 0,
+                min_ts: 0,
+                sequence: 0,
+                timestamp_index: 1,
+                raw_data: None,
+            })
+            .unwrap();
+
+        memtable.freeze().unwrap();
+        memtable
+            .write_bulk(BulkPart {
+                batch: rb_with_large_string(1, 3, &region_meta),
+                max_ts: 1,
+                min_ts: 1,
+                sequence: 1,
+                timestamp_index: 1,
+                raw_data: None,
+            })
+            .unwrap();
+        let MemtableRanges { ranges, .. } = memtable
+            .ranges(None, PredicateGroup::default(), None)
+            .unwrap();
+        let mut source = if ranges.len() == 1 {
+            let only_range = ranges.into_values().next().unwrap();
+            Source::Iter(only_range.build_iter().unwrap())
+        } else {
+            let sources = ranges
+                .into_values()
+                .map(|r| r.build_iter().map(Source::Iter))
+                .collect::<error::Result<Vec<_>>>()
+                .unwrap();
+            let merge_reader = MergeReaderBuilder::from_sources(sources)
+                .build()
+                .await
+                .unwrap();
+            Source::Reader(Box::new(merge_reader))
+        };
+
+        let mut rows = 0;
+        while let Some(b) = source.next_batch().await.unwrap() {
+            rows += b.num_rows();
+        }
+        assert_eq!(rows, 2);
     }
 }
