@@ -27,6 +27,7 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
+    WorkerRequestWithTime,
 };
 use crate::worker::WorkerListener;
 use crate::{error, metrics};
@@ -37,7 +38,7 @@ pub const MAX_PARALLEL_COMPACTION: usize = 1;
 pub(crate) struct CompactionTaskImpl {
     pub compaction_region: CompactionRegion,
     /// Request sender to notify the worker.
-    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+    pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
     /// Senders that are used to notify waiters waiting for pending compaction tasks.
     pub waiters: Vec<OutputTx>,
     /// Start time of compaction task
@@ -135,7 +136,11 @@ impl CompactionTaskImpl {
 
     /// Notifies region worker to handle post-compaction tasks.
     async fn send_to_worker(&self, request: WorkerRequest) {
-        if let Err(e) = self.request_sender.send(request).await {
+        if let Err(e) = self
+            .request_sender
+            .send(WorkerRequestWithTime::new(request))
+            .await
+        {
             error!(
                 "Failed to notify compaction job status for region {}, request: {:?}",
                 self.compaction_region.region_id, e.0
