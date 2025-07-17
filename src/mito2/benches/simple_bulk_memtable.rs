@@ -83,23 +83,25 @@ fn build_key_values(
     KeyValues::new(metadata, mutation).unwrap()
 }
 
-fn create_large_memtable() -> SimpleBulkMemtable {
+fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
     let memtable = new_test_memtable(false, MergeMode::LastRow);
-
-    // Create many series with different data to simulate real workload
-    for i in 0..1000 {
-        let data: Vec<_> = (0..100)
+    for i in 0..num_batches {
+        let data: Vec<_> = (0..10000)
             .map(|j| {
                 (
-                    (i * 100 + j) as i64,
-                    (i * 100 + j) as f64,
-                    format!("value_{}", i * 100 + j),
+                    (i * 10000 + j) as i64,
+                    (i * 10000 + j) as f64,
+                    format!("value_{}", i * 10000 + j),
                 )
             })
             .collect();
 
         memtable
-            .write(&build_key_values(&memtable.region_metadata(), i, &data))
+            .write(&build_key_values(
+                &memtable.region_metadata(),
+                i as u64,
+                &data,
+            ))
             .unwrap();
     }
 
@@ -139,18 +141,33 @@ async fn flush_original(mem: &SimpleBulkMemtable) {
 }
 
 fn bench_ranges_parallel_vs_sequential(c: &mut Criterion) {
-    let memtable = create_large_memtable();
+    use criterion::BenchmarkId;
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("ranges_parallel_vs_sequential");
 
-    group.bench_function("flush_by_merge_reader", |b| {
-        b.to_async(&rt).iter(|| async { flush(&memtable).await })
-    });
+    // Test different row counts: (num_series, rows_per_series)
+    let test_cases = vec![1, 10, 50, 100, 500, 1000];
 
-    group.bench_function("flush_by_iter", move |b| {
-        b.to_async(&rt)
-            .iter(|| async { flush_original(&memtable).await })
-    });
+    for num_batch in test_cases {
+        let total_rows_k = num_batch * 10;
+        let memtable = create_memtable_with_rows(num_batch);
+
+        group.bench_with_input(
+            BenchmarkId::new("flush_by_merge_reader", format!("{}k_rows", total_rows_k)),
+            &memtable,
+            |b, memtable| b.to_async(&rt).iter(|| async { flush(memtable).await }),
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("flush_by_iter", format!("{}k_rows", total_rows_k)),
+            &memtable,
+            |b, memtable| {
+                b.to_async(&rt)
+                    .iter(|| async { flush_original(memtable).await })
+            },
+        );
+    }
 
     group.finish();
 }
