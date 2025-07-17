@@ -342,9 +342,8 @@ impl PlanRewriter {
         }
         // store schema before expand
         let schema = on_node.schema().clone();
-        let mut rewriter = EnforceDistRequirementRewriter {
-            column_requirements: std::mem::take(&mut self.column_requirements),
-        };
+        let mut rewriter =
+            EnforceDistRequirementRewriter::new(std::mem::take(&mut self.column_requirements));
         on_node = on_node.rewrite(&mut rewriter)?.data;
 
         // add merge scan as the new root
@@ -370,6 +369,7 @@ impl PlanRewriter {
                 Expr::Column(Column::new(qualifier.cloned(), field.name()))
             }))?
             .build()?;
+        dbg!(&node);
 
         Ok(node)
     }
@@ -385,16 +385,24 @@ struct EnforceDistRequirementRewriter {
     column_requirements: HashSet<Column>,
 }
 
+impl EnforceDistRequirementRewriter {
+    fn new(column_requirements: HashSet<Column>) -> Self {
+        Self {
+            column_requirements,
+        }
+    }
+}
+
 impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        // only add column requirements for the topmost node
+        let mut column_requirements = std::mem::take(&mut self.column_requirements);
+        if column_requirements.is_empty() {
+            return Ok(Transformed::no(node));
+        }
         if let LogicalPlan::Projection(ref projection) = node {
-            let mut column_requirements = std::mem::take(&mut self.column_requirements);
-            if column_requirements.is_empty() {
-                return Ok(Transformed::no(node));
-            }
-
             for expr in &projection.expr {
                 let (qualifier, name) = expr.qualified_name();
                 let column = Column::new(qualifier, name);
@@ -411,9 +419,22 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             let new_node =
                 node.with_new_exprs(new_exprs, node.inputs().into_iter().cloned().collect())?;
             return Ok(Transformed::yes(new_node));
+        } else {
+            // if the topmost node is not a projection, we need to add a new projection node
+            let mut new_proj_exprs = vec![];
+            // first add output of the node
+            for (qualifier, field) in node.schema().iter() {
+                new_proj_exprs.push(Expr::Column(Column::new(qualifier.cloned(), field.name())));
+            }
+            // then add the column requirements
+            for col in &self.column_requirements {
+                new_proj_exprs.push(Expr::Column(col.clone()));
+            }
+            let new_projection = LogicalPlanBuilder::from(node)
+                .project(new_proj_exprs)?
+                .build()?;
+            return Ok(Transformed::yes(new_projection));
         }
-
-        Ok(Transformed::no(node))
     }
 
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
@@ -490,12 +511,48 @@ mod test {
 
     use datafusion::datasource::DefaultTableSource;
     use datafusion::functions_aggregate::expr_fn::avg;
+    use datafusion::functions_aggregate::min_max::min;
     use datafusion_common::JoinType;
     use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
+    use datafusion_sql::TableReference;
     use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::NumbersTable;
 
     use super::*;
+
+    /// test plan like:
+    /// ```
+    /// Aggregate: min(t.number)
+    ///  Projection: t.number
+    /// ```
+    /// which means aggr introduce new column requirements that shouldn't be updated in lower projection
+    ///
+    /// this help test expand need actually add new column requirements
+    /// because `Sort`/`Limit` doesn't introduce new column requirements
+    /// only `Aggregate` does
+    #[test]
+    fn expand_step_aggr_with_wrong_proj() {
+        let numbers_table = NumbersTable::table(0);
+        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(numbers_table),
+        )));
+        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+            .unwrap()
+            .project(vec![Expr::Column(Column::new(
+                Some(TableReference::bare("t")),
+                "number",
+            ))])
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let config = ConfigOptions::default();
+        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+        dbg!(&result);
+        println!("Expanded plan: {}", result.to_string());
+    }
 
     #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
     #[test]
