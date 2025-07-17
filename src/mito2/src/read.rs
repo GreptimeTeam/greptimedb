@@ -980,7 +980,7 @@ pub enum Source {
 
 impl Source {
     /// Returns next [Batch] from this data source.
-    pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    pub async fn next_batch(&mut self) -> Result<Option<Batch>> {
         match self {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),

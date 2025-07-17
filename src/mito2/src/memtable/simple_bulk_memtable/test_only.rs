@@ -12,72 +12,78 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::collections::HashSet;
 
-use itertools::Itertools;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error;
-use crate::memtable::simple_bulk_memtable::{BatchIterBuilder, SimpleBulkMemtable};
-use crate::memtable::{Memtable, MemtableRange, MemtableRangeContext, MemtableRanges};
-use crate::read::scan_region::PredicateGroup;
+use crate::memtable::simple_bulk_memtable::{Iter, SimpleBulkMemtable};
+use crate::memtable::time_series::Values;
+use crate::memtable::{BoxedBatchIterator, IterBuilder};
+use crate::read::dedup::LastNonNullIter;
+use crate::region::options::MergeMode;
 
 impl SimpleBulkMemtable {
     pub fn region_metadata(&self) -> RegionMetadataRef {
         self.region_metadata.clone()
     }
 
-    pub fn ranges_sequential(
+    pub(crate) fn create_iter(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
-    ) -> error::Result<MemtableRanges> {
-        let projection = Arc::new(self.build_projection(projection));
-        let values = self.series.read().unwrap().read_to_values();
-        let contexts = values
-            .into_iter()
-            .filter_map(|v| {
-                let filtered = match v
-                    .to_batch(&[], &self.region_metadata, &projection, self.dedup)
-                    .and_then(|mut b| {
-                        b.filter_by_sequence(sequence)?;
-                        Ok(b)
-                    }) {
-                    Ok(filtered) => filtered,
-                    Err(e) => {
-                        return Some(Err(e));
-                    }
-                };
-                if filtered.is_empty() {
-                    None
-                } else {
-                    Some(Ok(filtered))
-                }
-            })
-            .map_ok(|batch| {
-                let builder = BatchIterBuilder {
-                    batch,
-                    merge_mode: self.merge_mode,
-                };
-                Arc::new(MemtableRangeContext::new(
-                    self.id,
-                    Box::new(builder),
-                    predicate.clone(),
-                ))
-            })
-            .collect::<error::Result<Vec<_>>>()?;
+    ) -> error::Result<BatchIterBuilderDeprecated> {
+        let mut series = self.series.write().unwrap();
 
-        let ranges = contexts
-            .into_iter()
-            .enumerate()
-            .map(|(idx, context)| (idx, MemtableRange::new(context)))
-            .collect();
-
-        Ok(MemtableRanges {
-            ranges,
-            stats: self.stats(),
+        let values = if series.is_empty() {
+            None
+        } else {
+            Some(series.compact(&self.region_metadata)?.clone())
+        };
+        let projection = self.build_projection(projection);
+        Ok(BatchIterBuilderDeprecated {
+            region_metadata: self.region_metadata.clone(),
+            values,
+            projection,
+            dedup: self.dedup,
+            sequence,
+            merge_mode: self.merge_mode,
         })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct BatchIterBuilderDeprecated {
+    region_metadata: RegionMetadataRef,
+    values: Option<Values>,
+    projection: HashSet<ColumnId>,
+    sequence: Option<SequenceNumber>,
+    dedup: bool,
+    merge_mode: MergeMode,
+}
+
+impl IterBuilder for BatchIterBuilderDeprecated {
+    fn build(&self) -> error::Result<BoxedBatchIterator> {
+        let Some(values) = self.values.clone() else {
+            return Ok(Box::new(Iter { batch: None }));
+        };
+
+        let maybe_batch = values
+            .to_batch(&[], &self.region_metadata, &self.projection, self.dedup)
+            .and_then(|mut b| {
+                b.filter_by_sequence(self.sequence)?;
+                Ok(b)
+            })
+            .map(Some)
+            .transpose();
+
+        let iter = Iter { batch: maybe_batch };
+
+        if self.merge_mode == MergeMode::LastNonNull {
+            Ok(Box::new(LastNonNullIter::new(iter)))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 }

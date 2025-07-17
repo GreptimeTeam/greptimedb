@@ -32,7 +32,7 @@ use table::predicate::Predicate;
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
-use crate::memtable::time_series::{Series, Values};
+use crate::memtable::time_series::Series;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
     MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
@@ -101,29 +101,6 @@ impl SimpleBulkMemtable {
                 .map(|c| c.column_id)
                 .collect()
         }
-    }
-
-    fn create_iter(
-        &self,
-        projection: Option<&[ColumnId]>,
-        sequence: Option<SequenceNumber>,
-    ) -> error::Result<BatchIterBuilderDeprecated> {
-        let mut series = self.series.write().unwrap();
-
-        let values = if series.is_empty() {
-            None
-        } else {
-            Some(series.compact(&self.region_metadata)?.clone())
-        };
-        let projection = self.build_projection(projection);
-        Ok(BatchIterBuilderDeprecated {
-            region_metadata: self.region_metadata.clone(),
-            values,
-            projection,
-            dedup: self.dedup,
-            sequence,
-            merge_mode: self.merge_mode,
-        })
     }
 
     fn write_key_value(&self, kv: KeyValue, stats: &mut WriteMetrics) {
@@ -374,41 +351,6 @@ impl IterBuilder for BatchIterBuilder {
         let iter = Iter {
             batch: Some(Ok(batch)),
         };
-
-        if self.merge_mode == MergeMode::LastNonNull {
-            Ok(Box::new(LastNonNullIter::new(iter)))
-        } else {
-            Ok(Box::new(iter))
-        }
-    }
-}
-
-#[derive(Clone)]
-struct BatchIterBuilderDeprecated {
-    region_metadata: RegionMetadataRef,
-    values: Option<Values>,
-    projection: HashSet<ColumnId>,
-    sequence: Option<SequenceNumber>,
-    dedup: bool,
-    merge_mode: MergeMode,
-}
-
-impl IterBuilder for BatchIterBuilderDeprecated {
-    fn build(&self) -> error::Result<BoxedBatchIterator> {
-        let Some(values) = self.values.clone() else {
-            return Ok(Box::new(Iter { batch: None }));
-        };
-
-        let maybe_batch = values
-            .to_batch(&[], &self.region_metadata, &self.projection, self.dedup)
-            .and_then(|mut b| {
-                b.filter_by_sequence(self.sequence)?;
-                Ok(b)
-            })
-            .map(Some)
-            .transpose();
-
-        let iter = Iter { batch: maybe_batch };
 
         if self.merge_mode == MergeMode::LastNonNull {
             Ok(Box::new(LastNonNullIter::new(iter)))

@@ -6,8 +6,10 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
-use mito2::memtable::{KeyValues, Memtable};
+use mito2::memtable::{KeyValues, Memtable, MemtableRanges};
+use mito2::read::merge::MergeReaderBuilder;
 use mito2::read::scan_region::PredicateGroup;
+use mito2::read::Source;
 use mito2::region::options::MergeMode;
 use mito2::test_util::column_metadata_to_column_schema;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -104,118 +106,54 @@ fn create_large_memtable() -> SimpleBulkMemtable {
     memtable
 }
 
+async fn flush(mem: &SimpleBulkMemtable) {
+    let MemtableRanges { ranges, .. } = mem.ranges(None, PredicateGroup::default(), None).unwrap();
+
+    let mut source = if ranges.len() == 1 {
+        let only_range = ranges.into_values().next().unwrap();
+        Source::Iter(only_range.build_iter().unwrap())
+    } else {
+        // todo(hl): a workaround since sync version of MergeReader is wip.
+        let sources = ranges
+            .into_values()
+            .map(|r| r.build_iter().map(Source::Iter))
+            .collect::<mito2::error::Result<Vec<_>>>()
+            .unwrap();
+        let merge_reader = MergeReaderBuilder::from_sources(sources)
+            .build()
+            .await
+            .unwrap();
+        Source::Reader(Box::new(merge_reader))
+    };
+
+    while let Some(b) = source.next_batch().await.unwrap() {
+        black_box(b);
+    }
+}
+
+async fn flush_original(mem: &SimpleBulkMemtable) {
+    let iter = mem.iter(None, None, None).unwrap();
+    for b in iter {
+        black_box(b.unwrap());
+    }
+}
+
 fn bench_ranges_parallel_vs_sequential(c: &mut Criterion) {
     let memtable = create_large_memtable();
-    let predicate = PredicateGroup::default();
-
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("ranges_parallel_vs_sequential");
 
-    group.bench_function("parallel", |b| {
-        b.iter(|| black_box(memtable.ranges(None, predicate.clone(), None).unwrap()))
+    group.bench_function("flush_by_merge_reader", |b| {
+        b.to_async(&rt).iter(|| async { flush(&memtable).await })
     });
 
-    group.bench_function("sequential", |b| {
-        b.iter(|| {
-            black_box(
-                memtable
-                    .ranges_sequential(None, predicate.clone(), None)
-                    .unwrap(),
-            )
-        })
+    group.bench_function("flush_by_iter", move |b| {
+        b.to_async(&rt)
+            .iter(|| async { flush_original(&memtable).await })
     });
 
     group.finish();
 }
 
-fn bench_ranges_with_projection(c: &mut Criterion) {
-    let memtable = create_large_memtable();
-    let predicate = PredicateGroup::default();
-    let projection = vec![2]; // Only project f1 column
-
-    let mut group = c.benchmark_group("ranges_with_projection");
-
-    group.bench_function("parallel_with_projection", |b| {
-        b.iter(|| {
-            black_box(
-                memtable
-                    .ranges(Some(&projection), predicate.clone(), None)
-                    .unwrap(),
-            )
-        })
-    });
-
-    group.bench_function("sequential_with_projection", |b| {
-        b.iter(|| {
-            black_box(
-                memtable
-                    .ranges_sequential(Some(&projection), predicate.clone(), None)
-                    .unwrap(),
-            )
-        })
-    });
-
-    group.finish();
-}
-
-fn bench_ranges_with_sequence_filter(c: &mut Criterion) {
-    let memtable = create_large_memtable();
-    let predicate = PredicateGroup::default();
-    let sequence = Some(500); // Filter to first half of sequences
-
-    let mut group = c.benchmark_group("ranges_with_sequence_filter");
-
-    group.bench_function("parallel_with_sequence_filter", |b| {
-        b.iter(|| black_box(memtable.ranges(None, predicate.clone(), sequence).unwrap()))
-    });
-
-    group.bench_function("sequential_with_sequence_filter", |b| {
-        b.iter(|| {
-            black_box(
-                memtable
-                    .ranges_sequential(None, predicate.clone(), sequence)
-                    .unwrap(),
-            )
-        })
-    });
-
-    group.finish();
-}
-
-fn bench_memtable_write_performance(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memtable_write");
-
-    group.bench_function("write_small_batch", |b| {
-        b.iter_with_setup(
-            || new_test_memtable(false, MergeMode::LastRow),
-            |memtable| {
-                let data = vec![(1i64, 1.0f64, "test".to_string())];
-                let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
-                memtable.write(&kvs).unwrap();
-            },
-        )
-    });
-
-    group.bench_function("write_large_batch", |b| {
-        b.iter_with_setup(
-            || new_test_memtable(false, MergeMode::LastRow),
-            |memtable| {
-                let data: Vec<_> = (0..1000)
-                    .map(|i| (i as i64, i as f64, format!("value_{}", i)))
-                    .collect();
-                let kvs = build_key_values(&memtable.region_metadata(), 0, &data);
-                memtable.write(&kvs).unwrap();
-            },
-        )
-    });
-
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_ranges_parallel_vs_sequential,
-    bench_ranges_with_projection,
-    bench_ranges_with_sequence_filter,
-    bench_memtable_write_performance
-);
+criterion_group!(benches, bench_ranges_parallel_vs_sequential,);
 criterion_main!(benches);
