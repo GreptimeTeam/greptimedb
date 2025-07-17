@@ -73,7 +73,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
 
 // Valid option keys when creating a db.
 static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
-    let mut set = HashSet::new();
+    let mut set = HashSet::with_capacity(6);
     set.insert(TTL_KEY);
     set.insert(STORAGE_KEY);
     set.insert(MEMTABLE_TYPE);
