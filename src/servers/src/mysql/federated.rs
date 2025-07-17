@@ -170,7 +170,7 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 
     // skip the first "select"
     for var in vars.iter().skip(1) {
-        let var = var.trim_matches(|c| c == ' ' || c == ',');
+        let var = var.trim_matches(|c| c == ' ' || c == ',' || c == ';');
         let var_as: Vec<&str> = var
             .split(" as ")
             .map(|x| {
