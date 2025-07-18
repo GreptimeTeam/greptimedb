@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_telemetry::{info, warn};
 use futures::future::BoxFuture;
 use moka::future::Cache;
 use moka::ops::compute::Op;
@@ -89,6 +90,12 @@ fn init_factory(table_flow_manager: TableFlowManagerRef) -> Initializer<TableId,
                 // we have a corresponding cache invalidation mechanism to invalidate `(Key, EmptyHashSet)`.
                 .map(Arc::new)
                 .map(Some)
+                .inspect(|set| {
+                    info!(
+                        "Initialized table_flownode cache for table_id: {}, set: {:?}",
+                        table_id, set
+                    );
+                })
         })
     })
 }
@@ -167,7 +174,13 @@ fn invalidator<'a>(
         match ident {
             CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
             CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
-            CacheIdent::FlowNode(_) => cache.invalidate_all(),
+            CacheIdent::FlowNodeAddressChange(node_id) => {
+                info!(
+                    "Invalidate flow node cache for node_id in table_flownode: {}",
+                    node_id
+                );
+                cache.invalidate_all();
+            }
             _ => {}
         }
         Ok(())
@@ -175,7 +188,10 @@ fn invalidator<'a>(
 }
 
 fn filter(ident: &CacheIdent) -> bool {
-    matches!(ident, CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_))
+    matches!(
+        ident,
+        CacheIdent::CreateFlow(_) | CacheIdent::DropFlow(_) | CacheIdent::FlowNodeAddressChange(_)
+    )
 }
 
 #[cfg(test)]

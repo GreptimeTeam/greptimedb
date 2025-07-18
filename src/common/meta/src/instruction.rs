@@ -175,7 +175,7 @@ pub struct UpgradeRegion {
 pub enum CacheIdent {
     FlowId(FlowId),
     /// Indicate change of address of flownode.
-    FlowNode(u64),
+    FlowNodeAddressChange(u64),
     FlowName(FlowName),
     TableId(TableId),
     TableName(TableName),
