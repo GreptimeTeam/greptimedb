@@ -17,10 +17,10 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{
-    OrderOption, RecordBatch, RecordBatchMetrics, RecordBatchStream, SendableRecordBatchStream,
-};
+use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_telemetry::init_default_ut_logging;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::min;
@@ -29,11 +29,11 @@ use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
 use datafusion_sql::TableReference;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
-use datatypes::timestamp::Timestamp;
 use futures::task::{Context, Poll};
 use futures::Stream;
+use pretty_assertions::assert_eq;
 use store_api::data_source::DataSource;
-use store_api::storage::{ColumnId, ScanRequest};
+use store_api::storage::ScanRequest;
 use table::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMeta, TableType,
 };
@@ -60,6 +60,7 @@ impl TestTable {
         let column_schemas = vec![
             ColumnSchema::new("pk1", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("pk2", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("pk3", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
@@ -70,7 +71,6 @@ impl TestTable {
         ];
         let schema = SchemaBuilder::try_from_columns(column_schemas)
             .unwrap()
-            .timestamp_column_name("ts")
             .build()
             .unwrap();
         Arc::new(schema)
@@ -80,14 +80,14 @@ impl TestTable {
         let table_meta = TableMeta {
             schema: Self::schema(),
             primary_key_indices: vec![0, 1, 2],
-            value_indices: vec![3],
+            value_indices: vec![4],
             engine,
-            region_numbers: vec![0],
+            region_numbers: vec![0, 1],
             next_column_id: 5,
             options: Default::default(),
-            created_on: Timestamp::from_secs(0),
+            created_on: Default::default(),
             partition_key_indices: vec![0, 1],
-            column_ids: vec![1, 2, 3, 4],
+            column_ids: vec![0, 1, 2, 3, 4],
         };
 
         let table_info = TableInfoBuilder::default()
@@ -164,10 +164,11 @@ impl Stream for EmptyStream {
 /// only `Aggregate` does
 #[test]
 fn expand_step_aggr_with_not_in_scope_proj() {
+    init_default_ut_logging();
     // TODO(discord9): change to partitioned table
-    let numbers_table = NumbersTable::table(0);
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(numbers_table),
+        DfTableProviderAdapter::new(test_table),
     )));
     let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
         .unwrap()
@@ -186,7 +187,9 @@ fn expand_step_aggr_with_not_in_scope_proj() {
 
     let expected = [
         "Projection: min(t.number)",
-        "  MergeScan [is_placeholder=false]",
+        "  Projection: min(min(t.number)) AS min(t.number)",
+        "    Aggregate: groupBy=[[]], aggr=[[min(min(t.number))]]",
+        "      MergeScan [is_placeholder=false]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
