@@ -82,9 +82,13 @@ async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
                 info!("Successfully updated flow `NodeAddressValue`: {:?}", peer);
                 // broadcast invalidating cache to all frontends
                 let cache_idents = vec![CacheIdent::FlowNode(peer.id)];
-                ctx.cache_invalidator
+                if let Err(e) = ctx
+                    .cache_invalidator
                     .invalidate(&Context::default(), &cache_idents)
-                    .await?;
+                    .await
+                {
+                    error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
+                }
             }
             Err(e) => {
                 error!(e; "Failed to update flow `NodeAddressValue`: {:?}", peer);

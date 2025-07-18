@@ -139,7 +139,8 @@ where
                     self.invalidate_key(&key.to_bytes()).await;
                 }
                 CacheIdent::FlowNode(node_id) => {
-                    // TODO(discord9): table flow cache might also need to be invalidated
+                    // other caches doesn't need to be invalidated
+                    // since this is only for flownode address change not id change
                     let key = NodeAddressKey::with_flownode(*node_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
