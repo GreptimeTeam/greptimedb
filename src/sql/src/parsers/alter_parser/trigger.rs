@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use snafu::{ensure, ResultExt};
 use sqlparser::ast::Ident;
 use sqlparser::parser::Parser;
@@ -7,7 +6,11 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, DuplicateClauseSnafu, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::trigger::{ANNOTATIONS, LABELS, NOTIFY, ON};
-use crate::statements::alter::trigger::{AnnotationOperations, LabelOperations};
+use crate::statements::alter::trigger::{
+    AnnotationChange, AnnotationOperations, LabelChange, LabelOperations, NotifyChannelChange,
+    NotifyChannelOperations,
+};
+use crate::statements::create::trigger::NotifyChannel;
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
 
@@ -49,19 +52,7 @@ impl<'a> ParserContext<'a> {
         let mut new_query_and_interval = None;
         let mut label_ops: Option<LabelOperations> = None;
         let mut annotation_ops: Option<AnnotationOperations> = None;
-
-        let mut new_notify_channels = None;
-
-        let mut may_add_labels = None;
-        let mut may_add_annotations = None;
-        let mut add_notify_channels = None;
-
-        let mut may_modify_labels = None;
-        let mut may_modify_annotations = None;
-
-        let mut drop_labels = None;
-        let mut drop_annotations = None;
-        let mut drop_notify_channels = None;
+        let mut notify_ops: Option<NotifyChannelOperations> = None;
 
         loop {
             let next_token = self.parser.peek_token();
@@ -94,18 +85,12 @@ impl<'a> ParserContext<'a> {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                     self.parser.next_token();
                     let annotations = self.parse_trigger_annotations(true)?;
-                    ensure!(
-                        annotation_ops.is_none(),
-                        DuplicateClauseSnafu {
-                            clause: "ANNOTATIONS OR SET ANNOTATIONS"
-                        }
-                    );
-                    annotation_ops.replace(AnnotationOperations::ReplaceAll(annotations));
+                    check_and_set_annotations(&mut annotation_ops, annotations)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                     self.parser.next_token();
                     let channels = self.parse_trigger_notify(true)?;
-                    new_notify_channels.replace(channels);
+                    check_and_set_notify_channels(&mut notify_ops, channels)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(SET) => {
                     self.parser.next_token();
@@ -119,18 +104,12 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
-                            ensure!(
-                                annotation_ops.is_none(),
-                                DuplicateClauseSnafu {
-                                    clause: "ANNOTATIONS OR SET ANNOTATIONS"
-                                }
-                            );
-                            annotation_ops.replace(AnnotationOperations::ReplaceAll(annotations));
+                            check_and_set_annotations(&mut annotation_ops, annotations)?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
                             let channels = self.parse_trigger_notify(true)?;
-                            new_notify_channels.replace(channels);
+                            check_and_set_notify_channels(&mut notify_ops, channels)?;
                         }
                         _ => {
                             return self.expected(
@@ -147,17 +126,23 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(false)?;
-                            may_add_labels.replace(labels);
+                            check_and_change_labels(&mut label_ops, LabelChange::Add(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(false)?;
-                            may_add_annotations.replace(annotations);
+                            check_and_change_annotations(
+                                &mut annotation_ops,
+                                AnnotationChange::Add(annotations),
+                            )?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
                             let channels = self.parse_trigger_notify(false)?;
-                            add_notify_channels.replace(channels);
+                            check_and_change_notify_channels(
+                                &mut notify_ops,
+                                NotifyChannelChange::Add(channels),
+                            )?;
                         }
                         _ => {
                             return self.expected(
@@ -174,12 +159,15 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(false)?;
-                            may_modify_labels.replace(labels);
+                            check_and_change_labels(&mut label_ops, LabelChange::Modify(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(false)?;
-                            may_modify_annotations.replace(annotations);
+                            check_and_change_annotations(
+                                &mut annotation_ops,
+                                AnnotationChange::Modify(annotations),
+                            )?;
                         }
                         _ => {
                             return self.expected(
@@ -196,17 +184,23 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let names = self.parse_trigger_label_names(false)?;
-                            drop_labels.replace(names);
+                            check_and_change_labels(&mut label_ops, LabelChange::Drop(names))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let names = self.parse_trigger_annotation_names(false)?;
-                            drop_annotations.replace(names);
+                            check_and_change_annotations(
+                                &mut annotation_ops,
+                                AnnotationChange::Drop(names),
+                            )?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
-                            let channels = self.parse_trigger_notify(false)?;
-                            drop_notify_channels.replace(channels);
+                            let channels = self.parse_trigger_notify_names(false)?;
+                            check_and_change_notify_channels(
+                                &mut notify_ops,
+                                NotifyChannelChange::Drop(channels),
+                            )?;
                         }
                         _ => {
                             return self.expected(
@@ -396,7 +390,7 @@ impl<'a> ParserContext<'a> {
 fn check_and_set_labels(label_ops: &mut Option<LabelOperations>, labels: OptionMap) -> Result<()> {
     match label_ops {
         Some(LabelOperations::ReplaceAll(_)) => DuplicateClauseSnafu {
-            clause: "LABELS or SET LABELS",
+            clause: "SET LABELS",
         }
         .fail(),
         Some(LabelOperations::PartialChanges(_)) => InvalidSqlSnafu {
@@ -405,6 +399,108 @@ fn check_and_set_labels(label_ops: &mut Option<LabelOperations>, labels: OptionM
         .fail(),
         None => {
             *label_ops = Some(LabelOperations::ReplaceAll(labels));
+            Ok(())
+        }
+    }
+}
+
+fn check_and_set_annotations(
+    annotation_ops: &mut Option<AnnotationOperations>,
+    annotations: OptionMap,
+) -> Result<()> {
+    match annotation_ops {
+        Some(AnnotationOperations::ReplaceAll(_)) => DuplicateClauseSnafu {
+            clause: "SET ANNOTATIONS",
+        }
+        .fail(),
+        Some(AnnotationOperations::PartialChanges(_)) => InvalidSqlSnafu {
+            msg: "SET ANNOTATIONS cannot be used with ADD/MODIFY/DROP ANNOTATIONS",
+        }
+        .fail(),
+        None => {
+            *annotation_ops = Some(AnnotationOperations::ReplaceAll(annotations));
+            Ok(())
+        }
+    }
+}
+
+fn check_and_set_notify_channels(
+    notify_channel_ops: &mut Option<NotifyChannelOperations>,
+    channels: Vec<NotifyChannel>,
+) -> Result<()> {
+    match notify_channel_ops {
+        Some(NotifyChannelOperations::ReplaceAll(_)) => DuplicateClauseSnafu {
+            clause: "SET NOTIFY",
+        }
+        .fail(),
+        Some(NotifyChannelOperations::PartialChanges(_)) => InvalidSqlSnafu {
+            msg: "SET NOTIFY cannot be used with ADD/DROP NOTIFY",
+        }
+        .fail(),
+        None => {
+            *notify_channel_ops = Some(NotifyChannelOperations::ReplaceAll(channels));
+            Ok(())
+        }
+    }
+}
+
+fn check_and_change_labels(
+    label_ops: &mut Option<LabelOperations>,
+    label_change: LabelChange,
+) -> Result<()> {
+    match label_ops {
+        Some(LabelOperations::ReplaceAll(_)) => InvalidSqlSnafu {
+            msg: "SET LABELS cannot be used with ADD/MODIFY/DROP LABELS",
+        }
+        .fail(),
+        Some(LabelOperations::PartialChanges(label_changes)) => {
+            label_changes.push(label_change);
+            Ok(())
+        }
+        None => {
+            *label_ops = Some(LabelOperations::PartialChanges(vec![label_change]));
+            Ok(())
+        }
+    }
+}
+
+fn check_and_change_annotations(
+    annotation_ops: &mut Option<AnnotationOperations>,
+    annotation_change: AnnotationChange,
+) -> Result<()> {
+    match annotation_ops {
+        Some(AnnotationOperations::ReplaceAll(_)) => InvalidSqlSnafu {
+            msg: "SET ANNOTATIONS cannot be used with ADD/MODIFY/DROP ANNOTATIONS",
+        }
+        .fail(),
+        Some(AnnotationOperations::PartialChanges(label_changes)) => {
+            label_changes.push(annotation_change);
+            Ok(())
+        }
+        None => {
+            *annotation_ops = Some(AnnotationOperations::PartialChanges(vec![
+                annotation_change,
+            ]));
+            Ok(())
+        }
+    }
+}
+
+fn check_and_change_notify_channels(
+    ops: &mut Option<NotifyChannelOperations>,
+    change: NotifyChannelChange,
+) -> Result<()> {
+    match ops {
+        Some(NotifyChannelOperations::ReplaceAll(_)) => InvalidSqlSnafu {
+            msg: "SET NOTIFY cannot be used with ADD/DROP NOTIFY",
+        }
+        .fail(),
+        Some(NotifyChannelOperations::PartialChanges(changes)) => {
+            changes.push(change);
+            Ok(())
+        }
+        None => {
+            *ops = Some(NotifyChannelOperations::PartialChanges(vec![change]));
             Ok(())
         }
     }
