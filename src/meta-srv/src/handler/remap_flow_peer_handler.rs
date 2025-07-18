@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
+use common_meta::instruction::CacheIdent;
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::rpc::store::PutRequest;
@@ -80,7 +81,19 @@ async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
         match ctx.leader_cached_kv_backend.put(put).await {
             Ok(_) => {
                 info!("Successfully updated flow `NodeAddressValue`: {:?}", peer);
-                // TODO(discord): broadcast invalidating cache to all frontends
+                // broadcast invalidating cache to all frontends
+                let cache_idents = vec![CacheIdent::FlowNodeAddressChange(peer.id)];
+                info!(
+                    "Invalidate flow node cache for new address with cache idents: {:?}",
+                    cache_idents
+                );
+                if let Err(e) = ctx
+                    .cache_invalidator
+                    .invalidate(&Default::default(), &cache_idents)
+                    .await
+                {
+                    error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
+                }
             }
             Err(e) => {
                 error!(e; "Failed to update flow `NodeAddressValue`: {:?}", peer);
