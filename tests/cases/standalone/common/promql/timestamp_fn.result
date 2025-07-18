@@ -4,7 +4,7 @@ create table timestamp_test (ts timestamp time index, val double);
 
 Affected Rows: 0
 
-insert into timestamp_test values 
+insert into timestamp_test values
   (0, 1.0),
   (1000, 2.0),
   (60000, 3.0),
@@ -121,31 +121,33 @@ create table timestamp_test2 (ts timestamp time index, val double);
 
 Affected Rows: 0
 
-insert into timestamp_test2 values 
+insert into timestamp_test2 values
   (0, 10.0),
   (1000, 20.0),
   (60000, 30.0);
 
 Affected Rows: 3
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 60, '30s') timestamp(timestamp_test) + timestamp(timestamp_test2);
 
 +---------------------+----------------------------------------------+
 | ts                  | timestamp_test.value + timestamp_test2.value |
 +---------------------+----------------------------------------------+
-| 1970-01-01T00:00:30 | 2.0                                          |
 | 1970-01-01T00:00:00 | 0.0                                          |
+| 1970-01-01T00:00:30 | 2.0                                          |
 | 1970-01-01T00:01:00 | 120.0                                        |
 +---------------------+----------------------------------------------+
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 60, '30s') timestamp(timestamp_test) == timestamp(timestamp_test2);
 
 +---------------------+-------+---------------------+-------+
 | ts                  | value | ts                  | value |
 +---------------------+-------+---------------------+-------+
-| 1970-01-01T00:01:00 | 60.0  | 1970-01-01T00:01:00 | 60.0  |
-| 1970-01-01T00:00:30 | 1.0   | 1970-01-01T00:00:30 | 1.0   |
 | 1970-01-01T00:00:00 | 0.0   | 1970-01-01T00:00:00 | 0.0   |
+| 1970-01-01T00:00:30 | 1.0   | 1970-01-01T00:00:30 | 1.0   |
+| 1970-01-01T00:01:00 | 60.0  | 1970-01-01T00:01:00 | 60.0  |
 +---------------------+-------+---------------------+-------+
 
 drop table timestamp_test;

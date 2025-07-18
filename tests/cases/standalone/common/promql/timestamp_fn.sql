@@ -3,7 +3,7 @@
 
 create table timestamp_test (ts timestamp time index, val double);
 
-insert into timestamp_test values 
+insert into timestamp_test values
   (0, 1.0),
   (1000, 2.0),
   (60000, 3.0),
@@ -41,13 +41,15 @@ tql eval (0, 60, '30s') timestamp(timestamp_test) == 60;
 -- Test timestamp() with multiple metrics
 create table timestamp_test2 (ts timestamp time index, val double);
 
-insert into timestamp_test2 values 
+insert into timestamp_test2 values
   (0, 10.0),
   (1000, 20.0),
   (60000, 30.0);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 60, '30s') timestamp(timestamp_test) + timestamp(timestamp_test2);
 
+-- SQLNESS SORT_RESULT 3 1
 tql eval (0, 60, '30s') timestamp(timestamp_test) == timestamp(timestamp_test2);
 
 drop table timestamp_test;
