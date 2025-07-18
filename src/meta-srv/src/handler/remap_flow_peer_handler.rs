@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Peer, Role};
+use common_meta::instruction::CacheIdent;
 use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::rpc::store::PutRequest;
@@ -84,7 +85,7 @@ async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
                 let cache_idents = vec![CacheIdent::FlowNode(peer.id)];
                 if let Err(e) = ctx
                     .cache_invalidator
-                    .invalidate(&Context::default(), &cache_idents)
+                    .invalidate(&Default::default(), &cache_idents)
                     .await
                 {
                     error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
