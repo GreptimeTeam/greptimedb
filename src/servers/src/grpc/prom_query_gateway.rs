@@ -27,7 +27,7 @@ use common_error::status_code::StatusCode;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::value::ValueType;
 use query::parser::PromQuery;
-use session::context::QueryContext;
+use session::context::{Channel, QueryContext};
 use snafu::OptionExt;
 use tonic::{Request, Response};
 
@@ -77,7 +77,8 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(header, Default::default())?;
+        let query_ctx = create_query_context(Channel::Promql, header, Default::default())?;
+
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
