@@ -1,6 +1,6 @@
 ---
 Feature Name: Repartition
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/6558
 Date: 2025-06-20
 Author: "Ruihang Xia <waynestxia@gmail.com>"
 ---
@@ -96,8 +96,8 @@ Here describe the repartition procedure step by step:
   - Update region rule to regions
   - Pick one region to calculate new manifest for all regions in this repartition group
   - Let that region to apply new manifest to each region via `RegionEdit`
-  - If failed after some retries, revert this manifest change to other successed regions and mark this failure.
-  - If all successed, acknowledge those staged version changes and make them visible.
+  - If failed after some retries, revert this manifest change to other succeeded regions and mark this failure.
+  - If all succeeded, acknowledge those staged version changes and make them visible.
   - Return result
 - Collect results from subprocedure.
   - For those who failed, we need to restart those regions to force reconstruct their status from manifests
@@ -121,13 +121,13 @@ In the current codebase, the rule checker is not complete. It can't check unique
 
 The proposed validation way is based on a check-point system, which first generates a group of check-points from the rule, and then check if all the point is covered and only covered by one rule.
 
-All the partition rule expressionis limited to be the form of `<column> <operator> <value>`, and the operator is limited to be comparison operators. Those expressions are allowed to be nested with `AND` and `OR` operators. Based on this, we can first extract all the unique values on each column, adding and sutracting a little epsilon to cover its left and right boundary.
+All the partition rule expressionis limited to be the form of `<column> <operator> <value>`, and the operator is limited to be comparison operators. Those expressions are allowed to be nested with `AND` and `OR` operators. Based on this, we can first extract all the unique values on each column, adding and subtracting a little epsilon to cover its left and right boundary.
 
 Since we accept integer, float and string as the value type, compute on them directly is not convenient. So we'll first normalize them to a common type and only need to preserve the relative partial ordering. This also avoids the problem of "what is next/previous value" of string and "what's a good precision" for float.
 
 After normalization, we get a set of scatter points for each column. Then we can generate a set of check-points by combining all the scatter points like building a cartesian product. This might bring a large number of check-points, so we can do an prune optimization to remove some of them by merging some of the expression zones. Those expressions who have identical N-1 edge sub-expressions with one adjacent edge can be merged together. This prune check is with a time complexity of O(N * M * log(M)), where N is the number of active dimensions and M is the number of expression zones. Diff calculation is also done by finding different expression zones between the old and new rule set, and check if we can transform one to another by merging some of the expression zones.
 
-The step to validate the check-points set against expressions can be treated as a tiny expression of `PhyiscalExpr`. This evaluation will give a boolean matrix of K*M shape, where K is the number of check-points. We then check in each row of the matrix, if there is one and only one true value.
+The step to validate the check-points set against expressions can be treated as a tiny expression of `PhysicalExpr`. This evaluation will give a boolean matrix of K*M shape, where K is the number of check-points. We then check in each row of the matrix, if there is one and only one true value.
 
 ## Compute and use new manifest
 
@@ -135,7 +135,7 @@ We can generate a new set of manifest file based on old manifest and two version
 
 If necessary, we can do this better by involving some metadata related to data, like min-max statistics of each file, and pre-evaluate over min-max to filter out unneeded files when generating new manifest.
 
-The way to use new manifest needs one more extra step based on the current implementation. We'll need to record either in manifest or in file metadata, of what rule is used when generating (flush or compaction) a SST file. Then in every single read request, we need to append the current region rule as predicate to the read request, to ensure no data belong to other regions will be read. We can use the stored region rule to reduce the number of new predicates to apply, by removing the identical predicate between the current region rule and the stored region rule. So idealy in a table that has not been repartitioned recently, the overhead of checking region rule is minimal.
+The way to use new manifest needs one more extra step based on the current implementation. We'll need to record either in manifest or in file metadata, of what rule is used when generating (flush or compaction) a SST file. Then in every single read request, we need to append the current region rule as predicate to the read request, to ensure no data belong to other regions will be read. We can use the stored region rule to reduce the number of new predicates to apply, by removing the identical predicate between the current region rule and the stored region rule. So ideally in a table that has not been repartitioned recently, the overhead of checking region rule is minimal.
 
 ## Pre-required tasks
 
