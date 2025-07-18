@@ -72,7 +72,7 @@ impl Default for MemtableConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
@@ -82,7 +82,7 @@ pub struct MemtableStats {
     /// Total rows in memtable
     pub num_rows: usize,
     /// Total number of ranges in the memtable.
-    num_ranges: usize,
+    pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
     max_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
@@ -391,12 +391,15 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
+    /// Number of rows in current memtable range.
+    // todo(hl): use [MemtableRangeStats] instead.
+    num_rows: usize,
 }
 
 impl MemtableRange {
     /// Creates a new range from context.
-    pub fn new(context: MemtableRangeContextRef) -> Self {
-        Self { context }
+    pub fn new(context: MemtableRangeContextRef, num_rows: usize) -> Self {
+        Self { context, num_rows }
     }
 
     /// Returns the id of the memtable to read.
@@ -420,6 +423,10 @@ impl MemtableRange {
     /// Builds an iterator to read all rows in range.
     pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
         self.context.builder.build()
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
     }
 }
 

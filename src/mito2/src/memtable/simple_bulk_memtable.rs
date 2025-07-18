@@ -259,15 +259,19 @@ impl Memtable for SimpleBulkMemtable {
             })
             .map(|result| {
                 result.map(|batch| {
+                    let num_rows = batch.num_rows();
                     let builder = BatchIterBuilder {
                         batch,
                         merge_mode: self.merge_mode,
                     };
-                    Arc::new(MemtableRangeContext::new(
-                        self.id,
-                        Box::new(builder),
-                        predicate.clone(),
-                    ))
+                    (
+                        num_rows,
+                        Arc::new(MemtableRangeContext::new(
+                            self.id,
+                            Box::new(builder),
+                            predicate.clone(),
+                        )),
+                    )
                 })
             })
             .collect::<error::Result<Vec<_>>>()?;
@@ -275,7 +279,7 @@ impl Memtable for SimpleBulkMemtable {
         let ranges = contexts
             .into_iter()
             .enumerate()
-            .map(|(idx, context)| (idx, MemtableRange::new(context)))
+            .map(|(idx, (num_rows, context))| (idx, MemtableRange::new(context, num_rows)))
             .collect();
 
         Ok(MemtableRanges {
