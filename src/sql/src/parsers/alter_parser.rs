@@ -44,7 +44,10 @@ impl ParserContext<'_> {
             Token::Word(w) => match w.keyword {
                 Keyword::DATABASE => self.parse_alter_database().map(Statement::AlterDatabase),
                 Keyword::TABLE => self.parse_alter_table().map(Statement::AlterTable),
-                Keyword::TRIGGER => self.parse_alter_trigger(),
+                Keyword::TRIGGER => {
+                    self.parser.next_token();
+                    self.parse_alter_trigger()
+                }
                 _ => self.expected("DATABASE or TABLE after ALTER", self.parser.peek_token()),
             },
             unexpected => self.unsupported(unexpected.to_string()),

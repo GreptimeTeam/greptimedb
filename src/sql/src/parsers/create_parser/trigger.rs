@@ -337,6 +337,7 @@ impl<'a> ParserContext<'a> {
         }
 
         let notify_ident = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
+        let notify_ident = Self::canonicalize_identifier(notify_ident);
 
         if let Token::Word(w) = self.parser.peek_token().token
             && w.value.eq_ignore_ascii_case(URL)

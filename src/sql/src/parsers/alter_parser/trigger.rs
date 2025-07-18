@@ -7,8 +7,8 @@ use crate::error::{self, DuplicateClauseSnafu, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::trigger::{ANNOTATIONS, LABELS, NOTIFY, ON};
 use crate::statements::alter::trigger::{
-    AnnotationChange, AnnotationOperations, LabelChange, LabelOperations, NotifyChannelChange,
-    NotifyChannelOperations,
+    AlterTrigger, AlterTriggerOperation, AnnotationChange, AnnotationOperations, LabelChange,
+    LabelOperations, NotifyChannelChange, NotifyChannelOperations,
 };
 use crate::statements::create::trigger::NotifyChannel;
 use crate::statements::statement::Statement;
@@ -46,10 +46,11 @@ impl<'a> ParserContext<'a> {
     /// }
     /// ```
     pub(super) fn parse_alter_trigger(&mut self) -> Result<Statement> {
-        let _trigger_name = self.intern_parse_table_name()?;
+        let trigger_name = self.intern_parse_table_name()?;
 
         let mut new_trigger_name = None;
-        let mut new_query_and_interval = None;
+        let mut new_query = None;
+        let mut new_interval = None;
         let mut label_ops: Option<LabelOperations> = None;
         let mut annotation_ops: Option<AnnotationOperations> = None;
         let mut notify_ops: Option<NotifyChannelOperations> = None;
@@ -60,22 +61,24 @@ impl<'a> ParserContext<'a> {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(RENAME) => {
                     self.parser.next_token();
                     let name = self.parse_rename_to(true)?;
+                    let name = Self::canonicalize_identifier(name);
                     ensure!(
                         new_trigger_name.is_none(),
                         DuplicateClauseSnafu {
                             clause: "RENAME TO"
                         }
                     );
-                    new_trigger_name.replace(name);
+                    new_trigger_name.replace(name.value);
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ON) => {
                     self.parser.next_token();
                     let (query, interval) = self.parse_trigger_on(true)?;
                     ensure!(
-                        new_query_and_interval.is_none(),
+                        new_query.is_none() && new_interval.is_none(),
                         DuplicateClauseSnafu { clause: ON }
                     );
-                    new_query_and_interval.replace((query, interval));
+                    new_query.replace(query);
+                    new_interval.replace(interval);
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
@@ -125,12 +128,12 @@ impl<'a> ParserContext<'a> {
                     match next_token.token {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
-                            let labels = self.parse_trigger_labels(false)?;
+                            let labels = self.parse_trigger_labels(true)?;
                             check_and_change_labels(&mut label_ops, LabelChange::Add(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
-                            let annotations = self.parse_trigger_annotations(false)?;
+                            let annotations = self.parse_trigger_annotations(true)?;
                             check_and_change_annotations(
                                 &mut annotation_ops,
                                 AnnotationChange::Add(annotations),
@@ -138,7 +141,7 @@ impl<'a> ParserContext<'a> {
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
-                            let channels = self.parse_trigger_notify(false)?;
+                            let channels = self.parse_trigger_notify(true)?;
                             check_and_change_notify_channels(
                                 &mut notify_ops,
                                 NotifyChannelChange::Add(channels),
@@ -158,12 +161,12 @@ impl<'a> ParserContext<'a> {
                     match next_token.token {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
-                            let labels = self.parse_trigger_labels(false)?;
+                            let labels = self.parse_trigger_labels(true)?;
                             check_and_change_labels(&mut label_ops, LabelChange::Modify(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
-                            let annotations = self.parse_trigger_annotations(false)?;
+                            let annotations = self.parse_trigger_annotations(true)?;
                             check_and_change_annotations(
                                 &mut annotation_ops,
                                 AnnotationChange::Modify(annotations),
@@ -183,12 +186,12 @@ impl<'a> ParserContext<'a> {
                     match next_token.token {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
-                            let names = self.parse_trigger_label_names(false)?;
+                            let names = self.parse_trigger_label_names(true)?;
                             check_and_change_labels(&mut label_ops, LabelChange::Drop(names))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
-                            let names = self.parse_trigger_annotation_names(false)?;
+                            let names = self.parse_trigger_annotation_names(true)?;
                             check_and_change_annotations(
                                 &mut annotation_ops,
                                 AnnotationChange::Drop(names),
@@ -196,7 +199,7 @@ impl<'a> ParserContext<'a> {
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
-                            let channels = self.parse_trigger_notify_names(false)?;
+                            let channels = self.parse_trigger_notify_names(true)?;
                             check_and_change_notify_channels(
                                 &mut notify_ops,
                                 NotifyChannelChange::Drop(channels),
@@ -219,7 +222,29 @@ impl<'a> ParserContext<'a> {
                 }
             }
         }
-        todo!("parse_alter_trigger not implemented yet");
+
+        if new_trigger_name.is_none()
+            && new_query.is_none()
+            && new_interval.is_none()
+            && label_ops.is_none()
+            && annotation_ops.is_none()
+            && notify_ops.is_none()
+        {
+            return self.expected("alter option", self.parser.peek_token());
+        }
+
+        let alter_trigger = AlterTrigger {
+            trigger_name,
+            operation: AlterTriggerOperation {
+                rename: new_trigger_name,
+                new_query,
+                new_interval,
+                label_operations: label_ops,
+                annotation_operations: annotation_ops,
+                notify_channel_operations: notify_ops,
+            },
+        };
+        Ok(Statement::AlterTrigger(alter_trigger))
     }
 
     /// The SQL format as follows:
