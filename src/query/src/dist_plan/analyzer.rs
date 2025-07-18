@@ -192,11 +192,11 @@ impl PlanRewriter {
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
         debug!(
-            "Check should_expand at level: {}  with Stack:\n {}, ",
+            "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
             self.stack
                 .iter()
-                .map(|(p, l)| format!("Level={l}, Plan={p}"))
+                .map(|(p, l)| format!("Level={l}, Plan={}", p.display()))
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
@@ -236,7 +236,7 @@ impl PlanRewriter {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
-                    self.update_column_requirements(&plan, self.level);
+                    self.update_column_requirements(&plan, self.level - 1);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
@@ -245,7 +245,7 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan)
                 {
-                    self.update_column_requirements(&plan, self.level);
+                    self.update_column_requirements(&plan, self.level - 1);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
@@ -489,7 +489,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
         }
 
         self.cur_level += 1;
-        return Ok(Transformed::no(node));
+        Ok(Transformed::no(node))
     }
 
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {

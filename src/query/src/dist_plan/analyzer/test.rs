@@ -163,7 +163,8 @@ impl Stream for EmptyStream {
 /// because `Sort`/`Limit` doesn't introduce new column requirements
 /// only `Aggregate` does
 #[test]
-fn expand_step_aggr_with_not_in_scope_proj() {
+fn expand_proj_step_aggr() {
+    // use logging for better debugging
     init_default_ut_logging();
     // TODO(discord9): change to partitioned table
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
@@ -195,13 +196,18 @@ fn expand_step_aggr_with_not_in_scope_proj() {
     assert_eq!(expected, result.to_string());
 }
 
+/// should only expand `Sort`
 #[test]
-fn expand_step_proj_then_sort() {
-    let numbers_table = NumbersTable::table(0);
+fn expand_proj_sort_step_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(numbers_table),
+        DfTableProviderAdapter::new(test_table),
     )));
     let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
         .unwrap()
         .project(vec![Expr::Column(Column::new(
             Some(TableReference::bare("t")),
@@ -216,8 +222,46 @@ fn expand_step_proj_then_sort() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Projection: min(t.number)",
-        "  MergeScan [is_placeholder=false]",
+        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "  Projection: t.number",
+        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// should only expand `Sort`
+#[test]
+fn expand_proj_sort_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk3").sort(true, false)])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    MergeSort: t.pk3 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
