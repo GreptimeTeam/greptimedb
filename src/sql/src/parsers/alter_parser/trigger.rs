@@ -537,7 +537,115 @@ mod tests {
     use crate::parser::ParserContext;
     use crate::parsers::alter_parser::trigger::{check_and_change_labels, check_and_set_labels};
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
+    use crate::statements::statement::Statement;
     use crate::statements::OptionMap;
+
+    #[test]
+    fn test_parse_alter_without_alter_options() {
+        // Failed case: No alter options.
+        // Note: "ALTER TRIGGER" is matched.
+        let sql = r#"public.old_trigger"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_alter_trigger();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_set_query() {
+        // Passed case: SET QUERY.
+        // Note: "ALTER TRIGGER" is matched.
+        let sql = r#"public.old_trigger ON (SELECT * FROM test_table) EVERY '5 minute'::INTERVAL"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let stmt = ctx.parse_alter_trigger().unwrap();
+        let Statement::AlterTrigger(alter) = stmt else {
+            panic!("Expected AlterTrigger statement");
+        };
+        assert!(alter.operation.new_query.is_some());
+        assert!(alter.operation.new_interval.is_some());
+
+        // Failed case: multi SET QUERY.
+        let sql = r#"public.old_trigger ON (SELECT * FROM test_table) EVERY '5 minute'::INTERVAL
+            ON (SELECT * FROM another_table) EVERY '10 minute'::INTERVAL"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_alter_trigger();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_alter_trigger_rename() {
+        // Note: "ALTER TRIGGER" is matched.
+        let sql = r#"public.old_trigger RENAME TO new_trigger"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let stmt = ctx.parse_alter_trigger().unwrap();
+        let Statement::AlterTrigger(alter) = stmt else {
+            panic!("Expected AlterTrigger statement");
+        };
+        let trigger_name = alter.trigger_name.0;
+        assert_eq!(trigger_name.len(), 2);
+        assert_eq!(trigger_name[0].value, "public");
+        assert_eq!(trigger_name[1].value, "old_trigger");
+        assert_eq!(alter.operation.rename, Some("new_trigger".to_string()));
+    }
+
+    #[test]
+    fn test_parse_alter_trigger_labels() {
+        // Passed case: SET LABELS.
+        // Note: "ALTER TRIGGER" is matched.
+        let sql = r#"test_trigger SET LABELS (key1='value1', key2='value2')"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let stmt = ctx.parse_alter_trigger().unwrap();
+        let Statement::AlterTrigger(alter) = stmt else {
+            panic!("Expected AlterTrigger statement");
+        };
+        let Some(LabelOperations::ReplaceAll(labels)) = alter.operation.label_operations else {
+            panic!("Expected ReplaceAll label operations");
+        };
+        assert_eq!(labels.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(labels.get("key2"), Some(&"value2".to_string()));
+
+        // Passed case: multiple ADD/DROP/MODIFY LABELS.
+        let sql = r#"test_trigger ADD LABELS (key1='value1') MODIFY LABELS (key2='value2') DROP LABELS ('key3')"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let stmt = ctx.parse_alter_trigger().unwrap();
+        let Statement::AlterTrigger(alter) = stmt else {
+            panic!("Expected AlterTrigger statement");
+        };
+        let Some(LabelOperations::PartialChanges(changes)) = alter.operation.label_operations
+        else {
+            panic!("Expected PartialChanges label operations");
+        };
+        assert_eq!(changes.len(), 3);
+        let expected_changes = vec![
+            LabelChange::Add(OptionMap::from([(
+                "key1".to_string(),
+                "value1".to_string(),
+            )])),
+            LabelChange::Modify(OptionMap::from([(
+                "key2".to_string(),
+                "value2".to_string(),
+            )])),
+            LabelChange::Drop(vec!["key3".to_string()]),
+        ];
+        assert_eq!(changes, expected_changes);
+
+        // Failed case: Duplicate SET LABELS.
+        let sql =
+            r#"test_trigger SET LABELS (key1='value1', key2='value2') SET LABELS (key3='value3')"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_alter_trigger();
+        assert!(result.is_err());
+
+        // Failed case: SET LABELS with ADD/MODIFY/DROP LABELS.
+        let sql =
+            r#"test_trigger SET LABELS (key1='value1', key2='value2') ADD LABELS (key3='value3')"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_alter_trigger();
+        assert!(result.is_err());
+        let sql = r#"test_trigger SET LABELS (key1='value1', key2='value2') DROP LABELS ('key3')"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let result = ctx.parse_alter_trigger();
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_check_and_set_or_change_labels() {

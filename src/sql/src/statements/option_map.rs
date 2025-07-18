@@ -98,10 +98,10 @@ impl OptionMap {
     }
 }
 
-impl From<HashMap<String, String>> for OptionMap {
-    fn from(value: HashMap<String, String>) -> Self {
+impl<I: IntoIterator<Item = (String, String)>> From<I> for OptionMap {
+    fn from(value: I) -> Self {
         let mut result = OptionMap::default();
-        for (k, v) in value.into_iter() {
+        for (k, v) in value {
             result.insert(k, v);
         }
         result
