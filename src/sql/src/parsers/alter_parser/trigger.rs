@@ -83,17 +83,17 @@ impl<'a> ParserContext<'a> {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
                     let labels = self.parse_trigger_labels(true)?;
-                    check_and_set_labels(&mut label_ops, labels)?;
+                    apply_label_replacement(&mut label_ops, labels)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                     self.parser.next_token();
                     let annotations = self.parse_trigger_annotations(true)?;
-                    check_and_set_annotations(&mut annotation_ops, annotations)?;
+                    apply_annotation_replacement(&mut annotation_ops, annotations)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                     self.parser.next_token();
                     let channels = self.parse_trigger_notify(true)?;
-                    check_and_set_notify_channels(&mut notify_ops, channels)?;
+                    apply_notify_replacement(&mut notify_ops, channels)?;
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(SET) => {
                     self.parser.next_token();
@@ -102,17 +102,17 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(true)?;
-                            check_and_set_labels(&mut label_ops, labels)?;
+                            apply_label_replacement(&mut label_ops, labels)?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
-                            check_and_set_annotations(&mut annotation_ops, annotations)?;
+                            apply_annotation_replacement(&mut annotation_ops, annotations)?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
                             let channels = self.parse_trigger_notify(true)?;
-                            check_and_set_notify_channels(&mut notify_ops, channels)?;
+                            apply_notify_replacement(&mut notify_ops, channels)?;
                         }
                         _ => {
                             return self.expected(
@@ -129,12 +129,12 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(true)?;
-                            check_and_change_labels(&mut label_ops, LabelChange::Add(labels))?;
+                            apply_label_change(&mut label_ops, LabelChange::Add(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
-                            check_and_change_annotations(
+                            apply_annotation_change(
                                 &mut annotation_ops,
                                 AnnotationChange::Add(annotations),
                             )?;
@@ -142,7 +142,7 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
                             let channels = self.parse_trigger_notify(true)?;
-                            check_and_change_notify_channels(
+                            apply_notify_change(
                                 &mut notify_ops,
                                 NotifyChannelChange::Add(channels),
                             )?;
@@ -162,12 +162,12 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let labels = self.parse_trigger_labels(true)?;
-                            check_and_change_labels(&mut label_ops, LabelChange::Modify(labels))?;
+                            apply_label_change(&mut label_ops, LabelChange::Modify(labels))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let annotations = self.parse_trigger_annotations(true)?;
-                            check_and_change_annotations(
+                            apply_annotation_change(
                                 &mut annotation_ops,
                                 AnnotationChange::Modify(annotations),
                             )?;
@@ -187,12 +187,12 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                             self.parser.next_token();
                             let names = self.parse_trigger_label_names(true)?;
-                            check_and_change_labels(&mut label_ops, LabelChange::Drop(names))?;
+                            apply_label_change(&mut label_ops, LabelChange::Drop(names))?;
                         }
                         Token::Word(w) if w.value.eq_ignore_ascii_case(ANNOTATIONS) => {
                             self.parser.next_token();
                             let names = self.parse_trigger_annotation_names(true)?;
-                            check_and_change_annotations(
+                            apply_annotation_change(
                                 &mut annotation_ops,
                                 AnnotationChange::Drop(names),
                             )?;
@@ -200,7 +200,7 @@ impl<'a> ParserContext<'a> {
                         Token::Word(w) if w.value.eq_ignore_ascii_case(NOTIFY) => {
                             self.parser.next_token();
                             let channels = self.parse_trigger_notify_names(true)?;
-                            check_and_change_notify_channels(
+                            apply_notify_change(
                                 &mut notify_ops,
                                 NotifyChannelChange::Drop(channels),
                             )?;
@@ -412,7 +412,7 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn check_and_set_labels(label_ops: &mut Option<LabelOperations>, labels: OptionMap) -> Result<()> {
+fn apply_label_replacement(label_ops: &mut Option<LabelOperations>, labels: OptionMap) -> Result<()> {
     match label_ops {
         Some(LabelOperations::ReplaceAll(_)) => DuplicateClauseSnafu {
             clause: "SET LABELS",
@@ -429,7 +429,7 @@ fn check_and_set_labels(label_ops: &mut Option<LabelOperations>, labels: OptionM
     }
 }
 
-fn check_and_set_annotations(
+fn apply_annotation_replacement(
     annotation_ops: &mut Option<AnnotationOperations>,
     annotations: OptionMap,
 ) -> Result<()> {
@@ -449,7 +449,7 @@ fn check_and_set_annotations(
     }
 }
 
-fn check_and_set_notify_channels(
+fn apply_notify_replacement(
     notify_channel_ops: &mut Option<NotifyChannelOperations>,
     channels: Vec<NotifyChannel>,
 ) -> Result<()> {
@@ -469,7 +469,7 @@ fn check_and_set_notify_channels(
     }
 }
 
-fn check_and_change_labels(
+fn apply_label_change(
     label_ops: &mut Option<LabelOperations>,
     label_change: LabelChange,
 ) -> Result<()> {
@@ -489,7 +489,7 @@ fn check_and_change_labels(
     }
 }
 
-fn check_and_change_annotations(
+fn apply_annotation_change(
     annotation_ops: &mut Option<AnnotationOperations>,
     annotation_change: AnnotationChange,
 ) -> Result<()> {
@@ -511,7 +511,7 @@ fn check_and_change_annotations(
     }
 }
 
-fn check_and_change_notify_channels(
+fn apply_notify_change(
     ops: &mut Option<NotifyChannelOperations>,
     change: NotifyChannelChange,
 ) -> Result<()> {
@@ -535,7 +535,7 @@ fn check_and_change_notify_channels(
 mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
-    use crate::parsers::alter_parser::trigger::{check_and_change_labels, check_and_set_labels};
+    use crate::parsers::alter_parser::trigger::{apply_label_change, apply_label_replacement};
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
     use crate::statements::statement::Statement;
     use crate::statements::OptionMap;
@@ -655,28 +655,28 @@ mod tests {
         labels.insert("key1".to_string(), "value1".to_string());
         labels.insert("key2".to_string(), "value2".to_string());
 
-        check_and_set_labels(&mut label_ops, labels.clone()).unwrap();
+        apply_label_replacement(&mut label_ops, labels.clone()).unwrap();
         assert!(matches!(label_ops, Some(_)));
 
         // Set operations are mutually exclusive.
-        let result = check_and_set_labels(&mut label_ops, labels.clone());
+        let result = apply_label_replacement(&mut label_ops, labels.clone());
         assert!(result.is_err());
 
         // Set operations and Change operations are mutually exclusive.
         let result =
-            check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
+            apply_label_change(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
         assert!(result.is_err());
 
         let mut label_ops = None;
 
-        let result = check_and_change_labels(&mut label_ops, LabelChange::Add(labels.clone()));
+        let result = apply_label_change(&mut label_ops, LabelChange::Add(labels.clone()));
         assert!(result.is_ok());
 
         // Partial changes are not mutually exclusive.
-        let result = check_and_change_labels(&mut label_ops, LabelChange::Modify(labels));
+        let result = apply_label_change(&mut label_ops, LabelChange::Modify(labels));
         assert!(result.is_ok());
         let result =
-            check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
+            apply_label_change(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
         assert!(result.is_ok());
 
         let ops = label_ops.unwrap();
