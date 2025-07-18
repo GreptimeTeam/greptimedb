@@ -267,6 +267,44 @@ fn expand_proj_sort_part_col_aggr() {
     assert_eq!(expected, result.to_string());
 }
 
+#[test]
+fn expand_proj_sort_limit_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk3").sort(true, false)])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk3 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 #[ignore = "Projection is disabled for https://github.com/apache/arrow-datafusion/issues/6489"]
 #[test]
 fn transform_simple_projection_filter() {
