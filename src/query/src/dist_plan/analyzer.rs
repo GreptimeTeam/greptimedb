@@ -19,7 +19,7 @@ use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::Column;
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
@@ -572,6 +572,7 @@ mod test {
     /// only `Aggregate` does
     #[test]
     fn expand_step_aggr_with_wrong_proj() {
+        // TODO(discord9): change to partitioned table
         let numbers_table = NumbersTable::table(0);
         let table_source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(numbers_table),
