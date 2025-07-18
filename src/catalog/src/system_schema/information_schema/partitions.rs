@@ -329,13 +329,8 @@ impl InformationSchemaPartitionsBuilder {
             self.partition_names.push(Some(&partition_name));
             self.partition_ordinal_positions
                 .push(Some((index + 1) as i64));
-            let expressions = if partition.partition.partition_columns().is_empty() {
-                None
-            } else {
-                Some(partition.partition.to_string())
-            };
-
-            self.partition_expressions.push(expressions.as_deref());
+            let expression = partition.partition_expr.as_ref().map(|e| e.to_string());
+            self.partition_expressions.push(expression.as_deref());
             self.create_times.push(Some(TimestampMicrosecond::from(
                 table_info.meta.created_on.timestamp_millis(),
             )));

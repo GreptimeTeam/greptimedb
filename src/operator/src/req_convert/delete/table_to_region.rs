@@ -42,7 +42,7 @@ impl<'a> TableToRegion<'a> {
         let rows = Rows { schema, rows };
 
         let requests = Partitioner::new(self.partition_manager)
-            .partition_delete_requests(self.table_info.table_id(), rows)
+            .partition_delete_requests(self.table_info, rows)
             .await?;
         Ok(RegionDeleteRequests { requests })
     }

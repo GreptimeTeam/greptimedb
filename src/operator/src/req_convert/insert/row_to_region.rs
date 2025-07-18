@@ -52,7 +52,8 @@ impl<'a> RowToRegion<'a> {
         for request in requests.inserts {
             let Some(rows) = request.rows else { continue };
 
-            let table_id = self.get_table_id(&request.table_name)?;
+            let table_info = self.get_table_info(&request.table_name)?;
+            let table_id = table_info.table_id();
             let region_numbers = self.region_numbers(&request.table_name)?;
             let requests = if let Some(region_id) = match region_numbers[..] {
                 [singular] => Some(RegionId::new(table_id, singular)),
@@ -64,7 +65,7 @@ impl<'a> RowToRegion<'a> {
                 }]
             } else {
                 Partitioner::new(self.partition_manager)
-                    .partition_insert_requests(table_id, rows)
+                    .partition_insert_requests(table_info, rows)
                     .await?
             };
 
@@ -85,10 +86,9 @@ impl<'a> RowToRegion<'a> {
         })
     }
 
-    fn get_table_id(&self, table_name: &str) -> Result<TableId> {
+    fn get_table_info(&self, table_name: &str) -> Result<&TableInfoRef> {
         self.tables_info
             .get(table_name)
-            .map(|x| x.table_id())
             .context(TableNotFoundSnafu { table_name })
     }
 

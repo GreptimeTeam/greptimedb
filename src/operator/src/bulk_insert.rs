@@ -67,7 +67,7 @@ impl Inserter {
         }
 
         // notify flownode to update dirty timestamps if flow is configured.
-        self.maybe_update_flow_dirty_window(table_info, record_batch.clone());
+        self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
 
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
@@ -81,7 +81,7 @@ impl Inserter {
             .start_timer();
         let partition_rule = self
             .partition_manager
-            .find_table_partition_rule(table_id)
+            .find_table_partition_rule(&table_info)
             .await
             .context(error::InvalidPartitionSnafu)?;
 

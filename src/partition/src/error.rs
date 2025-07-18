@@ -108,14 +108,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid table route data, table id: {}, msg: {}", table_id, err_msg))]
-    InvalidTableRouteData {
-        table_id: TableId,
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to convert DataFusion's ScalarValue: {:?}", value))]
     ConvertScalarValue {
         value: ScalarValue,
@@ -265,7 +257,6 @@ impl ErrorExt for Error {
             | Error::DeserializeJson { .. } => StatusCode::Internal,
 
             Error::Unexpected { .. }
-            | Error::InvalidTableRouteData { .. }
             | Error::FindTableRoutes { .. }
             | Error::FindRegionRoutes { .. } => StatusCode::Unexpected,
             Error::TableRouteNotFound { .. } => StatusCode::TableNotFound,

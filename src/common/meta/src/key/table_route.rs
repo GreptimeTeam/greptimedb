@@ -711,6 +711,7 @@ mod tests {
                         name: "r1".to_string(),
                         partition: None,
                         attrs: Default::default(),
+                        partition_expr: Default::default(),
                     },
                     leader_peer: Some(Peer {
                         id: 2,
@@ -726,6 +727,7 @@ mod tests {
                         name: "r1".to_string(),
                         partition: None,
                         attrs: Default::default(),
+                        partition_expr: Default::default(),
                     },
                     leader_peer: Some(Peer {
                         id: 2,

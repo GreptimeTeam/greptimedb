@@ -606,6 +606,7 @@ impl From<DropTableTask> for PbDropTableTask {
 #[derive(Debug, PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
+    // TODO(zhongzc): change to `Vec<PartitionExpr>`
     pub partitions: Vec<Partition>,
     pub table_info: RawTableInfo,
 }

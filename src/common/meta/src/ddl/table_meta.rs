@@ -21,7 +21,7 @@ use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::ddl::TableMetadata;
-use crate::error::{self, Result, UnsupportedSnafu};
+use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
@@ -113,17 +113,11 @@ impl TableMetadataAllocator {
         table_id: TableId,
         task: &CreateTableTask,
     ) -> Result<PhysicalTableRouteValue> {
-        let regions = task.partitions.len();
-        ensure!(
-            regions > 0,
-            error::UnexpectedSnafu {
-                err_msg: "The number of partitions must be greater than 0"
-            }
-        );
-
+        let regions = task.partitions.len().max(1);
         let peers = self.peer_allocator.alloc(regions).await?;
         debug!("Allocated peers {:?} for table {}", peers, table_id);
-        let region_routes = task
+
+        let mut region_routes = task
             .partitions
             .iter()
             .enumerate()
@@ -143,6 +137,17 @@ impl TableMetadataAllocator {
                 }
             })
             .collect::<Vec<_>>();
+
+        if region_routes.is_empty() {
+            region_routes.push(RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 0),
+                    ..Default::default()
+                },
+                leader_peer: Some(peers[0].clone()),
+                ..Default::default()
+            });
+        }
 
         Ok(PhysicalTableRouteValue::new(region_routes))
     }

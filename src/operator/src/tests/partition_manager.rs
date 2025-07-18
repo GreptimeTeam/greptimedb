@@ -57,6 +57,7 @@ pub fn new_test_table_info(
         .engine("engine")
         .next_column_id(3)
         .region_numbers(region_numbers.collect::<Vec<_>>())
+        .partition_key_indices(vec![0])
         .build()
         .unwrap();
     TableInfoBuilder::default()
@@ -105,10 +106,8 @@ pub(crate) async fn create_partition_rule_manager(
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let table_route_cache = test_new_table_route_cache(kv_backend.clone());
     let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend, table_route_cache));
-
     let regions = vec![1u32, 2, 3];
     let region_wal_options = new_test_region_wal_options(regions.clone());
-
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
@@ -117,19 +116,15 @@ pub(crate) async fn create_partition_rule_manager(
                     region: Region {
                         id: 3.into(),
                         name: "r1".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string()],
-                                vec![PartitionBound::Expr(PartitionExpr::new(
-                                    Operand::Column("a".to_string()),
-                                    RestrictedOp::Lt,
-                                    Operand::Value(datatypes::value::Value::Int32(10)),
-                                ))],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
+                        partition: None,
                         attrs: BTreeMap::new(),
+                        partition_expr: PartitionExpr::new(
+                            Operand::Column("a".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(datatypes::value::Value::Int32(10)),
+                        )
+                        .as_json_str()
+                        .unwrap(),
                     },
                     leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
@@ -140,27 +135,23 @@ pub(crate) async fn create_partition_rule_manager(
                     region: Region {
                         id: 2.into(),
                         name: "r2".to_string(),
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string()],
-                                vec![PartitionBound::Expr(PartitionExpr::new(
-                                    Operand::Expr(PartitionExpr::new(
-                                        Operand::Column("a".to_string()),
-                                        RestrictedOp::GtEq,
-                                        Operand::Value(datatypes::value::Value::Int32(10)),
-                                    )),
-                                    RestrictedOp::And,
-                                    Operand::Expr(PartitionExpr::new(
-                                        Operand::Column("a".to_string()),
-                                        RestrictedOp::Lt,
-                                        Operand::Value(datatypes::value::Value::Int32(50)),
-                                    )),
-                                ))],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
+                        partition: None,
                         attrs: BTreeMap::new(),
+                        partition_expr: PartitionExpr::new(
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Column("a".to_string()),
+                                RestrictedOp::GtEq,
+                                Operand::Value(datatypes::value::Value::Int32(10)),
+                            )),
+                            RestrictedOp::And,
+                            Operand::Expr(PartitionExpr::new(
+                                Operand::Column("a".to_string()),
+                                RestrictedOp::Lt,
+                                Operand::Value(datatypes::value::Value::Int32(50)),
+                            )),
+                        )
+                        .as_json_str()
+                        .unwrap(),
                     },
                     leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
@@ -171,6 +162,7 @@ pub(crate) async fn create_partition_rule_manager(
                     region: Region {
                         id: 1.into(),
                         name: "r3".to_string(),
+                        // Keep the old partition definition to test compatibility.
                         partition: Some(
                             PartitionDef::new(
                                 vec!["a".to_string()],
@@ -184,6 +176,7 @@ pub(crate) async fn create_partition_rule_manager(
                             .unwrap(),
                         ),
                         attrs: BTreeMap::new(),
+                        partition_expr: Default::default(),
                     },
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
@@ -195,6 +188,5 @@ pub(crate) async fn create_partition_rule_manager(
         )
         .await
         .unwrap();
-
     partition_manager
 }

@@ -36,8 +36,8 @@ SHOW CREATE TABLE system_metrics;
 |                | )                                                         |
 |                | PARTITION ON COLUMNS ("id") (                             |
 |                |   id < 5,                                                 |
-|                |   id >= 9,                                                |
-|                |   id >= 5 AND id < 9                                      |
+|                |   id >= 5 AND id < 9,                                     |
+|                |   id >= 9                                                 |
 |                | )                                                         |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |

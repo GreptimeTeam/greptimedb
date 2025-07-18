@@ -67,26 +67,26 @@ Affected Rows: 0
 
 show create table logical_table_2;
 
-+-----------------+-------------------------------------------------------------------------------+
-| Table           | Create Table                                                                  |
-+-----------------+-------------------------------------------------------------------------------+
-| logical_table_2 | CREATE TABLE IF NOT EXISTS "logical_table_2" (                                |
-|                 |   "cpu" DOUBLE NULL,                                                          |
-|                 |   "host" STRING NULL,                                                         |
-|                 |   "ts" TIMESTAMP(3) NOT NULL,                                                 |
-|                 |   TIME INDEX ("ts"),                                                          |
-|                 |   PRIMARY KEY ("host")                                                        |
-|                 | )                                                                             |
-|                 | PARTITION ON COLUMNS ("host", "one_partition_key", "another_partition_key") ( |
-|                 |   host <= 'host1',                                                            |
-|                 |   host > 'host2',                                                             |
-|                 |   host > 'host1' AND host <= 'host2'                                          |
-|                 | )                                                                             |
-|                 | ENGINE=metric                                                                 |
-|                 | WITH(                                                                         |
-|                 |   on_physical_table = 'metric_engine_partition'                               |
-|                 | )                                                                             |
-+-----------------+-------------------------------------------------------------------------------+
++-----------------+-------------------------------------------------+
+| Table           | Create Table                                    |
++-----------------+-------------------------------------------------+
+| logical_table_2 | CREATE TABLE IF NOT EXISTS "logical_table_2" (  |
+|                 |   "cpu" DOUBLE NULL,                            |
+|                 |   "host" STRING NULL,                           |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                 |   TIME INDEX ("ts"),                            |
+|                 |   PRIMARY KEY ("host")                          |
+|                 | )                                               |
+|                 | PARTITION ON COLUMNS ("host") (                 |
+|                 |   host <= 'host1',                              |
+|                 |   host > 'host1' AND host <= 'host2',           |
+|                 |   host > 'host2'                                |
+|                 | )                                               |
+|                 | ENGINE=metric                                   |
+|                 | WITH(                                           |
+|                 |   on_physical_table = 'metric_engine_partition' |
+|                 | )                                               |
++-----------------+-------------------------------------------------+
 
 select count(*) from logical_table_2;
 
