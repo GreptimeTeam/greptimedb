@@ -2,19 +2,19 @@
 SELECt @@tx_isolation;
 
 +-----------------+
-| @@tx_isolation; |
+| @@tx_isolation  |
 +-----------------+
-| 0               |
+| REPEATABLE-READ |
 +-----------------+
 
 -- SQLNESS PROTOCOL MYSQL
 SELECT @@version_comment;
 
-+--------------------+
-| @@version_comment; |
-+--------------------+
-| 0                  |
-+--------------------+
++-------------------+
+| @@version_comment |
++-------------------+
+| Greptime          |
++-------------------+
 
 -- SQLNESS PROTOCOL MYSQL
 SHOW DATABASES;
