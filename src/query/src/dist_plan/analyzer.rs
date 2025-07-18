@@ -191,6 +191,15 @@ impl PlanRewriter {
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
+        debug!(
+            "Check should_expand at level: {}  with Stack:\n {}, ",
+            self.level,
+            self.stack
+                .iter()
+                .map(|(p, l)| format!("Level={l}, Plan={p}"))
+                .collect::<Vec<String>>()
+                .join("\n"),
+        );
         if DFLogicalSubstraitConvertor
             .encode(plan, DefaultSerializer)
             .is_err()
@@ -227,7 +236,7 @@ impl PlanRewriter {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
-                    self.update_column_requirements(&plan);
+                    self.update_column_requirements(&plan, self.level);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
@@ -236,7 +245,7 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan)
                 {
-                    self.update_column_requirements(&plan);
+                    self.update_column_requirements(&plan, self.level);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
                 }
@@ -246,12 +255,21 @@ impl PlanRewriter {
                     && let Some(transformer_actions) = transformer(plan)
                 {
                     debug!(
-                        "PlanRewriter: transformed plan: {:?}\n from {plan}",
-                        transformer_actions.extra_parent_plans
+                        "PlanRewriter: transformed plan: {}\n from {plan}",
+                        transformer_actions
+                            .extra_parent_plans
+                            .iter()
+                            .enumerate()
+                            .map(|(i, p)| format!(
+                                "Extra {i}th parent plan from parent to child = {p}"
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     );
                     if let Some(last_stage) = transformer_actions.extra_parent_plans.last() {
                         // update the column requirements from the last stage
-                        self.update_column_requirements(last_stage);
+                        // notice current plan's parent plan is where we need to apply the column requirements
+                        self.update_column_requirements(last_stage, self.level - 1);
                     }
                     self.stage
                         .extend(transformer_actions.extra_parent_plans.into_iter().rev());
@@ -269,7 +287,10 @@ impl PlanRewriter {
         false
     }
 
-    fn update_column_requirements(&mut self, plan: &LogicalPlan) {
+    /// Update the column requirements for the current plan, plan_level is the level of the plan
+    /// in the stack, which is used to determine if the column requirements are applicable
+    /// for other plans in the stack.
+    fn update_column_requirements(&mut self, plan: &LogicalPlan, plan_level: usize) {
         debug!(
             "PlanRewriter: update column requirements for plan: {plan}\n with old column_requirements: {:?}",
             self.column_requirements
@@ -280,7 +301,7 @@ impl PlanRewriter {
             let _ = expr_to_columns(&expr, &mut container);
         }
 
-        self.column_requirements.push((container, self.level));
+        self.column_requirements.push((container, plan_level));
         debug!(
             "PlanRewriter: updated column requirements: {:?}",
             self.column_requirements

@@ -139,9 +139,7 @@ pub fn step_aggr_to_upper_aggr(
         new_projection_exprs.push(aliased_output_aggr_expr);
     }
     let upper_aggr_plan = LogicalPlan::Aggregate(new_aggr);
-    debug!("Before recompute schema: {upper_aggr_plan:?}");
     let upper_aggr_plan = upper_aggr_plan.recompute_schema()?;
-    debug!("After recompute schema: {upper_aggr_plan:?}");
     // create a projection on top of the new aggregate plan
     let new_projection =
         Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
@@ -246,8 +244,18 @@ impl Categorizer {
                     return Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
                             debug!("Before Step optimize: {plan}");
-                            let ret = step_aggr_to_upper_aggr(plan);
-                            debug!("After Step Optimize: {ret:?}");
+                            let ret = step_aggr_to_upper_aggr(plan).inspect(|plan| {
+                                debug!(
+                                    "Extra parent plan after step optimize: {}",
+                                    plan.iter()
+                                        .enumerate()
+                                        .map(|(i, p)| format!(
+                                            "Extra {i}th parent plan from parent to child = {p}"
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                );
+                            });
                             ret.ok().map(|s| TransformerAction {
                                 extra_parent_plans: s.to_vec(),
                                 new_child_plan: None,
