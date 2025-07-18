@@ -510,6 +510,51 @@ fn check_and_change_notify_channels(
 mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
+    use crate::parsers::alter_parser::trigger::{check_and_change_labels, check_and_set_labels};
+    use crate::statements::alter::trigger::{LabelChange, LabelOperations};
+    use crate::statements::OptionMap;
+
+    #[test]
+    fn test_check_and_set_or_change_labels() {
+        let mut label_ops = None;
+
+        let mut labels = OptionMap::default();
+        labels.insert("key1".to_string(), "value1".to_string());
+        labels.insert("key2".to_string(), "value2".to_string());
+
+        check_and_set_labels(&mut label_ops, labels.clone()).unwrap();
+        assert!(matches!(label_ops, Some(_)));
+
+        // Set operations are mutually exclusive.
+        let result = check_and_set_labels(&mut label_ops, labels.clone());
+        assert!(result.is_err());
+
+        // Set operations and Change operations are mutually exclusive.
+        let result =
+            check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
+        assert!(result.is_err());
+
+        let mut label_ops = None;
+
+        let result = check_and_change_labels(&mut label_ops, LabelChange::Add(labels.clone()));
+        assert!(result.is_ok());
+
+        // Partial changes are not mutually exclusive.
+        let result = check_and_change_labels(&mut label_ops, LabelChange::Modify(labels));
+        assert!(result.is_ok());
+        let result = check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
+        assert!(result.is_ok());
+
+        let ops = label_ops.unwrap();
+        if let LabelOperations::PartialChanges(changes) = ops {
+            assert_eq!(changes.len(), 3);
+            assert!(matches!(changes[0], LabelChange::Add(_)));
+            assert!(matches!(changes[1], LabelChange::Modify(_)));
+            assert!(matches!(changes[2], LabelChange::Drop(_)));
+        } else {
+            panic!("Expected PartialChanges, got {:?}", ops);
+        }
+    }
 
     #[test]
     fn test_parse_rename_to() {
