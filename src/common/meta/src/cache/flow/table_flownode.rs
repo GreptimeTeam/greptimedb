@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use futures::future::BoxFuture;
 use moka::future::Cache;
 use moka::ops::compute::Op;
