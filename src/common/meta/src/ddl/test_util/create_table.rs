@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use api::v1::column_def::try_as_column_schema;
-use api::v1::meta::Partition;
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
 use chrono::DateTime;
 use common_catalog::consts::{
@@ -175,10 +174,7 @@ pub fn test_create_table_task(name: &str, table_id: TableId) -> CreateTableTask 
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: None,
         table_info,
     }
 }

@@ -15,7 +15,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use api::v1::meta::Partition;
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{CreateRequest as PbCreateRegionRequest, RegionColumnDef};
 use api::v1::{ColumnDataType, ColumnDef as PbColumnDef, SemanticType};
@@ -84,14 +83,7 @@ fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
         .into();
 
     let table_info = build_raw_table_info_from_expr(&expr);
-    CreateTableTask::new(
-        expr,
-        vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
-        table_info,
-    )
+    CreateTableTask::new(expr, None, table_info)
 }
 
 #[test]
