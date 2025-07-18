@@ -743,17 +743,6 @@ impl PromPlanner {
     ///
     /// Updates the planner context's field columns to contain only the timestamp column name.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the time index column is not set in the planner context or if the
-    /// projection plan cannot be built.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Used internally when planning a PromQL `timestamp()` call:
-    /// let plan = planner.create_timestamp_func_plan(normalize_plan)?;
-    /// ```
     fn create_timestamp_func_plan(&mut self, normalize: LogicalPlan) -> Result<LogicalPlan> {
         let time_expr = build_special_time_expr(self.ctx.time_index_column.as_ref().unwrap())
             .alias(DEFAULT_FIELD_COLUMN);
