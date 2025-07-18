@@ -121,6 +121,7 @@ mod tests {
             memtable_size: 0,
             manifest_size: 0,
             sst_size: 0,
+            sst_num: 0,
             index_size: 0,
             data_topic_latest_entry_id: 0,
             metadata_topic_latest_entry_id: 0,

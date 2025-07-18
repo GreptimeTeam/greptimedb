@@ -1,4 +1,4 @@
-CREATE TABLE demo(
+CREATE TABLE multi_partitions_test_table (
     host STRING,
     ts TIMESTAMP,
     cpu DOUBLE NULL,
@@ -15,9 +15,7 @@ PARTITION ON COLUMNS (host) (
 
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
-explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
+explain SELECT * FROM multi_partitions_test_table WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
 
-drop table demo;
+drop table multi_partitions_test_table;

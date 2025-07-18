@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod approximate;
-pub mod count_hash;
-#[cfg(feature = "geo")]
-pub mod geo;
-pub mod vector;
-
-pub mod aggr_wrapper;
+// TODO(weny): Remove it
+#[allow(dead_code)]
+pub(crate) mod utils;

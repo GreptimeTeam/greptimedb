@@ -93,6 +93,8 @@ pub struct RegionStat {
     pub manifest_size: u64,
     /// The size of the SST data files in bytes.
     pub sst_size: u64,
+    /// The num of the SST data files.
+    pub sst_num: u64,
     /// The size of the SST index files in bytes.
     pub index_size: u64,
     /// The manifest infoof the region.
@@ -173,8 +175,8 @@ impl RegionStat {
         std::mem::size_of::<RegionId>() +
         // rcus, wcus, approximate_bytes, num_rows
         std::mem::size_of::<i64>() * 4 +
-        // memtable_size, manifest_size, sst_size, index_size
-        std::mem::size_of::<u64>() * 4 +
+        // memtable_size, manifest_size, sst_size, sst_num, index_size
+        std::mem::size_of::<u64>() * 5 +
         // engine
         std::mem::size_of::<String>() + self.engine.capacity() +
         // region_manifest
@@ -275,6 +277,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             memtable_size: region_stat.memtable_size,
             manifest_size: region_stat.manifest_size,
             sst_size: region_stat.sst_size,
+            sst_num: region_stat.sst_num,
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,

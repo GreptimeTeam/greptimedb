@@ -62,7 +62,7 @@ use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
 use crate::region::ManifestContextRef;
-use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
+use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
@@ -77,7 +77,7 @@ pub struct CompactionRequest {
     pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
     /// Sender to send notification to the region worker.
-    pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
+    pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
     /// Waiters of the compaction request.
     pub(crate) waiters: Vec<OutputTx>,
     /// Start time of compaction task.
@@ -101,7 +101,7 @@ pub(crate) struct CompactionScheduler {
     /// Compacting regions.
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
-    request_sender: Sender<WorkerRequest>,
+    request_sender: Sender<WorkerRequestWithTime>,
     cache_manager: CacheManagerRef,
     engine_config: Arc<MitoConfig>,
     listener: WorkerListener,
@@ -112,7 +112,7 @@ pub(crate) struct CompactionScheduler {
 impl CompactionScheduler {
     pub(crate) fn new(
         scheduler: SchedulerRef,
-        request_sender: Sender<WorkerRequest>,
+        request_sender: Sender<WorkerRequestWithTime>,
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
         listener: WorkerListener,
@@ -560,7 +560,7 @@ impl CompactionStatus {
     #[allow(clippy::too_many_arguments)]
     fn new_compaction_request(
         &mut self,
-        request_sender: Sender<WorkerRequest>,
+        request_sender: Sender<WorkerRequestWithTime>,
         mut waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
