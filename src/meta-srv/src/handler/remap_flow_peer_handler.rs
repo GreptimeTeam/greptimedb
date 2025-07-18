@@ -80,7 +80,11 @@ async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
         match ctx.leader_cached_kv_backend.put(put).await {
             Ok(_) => {
                 info!("Successfully updated flow `NodeAddressValue`: {:?}", peer);
-                // TODO(discord): broadcast invalidating cache to all frontends
+                // broadcast invalidating cache to all frontends
+                let cache_idents = vec![CacheIdent::FlowNode(peer.id)];
+                ctx.cache_invalidator
+                    .invalidate(&Context::default(), &cache_idents)
+                    .await?;
             }
             Err(e) => {
                 error!(e; "Failed to update flow `NodeAddressValue`: {:?}", peer);

@@ -167,6 +167,7 @@ fn invalidator<'a>(
         match ident {
             CacheIdent::CreateFlow(create_flow) => handle_create_flow(cache, create_flow).await,
             CacheIdent::DropFlow(drop_flow) => handle_drop_flow(cache, drop_flow).await,
+            CacheIdent::FlowNode(_) => cache.invalidate_all(),
             _ => {}
         }
         Ok(())

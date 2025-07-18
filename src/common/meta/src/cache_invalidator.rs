@@ -22,6 +22,7 @@ use crate::key::flow::flow_name::FlowNameKey;
 use crate::key::flow::flow_route::FlowRouteKey;
 use crate::key::flow::flownode_flow::FlownodeFlowKey;
 use crate::key::flow::table_flow::TableFlowKey;
+use crate::key::node_address::NodeAddressKey;
 use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
@@ -135,6 +136,11 @@ where
                 }
                 CacheIdent::FlowId(flow_id) => {
                     let key = FlowInfoKey::new(*flow_id);
+                    self.invalidate_key(&key.to_bytes()).await;
+                }
+                CacheIdent::FlowNode(node_id) => {
+                    // TODO(discord9): table flow cache might also need to be invalidated
+                    let key = NodeAddressKey::with_flownode(*node_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
             }
