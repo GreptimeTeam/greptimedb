@@ -542,7 +542,8 @@ mod tests {
         // Partial changes are not mutually exclusive.
         let result = check_and_change_labels(&mut label_ops, LabelChange::Modify(labels));
         assert!(result.is_ok());
-        let result = check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
+        let result =
+            check_and_change_labels(&mut label_ops, LabelChange::Drop(vec!["key1".to_string()]));
         assert!(result.is_ok());
 
         let ops = label_ops.unwrap();
@@ -589,6 +590,12 @@ mod tests {
         let notify_names = ctx.parse_trigger_notify_names(false).unwrap();
         let expected_notify_names =
             vec!["key1".to_string(), "key2".to_string(), "key3".to_string()];
+        assert_eq!(notify_names, expected_notify_names);
+
+        let sql = r#"NOTIFY (key1, key2,)"#;
+        let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let notify_names = ctx.parse_trigger_notify_names(false).unwrap();
+        let expected_notify_names = vec!["key1".to_string(), "key2".to_string()];
         assert_eq!(notify_names, expected_notify_names);
     }
 }

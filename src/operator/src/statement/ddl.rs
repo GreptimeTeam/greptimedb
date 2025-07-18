@@ -88,10 +88,10 @@ use crate::error::{
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     DeserializePartitionSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
@@ -1340,8 +1340,10 @@ impl StatementExecutor {
         _alter_expr: AlterTrigger,
         _query_context: QueryContextRef,
     ) -> Result<Output> {
-        // TODO: Implement alter trigger
-        todo!()
+        NotSupportedSnafu {
+            feat: "alter trigger",
+        }
+        .fail()
     }
 
     #[tracing::instrument(skip_all)]
