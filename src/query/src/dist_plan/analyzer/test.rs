@@ -12,18 +12,145 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::BoxedError;
+use common_recordbatch::error::Result as RecordBatchResult;
+use common_recordbatch::{
+    OrderOption, RecordBatch, RecordBatchMetrics, RecordBatchStream, SendableRecordBatchStream,
+};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::min;
 use datafusion_common::JoinType;
 use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
 use datafusion_sql::TableReference;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::timestamp::Timestamp;
+use futures::task::{Context, Poll};
+use futures::Stream;
+use store_api::data_source::DataSource;
+use store_api::storage::{ColumnId, ScanRequest};
+use table::metadata::{
+    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMeta, TableType,
+};
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
+use table::{Table, TableRef};
 
 use super::*;
+
+struct TestTable;
+
+impl TestTable {
+    pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
+        let data_source = Arc::new(TestDataSource::new(Self::schema()));
+        let table = Table::new(
+            Self::table_info(table_id, name, "test_engine".to_string()),
+            FilterPushDownType::Unsupported,
+            data_source,
+        );
+        Arc::new(table)
+    }
+
+    pub fn schema() -> SchemaRef {
+        let column_schemas = vec![
+            ColumnSchema::new("pk1", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("pk2", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ];
+        let schema = SchemaBuilder::try_from_columns(column_schemas)
+            .unwrap()
+            .timestamp_column_name("ts")
+            .build()
+            .unwrap();
+        Arc::new(schema)
+    }
+
+    pub fn table_info(table_id: TableId, name: String, engine: String) -> TableInfoRef {
+        let table_meta = TableMeta {
+            schema: Self::schema(),
+            primary_key_indices: vec![0, 1, 2],
+            value_indices: vec![3],
+            engine,
+            region_numbers: vec![0],
+            next_column_id: 5,
+            options: Default::default(),
+            created_on: Timestamp::from_secs(0),
+            partition_key_indices: vec![0, 1],
+            column_ids: vec![1, 2, 3, 4],
+        };
+
+        let table_info = TableInfoBuilder::default()
+            .table_id(table_id)
+            .name(name)
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .table_version(0)
+            .table_type(TableType::Base)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        Arc::new(table_info)
+    }
+}
+
+struct TestDataSource {
+    schema: SchemaRef,
+}
+
+impl TestDataSource {
+    pub fn new(schema: SchemaRef) -> Self {
+        Self { schema }
+    }
+}
+
+impl DataSource for TestDataSource {
+    fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
+        let projected_schema = match &request.projection {
+            Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
+            None => self.schema.clone(),
+        };
+        Ok(Box::pin(EmptyStream {
+            schema: projected_schema,
+        }))
+    }
+}
+
+struct EmptyStream {
+    schema: SchemaRef,
+}
+
+impl RecordBatchStream for EmptyStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        None
+    }
+}
+
+impl Stream for EmptyStream {
+    type Item = RecordBatchResult<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
+    }
+}
 
 /// test plan like:
 /// ```
@@ -56,7 +183,7 @@ fn expand_step_aggr_with_not_in_scope_proj() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-    println!("result: {result}");
+
     let expected = [
         "Projection: min(t.number)",
         "  MergeScan [is_placeholder=false]",
