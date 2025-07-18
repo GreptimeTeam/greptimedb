@@ -26,35 +26,37 @@ pub struct AlterTriggerOperation {
 
 impl Display for AlterTrigger {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "ALTER TRIGGER {}", self.trigger_name)?;
+        write!(f, "ALTER TRIGGER {}", self.trigger_name)?;
 
         let operation = &self.operation;
 
         if let Some(new_name) = &operation.rename {
-            writeln!(f, "RENAME TO {}", new_name)?;
+            writeln!(f)?;
+            write!(f, "RENAME TO {}", new_name)?;
         }
 
-        if operation.new_query.is_some() || operation.new_interval.is_some() {
-            write!(f, "SET EXEC QUERY")?;
+        if operation.new_query.is_some() && operation.new_interval.is_some() {
+            writeln!(f)?;
+            write!(f, "ON")?;
         }
 
         if let Some(query) = &operation.new_query {
-            write!(f, " ({})", query)?;
+            write!(f, " {}", query)?;
         }
 
         if let Some(interval) = operation.new_interval {
             write!(f, " EVERY {} SECONDS", interval)?;
         }
 
-        writeln!(f)?;
-
         if let Some(label_ops) = &operation.label_operations {
             match label_ops {
                 LabelOperations::ReplaceAll(map) => {
-                    writeln!(f, "SET LABELS ({})", map.kv_pairs().join(", "))?
+                    writeln!(f)?;
+                    write!(f, "SET LABELS ({})", map.kv_pairs().join(", "))?
                 }
                 LabelOperations::PartialChanges(changes) => {
                     for change in changes {
+                        writeln!(f)?;
                         write!(f, "{}", change)?;
                     }
                 }
@@ -64,10 +66,12 @@ impl Display for AlterTrigger {
         if let Some(annotation_ops) = &operation.annotation_operations {
             match annotation_ops {
                 AnnotationOperations::ReplaceAll(map) => {
-                    writeln!(f, "SET ANNOTATIONS ({})", map.kv_pairs().join(", "))?
+                    writeln!(f)?;
+                    write!(f, "SET ANNOTATIONS ({})", map.kv_pairs().join(", "))?
                 }
                 AnnotationOperations::PartialChanges(changes) => {
                     for change in changes {
+                        writeln!(f)?;
                         write!(f, "{}", change)?;
                     }
                 }
@@ -78,6 +82,7 @@ impl Display for AlterTrigger {
             match notify_channel_ops {
                 NotifyChannelOperations::ReplaceAll(channels) => {
                     if !channels.is_empty() {
+                        writeln!(f)?;
                         writeln!(f, "SET NOTIFY")?;
                         for channel in channels {
                             write!(f, "    {}", channel)?;
@@ -86,6 +91,7 @@ impl Display for AlterTrigger {
                 }
                 NotifyChannelOperations::PartialChanges(changes) => {
                     for change in changes {
+                        writeln!(f)?;
                         write!(f, "{}", change)?;
                     }
                 }
@@ -144,19 +150,19 @@ impl Display for LabelChange {
                 if map.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "ADD LABELS ({})", map.kv_pairs().join(", "))
+                write!(f, "ADD LABELS ({})", map.kv_pairs().join(", "))
             }
             LabelChange::Modify(map) => {
                 if map.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "MODIFY LABELS ({})", map.kv_pairs().join(", "))
+                write!(f, "MODIFY LABELS ({})", map.kv_pairs().join(", "))
             }
             LabelChange::Drop(names) => {
                 if names.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "DROP LABELS ({})", names.join(", "))
+                write!(f, "DROP LABELS ({})", names.join(", "))
             }
         }
     }
@@ -195,19 +201,19 @@ impl Display for AnnotationChange {
                 if map.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "ADD ANNOTATIONS ({})", map.kv_pairs().join(", "))
+                write!(f, "ADD ANNOTATIONS ({})", map.kv_pairs().join(", "))
             }
             AnnotationChange::Modify(map) => {
                 if map.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "MODIFY ANNOTATIONS ({})", map.kv_pairs().join(", "))
+                write!(f, "MODIFY ANNOTATIONS ({})", map.kv_pairs().join(", "))
             }
             AnnotationChange::Drop(names) => {
                 if names.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "DROP ANNOTATIONS ({})", names.join(", "))
+                write!(f, "DROP ANNOTATIONS ({})", names.join(", "))
             }
         }
     }
@@ -243,16 +249,21 @@ impl Display for NotifyChannelChange {
                 if channels.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "ADD NOTIFY")?;
-                for channel in channels {
-                    writeln!(f, "    {}", channel)?;
+                write!(f, "ADD NOTIFY(")?;
+                for (idx, channel) in channels.into_iter().enumerate() {
+                    writeln!(f)?;
+                    write!(f, "    {}", channel)?;
+                    if idx < channels.len() - 1 {
+                        write!(f, ",")?;
+                    }
                 }
+                write!(f, ")")?;
             }
             NotifyChannelChange::Drop(names) => {
                 if names.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "DROP NOTIFY ({})", names.join(", "))?;
+                write!(f, "DROP NOTIFY ({})", names.join(", "))?;
             }
         }
         Ok(())
@@ -261,81 +272,87 @@ impl Display for NotifyChannelChange {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use sqlparser::ast::{Ident, ObjectName};
+    use sqlparser::ast::Ident;
 
     use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::create::trigger::{AlertManagerWebhook, ChannelType};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_display_label_change() {
+        let add = LabelChange::Add(OptionMap::from([("k1".to_string(), "v1".to_string())]));
+        let modify = LabelChange::Modify(OptionMap::from([("k2".to_string(), "v2".to_string())]));
+        let drop = LabelChange::Drop(vec!["k3".to_string(), "k4".to_string()]);
+
+        assert_eq!(add.to_string(), "ADD LABELS (k1 = 'v1')");
+        assert_eq!(modify.to_string(), "MODIFY LABELS (k2 = 'v2')");
+        assert_eq!(drop.to_string(), "DROP LABELS (k3, k4)");
+    }
+
+    #[test]
+    fn test_display_annotation_change() {
+        let add = AnnotationChange::Add(OptionMap::from([("a1".to_string(), "v1".to_string())]));
+        let modify =
+            AnnotationChange::Modify(OptionMap::from([("a2".to_string(), "v2".to_string())]));
+        let drop = AnnotationChange::Drop(vec!["a3".to_string(), "a4".to_string()]);
+
+        assert_eq!(add.to_string(), "ADD ANNOTATIONS (a1 = 'v1')");
+        assert_eq!(modify.to_string(), "MODIFY ANNOTATIONS (a2 = 'v2')");
+        assert_eq!(drop.to_string(), "DROP ANNOTATIONS (a3, a4)");
+    }
+
+    #[test]
+    fn test_display_notify_channel_change() {
+        let add_channel = NotifyChannel {
+            name: Ident::new("webhook1"),
+            channel_type: ChannelType::Webhook(AlertManagerWebhook {
+                url: Ident::new("http://example.com"),
+                options: OptionMap::default(),
+            }),
+        };
+        let add = NotifyChannelChange::Add(vec![add_channel]);
+        let expected = r#"ADD NOTIFY(
+    WEBHOOK webhook1 URL http://example.com)"#;
+        assert_eq!(expected, add.to_string(),);
+
+        let drop = NotifyChannelChange::Drop(vec!["webhook2".to_string(), "webhook3".to_string()]);
+        assert_eq!(drop.to_string(), "DROP NOTIFY (webhook2, webhook3)");
+    }
 
     #[test]
     fn test_display_alter_trigger() {
-        let rename = Some("new_trigger".to_string());
-
-        let new_interval = Some(60);
-
-        let add_labels = HashMap::from([
-            ("k1".to_string(), "v1".to_string()),
-            ("k2".to_string(), "v2".to_string()),
-        ]);
-        let add_labels = LabelChange::Add(add_labels.into());
-        let remove_labels = LabelChange::Drop(vec!["k3".to_string(), "k4".to_string()]);
-        let label_operations = Some(LabelOperations::PartialChanges(vec![
-            add_labels,
-            remove_labels,
-        ]));
-
-        let set_annotations = HashMap::from([
-            ("a1".to_string(), "v1".to_string()),
-            ("a2".to_string(), "v2".to_string()),
-        ]);
-        let annotation_operations = Some(AnnotationOperations::ReplaceAll(set_annotations.into()));
-
-        let add_notify_channel_3 = NotifyChannel {
-            name: Ident::new("webhook3"),
-            channel_type: ChannelType::Webhook(AlertManagerWebhook {
-                url: Ident::new("http://new3.com"),
-                options: OptionMap::default(),
-            }),
-        };
-        let add_notify_channel_4 = NotifyChannel {
-            name: Ident::new("webhook4"),
-            channel_type: ChannelType::Webhook(AlertManagerWebhook {
-                url: Ident::new("http://new4.com"),
-                options: OptionMap::default(),
-            }),
-        };
-        let notify_channel_operation = vec![
-            NotifyChannelChange::Drop(vec!["webhook1".to_string(), "webhook2".to_string()]),
-            NotifyChannelChange::Add(vec![add_notify_channel_3, add_notify_channel_4]),
-        ];
-        let notify_channel_operations = Some(NotifyChannelOperations::PartialChanges(
-            notify_channel_operation,
-        ));
-
-        let trigger = AlterTrigger {
-            trigger_name: ObjectName(vec![Ident::new("my_trigger")]),
-            operation: AlterTriggerOperation {
-                rename,
-                new_query: None,
-                new_interval,
-                label_operations,
-                annotation_operations,
-                notify_channel_operations,
-            },
-        };
-
-        let expected = r#"ALTER TRIGGER my_trigger
+        let sql = r#"ALTER TRIGGER my_trigger
+ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY '5 minute'::INTERVAL
 RENAME TO new_trigger
-SET EXEC QUERY EVERY 60 SECONDS
 ADD LABELS (k1 = 'v1', k2 = 'v2')
 DROP LABELS (k3, k4)
 SET ANNOTATIONS (a1 = 'v1', a2 = 'v2')
 DROP NOTIFY (webhook1, webhook2)
 ADD NOTIFY
-    WEBHOOK webhook3 URL 'http://new3.com'
-    WEBHOOK webhook4 URL 'http://new4.com'
-"#;
-        assert_eq!(trigger.to_string(), expected);
+    (WEBHOOK webhook3 URL 'http://new3.com',
+    WEBHOOK webhook4 URL 'http://new4.com')"#;
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+
+        let Statement::AlterTrigger(trigger) = &result[0] else {
+            panic!("Expected AlterTrigger statement");
+        };
+
+        let formatted = format!("{}", trigger);
+        let expected = r#"ALTER TRIGGER my_trigger
+RENAME TO new_trigger
+ON (SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 2) EVERY 300 SECONDS
+ADD LABELS (k1 = 'v1', k2 = 'v2')
+DROP LABELS (k3, k4)
+SET ANNOTATIONS (a1 = 'v1', a2 = 'v2')
+DROP NOTIFY (webhook1, webhook2)
+ADD NOTIFY(
+    WEBHOOK webhook3 URL 'http://new3.com',
+    WEBHOOK webhook4 URL 'http://new4.com')"#;
+        assert_eq!(formatted, expected);
     }
 }
