@@ -355,8 +355,13 @@ impl RegionRoutes {
 pub struct Region {
     pub id: RegionId,
     pub name: String,
-    pub partition: Option<Partition>,
     pub attrs: BTreeMap<String, String>,
+
+    /// **Deprecated:** Use `partition_expr` instead.
+    pub partition: Option<Partition>,
+    /// The partition expression of the region.
+    #[serde(default)]
+    pub partition_expr: String,
 }
 
 impl Region {
@@ -367,25 +372,61 @@ impl Region {
             ..Default::default()
         }
     }
+
+    /// Gets the partition expression of the region in compatible mode.
+    pub fn partition_expr(&self) -> String {
+        if !self.partition_expr.is_empty() {
+            self.partition_expr.clone()
+        } else if let Some(Partition { value_list, .. }) = &self.partition {
+            if !value_list.is_empty() {
+                String::from_utf8_lossy(&value_list[0]).to_string()
+            } else {
+                "".to_string()
+            }
+        } else {
+            "".to_string()
+        }
+    }
+}
+
+/// Gets the partition expression of the `PbRegion` in compatible mode.
+#[allow(deprecated)]
+pub fn pb_region_partition_expr(r: &PbRegion) -> String {
+    if !r.partition_expr.is_empty() {
+        r.partition_expr.clone()
+    } else if let Some(partition) = &r.partition {
+        if !partition.value_list.is_empty() {
+            String::from_utf8_lossy(&partition.value_list[0]).to_string()
+        } else {
+            "".to_string()
+        }
+    } else {
+        "".to_string()
+    }
 }
 
 impl From<PbRegion> for Region {
     fn from(r: PbRegion) -> Self {
+        let partition_expr = pb_region_partition_expr(&r);
         Self {
             id: r.id.into(),
             name: r.name,
-            partition: r.partition.map(Into::into),
+            partition: None,
+            partition_expr,
             attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
         }
     }
 }
 
 impl From<Region> for PbRegion {
+    #[allow(deprecated)]
     fn from(region: Region) -> Self {
+        let partition_expr = region.partition_expr();
         Self {
             id: region.id.into(),
             name: region.name,
-            partition: region.partition.map(Into::into),
+            partition: None,
+            partition_expr,
             attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
@@ -469,8 +510,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -491,8 +533,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -513,8 +556,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -529,8 +573,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -545,8 +590,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -561,8 +607,9 @@ mod tests {
             region: Region {
                 id: 2.into(),
                 name: "r2".to_string(),
-                partition: None,
                 attrs: BTreeMap::new(),
+                partition: None,
+                partition_expr: "".to_string(),
             },
             leader_peer: Some(Peer::new(1, "a1")),
             follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
@@ -572,6 +619,44 @@ mod tests {
         let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}],"leader_status":"Downgrading","leader_down_since":null}"#;
         let decoded: RegionRoute = serde_json::from_str(input).unwrap();
         assert_eq!(decoded, region_route);
+    }
+
+    #[test]
+    fn test_region_distribution() {
+        let region_routes = vec![
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1, 1),
+                    name: "r1".to_string(),
+                    attrs: BTreeMap::new(),
+                    partition: None,
+                    partition_expr: "".to_string(),
+                },
+                leader_peer: Some(Peer::new(1, "a1")),
+                follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+                leader_state: None,
+                leader_down_since: None,
+            },
+            RegionRoute {
+                region: Region {
+                    id: RegionId::new(1, 2),
+                    name: "r2".to_string(),
+                    attrs: BTreeMap::new(),
+                    partition: None,
+                    partition_expr: "".to_string(),
+                },
+                leader_peer: Some(Peer::new(2, "a2")),
+                follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
+                leader_state: None,
+                leader_down_since: None,
+            },
+        ];
+
+        let distribution = region_distribution(&region_routes);
+        assert_eq!(distribution.len(), 3);
+        assert_eq!(distribution[&1], RegionRoleSet::new(vec![1], vec![2]));
+        assert_eq!(distribution[&2], RegionRoleSet::new(vec![2], vec![1]));
+        assert_eq!(distribution[&3], RegionRoleSet::new(vec![], vec![1, 2]));
     }
 
     #[test]
@@ -588,38 +673,63 @@ mod tests {
     }
 
     #[test]
-    fn test_region_distribution() {
-        let region_routes = vec![
-            RegionRoute {
-                region: Region {
-                    id: RegionId::new(1, 1),
-                    name: "r1".to_string(),
-                    partition: None,
-                    attrs: BTreeMap::new(),
-                },
-                leader_peer: Some(Peer::new(1, "a1")),
-                follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
-                leader_state: None,
-                leader_down_since: None,
-            },
-            RegionRoute {
-                region: Region {
-                    id: RegionId::new(1, 2),
-                    name: "r2".to_string(),
-                    partition: None,
-                    attrs: BTreeMap::new(),
-                },
-                leader_peer: Some(Peer::new(2, "a2")),
-                follower_peers: vec![Peer::new(1, "a1"), Peer::new(3, "a3")],
-                leader_state: None,
-                leader_down_since: None,
-            },
-        ];
+    #[allow(deprecated)]
+    fn test_region_partition_expr() {
+        let r = PbRegion {
+            id: 1,
+            name: "r1".to_string(),
+            partition: None,
+            partition_expr: "".to_string(),
+            attrs: Default::default(),
+        };
+        assert_eq!(pb_region_partition_expr(&r), "");
 
-        let distribution = region_distribution(&region_routes);
-        assert_eq!(distribution.len(), 3);
-        assert_eq!(distribution[&1], RegionRoleSet::new(vec![1], vec![2]));
-        assert_eq!(distribution[&2], RegionRoleSet::new(vec![2], vec![1]));
-        assert_eq!(distribution[&3], RegionRoleSet::new(vec![], vec![1, 2]));
+        let r2: Region = r.into();
+        assert_eq!(r2.partition_expr(), "");
+        assert!(r2.partition.is_none());
+
+        let r3: PbRegion = r2.into();
+        assert_eq!(r3.partition_expr, "");
+        assert!(r3.partition.is_none());
+
+        let r = PbRegion {
+            id: 1,
+            name: "r1".to_string(),
+            partition: Some(PbPartition {
+                column_list: vec![b"a".to_vec()],
+                value_list: vec![b"{}".to_vec()],
+            }),
+            partition_expr: "".to_string(),
+            attrs: Default::default(),
+        };
+        assert_eq!(pb_region_partition_expr(&r), "{}");
+
+        let r2: Region = r.into();
+        assert_eq!(r2.partition_expr(), "{}");
+        assert!(r2.partition.is_none());
+
+        let r3: PbRegion = r2.into();
+        assert_eq!(r3.partition_expr, "{}");
+        assert!(r3.partition.is_none());
+
+        let r = PbRegion {
+            id: 1,
+            name: "r1".to_string(),
+            partition: Some(PbPartition {
+                column_list: vec![b"a".to_vec()],
+                value_list: vec![b"{}".to_vec()],
+            }),
+            partition_expr: "a>b".to_string(),
+            attrs: Default::default(),
+        };
+        assert_eq!(pb_region_partition_expr(&r), "a>b");
+
+        let r2: Region = r.into();
+        assert_eq!(r2.partition_expr(), "a>b");
+        assert!(r2.partition.is_none());
+
+        let r3: PbRegion = r2.into();
+        assert_eq!(r3.partition_expr, "a>b");
+        assert!(r3.partition.is_none());
     }
 }

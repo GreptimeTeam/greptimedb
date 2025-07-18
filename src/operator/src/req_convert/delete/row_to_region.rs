@@ -46,10 +46,10 @@ impl<'a> RowToRegion<'a> {
         let mut region_request = Vec::with_capacity(requests.deletes.len());
         for request in requests.deletes {
             let table = self.get_table(&request.table_name).await?;
-            let table_id = table.table_info().table_id();
+            let table_info = table.table_info();
 
             let requests = Partitioner::new(self.partition_manager)
-                .partition_delete_requests(table_id, request.rows.unwrap_or_default())
+                .partition_delete_requests(&table_info, request.rows.unwrap_or_default())
                 .await?;
 
             region_request.extend(requests);

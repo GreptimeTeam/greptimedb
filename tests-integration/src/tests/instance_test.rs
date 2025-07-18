@@ -128,9 +128,9 @@ PARTITION ON COLUMNS (n) (
 |       | )                                   |
 |       | PARTITION ON COLUMNS ("n") (        |
 |       |   n < 1,                            |
-|       |   n >= 100,                         |
 |       |   n >= 1 AND n < 10,                |
-|       |   n >= 10 AND n < 100               |
+|       |   n >= 10 AND n < 100,              |
+|       |   n >= 100                          |
 |       | )                                   |
 |       | ENGINE=mito                         |
 |       |                                     |

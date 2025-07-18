@@ -188,6 +188,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
                 name: String::new(),
                 partition: None,
                 attrs: BTreeMap::new(),
+                partition_expr: Default::default(),
             },
             leader_peer: Some(Peer {
                 id: rng.random_range(0..10),

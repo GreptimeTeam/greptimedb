@@ -48,10 +48,12 @@ pub trait PartitionRule: Sync + Send {
     ) -> Result<HashMap<RegionNumber, RegionMask>>;
 }
 
-/// The right bound(exclusive) of partition range.
+/// The bound of one partition.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PartitionBound {
+    /// Deprecated since 0.9.0.
     Value(Value),
+    /// Deprecated since 0.15.0.
     MaxValue,
     Expr(crate::expr::PartitionExpr),
 }
