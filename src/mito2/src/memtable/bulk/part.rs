@@ -136,7 +136,12 @@ impl TryFrom<&BulkPart> for BulkWalEntry {
 
 impl BulkPart {
     pub(crate) fn estimated_size(&self) -> usize {
-        self.batch.get_array_memory_size()
+        self.batch
+            .columns()
+            .iter()
+            // If can not get slice memory size, assume 0 here.
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum()
     }
 
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
