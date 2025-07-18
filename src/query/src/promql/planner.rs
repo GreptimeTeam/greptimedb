@@ -191,10 +191,20 @@ impl PromPlanner {
         planner.prom_expr_to_plan(&stmt.expr, session_state).await
     }
 
-    #[async_recursion]
     pub async fn prom_expr_to_plan(
         &mut self,
         prom_expr: &PromExpr,
+        session_state: &SessionState,
+    ) -> Result<LogicalPlan> {
+        self.prom_expr_to_plan_inner(prom_expr, false, session_state)
+            .await
+    }
+
+    #[async_recursion]
+    pub async fn prom_expr_to_plan_inner(
+        &mut self,
+        prom_expr: &PromExpr,
+        timestamp_fn: bool,
         session_state: &SessionState,
     ) -> Result<LogicalPlan> {
         let res = match prom_expr {
@@ -202,7 +212,8 @@ impl PromPlanner {
             PromExpr::Unary(expr) => self.prom_unary_expr_to_plan(session_state, expr).await?,
             PromExpr::Binary(expr) => self.prom_binary_expr_to_plan(session_state, expr).await?,
             PromExpr::Paren(ParenExpr { expr }) => {
-                self.prom_expr_to_plan(expr, session_state).await?
+                self.prom_expr_to_plan_inner(expr, timestamp_fn, session_state)
+                    .await?
             }
             PromExpr::Subquery(expr) => {
                 self.prom_subquery_expr_to_plan(session_state, expr).await?
@@ -210,7 +221,8 @@ impl PromPlanner {
             PromExpr::NumberLiteral(lit) => self.prom_number_lit_to_plan(lit)?,
             PromExpr::StringLiteral(lit) => self.prom_string_lit_to_plan(lit)?,
             PromExpr::VectorSelector(selector) => {
-                self.prom_vector_selector_to_plan(selector).await?
+                self.prom_vector_selector_to_plan(selector, timestamp_fn)
+                    .await?
             }
             PromExpr::MatrixSelector(selector) => {
                 self.prom_matrix_selector_to_plan(selector).await?
@@ -673,6 +685,7 @@ impl PromPlanner {
     async fn prom_vector_selector_to_plan(
         &mut self,
         vector_selector: &VectorSelector,
+        timestamp_fn: bool,
     ) -> Result<LogicalPlan> {
         let VectorSelector {
             name,
@@ -687,6 +700,13 @@ impl PromPlanner {
         let normalize = self
             .selector_to_series_normalize_plan(offset, matchers, false)
             .await?;
+
+        let normalize = if timestamp_fn {
+            self.create_timestamp_func_plan(normalize)?
+        } else {
+            normalize
+        };
+
         let manipulate = InstantManipulate::new(
             self.ctx.start,
             self.ctx.end,
@@ -702,6 +722,52 @@ impl PromPlanner {
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
         }))
+    }
+
+    /// Implements the PromQL `timestamp` function as a logical plan transformation.
+    ///
+    /// This function creates a projection plan that replaces the value columns with the timestamp
+    /// (time index) column for each input row. It is used to evaluate the PromQL `timestamp()`
+    /// function, which returns the timestamp of each sample in the input vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `normalize` - The input [`LogicalPlan`] representing the normalized series data.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`Result<LogicalPlan>`] where the resulting logical plan projects the timestamp
+    /// column as the value column, along with the original tag and time index columns.
+    ///
+    /// # Side Effects
+    ///
+    /// Updates the planner context's field columns to contain only the timestamp column name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the time index column is not set in the planner context or if the
+    /// projection plan cannot be built.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Used internally when planning a PromQL `timestamp()` call:
+    /// let plan = planner.create_timestamp_func_plan(normalize_plan)?;
+    /// ```
+    fn create_timestamp_func_plan(&mut self, normalize: LogicalPlan) -> Result<LogicalPlan> {
+        let time_expr = build_special_time_expr(self.ctx.time_index_column.as_ref().unwrap())
+            .alias(DEFAULT_FIELD_COLUMN);
+        self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
+        let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
+        project_exprs.push(self.create_time_index_column_expr()?);
+        project_exprs.push(time_expr);
+        project_exprs.extend(self.create_tag_column_exprs()?);
+
+        LogicalPlanBuilder::from(normalize)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     async fn prom_matrix_selector_to_plan(
@@ -768,7 +834,8 @@ impl PromPlanner {
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
         let input = if let Some(prom_expr) = &args.input {
-            self.prom_expr_to_plan(prom_expr, session_state).await?
+            self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", session_state)
+                .await?
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -1654,7 +1721,7 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
-            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" => {
+            "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc" | "timestamp" => {
                 // These functions are not expression but a part of plan,
                 // they are processed by `prom_call_expr_to_plan`.
                 for value in &self.ctx.field_columns {
