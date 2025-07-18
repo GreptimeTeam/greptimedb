@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_METASRV_ADDR_PORT","FLOW_ID_SEQ","METASRV_DATA_DIR","TABLE_ID_SEQ"],"enum":["BackendImpl","SelectTarget"],"mod":["builder"],"struct":["Context","LeaderValue","MetaStateHandler","Metasrv","MetasrvInfo","MetasrvNodeInfo","MetasrvOptions","SelectorContext"],"type":["ElectionRef","RegionStatAwareSelectorRef","SelectorRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["merge_record_batches"],"struct":["RecordBatch","RecordBatchRowIterator"]};

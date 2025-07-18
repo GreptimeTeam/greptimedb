@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error","Expr","SqlValue"],"struct":["ColumnTypeMismatchSnafu","ConvertSqlValueSnafu","ConvertStrSnafu","DatatypeSnafu","InvalidCastSnafu","InvalidSqlValueSnafu","InvalidUnaryOpSnafu","ParseSqlValueSnafu","TimestampOverflowSnafu","UnsupportedDefaultValueSnafu","UnsupportedUnaryOpSnafu"],"type":["Result"]};

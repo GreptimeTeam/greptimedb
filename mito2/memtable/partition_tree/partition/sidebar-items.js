@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["data_batch_to_batch"],"struct":["Inner","Partition","PartitionReader","PartitionReaderMetrics","PartitionStats","ReadPartitionContext"],"type":["PartitionKey","PartitionRef"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_tables_from_query","extract_tables_from_set_expr","format_raw_object_name","location_to_index","parse_option_string","table_factor_to_object_name"]};

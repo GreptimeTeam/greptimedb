@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_add_columns","parse_alter_column_drop_default","parse_string_option_names","parse_string_options"]};

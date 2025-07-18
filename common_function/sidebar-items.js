@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":["ensure_greptime","pg_catalog_func_fullname"],"mod":["admin","aggrs","flush_flow","function","function_factory","function_registry","handlers","helper","macros","scalars","state","system","utils"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_resource_limit_metrics","log_env_flags","log_versions","start_wait_for_close_signal"],"mod":["cli","datanode","error","flownode","frontend","metasrv","options","standalone"],"struct":["APP_VERSION","CPU_LIMIT","MEMORY_LIMIT"],"trait":["App"]};
