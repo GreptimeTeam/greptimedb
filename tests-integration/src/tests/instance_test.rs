@@ -2199,3 +2199,97 @@ WITH(
         }
     }
 }
+
+#[apply(both_instances_cases)]
+async fn test_copy_parquet_map_to_json(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let output = execute_sql(
+        &instance,
+        r#"CREATE TABLE map_json_test (
+            "id" INT,
+            map_data JSON,
+            ts TIMESTAMP TIME INDEX
+        );"#,
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let parquet_path = find_testing_resource("/tests/data/parquet/map_to_json.parquet");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY map_json_test FROM '{}' WITH (FORMAT='parquet');",
+            parquet_path
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(5)));
+
+    let output = execute_sql(
+        &instance,
+        "SELECT \"id\", json_to_string(map_data) FROM map_json_test ORDER BY \"id\";",
+    )
+    .await
+    .data;
+
+    let expected = r#"+----+-----------------------------------------+
+| id | json_to_string(map_json_test.map_data)  |
++----+-----------------------------------------+
+| 1  | {"a":"1","b":"2","c":"hello"}           |
+| 2  | {"x":"42","y":"test"}                   |
+| 3  | {}                                      |
+| 4  | {"single":"value"}                      |
+| 5  | {"complex":"structure","nested":"data"} |
++----+-----------------------------------------+"#;
+    check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_copy_parquet_map_to_binary(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let output = execute_sql(
+        &instance,
+        r#"CREATE TABLE map_bin_test (
+            "id" INT,
+            map_data BINARY,
+            ts TIMESTAMP TIME INDEX
+        );"#,
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let parquet_path = find_testing_resource("/tests/data/parquet/map_to_json.parquet");
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY map_bin_test FROM '{}' WITH (FORMAT='parquet');",
+            parquet_path
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(5)));
+
+    let output = execute_sql(
+        &instance,
+        "SELECT \"id\", CAST(map_data AS STRING) FROM map_bin_test ORDER BY \"id\";",
+    )
+    .await
+    .data;
+
+    let expected = r#"+----+-----------------------------------------+
+| id | map_bin_test.map_data                   |
++----+-----------------------------------------+
+| 1  | {"a":"1","b":"2","c":"hello"}           |
+| 2  | {"x":"42","y":"test"}                   |
+| 3  | {}                                      |
+| 4  | {"single":"value"}                      |
+| 5  | {"complex":"structure","nested":"data"} |
++----+-----------------------------------------+"#;
+    check_output_stream(output, expected).await;
+}
