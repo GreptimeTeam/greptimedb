@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -58,12 +58,17 @@ impl Default for SchemaNameKey<'_> {
 pub struct SchemaNameValue {
     #[serde(default)]
     pub ttl: Option<DatabaseTimeToLive>,
+    #[serde(default)]
+    pub extra_options: BTreeMap<String, String>,
 }
 
 impl Display for SchemaNameValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ttl) = self.ttl.map(|i| i.to_string()) {
-            write!(f, "ttl='{}'", ttl)?;
+            writeln!(f, "'ttl'='{}'", ttl)?;
+        }
+        for (k, v) in self.extra_options.iter() {
+            writeln!(f, "'{k}'='{v}'")?;
         }
 
         Ok(())
@@ -87,7 +92,18 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
             })
             .transpose()?
             .map(|ttl| ttl.into());
-        Ok(Self { ttl })
+        let extra_options = value
+            .iter()
+            .filter_map(|(k, v)| {
+                if k == OPT_KEY_TTL {
+                    None
+                } else {
+                    Some((k.clone(), v.clone()))
+                }
+            })
+            .collect();
+
+        Ok(Self { ttl, extra_options })
     }
 }
 
@@ -97,6 +113,12 @@ impl From<SchemaNameValue> for HashMap<String, String> {
         if let Some(ttl) = value.ttl.map(|ttl| ttl.to_string()) {
             opts.insert(OPT_KEY_TTL.to_string(), ttl);
         }
+        opts.extend(
+            value
+                .extra_options
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         opts
     }
 }
@@ -316,18 +338,23 @@ mod tests {
 
     #[test]
     fn test_display_schema_value() {
-        let schema_value = SchemaNameValue { ttl: None };
+        let schema_value = SchemaNameValue {
+            ttl: None,
+            ..Default::default()
+        };
         assert_eq!("", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
             ttl: Some(Duration::from_secs(9).into()),
+            ..Default::default()
         };
-        assert_eq!("ttl='9s'", schema_value.to_string());
+        assert_eq!("'ttl'='9s'\n", schema_value.to_string());
 
         let schema_value = SchemaNameValue {
             ttl: Some(Duration::from_secs(0).into()),
+            ..Default::default()
         };
-        assert_eq!("ttl='forever'", schema_value.to_string());
+        assert_eq!("'ttl'='forever'\n", schema_value.to_string());
     }
 
     #[test]
@@ -341,6 +368,7 @@ mod tests {
 
         let value = SchemaNameValue {
             ttl: Some(Duration::from_secs(10).into()),
+            ..Default::default()
         };
         let mut opts: HashMap<String, String> = HashMap::new();
         opts.insert("ttl".to_string(), "10s".to_string());
@@ -355,6 +383,7 @@ mod tests {
 
         let forever = SchemaNameValue {
             ttl: Some(Default::default()),
+            ..Default::default()
         };
         let parsed = SchemaNameValue::try_from_raw_value(
             serde_json::json!({"ttl": "forever"}).to_string().as_bytes(),
@@ -372,6 +401,81 @@ mod tests {
 
         let err_empty = SchemaNameValue::try_from_raw_value("".as_bytes());
         assert!(err_empty.is_err());
+    }
+
+    #[test]
+    fn test_extra_options_compatibility() {
+        // Test with extra_options only
+        let mut opts: HashMap<String, String> = HashMap::new();
+        opts.insert("foo".to_string(), "bar".to_string());
+        opts.insert("baz".to_string(), "qux".to_string());
+        let value = SchemaNameValue::try_from(&opts).unwrap();
+        assert_eq!(value.ttl, None);
+        assert_eq!(value.extra_options.get("foo"), Some(&"bar".to_string()));
+        assert_eq!(value.extra_options.get("baz"), Some(&"qux".to_string()));
+
+        // Test round-trip conversion
+        let opts_back: HashMap<String, String> = value.clone().into();
+        assert_eq!(opts_back.get("foo"), Some(&"bar".to_string()));
+        assert_eq!(opts_back.get("baz"), Some(&"qux".to_string()));
+        assert!(!opts_back.contains_key("ttl"));
+
+        // Test with both ttl and extra_options
+        let mut opts: HashMap<String, String> = HashMap::new();
+        opts.insert("ttl".to_string(), "5m".to_string());
+        opts.insert("opt1".to_string(), "val1".to_string());
+        let value = SchemaNameValue::try_from(&opts).unwrap();
+        assert_eq!(value.ttl, Some(Duration::from_secs(300).into()));
+        assert_eq!(value.extra_options.get("opt1"), Some(&"val1".to_string()));
+
+        // Test serialization/deserialization compatibility
+        let json = serde_json::to_string(&value).unwrap();
+        let deserialized: SchemaNameValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(value, deserialized);
+
+        // Test display includes extra_options
+        let mut value = SchemaNameValue::default();
+        value
+            .extra_options
+            .insert("foo".to_string(), "bar".to_string());
+        let display = value.to_string();
+        assert!(display.contains("'foo'='bar'"));
+    }
+
+    #[test]
+    fn test_backward_compatibility_with_old_format() {
+        // Simulate old format: only ttl, no extra_options
+        let json = r#"{"ttl":"10s"}"#;
+        let parsed = SchemaNameValue::try_from_raw_value(json.as_bytes()).unwrap();
+        assert_eq!(
+            parsed,
+            Some(SchemaNameValue {
+                ttl: Some(Duration::from_secs(10).into()),
+                extra_options: BTreeMap::new(),
+            })
+        );
+
+        // Simulate old format: null value
+        let json = r#"null"#;
+        let parsed = SchemaNameValue::try_from_raw_value(json.as_bytes()).unwrap();
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn test_forward_compatibility_with_new_options() {
+        // Simulate new format: ttl + extra_options
+        let json = r#"{"ttl":"15s","extra_options":{"foo":"bar","baz":"qux"}}"#;
+        let parsed = SchemaNameValue::try_from_raw_value(json.as_bytes()).unwrap();
+        let mut expected_options = BTreeMap::new();
+        expected_options.insert("foo".to_string(), "bar".to_string());
+        expected_options.insert("baz".to_string(), "qux".to_string());
+        assert_eq!(
+            parsed,
+            Some(SchemaNameValue {
+                ttl: Some(Duration::from_secs(15).into()),
+                extra_options: expected_options,
+            })
+        );
     }
 
     #[tokio::test]
@@ -396,6 +500,7 @@ mod tests {
         let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
         let new_schema_value = SchemaNameValue {
             ttl: Some(Duration::from_secs(10).into()),
+            ..Default::default()
         };
         manager
             .update(schema_key, &current_schema_value, &new_schema_value)
@@ -410,9 +515,11 @@ mod tests {
 
         let new_schema_value = SchemaNameValue {
             ttl: Some(Duration::from_secs(40).into()),
+            ..Default::default()
         };
         let incorrect_schema_value = SchemaNameValue {
             ttl: Some(Duration::from_secs(20).into()),
+            ..Default::default()
         }
         .try_as_raw_value()
         .unwrap();
@@ -425,7 +532,10 @@ mod tests {
             .unwrap_err();
 
         let current_schema_value = manager.get(schema_key).await.unwrap().unwrap();
-        let new_schema_value = SchemaNameValue { ttl: None };
+        let new_schema_value = SchemaNameValue {
+            ttl: None,
+            ..Default::default()
+        };
         manager
             .update(schema_key, &current_schema_value, &new_schema_value)
             .await

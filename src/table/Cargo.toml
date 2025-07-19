@@ -34,6 +34,7 @@ greptime-proto.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
+once_cell.workspace = true
 paste.workspace = true
 serde.workspace = true
 snafu.workspace = true
