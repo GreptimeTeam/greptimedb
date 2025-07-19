@@ -19,13 +19,11 @@ use std::sync::{Arc, RwLock};
 use mito_codec::key_values::KeyValue;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
-use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::bulk::part::{BulkPart, EncodedBulkPart};
 use crate::memtable::{
-    BoxedBatchIterator, KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef,
-    MemtableStats, PredicateGroup,
+    KeyValues, Memtable, MemtableId, MemtableRanges, MemtableRef, MemtableStats, PredicateGroup,
 };
 
 #[allow(unused)]
@@ -58,12 +56,13 @@ impl Memtable for BulkMemtable {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         _projection: Option<&[ColumnId]>,
-        _predicate: Option<Predicate>,
+        _predicate: Option<table::predicate::Predicate>,
         _sequence: Option<SequenceNumber>,
-    ) -> Result<BoxedBatchIterator> {
+    ) -> Result<crate::memtable::BoxedBatchIterator> {
         todo!()
     }
 

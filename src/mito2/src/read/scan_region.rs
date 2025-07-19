@@ -357,6 +357,13 @@ impl ScanRegion {
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
+
+        // The mapper always computes projected column ids as the schema of SSTs may change.
+        let mapper = match &self.request.projection {
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
+            None => ProjectionMapper::all(&self.version.metadata)?,
+        };
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
@@ -385,18 +392,31 @@ impl ScanRegion {
 
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
-        let memtables: Vec<_> = memtables
-            .into_iter()
-            .filter(|mem| {
-                // check if memtable is empty by reading stats.
-                let Some((start, end)) = mem.stats().time_range() else {
-                    return false;
-                };
-                // The time range of the memtable is inclusive.
-                let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
-                memtable_range.intersects(&time_range)
-            })
-            .collect();
+        let mut mem_range_builders = Vec::new();
+
+        for m in memtables {
+            // check if memtable is empty by reading stats.
+            let Some((start, end)) = m.stats().time_range() else {
+                continue;
+            };
+            // The time range of the memtable is inclusive.
+            let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
+            if !memtable_range.intersects(&time_range) {
+                continue;
+            }
+            let ranges_in_memtable = m.ranges(
+                Some(mapper.column_ids()),
+                predicate.clone(),
+                self.request.sequence,
+            )?;
+            mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
+                // todo: we should add stats to MemtableRange
+                let mut stats = ranges_in_memtable.stats.clone();
+                stats.num_ranges = 1;
+                stats.num_rows = v.num_rows();
+                MemRangeBuilder::new(v, stats)
+            }));
+        }
 
         let region_id = self.region_id();
         debug!(
@@ -404,7 +424,7 @@ impl ScanRegion {
             region_id,
             self.request,
             time_range,
-            memtables.len(),
+            mem_range_builders.len(),
             files.len(),
             self.version.options.append_mode,
         );
@@ -421,23 +441,11 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
-        // Get memtable ranges to scan.
-        let memtables = memtables
-            .into_iter()
-            .map(|mem| {
-                mem.ranges(
-                    Some(mapper.column_ids()),
-                    predicate.clone(),
-                    self.request.sequence,
-                )
-                .map(MemRangeBuilder::new)
-            })
-            .collect::<Result<Vec<_>>>()?;
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
-            .with_memtables(memtables)
+            .with_memtables(mem_range_builders)
             .with_files(files)
             .with_cache(self.cache_strategy)
             .with_inverted_index_applier(inverted_index_applier)

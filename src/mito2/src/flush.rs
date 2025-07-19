@@ -32,10 +32,13 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::memtable::MemtableRanges;
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
+use crate::read::merge::MergeReaderBuilder;
+use crate::read::scan_region::PredicateGroup;
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::region::version::{VersionControlData, VersionControlRef};
@@ -347,11 +350,24 @@ impl RegionFlushTask {
                 continue;
             }
 
-            let stats = mem.stats();
+            let MemtableRanges { ranges, stats } =
+                mem.ranges(None, PredicateGroup::default(), None)?;
+
             let max_sequence = stats.max_sequence();
             series_count += stats.series_count();
-            let iter = mem.iter(None, None, None)?;
-            let source = Source::Iter(iter);
+
+            let source = if ranges.len() == 1 {
+                let only_range = ranges.into_values().next().unwrap();
+                Source::Iter(only_range.build_iter()?)
+            } else {
+                // todo(hl): a workaround since sync version of MergeReader is wip.
+                let sources = ranges
+                    .into_values()
+                    .map(|r| r.build_iter().map(Source::Iter))
+                    .collect::<Result<Vec<_>>>()?;
+                let merge_reader = MergeReaderBuilder::from_sources(sources).build().await?;
+                Source::Reader(Box::new(merge_reader))
+            };
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
