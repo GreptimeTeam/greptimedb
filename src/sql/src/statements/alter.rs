@@ -19,7 +19,7 @@ use common_query::AddColumnLocation;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -92,14 +92,14 @@ pub enum AlterTableOperation {
     UnsetIndex {
         options: UnsetIndexOperation,
     },
-    DropDefaults {
-        columns: Vec<DropDefaultsOperation>,
+    /// `ALTER <column_name> UNSET DEFAULT`
+    UnsetDefaultOperation(Ident),
+    /// `ALTER <column_name> SET DEFAULT <value>`
+    SetDefaultOperation {
+        column_name: Ident,
+        default_constraint: Expr,
     },
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
-/// `ALTER <column_name> DROP DEFAULT`
-pub struct DropDefaultsOperation(pub Ident);
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum SetIndexOperation {
@@ -211,12 +211,19 @@ impl Display for AlterTableOperation {
                     write!(f, "MODIFY COLUMN {column_name} UNSET SKIPPING INDEX")
                 }
             },
-            AlterTableOperation::DropDefaults { columns } => {
-                let columns = columns
-                    .iter()
-                    .map(|column| format!("ALTER {} DROP DEFAULT", column.0))
-                    .join(", ");
-                write!(f, "{columns}")
+            AlterTableOperation::UnsetDefaultOperation(col) => {
+                write!(f, "MODIFY COLUMN {} UNSET DEFAULT", col)
+            }
+            AlterTableOperation::SetDefaultOperation {
+                column_name,
+                default_constraint,
+            } => {
+                write!(
+                    f,
+                    "MODIFY COLUMN {} SET DEFAULT {}",
+                    column_name.to_owned(),
+                    default_constraint.to_owned()
+                )
             }
         }
     }
@@ -502,7 +509,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor ALTER a DROP DEFAULT";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a UNSET DEFAULT";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -514,7 +521,28 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ALTER a DROP DEFAULT"#,
+ALTER TABLE monitor MODIFY COLUMN a UNSET DEFAULT"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::AlterTable { .. });
+
+        match &stmts[0] {
+            Statement::AlterTable(set) => {
+                let new_sql = format!("\n{}", set);
+                assert_eq!(
+                    r#"
+ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'"#,
                     &new_sql
                 );
             }

@@ -534,10 +534,12 @@ pub enum AlterKind {
     SetIndex { options: ApiSetIndexOptions },
     /// Unset index options.
     UnsetIndex { options: ApiUnsetIndexOptions },
-    /// Drop column default value.
-    DropDefaults {
-        /// Name of columns to drop.
-        names: Vec<String>,
+    /// Unset column default value.
+    UnsetDefault(String),
+    /// Set column default value.
+    SetDefault {
+        name: String,
+        default_constraint: Vec<u8>,
     },
 }
 
@@ -636,10 +638,11 @@ impl AlterKind {
                     options.is_fulltext(),
                 )?;
             }
-            AlterKind::DropDefaults { names } => {
-                names
-                    .iter()
-                    .try_for_each(|name| Self::validate_column_to_drop(name, metadata))?;
+            AlterKind::UnsetDefault(name) => {
+                Self::validate_column_existence(name, metadata)?;
+            }
+            AlterKind::SetDefault { name, .. } => {
+                Self::validate_column_existence(name, metadata)?;
             }
         }
         Ok(())
@@ -670,9 +673,8 @@ impl AlterKind {
             AlterKind::UnsetIndex { options } => {
                 metadata.column_by_name(options.column_name()).is_some()
             }
-            AlterKind::DropDefaults { names } => names
-                .iter()
-                .any(|name| metadata.column_by_name(name).is_some()),
+            AlterKind::UnsetDefault(name) => metadata.column_by_name(name).is_some(),
+            AlterKind::SetDefault { name, .. } => metadata.column_by_name(name).is_some(),
         }
     }
 
@@ -716,6 +718,18 @@ impl AlterKind {
                 }
             );
         }
+
+        Ok(())
+    }
+
+    /// Returns an error if the column isn't exist.
+    fn validate_column_existence(column_name: &String, metadata: &RegionMetadata) -> Result<()> {
+        metadata
+            .column_by_name(column_name)
+            .context(InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
 
         Ok(())
     }
@@ -816,8 +830,10 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     },
                 },
             },
-            alter_request::Kind::DropDefaults(x) => AlterKind::DropDefaults {
-                names: x.drop_defaults.into_iter().map(|x| x.column_name).collect(),
+            alter_request::Kind::UnsetDefault(col) => AlterKind::UnsetDefault(col),
+            alter_request::Kind::SetDefault(s) => AlterKind::SetDefault {
+                name: s.column_name,
+                default_constraint: s.default_constraint,
             },
         };
 
