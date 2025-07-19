@@ -92,23 +92,13 @@ pub enum AlterTableOperation {
     UnsetIndex {
         options: UnsetIndexOperation,
     },
-    DropDefaults {
-        columns: Vec<DropDefaultsOperation>,
+    /// `ALTER <column_name> UNSET DEFAULT`
+    UnsetDefaultOperation(Ident),
+    /// `ALTER <column_name> SET DEFAULT <value>`
+    SetDefaultOperation {
+        column_name: Ident,
+        default_constraint: Expr,
     },
-    /// `ALTER <column_name> SET DEFAULT <default_value>`
-    SetDefaults {
-        defaults: Vec<SetDefaultsOperation>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
-/// `ALTER <column_name> UNSET DEFAULT`
-pub struct DropDefaultsOperation(pub Ident);
-
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
-pub struct SetDefaultsOperation {
-    pub column_name: Ident,
-    pub default_constraint: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -221,24 +211,19 @@ impl Display for AlterTableOperation {
                     write!(f, "MODIFY COLUMN {column_name} UNSET SKIPPING INDEX")
                 }
             },
-            AlterTableOperation::DropDefaults { columns } => {
-                let columns = columns
-                    .iter()
-                    .map(|column| format!("MODIFY COLUMN {} UNSET DEFAULT", column.0))
-                    .join(", ");
-                write!(f, "{columns}")
+            AlterTableOperation::UnsetDefaultOperation(col) => {
+                write!(f, "MODIFY COLUMN {} UNSET DEFAULT", col)
             }
-            AlterTableOperation::SetDefaults { defaults } => {
-                let defaults = defaults
-                    .iter()
-                    .map(|column| {
-                        format!(
-                            "MODIFY COLUMN {} SET DEFAULT {}",
-                            column.column_name, column.default_constraint
-                        )
-                    })
-                    .join(", ");
-                write!(f, "{defaults}")
+            AlterTableOperation::SetDefaultOperation {
+                column_name,
+                default_constraint,
+            } => {
+                write!(
+                    f,
+                    "MODIFY COLUMN {} SET DEFAULT {}",
+                    column_name.to_owned(),
+                    default_constraint.to_owned()
+                )
             }
         }
     }

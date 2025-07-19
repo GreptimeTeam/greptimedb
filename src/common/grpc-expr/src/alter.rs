@@ -29,8 +29,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetDefaultRequest,
-    SetIndexOptions, UnsetIndexOptions,
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOptions,
+    UnsetIndexOptions,
 };
 
 use crate::error::{
@@ -192,46 +192,24 @@ pub fn alter_expr_to_request(
             },
             None => return MissingAlterIndexOptionSnafu.fail(),
         },
-        Kind::DropDefaults(o) => {
-            let names = o
-                .drop_defaults
-                .into_iter()
-                .map(|col| {
-                    ensure!(
-                        !col.column_name.is_empty(),
-                        MissingFieldSnafu {
-                            field: "column_name"
-                        }
-                    );
-                    Ok(col.column_name)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            AlterKind::DropDefaults { names }
-        }
-        Kind::SetDefaults(o) => {
+        Kind::UnsetDefault(o) => AlterKind::UnsetDefault(o),
+        Kind::SetDefault(col) => {
             let table_meta = table_meta.context(MissingTableMetaSnafu)?;
-            let defaults = o
-                .set_defaults
-                .into_iter()
-                .map(|col| {
-                    let column_scheme = table_meta
-                        .schema
-                        .column_schema_by_name(&col.column_name)
-                        .context(ColumnNotFoundSnafu {
-                        column_name: &col.column_name,
-                    })?;
-                    Ok(SetDefaultRequest {
-                        column_name: col.column_name.clone(),
-                        default_constraint: common_sql::convert::deserialize_default_constraint(
-                            col.default_constraint.as_slice(),
-                            &col.column_name,
-                            &column_scheme.data_type,
-                        )
-                        .context(crate::error::SqlCommonSnafu)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            AlterKind::SetDefaults { defaults }
+            let column_scheme = table_meta
+                .schema
+                .column_schema_by_name(&col.column_name)
+                .context(ColumnNotFoundSnafu {
+                    column_name: &col.column_name,
+                })?;
+            AlterKind::SetDefault {
+                column_name: col.column_name.clone(),
+                default_constraint: common_sql::convert::deserialize_default_constraint(
+                    col.default_constraint.as_slice(),
+                    &col.column_name,
+                    &column_scheme.data_type,
+                )
+                .context(crate::error::SqlCommonSnafu)?,
+            }
         }
     };
 

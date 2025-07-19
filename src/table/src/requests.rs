@@ -259,18 +259,11 @@ pub enum AlterKind {
     UnsetIndex {
         options: UnsetIndexOptions,
     },
-    DropDefaults {
-        names: Vec<String>,
+    UnsetDefault(String),
+    SetDefault {
+        column_name: String,
+        default_constraint: Option<ColumnDefaultConstraint>,
     },
-    SetDefaults {
-        defaults: Vec<SetDefaultRequest>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetDefaultRequest {
-    pub column_name: String,
-    pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

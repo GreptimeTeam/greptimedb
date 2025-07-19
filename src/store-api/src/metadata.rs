@@ -612,10 +612,13 @@ impl RegionMetadataBuilder {
             AlterKind::UnsetRegionOptions { keys: _ } => {
                 // nothing to be done with RegionMetadata
             }
-            AlterKind::DropDefaults { names } => {
-                self.drop_defaults(names)?;
+            AlterKind::UnsetDefault(name) => {
+                self.unset_default(name)?;
             }
-            AlterKind::SetDefaults { columns } => self.set_defaults(&columns)?,
+            AlterKind::SetDefault {
+                name,
+                default_constraint,
+            } => self.set_default(name, &default_constraint)?,
         }
         Ok(self)
     }
@@ -831,69 +834,67 @@ impl RegionMetadataBuilder {
         Ok(())
     }
 
-    fn drop_defaults(&mut self, column_names: Vec<String>) -> Result<()> {
-        for name in column_names.iter() {
-            let meta = self
-                .column_metadatas
-                .iter_mut()
-                .find(|col| col.column_schema.name == *name);
-            if let Some(meta) = meta {
-                if !meta.column_schema.is_nullable() {
-                    return InvalidRegionRequestSnafu {
-                        region_id: self.region_id,
-                        err: format!(
-                            "column {name} is not nullable and `default` cannot be dropped",
-                        ),
-                    }
-                    .fail();
-                }
-                meta.column_schema = meta
-                    .column_schema
-                    .clone()
-                    .with_default_constraint(None)
-                    .with_context(|_| CastDefaultValueSnafu {
-                        reason: format!("Failed to drop default : {name:?}"),
-                    })?;
-            } else {
+    fn unset_default(&mut self, column_name: String) -> Result<()> {
+        let meta = self
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_schema.name == *column_name);
+        if let Some(meta) = meta {
+            if !meta.column_schema.is_nullable() {
                 return InvalidRegionRequestSnafu {
                     region_id: self.region_id,
-                    err: format!("column {name} not found",),
+                    err: format!(
+                        "column {column_name} is not nullable and `default` cannot be dropped",
+                    ),
                 }
                 .fail();
             }
+            meta.column_schema = meta
+                .column_schema
+                .clone()
+                .with_default_constraint(None)
+                .with_context(|_| CastDefaultValueSnafu {
+                    reason: format!("Failed to drop default : {column_name:?}"),
+                })?;
+        } else {
+            return InvalidRegionRequestSnafu {
+                region_id: self.region_id,
+                err: format!("column {column_name} not found",),
+            }
+            .fail();
         }
+
         Ok(())
     }
 
-    fn set_defaults(&mut self, set_defaults: &[crate::region_request::SetDefault]) -> Result<()> {
-        for set_default in set_defaults.iter() {
-            let meta = self
-                .column_metadatas
-                .iter_mut()
-                .find(|col| col.column_schema.name == set_default.name);
-            if let Some(meta) = meta {
-                let default_constraint = common_sql::convert::deserialize_default_constraint(
-                    set_default.default_constraint.as_slice(),
-                    &meta.column_schema.name,
-                    &meta.column_schema.data_type,
-                )
-                .context(SqlCommonSnafu)?;
+    fn set_default(&mut self, column_name: String, default_constraint: &[u8]) -> Result<()> {
+        let meta = self
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_schema.name == column_name);
+        if let Some(meta) = meta {
+            let default_constraint = common_sql::convert::deserialize_default_constraint(
+                default_constraint,
+                &meta.column_schema.name,
+                &meta.column_schema.data_type,
+            )
+            .context(SqlCommonSnafu)?;
 
-                meta.column_schema = meta
-                    .column_schema
-                    .clone()
-                    .with_default_constraint(default_constraint)
-                    .with_context(|_| CastDefaultValueSnafu {
-                        reason: format!("Failed to set default : {set_default:?}"),
-                    })?;
-            } else {
-                return InvalidRegionRequestSnafu {
-                    region_id: self.region_id,
-                    err: format!("column {} not found", set_default.name),
-                }
-                .fail();
+            meta.column_schema = meta
+                .column_schema
+                .clone()
+                .with_default_constraint(default_constraint)
+                .with_context(|_| CastDefaultValueSnafu {
+                    reason: format!("Failed to set default : {column_name}"),
+                })?;
+        } else {
+            return InvalidRegionRequestSnafu {
+                region_id: self.region_id,
+                err: format!("column {} not found", column_name),
             }
+            .fail();
         }
+
         Ok(())
     }
 }
@@ -1628,9 +1629,7 @@ mod test {
 
         let mut builder: RegionMetadataBuilder = RegionMetadataBuilder::from_existing(metadata);
         builder
-            .alter(AlterKind::DropDefaults {
-                names: vec!["g".to_string()],
-            })
+            .alter(AlterKind::UnsetDefault("g".to_string()))
             .unwrap();
         let metadata = builder.build().unwrap();
         assert_eq!(

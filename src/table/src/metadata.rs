@@ -22,8 +22,8 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{
-    ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder, SchemaRef,
-    SkippingIndexOptions,
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, RawSchema, Schema, SchemaBuilder,
+    SchemaRef, SkippingIndexOptions,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,8 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, Re
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetDefaultRequest, SetIndexOptions,
-    TableOptions, UnsetIndexOptions,
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
+    UnsetIndexOptions,
 };
 use crate::table_reference::TableReference;
 
@@ -269,8 +269,11 @@ impl TableMeta {
                     self.change_column_skipping_index_options(table_name, column_name, None)
                 }
             },
-            AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
-            AlterKind::SetDefaults { defaults } => self.set_defaults(table_name, defaults),
+            AlterKind::UnsetDefault(name) => self.unset_default(table_name, name.to_owned()),
+            AlterKind::SetDefault {
+                column_name,
+                default_constraint,
+            } => self.set_default(table_name, column_name.clone(), default_constraint.clone()),
         }
     }
 
@@ -960,25 +963,25 @@ impl TableMeta {
         })
     }
 
-    fn drop_defaults(&self, table_name: &str, column_names: &[String]) -> Result<TableMetaBuilder> {
+    fn unset_default(&self, table_name: &str, column_name: String) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
         let mut columns = Vec::with_capacity(table_schema.num_columns());
         for column_schema in table_schema.column_schemas() {
-            if let Some(name) = column_names.iter().find(|s| **s == column_schema.name) {
+            if column_name == column_schema.name {
                 // Drop default constraint.
                 ensure!(
                     column_schema.default_constraint().is_some(),
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
-                        err: format!("column {name} does not have a default value"),
+                        err: format!("column {column_name} does not have a default value"),
                     }
                 );
                 if !column_schema.is_nullable() {
                     return error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
-                            "column {name} is not nullable and `default` cannot be dropped",
+                            "column {column_name} is not nullable and `default` cannot be dropped",
                         ),
                     }
                     .fail();
@@ -1013,22 +1016,20 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
-    fn set_defaults(
+    fn set_default(
         &self,
         table_name: &str,
-        set_defaults: &[SetDefaultRequest],
+        column_name: String,
+        default_constraint: Option<ColumnDefaultConstraint>,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
         let mut columns = Vec::with_capacity(table_schema.num_columns());
         for column_schema in table_schema.column_schemas() {
-            if let Some(set_default) = set_defaults
-                .iter()
-                .find(|s| s.column_name == column_schema.name)
-            {
+            if column_name == column_schema.name {
                 let new_column_schema = column_schema.clone();
                 let new_column_schema = new_column_schema
-                    .with_default_constraint(set_default.default_constraint.clone())
+                    .with_default_constraint(default_constraint.clone())
                     .with_context(|_| error::SchemaBuildSnafu {
                         msg: format!("Table {table_name} cannot set default values"),
                     })?;

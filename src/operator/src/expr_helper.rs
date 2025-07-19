@@ -24,11 +24,11 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::{
     set_index, unset_index, AddColumn, AddColumns, AlterDatabaseExpr, AlterTableExpr, Analyzer,
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
-    ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
-    SetDefaults, SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions,
-    SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    DropColumn, DropColumns, ExpireAfter, FulltextBackend as PbFulltextBackend, ModifyColumnType,
+    ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions, SetFulltext, SetIndex,
+    SetInverted, SetSkipping, SetTableOptions, SkippingIndexType as PbSkippingIndexType, TableName,
+    UnsetDatabaseOptions, UnsetFulltext, UnsetIndex, UnsetInverted, UnsetSkipping,
+    UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -634,31 +634,17 @@ pub(crate) fn to_alter_table_expr(
                 })),
             },
         }),
-        AlterTableOperation::DropDefaults { columns } => {
-            AlterTableKind::DropDefaults(DropDefaults {
-                drop_defaults: columns
-                    .into_iter()
-                    .map(|col| {
-                        let column_name = col.0.to_string();
-                        Ok(api::v1::DropDefault { column_name })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            })
+        AlterTableOperation::UnsetDefaultOperation(col) => {
+            AlterTableKind::UnsetDefault(col.to_string())
         }
-        AlterTableOperation::SetDefaults { defaults } => AlterTableKind::SetDefaults(SetDefaults {
-            set_defaults: defaults
-                .into_iter()
-                .map(|col| {
-                    let column_name = col.column_name.to_string();
-                    let default_constraint = serde_json::to_string(&col.default_constraint)
-                        .context(EncodeJsonSnafu)?
-                        .into_bytes();
-                    Ok(api::v1::SetDefault {
-                        column_name,
-                        default_constraint,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?,
+        AlterTableOperation::SetDefaultOperation {
+            column_name,
+            default_constraint,
+        } => AlterTableKind::SetDefault(api::v1::SetDefault {
+            column_name: column_name.value,
+            default_constraint: serde_json::to_string(&default_constraint)
+                .context(EncodeJsonSnafu)?
+                .into_bytes(),
         }),
     };
 
