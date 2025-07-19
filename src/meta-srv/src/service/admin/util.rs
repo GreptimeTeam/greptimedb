@@ -14,6 +14,9 @@
 
 use std::fmt::Debug;
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 use snafu::ResultExt;
 use tonic::codegen::http;
@@ -42,6 +45,16 @@ where
         .status(http::StatusCode::OK)
         .body(response)
         .context(error::InvalidHttpBodySnafu)
+}
+
+/// Converts any serializable type to an Axum JSON response with status 200.
+pub fn to_axum_json_response<T: Serialize>(value: T) -> Response {
+    (StatusCode::OK, Json(value)).into_response()
+}
+
+/// Returns a 404 response with an empty body.
+pub fn to_axum_not_found_response() -> Response {
+    (StatusCode::NOT_FOUND, "").into_response()
 }
 
 /// Returns a 404 response with an empty body.
