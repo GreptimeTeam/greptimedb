@@ -29,8 +29,8 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::TableId;
 use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOptions,
-    UnsetIndexOptions,
+    AddColumnRequest, AlterKind, AlterTableRequest, ModifyColumnTypeRequest, SetIndexOption,
+    UnsetIndexOption,
 };
 
 use crate::error::{
@@ -42,6 +42,59 @@ use crate::error::{
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
 const LOCATION_TYPE_AFTER: i32 = LocationType::After as i32;
+
+fn set_index_option_from_proto(set_index: api::v1::SetIndex) -> Result<SetIndexOption> {
+    let options = set_index.options.context(MissingAlterIndexOptionSnafu)?;
+    Ok(match options {
+        api::v1::set_index::Options::Fulltext(f) => SetIndexOption::Fulltext {
+            column_name: f.column_name.clone(),
+            options: FulltextOptions::new(
+                f.enable,
+                as_fulltext_option_analyzer(
+                    Analyzer::try_from(f.analyzer).context(InvalidSetFulltextOptionRequestSnafu)?,
+                ),
+                f.case_sensitive,
+                as_fulltext_option_backend(
+                    PbFulltextBackend::try_from(f.backend)
+                        .context(InvalidSetFulltextOptionRequestSnafu)?,
+                ),
+                f.granularity as u32,
+                f.false_positive_rate,
+            )
+            .context(InvalidIndexOptionSnafu)?,
+        },
+        api::v1::set_index::Options::Inverted(i) => SetIndexOption::Inverted {
+            column_name: i.column_name,
+        },
+        api::v1::set_index::Options::Skipping(s) => SetIndexOption::Skipping {
+            column_name: s.column_name,
+            options: SkippingIndexOptions::new(
+                s.granularity as u32,
+                s.false_positive_rate,
+                as_skipping_index_type(
+                    PbSkippingIndexType::try_from(s.skipping_index_type)
+                        .context(InvalidSetSkippingIndexOptionRequestSnafu)?,
+                ),
+            )
+            .context(InvalidIndexOptionSnafu)?,
+        },
+    })
+}
+
+fn unset_index_option_from_proto(unset_index: api::v1::UnsetIndex) -> Result<UnsetIndexOption> {
+    let options = unset_index.options.context(MissingAlterIndexOptionSnafu)?;
+    Ok(match options {
+        api::v1::unset_index::Options::Fulltext(f) => UnsetIndexOption::Fulltext {
+            column_name: f.column_name,
+        },
+        api::v1::unset_index::Options::Inverted(i) => UnsetIndexOption::Inverted {
+            column_name: i.column_name,
+        },
+        api::v1::unset_index::Options::Skipping(s) => UnsetIndexOption::Skipping {
+            column_name: s.column_name,
+        },
+    })
+}
 
 /// Convert an [`AlterTableExpr`] to an [`AlterTableRequest`]
 pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<AlterTableRequest> {
@@ -121,70 +174,34 @@ pub fn alter_expr_to_request(table_id: TableId, expr: AlterTableExpr) -> Result<
                     .context(InvalidUnsetTableOptionRequestSnafu)?,
             }
         }
-        Kind::SetIndex(o) => match o.options {
-            Some(opt) => match opt {
-                api::v1::set_index::Options::Fulltext(f) => AlterKind::SetIndex {
-                    options: SetIndexOptions::Fulltext {
-                        column_name: f.column_name.clone(),
-                        options: FulltextOptions::new(
-                            f.enable,
-                            as_fulltext_option_analyzer(
-                                Analyzer::try_from(f.analyzer)
-                                    .context(InvalidSetFulltextOptionRequestSnafu)?,
-                            ),
-                            f.case_sensitive,
-                            as_fulltext_option_backend(
-                                PbFulltextBackend::try_from(f.backend)
-                                    .context(InvalidSetFulltextOptionRequestSnafu)?,
-                            ),
-                            f.granularity as u32,
-                            f.false_positive_rate,
-                        )
-                        .context(InvalidIndexOptionSnafu)?,
-                    },
-                },
-                api::v1::set_index::Options::Inverted(i) => AlterKind::SetIndex {
-                    options: SetIndexOptions::Inverted {
-                        column_name: i.column_name,
-                    },
-                },
-                api::v1::set_index::Options::Skipping(s) => AlterKind::SetIndex {
-                    options: SetIndexOptions::Skipping {
-                        column_name: s.column_name,
-                        options: SkippingIndexOptions::new(
-                            s.granularity as u32,
-                            s.false_positive_rate,
-                            as_skipping_index_type(
-                                PbSkippingIndexType::try_from(s.skipping_index_type)
-                                    .context(InvalidSetSkippingIndexOptionRequestSnafu)?,
-                            ),
-                        )
-                        .context(InvalidIndexOptionSnafu)?,
-                    },
-                },
-            },
-            None => return MissingAlterIndexOptionSnafu.fail(),
-        },
-        Kind::UnsetIndex(o) => match o.options {
-            Some(opt) => match opt {
-                api::v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
-                    options: UnsetIndexOptions::Fulltext {
-                        column_name: f.column_name,
-                    },
-                },
-                api::v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
-                    options: UnsetIndexOptions::Inverted {
-                        column_name: i.column_name,
-                    },
-                },
-                api::v1::unset_index::Options::Skipping(s) => AlterKind::UnsetIndex {
-                    options: UnsetIndexOptions::Skipping {
-                        column_name: s.column_name,
-                    },
-                },
-            },
-            None => return MissingAlterIndexOptionSnafu.fail(),
-        },
+        Kind::SetIndex(o) => {
+            let option = set_index_option_from_proto(o)?;
+            AlterKind::SetIndexes {
+                options: vec![option],
+            }
+        }
+        Kind::UnsetIndex(o) => {
+            let option = unset_index_option_from_proto(o)?;
+            AlterKind::UnsetIndexes {
+                options: vec![option],
+            }
+        }
+        Kind::SetIndexes(o) => {
+            let options = o
+                .set_indexes
+                .into_iter()
+                .map(set_index_option_from_proto)
+                .collect::<Result<Vec<_>>>()?;
+            AlterKind::SetIndexes { options }
+        }
+        Kind::UnsetIndexes(o) => {
+            let options = o
+                .unset_indexes
+                .into_iter()
+                .map(unset_index_option_from_proto)
+                .collect::<Result<Vec<_>>>()?;
+            AlterKind::UnsetIndexes { options }
+        }
         Kind::DropDefaults(o) => {
             let names = o
                 .drop_defaults
