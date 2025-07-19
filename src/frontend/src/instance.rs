@@ -678,6 +678,7 @@ pub fn check_permission(
         Statement::AlterTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
+        Statement::AlterTrigger(_) => {}
         // set/show variable now only alter/show variable in session
         Statement::SetVariables(_) | Statement::ShowVariables(_) => {}
         // show charset and show collation won't be checked
