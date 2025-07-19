@@ -42,6 +42,7 @@ pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
 
 // const keys
 pub const KEY_SERVICE_NAME: &str = "service.name";
+pub const KEY_SERVICE_INSTANCE_ID: &str = "service.instance.id";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 
 // jaeger const keys, not sure if they are general
