@@ -41,7 +41,7 @@ use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 use crate::access_layer::{FilePathProvider, SstInfoArray, TempFileCleaner};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
-use crate::sst::file::FileId;
+use crate::sst::file::{FileId, RegionFileId};
 use crate::sst::index::{Indexer, IndexerBuilder};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::helper::parse_parquet_metadata;
@@ -320,7 +320,10 @@ where
             let props_builder = Self::customize_column_config(props_builder, &self.metadata);
             let writer_props = props_builder.build();
 
-            let sst_file_path = self.path_provider.build_sst_file_path(self.current_file);
+            let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(
+                self.metadata.region_id,
+                self.current_file,
+            ));
             let writer = SizeAwareWriter::new(
                 self.writer_factory.create(&sst_file_path).await?,
                 self.bytes_written.clone(),

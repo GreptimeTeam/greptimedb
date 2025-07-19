@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
+use store_api::path_utils::region_name;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
@@ -50,7 +51,10 @@ impl FileRegion {
             options: request.options,
         };
 
-        let region_dir = request.region_dir;
+        let region_dir = object_store::util::join_dir(
+            &request.table_dir,
+            &region_name(region_id.table_id(), region_id.region_sequence()),
+        );
         let url = manifest.url()?;
         let file_options = manifest.file_options()?;
         let format = manifest.format()?;
@@ -74,11 +78,14 @@ impl FileRegion {
         request: RegionOpenRequest,
         object_store: &ObjectStore,
     ) -> Result<FileRegionRef> {
-        let manifest =
-            FileRegionManifest::load(region_id, &request.region_dir, object_store).await?;
+        let region_dir = object_store::util::join_dir(
+            &request.table_dir,
+            &region_name(region_id.table_id(), region_id.region_sequence()),
+        );
+        let manifest = FileRegionManifest::load(region_id, &region_dir, object_store).await?;
 
         Ok(Arc::new(Self {
-            region_dir: request.region_dir,
+            region_dir,
             url: manifest.url()?,
             file_options: manifest.file_options()?,
             format: manifest.format()?,
@@ -100,6 +107,8 @@ impl FileRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use store_api::region_request::PathType;
+
     use super::*;
     use crate::error::Error;
     use crate::test_util::{new_test_column_metadata, new_test_object_store, new_test_options};
@@ -113,7 +122,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: "create_region_dir/".to_string(),
+            table_dir: "create_region_dir/".to_string(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -121,7 +131,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(region.region_dir, "create_region_dir/");
+        assert_eq!(region.region_dir, "create_region_dir/1_0000000000/");
         assert_eq!(region.url, "test");
         assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
@@ -130,7 +140,7 @@ mod tests {
         assert_eq!(region.metadata.primary_key, vec![1]);
 
         assert!(object_store
-            .exists("create_region_dir/manifest/_file_manifest")
+            .exists("create_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 
@@ -151,7 +161,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: region_dir.clone(),
+            table_dir: region_dir.clone(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -161,7 +172,8 @@ mod tests {
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),
-            region_dir,
+            table_dir: region_dir,
+            path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
         };
@@ -170,7 +182,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(region.region_dir, "open_region_dir/");
+        assert_eq!(region.region_dir, "open_region_dir/1_0000000000/");
         assert_eq!(region.url, "test");
         assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
@@ -189,7 +201,8 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
-            region_dir: region_dir.clone(),
+            table_dir: region_dir.clone(),
+            path_type: PathType::Bare,
         };
         let region_id = RegionId::new(1, 0);
 
@@ -198,19 +211,20 @@ mod tests {
             .unwrap();
 
         assert!(object_store
-            .exists("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 
         FileRegion::drop(&region, &object_store).await.unwrap();
         assert!(!object_store
-            .exists("drop_region_dir/manifest/_file_manifest")
+            .exists("drop_region_dir/1_0000000000/manifest/_file_manifest")
             .await
             .unwrap());
 
         let request = RegionOpenRequest {
             engine: "file".to_string(),
-            region_dir,
+            table_dir: region_dir,
+            path_type: PathType::Bare,
             options: HashMap::default(),
             skip_wal_replay: false,
         };

@@ -20,7 +20,7 @@ use common_base::BitVec;
 use common_time::Timestamp;
 use smallvec::{smallvec, SmallVec};
 
-use crate::sst::file::{FileHandle, FileId};
+use crate::sst::file::{FileHandle, RegionFileId};
 
 /// Default max compaction output file size when not specified.
 const DEFAULT_MAX_OUTPUT_SIZE: u64 = ReadableSize::gb(2).as_bytes();
@@ -168,7 +168,7 @@ impl FileGroup {
         &self.files[..]
     }
 
-    pub(crate) fn file_ids(&self) -> SmallVec<[FileId; 2]> {
+    pub(crate) fn file_ids(&self) -> SmallVec<[RegionFileId; 2]> {
         SmallVec::from_iter(self.files.iter().map(|f| f.file_id()))
     }
 
