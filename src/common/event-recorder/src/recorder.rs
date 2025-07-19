@@ -466,11 +466,14 @@ mod tests {
         );
         event_recorder.record(Box::new(TestEvent {}));
 
-        // Cancel the event recorder to flush the buffer.
+        // Sleep for a while to let the event be sent to the event handler.
+        sleep(Duration::from_millis(500)).await;
+
+        // Close the event recorder to flush the buffer.
         event_recorder.close();
 
         // Sleep for a while to let the background task process the event.
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
 
         if let Some(handle) = event_recorder.handle.take() {
             assert!(handle.await.is_ok());
@@ -508,11 +511,14 @@ mod tests {
 
         event_recorder.record(Box::new(TestEvent {}));
 
+        // Sleep for a while to let the event be sent to the event handler.
+        sleep(Duration::from_millis(500)).await;
+
         // Close the event recorder to flush the buffer.
         event_recorder.close();
 
         // Sleep for a while to let the background task process the event.
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(500)).await;
 
         if let Some(handle) = event_recorder.handle.take() {
             assert!(handle.await.unwrap_err().is_panic());
