@@ -350,7 +350,7 @@ impl MergeScanExec {
                 };
                 partition_metrics.add_region_metrics(region_metrics);
 
-                common_telemetry::debug!(
+                common_telemetry::info!(
                     "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
                     partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
                 );
