@@ -369,7 +369,7 @@ impl InformationSchemaTablesBuilder {
         self.checksum.push(Some(0));
         self.max_index_length.push(Some(0));
         self.data_free.push(Some(0));
-        self.auto_increment.push(Some(0));
+        self.auto_increment.push(None);
         self.row_format.push(Some("Fixed"));
         self.table_collation.push(Some("utf8_bin"));
         self.update_time.push(None);
