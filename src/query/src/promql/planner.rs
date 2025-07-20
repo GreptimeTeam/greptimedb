@@ -200,8 +200,17 @@ impl PromPlanner {
             .await
     }
 
+    /**
+    Converts a PromQL expression to a logical plan.
+
+    NOTE:
+        The `timestamp_fn` indicates whether the PromQL `timestamp()` function is being evaluated in the current context.
+        If `true`, the planner generates a logical plan that projects the timestamp (time index) column
+        as the value column for each input row, implementing the PromQL `timestamp()` function semantics.
+        If `false`, the planner generates the standard logical plan for the given PromQL expression.
+    */
     #[async_recursion]
-    pub async fn prom_expr_to_plan_inner(
+    async fn prom_expr_to_plan_inner(
         &mut self,
         prom_expr: &PromExpr,
         timestamp_fn: bool,
@@ -702,6 +711,8 @@ impl PromPlanner {
             .await?;
 
         let normalize = if timestamp_fn {
+            // If evaluating the PromQL `timestamp()` function, project the time index column as the value column
+            // before wrapping with [`InstantManipulate`], so the output matches PromQL's `timestamp()` semantics.
             self.create_timestamp_func_plan(normalize)?
         } else {
             normalize
@@ -724,24 +735,22 @@ impl PromPlanner {
         }))
     }
 
-    /// Implements the PromQL `timestamp` function as a logical plan transformation.
+    /// Builds a projection plan for the PromQL `timestamp()` function.
     ///
-    /// This function creates a projection plan that replaces the value columns with the timestamp
-    /// (time index) column for each input row. It is used to evaluate the PromQL `timestamp()`
-    /// function, which returns the timestamp of each sample in the input vector.
-    ///
-    /// # Arguments
-    ///
-    /// * `normalize` - The input [`LogicalPlan`] representing the normalized series data.
-    ///
-    /// # Returns
-    ///
-    /// Returns a [`Result<LogicalPlan>`] where the resulting logical plan projects the timestamp
-    /// column as the value column, along with the original tag and time index columns.
+    /// Projects the time index column as the value column for each row.
     ///
     /// # Side Effects
+    /// Updates the planner context's field columns to the timestamp column name.
     ///
-    /// Updates the planner context's field columns to contain only the timestamp column name.
+    /// # Arguments
+    /// * `normalize` - Input [`LogicalPlan`] for the normalized series.
+    /// # Timestamp vs. Time Function
+    ///
+    /// - **Timestamp Function (`timestamp()`)**: In PromQL, the `timestamp()` function returns the
+    ///   timestamp (time index) of each sample as the value column.
+    ///
+    /// - **Time Function (`time()`)**: The `time()` function returns the evaluation time of the query
+    ///   as a scalar value.
     ///
     fn create_timestamp_func_plan(&mut self, normalize: LogicalPlan) -> Result<LogicalPlan> {
         let time_expr = build_special_time_expr(self.ctx.time_index_column.as_ref().unwrap())
