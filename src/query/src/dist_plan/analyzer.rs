@@ -158,6 +158,28 @@ struct PlanRewriter {
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
     /// use stack count as scope to determine column requirements is needed or not
+    /// i.e for a logical plan like:
+    /// ```
+    /// 1: Projection: t.number
+    /// 2: Sort: t.pk1+t.pk2
+    /// 3. Projection: t.number, t.pk1, t.pk2
+    /// ```
+    /// `Sort` will make a column requirement for `t.pk1` at level 2.
+    /// Which making `Projection` at level 1 need to add a ref to `t.pk1` as well.
+    /// So that the expanded plan will be
+    /// ```
+    /// Projection: t.number
+    ///   MergeSort: t.pk1
+    ///     MergeScan: remote_input=
+    /// Projection: t.number, "t.pk1+t.pk2" <--- the original `Projection` at level 1 get added with `t.pk1+t.pk2`
+    ///  Sort: t.pk1+t.pk2
+    ///    Projection: t.number, t.pk1, t.pk2
+    /// ```
+    /// Making `MergeSort` can have `t.pk1` as input.
+    /// Meanwhile `Projection` at level 3 doesn't need to add any new column because 3 > 2
+    /// and col requirements at level 2 is not applicable for level 3.
+    ///
+    /// see more details in test `expand_proj_step_aggr` and `expand_proj_sort_proj`
     column_requirements: Vec<(HashSet<Column>, usize)>,
     /// Whether to expand on next call
     /// This is used to handle the case where a plan is transformed, but need to be expanded from it's
@@ -420,7 +442,8 @@ impl PlanRewriter {
 ///
 #[derive(Debug)]
 struct EnforceDistRequirementRewriter {
-    // only enforce column requirements after the expanding node in question
+    /// only enforce column requirements after the expanding node in question,
+    /// meaning only for node with `cur_level` <= `level` will consider adding those column requirements
     column_requirements: Vec<(HashSet<Column>, usize)>,
     /// only apply column requirements >= `cur_level`
     /// this is used to avoid applying column requirements that are not needed
@@ -448,6 +471,19 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        // TODO(discord9): check that node doesn't have multiple children
+        if node.inputs().len() > 1 {
+            return Err(datafusion_common::DataFusionError::Internal(
+                "EnforceDistRequirementRewriter: node with multiple inputs is not supported"
+                    .to_string(),
+            ));
+        }
+        self.cur_level += 1;
+        Ok(Transformed::no(node))
+    }
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        self.cur_level -= 1;
         // first get all applicable column requirements
         let mut applicable_column_requirements = self
             .column_requirements
@@ -475,7 +511,6 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 applicable_column_requirements.remove(&column);
             }
             if applicable_column_requirements.is_empty() {
-                self.cur_level += 1;
                 return Ok(Transformed::no(node));
             }
 
@@ -490,16 +525,9 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
                 applicable_column_requirements
             );
 
-            self.cur_level += 1;
             // still need to continue for next projection if applicable
             return Ok(Transformed::yes(new_node));
         }
-
-        self.cur_level += 1;
-        Ok(Transformed::no(node))
-    }
-
-    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         Ok(Transformed::no(node))
     }
 }

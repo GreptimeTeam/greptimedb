@@ -153,6 +153,53 @@ impl Stream for EmptyStream {
 }
 
 #[test]
+fn expand_proj_sort_proj() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![col("number"), col("pk1"), col("pk2"), col("pk3")])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk1"),
+            col("pk3"),
+            col("pk1").eq(col("pk2")),
+        ])
+        .unwrap()
+        .sort(vec![col("t.pk1 = t.pk2").sort(true, true)])
+        .unwrap()
+        .project(vec![col("number")])
+        .unwrap()
+        .project(vec![col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.number",
+        "  MergeSort: t.pk1 = t.pk2 ASC NULLS FIRST",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, t.pk1 = t.pk2",
+        "  Projection: t.number, t.pk1 = t.pk2", // notice both projections added `t.pk1 = t.pk2` column requirement
+        "    Sort: t.pk1 = t.pk2 ASC NULLS FIRST",
+        "      Projection: t.number, t.pk1, t.pk3, t.pk1 = t.pk2",
+        "        Projection: t.number, t.pk1, t.pk2, t.pk3", // notice this projection doesn't add `t.pk1 = t.pk2` column requirement
+        "          TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
 fn expand_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
@@ -230,8 +277,8 @@ fn expand_limit_sort() {
 /// which means aggr introduce new column requirements that shouldn't be updated in lower projection
 ///
 /// this help test expand need actually add new column requirements
-/// because `Sort`/`Limit` doesn't introduce new column requirements
-/// only `Aggregate` does
+/// because ``Limit` doesn't introduce new column requirements
+/// only `Sort/Aggregate` does, and for now since `aggregate` get expanded immediately, it's col requirements are not used anyway
 #[test]
 fn expand_proj_step_aggr() {
     // use logging for better debugging
@@ -261,7 +308,7 @@ fn expand_proj_step_aggr() {
         "    Aggregate: groupBy=[[]], aggr=[[min(min(t.number))]]",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
-        "  Projection: t.number",
+        "  Projection: t.number", // This Projection shouldn't add new column requirements
         "    TableScan: t",
         "]]",
     ]
