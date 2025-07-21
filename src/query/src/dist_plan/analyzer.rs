@@ -471,7 +471,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        // TODO(discord9): check that node doesn't have multiple children
+        // check that node doesn't have multiple children, i.e. join/subquery
         if node.inputs().len() > 1 {
             return Err(datafusion_common::DataFusionError::Internal(
                 "EnforceDistRequirementRewriter: node with multiple inputs is not supported"
