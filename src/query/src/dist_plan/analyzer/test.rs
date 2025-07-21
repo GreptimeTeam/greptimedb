@@ -152,6 +152,78 @@ impl Stream for EmptyStream {
     }
 }
 
+#[test]
+fn expand_sort_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    // TODO(discord9): change to partitioned table
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk1 ASC NULLS LAST",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// TODO(discord9): it is possible to expand `Sort` and `Limit` in the same step,
+/// but it's too complicated to implement now, and probably not worth it since `Limit` already
+/// greatly reduces the amount of data to sort.
+#[test]
+fn expand_limit_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    // TODO(discord9): change to partitioned table
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Sort: t.pk1 ASC NULLS LAST",
+        "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "    Limit: skip=0, fetch=10",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// test plan like:
 /// ```
 /// Aggregate: min(t.number)
@@ -277,9 +349,91 @@ fn expand_proj_sort_step_aggr_limit() {
     assert_eq!(expected, result.to_string());
 }
 
-/// should only expand `Sort`
 #[test]
-fn expand_proj_sort_part_col_aggr() {
+fn expand_proj_sort_limit_step_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .project(vec![Expr::Column(Column::new(
+            Some(TableReference::bare("t")),
+            "number",
+        ))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "  Projection: t.number",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk1 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_limit_step_aggr_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![Expr::Column(Column::new(
+            Some(TableReference::bare("t")),
+            "number",
+        ))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![col("min(t.number)").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Sort: min(t.number) ASC NULLS LAST",
+        "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "    Projection: t.number",
+        "      Limit: skip=0, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_sort_part_col_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
@@ -298,16 +452,19 @@ fn expand_proj_sort_part_col_aggr() {
         .unwrap()
         .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
         .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
         .build()
         .unwrap();
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
-        "  Projection: t.number, t.pk1, t.pk2",
-        "    MergeSort: t.pk3 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      MergeSort: t.pk3 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
         "Projection: t.number, t.pk1, t.pk2, t.pk3",
         "  Sort: t.pk3 ASC NULLS LAST",
         "    TableScan: t",
@@ -359,6 +516,174 @@ fn expand_proj_sort_limit_part_col_aggr() {
     .join("\n");
     assert_eq!(expected, result.to_string());
 }
+#[test]
+fn expand_proj_part_col_aggr_limit_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .sort(vec![col("pk2").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Sort: t.pk2 ASC NULLS LAST",
+        "  Projection: t.pk1, t.pk2, min(t.number)",
+        "    Limit: skip=0, fetch=10",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_part_col_aggr_sort_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![col("pk2").sort(true, false)])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: t.pk1, t.pk2, min(t.number)",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk2 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk2 ASC NULLS LAST",
+        "    Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "      Projection: t.number, t.pk1, t.pk2",
+        "        TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_limit_part_col_aggr_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .sort(vec![col("pk2").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Sort: t.pk2 ASC NULLS LAST",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      Limit: skip=0, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_limit_sort_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::Column(Column::new(Some(TableReference::bare("t")), "number")),
+            col("pk1"),
+            col("pk2"),
+        ])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .sort(vec![col("pk2").sort(true, false)])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "  Sort: t.pk2 ASC NULLS LAST",
+        "    Projection: t.number, t.pk1, t.pk2",
+        "      Limit: skip=0, fetch=10",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
 
 #[test]
 fn expand_step_aggr_limit() {
@@ -387,6 +712,39 @@ fn expand_step_aggr_limit() {
         "        MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
         "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// notice how `Limit` can still get expanded
+#[test]
+fn expand_part_col_aggr_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Projection: t.pk1, t.pk2, min(t.number)",
+        "  Limit: skip=0, fetch=10",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
+        "    TableScan: t",
         "]]",
     ]
     .join("\n");
