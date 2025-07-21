@@ -88,7 +88,11 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "MergeScan [is_placeholder={}]", self.is_placeholder)
+        write!(
+            f,
+            "MergeScan [is_placeholder={}, remote_input=[\n{}\n]]",
+            self.is_placeholder, self.input
+        )
     }
 
     fn with_exprs_and_inputs(
@@ -155,6 +159,7 @@ impl std::fmt::Debug for MergeScanExec {
             .field("table", &self.table)
             .field("regions", &self.regions)
             .field("schema", &self.schema)
+            .field("plan", &self.plan)
             .finish()
     }
 }

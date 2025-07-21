@@ -12,13 +12,19 @@ Affected Rows: 3
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
-+---------------+-------------------------------------------------+
-| plan_type     | plan                                            |
-+---------------+-------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                |
++---------------+--------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                         |
++---------------+--------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                              |
+|               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                    |
+|               |   PromSeriesDivide: tags=["k"]                                                                               |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                     |
+|               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
+|               |         TableScan: test                                                                                      |
+|               | ]]                                                                                                           |
 | physical_plan | MergeScanExec: REDACTED
-|               |                                                 |
-+---------------+-------------------------------------------------+
+|               |                                                                                                              |
++---------------+--------------------------------------------------------------------------------------------------------------+
 
 -- 'lookback' parameter is not fully supported, the test has to be updated
 -- explain at 0s, 5s and 10s. No point at 0s.
@@ -26,26 +32,38 @@ TQL EXPLAIN (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '1s', '2s') test;
 
-+---------------+-------------------------------------------------+
-| plan_type     | plan                                            |
-+---------------+-------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                |
++---------------+----------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                     |
++---------------+----------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                          |
+|               | PromInstantManipulate: range=[0..0], lookback=[2000], interval=[300000], time index=[j]                  |
+|               |   PromSeriesDivide: tags=["k"]                                                                           |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                 |
+|               |       Filter: test.j >= TimestampMillisecond(-2000, None) AND test.j <= TimestampMillisecond(2000, None) |
+|               |         TableScan: test                                                                                  |
+|               | ]]                                                                                                       |
 | physical_plan | MergeScanExec: REDACTED
-|               |                                                 |
-+---------------+-------------------------------------------------+
+|               |                                                                                                          |
++---------------+----------------------------------------------------------------------------------------------------------+
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
-+---------------+-------------------------------------------------+
-| plan_type     | plan                                            |
-+---------------+-------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false]                |
++---------------+--------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                         |
++---------------+--------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                              |
+|               | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]                    |
+|               |   PromSeriesDivide: tags=["k"]                                                                               |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                     |
+|               |       Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None) |
+|               |         TableScan: test                                                                                      |
+|               | ]]                                                                                                           |
 | physical_plan | MergeScanExec: REDACTED
-|               |                                                 |
-+---------------+-------------------------------------------------+
+|               |                                                                                                              |
++---------------+--------------------------------------------------------------------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (-+) -
@@ -71,7 +89,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
+|_|_TableScan: test_|
+|_| ]]_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
@@ -97,7 +121,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after unwrap_cast_in_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
-| logical_plan after optimize_projections_| MergeScan [is_placeholder=false]_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
+|_|_TableScan: test_|
+|_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_nested_union_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
@@ -125,7 +155,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
-| logical_plan_| MergeScan [is_placeholder=false]_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-300000, None) AND test.j <= TimestampMillisecond(300000, None)_|
+|_|_TableScan: test_|
+|_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
 | initial_physical_plan_with_stats_| MergeScanExec: REDACTED
