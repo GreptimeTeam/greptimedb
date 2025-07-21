@@ -263,6 +263,8 @@ impl UnorderedScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
+
+            part_metrics.on_finish();
         };
         Ok(Box::pin(stream))
     }

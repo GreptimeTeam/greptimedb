@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
-use common_telemetry::debug;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use futures::Stream;
 use prometheus::IntGauge;
@@ -105,6 +104,9 @@ struct ScanMetricsSet {
     distributor_scan_cost: Duration,
     /// Duration of the series distributor to yield.
     distributor_yield_cost: Duration,
+
+    /// The stream reached EOF
+    stream_eof: bool,
 }
 
 impl fmt::Debug for ScanMetricsSet {
@@ -140,6 +142,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_distributor_batches,
             distributor_scan_cost,
             distributor_yield_cost,
+            stream_eof,
         } = self;
 
         write!(
@@ -173,7 +176,8 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_distributor_rows\":{num_distributor_rows}, \
             \"num_distributor_batches\":{num_distributor_batches}, \
             \"distributor_scan_cost\":\"{distributor_scan_cost:?}\", \
-            \"distributor_yield_cost\":\"{distributor_yield_cost:?}\"}}"
+            \"distributor_yield_cost\":\"{distributor_yield_cost:?}\", \
+            \"stream_eof\":{stream_eof}}}"
         )
     }
 }
@@ -352,22 +356,25 @@ struct PartitionMetricsInner {
 }
 
 impl PartitionMetricsInner {
-    fn on_finish(&self) {
+    fn on_finish(&self, stream_eof: bool) {
         let mut metrics = self.metrics.lock().unwrap();
         if metrics.total_cost.is_zero() {
             metrics.total_cost = self.query_start.elapsed();
+        }
+        if !metrics.stream_eof {
+            metrics.stream_eof = stream_eof;
         }
     }
 }
 
 impl Drop for PartitionMetricsInner {
     fn drop(&mut self) {
-        self.on_finish();
+        self.on_finish(false);
         let metrics = self.metrics.lock().unwrap();
         metrics.observe_metrics();
         self.in_progress_scan.dec();
 
-        debug!(
+        common_telemetry::info!(
             "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
             self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
         );
@@ -482,7 +489,7 @@ impl PartitionMetrics {
 
     /// Finishes the query.
     pub(crate) fn on_finish(&self) {
-        self.0.on_finish();
+        self.0.on_finish(true);
     }
 
     /// Sets the distributor metrics.
