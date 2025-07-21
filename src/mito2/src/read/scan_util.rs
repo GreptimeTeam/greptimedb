@@ -95,6 +95,8 @@ struct ScanMetricsSet {
 
     /// Number of send timeout in SeriesScan.
     num_series_send_timeout: usize,
+    /// Number of send full in SeriesScan.
+    num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
     num_distributor_rows: usize,
     /// Number of batches the series distributor scanned.
@@ -133,6 +135,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_rows,
             first_poll,
             num_series_send_timeout,
+            num_series_send_full,
             num_distributor_rows,
             num_distributor_batches,
             distributor_scan_cost,
@@ -166,6 +169,7 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_sst_rows\":{num_sst_rows}, \
             \"first_poll\":\"{first_poll:?}\", \
             \"num_series_send_timeout\":{num_series_send_timeout}, \
+            \"num_series_send_full\":{num_series_send_full}, \
             \"num_distributor_rows\":{num_distributor_rows}, \
             \"num_distributor_batches\":{num_distributor_batches}, \
             \"distributor_scan_cost\":\"{distributor_scan_cost:?}\", \
@@ -249,6 +253,7 @@ impl ScanMetricsSet {
     fn set_distributor_metrics(&mut self, distributor_metrics: &SeriesDistributorMetrics) {
         let SeriesDistributorMetrics {
             num_series_send_timeout,
+            num_series_send_full,
             num_rows,
             num_batches,
             scan_cost,
@@ -256,6 +261,7 @@ impl ScanMetricsSet {
         } = distributor_metrics;
 
         self.num_series_send_timeout += *num_series_send_timeout;
+        self.num_series_send_full += *num_series_send_full;
         self.num_distributor_rows += *num_rows;
         self.num_distributor_batches += *num_batches;
         self.distributor_scan_cost += *scan_cost;
@@ -502,6 +508,8 @@ impl fmt::Debug for PartitionMetrics {
 pub(crate) struct SeriesDistributorMetrics {
     /// Number of send timeout in SeriesScan.
     pub(crate) num_series_send_timeout: usize,
+    /// Number of send full in SeriesScan.
+    pub(crate) num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
     pub(crate) num_rows: usize,
     /// Number of batches the series distributor scanned.

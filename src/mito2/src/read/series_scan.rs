@@ -146,6 +146,8 @@ impl SeriesScan {
 
                 part_metrics.merge_metrics(&metrics);
             }
+
+            part_metrics.on_finish();
         };
         Ok(Box::pin(stream))
     }
@@ -399,6 +401,7 @@ impl SeriesDistributor {
 
         metrics.scan_cost += fetch_start.elapsed();
         metrics.num_series_send_timeout = self.senders.num_timeout;
+        metrics.num_series_send_full = self.senders.num_full;
         part_metrics.set_distributor_metrics(&metrics);
 
         part_metrics.on_finish();
@@ -444,6 +447,8 @@ struct SenderList {
     sender_idx: usize,
     /// Number of timeout.
     num_timeout: usize,
+    /// Number of full senders.
+    num_full: usize,
 }
 
 impl SenderList {
@@ -454,6 +459,7 @@ impl SenderList {
             num_nones,
             sender_idx: 0,
             num_timeout: 0,
+            num_full: 0,
         }
     }
 
@@ -471,6 +477,7 @@ impl SenderList {
             match sender.try_send(Ok(batch)) {
                 Ok(()) => return Ok(None),
                 Err(TrySendError::Full(res)) => {
+                    self.num_full += 1;
                     // Safety: we send Ok.
                     batch = res.unwrap();
                 }
