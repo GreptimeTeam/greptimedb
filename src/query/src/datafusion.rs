@@ -515,6 +515,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
+        let output_partitions = plan.properties().output_partitioning().partition_count();
         match plan.properties().output_partitioning().partition_count() {
             0 => {
                 let schema = Arc::new(
@@ -537,7 +538,10 @@ impl QueryExecutor for DatafusionQueryEngine {
                 stream.set_metrics2(plan.clone());
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    common_telemetry::info!(
+                        "DatafusionQueryEngine execute 1 stream, cost: {:?}s",
+                        exec_timer.stop_and_record()
+                    );
                 });
                 Ok(Box::pin(stream))
             }
@@ -564,7 +568,10 @@ impl QueryExecutor for DatafusionQueryEngine {
                 stream.set_metrics2(Arc::new(merged_plan));
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    common_telemetry::info!(
+                        "DatafusionQueryEngine execute {output_partitions} stream, cost: {:?}s",
+                        exec_timer.stop_and_record()
+                    );
                 });
                 Ok(Box::pin(stream))
             }
