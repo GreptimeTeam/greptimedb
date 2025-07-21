@@ -156,7 +156,6 @@ impl Stream for EmptyStream {
 fn expand_sort_limit() {
     // use logging for better debugging
     init_default_ut_logging();
-    // TODO(discord9): change to partitioned table
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
@@ -194,7 +193,6 @@ fn expand_sort_limit() {
 fn expand_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();
-    // TODO(discord9): change to partitioned table
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
@@ -238,7 +236,6 @@ fn expand_limit_sort() {
 fn expand_proj_step_aggr() {
     // use logging for better debugging
     init_default_ut_logging();
-    // TODO(discord9): change to partitioned table
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
@@ -276,7 +273,6 @@ fn expand_proj_step_aggr() {
 fn expand_step_aggr_proj() {
     // use logging for better debugging
     init_default_ut_logging();
-    // TODO(discord9): change to partitioned table
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
     let table_source = Arc::new(DefaultTableSource::new(Arc::new(
         DfTableProviderAdapter::new(test_table),
