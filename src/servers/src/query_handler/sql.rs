@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,15 +18,24 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
+use query::query_engine::DescribeResult;
+use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
+/// Strip backticks and lowercase any simple identifier they quote, e.g. `` `AUTO_INCREMENT` `` -> `auto_increment`.
+fn normalize_backticks(sql: &str) -> String {
+    // Matches things like `AUTO_INCREMENT` but skips more complex forms like `schema`.`table`
+    let re = Regex::new(r#"`([A-Za-z_][A-Za-z0-9_]*)`"#).unwrap();
+    re.replace_all(sql, |caps: &regex::Captures| caps[1].to_lowercase())
+        .into_owned()
+}
+
 pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
 pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef<error::Error>;
-use query::query_engine::DescribeResult;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -80,8 +88,11 @@ where
     type Error = error::Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        // normalize any backtick-quoted identifiers ex : `AUTO_INCREMENT` → auto_increment
+        let normalized = normalize_backticks(query);
+        // delegate to the real handler
         self.0
-            .do_query(query, query_ctx)
+            .do_query(&normalized, query_ctx)
             .await
             .into_iter()
             .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))

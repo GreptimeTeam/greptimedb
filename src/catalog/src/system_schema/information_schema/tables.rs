@@ -88,44 +88,54 @@ impl InformationSchemaTables {
     }
 
     pub(crate) fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(TABLE_TYPE, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new(DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(MAX_DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(MAX_INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(AVG_ROW_LENGTH, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(VERSION, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(ROW_FORMAT, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(TABLE_ROWS, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(DATA_FREE, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(AUTO_INCREMENT, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(
+        // base columns: (name, datatype, nullable)
+        let cols = vec![
+            (TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
+            (TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
+            (TABLE_NAME, ConcreteDataType::string_datatype(), false),
+            (TABLE_TYPE, ConcreteDataType::string_datatype(), false),
+            (TABLE_ID, ConcreteDataType::uint32_datatype(), true),
+            (DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            (MAX_DATA_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            (INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            (MAX_INDEX_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            (AVG_ROW_LENGTH, ConcreteDataType::uint64_datatype(), true),
+            (ENGINE, ConcreteDataType::string_datatype(), true),
+            (VERSION, ConcreteDataType::uint64_datatype(), true),
+            (ROW_FORMAT, ConcreteDataType::string_datatype(), true),
+            (TABLE_ROWS, ConcreteDataType::uint64_datatype(), true),
+            (DATA_FREE, ConcreteDataType::uint64_datatype(), true),
+            (AUTO_INCREMENT, ConcreteDataType::uint64_datatype(), true),
+            (
                 CREATE_TIME,
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(
+            (
                 UPDATE_TIME,
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(
+            (
                 CHECK_TIME,
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 true,
             ),
-            ColumnSchema::new(TABLE_COLLATION, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(CHECKSUM, ConcreteDataType::uint64_datatype(), true),
-            ColumnSchema::new(CREATE_OPTIONS, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(TABLE_COMMENT, ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new(TEMPORARY, ConcreteDataType::string_datatype(), true),
-        ]))
+            (TABLE_COLLATION, ConcreteDataType::string_datatype(), true),
+            (CHECKSUM, ConcreteDataType::uint64_datatype(), true),
+            (CREATE_OPTIONS, ConcreteDataType::string_datatype(), true),
+            (TABLE_COMMENT, ConcreteDataType::string_datatype(), true),
+            (TEMPORARY, ConcreteDataType::string_datatype(), true),
+        ];
+
+        // register both lowercase and uppercase variants
+        let mut all = Vec::with_capacity(cols.len() * 2);
+        for (name, dt, nullable) in cols {
+            all.push(ColumnSchema::new(name, dt.clone(), nullable));
+            all.push(ColumnSchema::new(&name.to_uppercase(), dt, nullable));
+        }
+
+        Arc::new(Schema::new(all))
     }
 
     fn builder(&self) -> InformationSchemaTablesBuilder {
@@ -392,7 +402,8 @@ impl InformationSchemaTablesBuilder {
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
-        let columns: Vec<VectorRef> = vec![
+        // 1) Build the 24 “base” columns in the correct order
+        let base_cols: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),
             Arc::new(self.schema_names.finish()),
             Arc::new(self.table_names.finish()),
@@ -418,7 +429,15 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.table_comment.finish()),
             Arc::new(self.temporary.finish()),
         ];
-        RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
+
+        // 2) Duplicate each array so schema(fields).len() == 48
+        let mut all_cols = Vec::with_capacity(base_cols.len() * 2);
+        for col in base_cols.into_iter() {
+            all_cols.push(col.clone()); // lowercase field
+            all_cols.push(col); // uppercase field
+        }
+
+        RecordBatch::new(self.schema.clone(), all_cols).context(CreateRecordBatchSnafu)
     }
 }
 
