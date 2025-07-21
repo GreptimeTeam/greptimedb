@@ -237,7 +237,7 @@ fn expand_step_aggr_proj() {
 
 /// should only expand `Sort`
 #[test]
-fn expand_proj_sort_step_aggr() {
+fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "numbers".to_string());
@@ -255,16 +255,19 @@ fn expand_proj_sort_step_aggr() {
         .unwrap()
         .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
         .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
         .build()
         .unwrap();
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
-        "  Projection: t.number",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "    Projection: t.number",
+        "      MergeSort: t.pk1 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
         "Projection: t.number, t.pk1",
         "  Sort: t.pk1 ASC NULLS LAST",
         "    TableScan: t",

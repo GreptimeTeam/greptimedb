@@ -30,7 +30,6 @@ use datafusion_optimizer::{OptimizerContext, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
-use tracing::field::debug;
 
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
