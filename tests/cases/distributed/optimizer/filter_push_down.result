@@ -252,10 +252,14 @@ EXPLAIN SELECT * FROM (SELECT 0=1 AS cond FROM integers i1, integers i2) a1 WHER
 |_|_Cross Join:_|
 |_|_SubqueryAlias: i1_|
 |_|_Projection:_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[ |
+|_| TableScan: integers_|
+|_| ]]_|
 |_|_SubqueryAlias: i2_|
 |_|_Projection:_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[ |
+|_| TableScan: integers_|
+|_| ]]_|
 | physical_plan | CoalescePartitionsExec_|
 |_|_ProjectionExec: expr=[false as cond]_|
 |_|_CrossJoinExec_|

@@ -12,7 +12,12 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| MergeScan [is_placeholder=false]_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[ |
+|_| Sort: integers.i % Int64(2) ASC NULLS LAST_|
+|_|_Distinct:_|
+|_|_Projection: integers.i % Int64(2)_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -35,7 +40,11 @@ EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| MergeScan [is_placeholder=false]_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST |
+|_|_Projection: test.a, test.b_|
+|_|_TableScan: test_|
+|_| ]]_|
 | physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -50,7 +59,12 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| MergeScan [is_placeholder=false]_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST |
+|_|_Distinct:_|
+|_|_Projection: test.a, test.b_|
+|_|_TableScan: test_|
+|_| ]]_|
 | physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+

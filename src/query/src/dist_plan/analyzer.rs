@@ -547,7 +547,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "Projection: avg(t.number)\
-        \n  MergeScan [is_placeholder=false]";
+        \n  MergeScan [is_placeholder=false, remote_input=[\nAggregate: groupBy=[[]], aggr=[[avg(t.number)]]\n  TableScan: t\n]]";
         assert_eq!(expected, result.to_string());
     }
 
@@ -569,7 +569,15 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = ["Projection: t.number", "  MergeScan [is_placeholder=false]"].join("\n");
+        let expected = [
+            "Projection: t.number",
+            "  MergeScan [is_placeholder=false, remote_input=[",
+            "Sort: t.number ASC NULLS LAST",
+            "  Distinct:",
+            "    TableScan: t",
+            "]]",
+        ]
+        .join("\n");
         assert_eq!(expected, result.to_string());
     }
 
@@ -590,7 +598,7 @@ mod test {
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
         let expected = "Projection: t.number\
-        \n  MergeScan [is_placeholder=false]";
+        \n  MergeScan [is_placeholder=false, remote_input=[\nLimit: skip=0, fetch=1\n  TableScan: t\n]]";
         assert_eq!(expected, result.to_string());
     }
 
@@ -631,10 +639,10 @@ mod test {
             "Limit: skip=0, fetch=1",
             "  LeftSemi Join:  Filter: t.number = right.number",
             "    Projection: t.number",
-            "      MergeScan [is_placeholder=false]",
+            "      MergeScan [is_placeholder=false, remote_input=[\nTableScan: t\n]]",
             "    SubqueryAlias: right",
             "      Projection: t.number",
-            "        MergeScan [is_placeholder=false]",
+            "        MergeScan [is_placeholder=false, remote_input=[\nTableScan: t\n]]",
         ]
         .join("\n");
         assert_eq!(expected, result.to_string());
