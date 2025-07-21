@@ -209,6 +209,8 @@ impl RegionServer {
         let provider = self.table_provider(region_id, Some(&query_ctx)).await?;
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
 
+        common_telemetry::info!("Handle remote read for region: {}", region_id);
+
         let decoder = self
             .inner
             .query_engine

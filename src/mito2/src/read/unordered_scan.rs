@@ -168,6 +168,11 @@ impl UnorderedScan {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
+        common_telemetry::info!(
+            "scan partition impl, region_id: {}",
+            self.stream_ctx.input.region_metadata().region_id
+        );
+
         let metrics = self.partition_metrics(partition, metrics_set);
 
         let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;

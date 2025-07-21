@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use arrow_flight::FlightData;
 use common_error::ext::ErrorExt;
@@ -22,7 +23,7 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing::{info_span, Instrument};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
-use common_telemetry::{error, warn};
+use common_telemetry::{error, info, warn};
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
@@ -78,15 +79,28 @@ impl FlightRecordBatchStream {
         mut tx: Sender<TonicResult<FlightMessage>>,
         should_send_partial_metrics: bool,
     ) {
+        let mut send_schema_duration = Duration::ZERO;
+        let mut send_record_batch_duration = Duration::ZERO;
+        let mut send_metrics_duration = Duration::ZERO;
+        let mut fetch_content_duration = Duration::ZERO;
+
         let schema = recordbatches.schema().arrow_schema().clone();
+        let start = Instant::now();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
             warn!(e; "stop sending Flight data");
             return;
         }
+        send_schema_duration += start.elapsed();
 
-        while let Some(batch_or_err) = recordbatches.next().in_current_span().await {
+        while let Some(batch_or_err) = {
+            let start = Instant::now();
+            let result = recordbatches.next().in_current_span().await;
+            fetch_content_duration += start.elapsed();
+            result
+        } {
             match batch_or_err {
                 Ok(recordbatch) => {
+                    let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
                             recordbatch.into_df_record_batch(),
@@ -96,15 +110,19 @@ impl FlightRecordBatchStream {
                         warn!(e; "stop sending Flight data");
                         return;
                     }
+                    send_record_batch_duration += start.elapsed();
+                    
                     if should_send_partial_metrics {
                         if let Some(metrics) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
                         {
+                            let start = Instant::now();
                             if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics))).await {
                                 warn!(e; "stop sending Flight data");
                                 return;
                             }
+                            send_metrics_duration += start.elapsed();
                         }
                     }
                 }
@@ -126,8 +144,15 @@ impl FlightRecordBatchStream {
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
         {
+            let start = Instant::now();
             let _ = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await;
+            send_metrics_duration += start.elapsed();
         }
+
+        info!(
+            "flight_data_stream finished: send_schema_duration={:?}, send_record_batch_duration={:?}, send_metrics_duration={:?}, fetch_content_duration={:?}",
+            send_schema_duration, send_record_batch_duration, send_metrics_duration, fetch_content_duration
+        );
     }
 }
 

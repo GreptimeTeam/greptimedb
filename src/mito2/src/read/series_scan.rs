@@ -115,6 +115,11 @@ impl SeriesScan {
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
     ) -> Result<ScanBatchStream> {
+        common_telemetry::info!(
+            "scan partition impl, region_id: {}",
+            self.stream_ctx.input.region_metadata().region_id
+        );
+
         ensure!(
             partition < self.properties.num_partitions(),
             PartitionOutOfRangeSnafu {

@@ -512,6 +512,8 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
+        common_telemetry::info!("Executing query plan");
+
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
