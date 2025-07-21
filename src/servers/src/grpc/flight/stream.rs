@@ -84,6 +84,11 @@ impl FlightRecordBatchStream {
         let mut send_metrics_duration = Duration::ZERO;
         let mut fetch_content_duration = Duration::ZERO;
 
+        let mut record_batch_count = 0usize;
+        let mut metrics_count = 0usize;
+        let mut total_rows = 0usize;
+        let mut total_bytes = 0usize;
+
         let schema = recordbatches.schema().arrow_schema().clone();
         let start = Instant::now();
         if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
@@ -100,6 +105,10 @@ impl FlightRecordBatchStream {
         } {
             match batch_or_err {
                 Ok(recordbatch) => {
+                    total_rows += recordbatch.num_rows();
+                    record_batch_count += 1;
+                    total_bytes += recordbatch.df_record_batch().get_array_memory_size();
+
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -111,12 +120,13 @@ impl FlightRecordBatchStream {
                         return;
                     }
                     send_record_batch_duration += start.elapsed();
-                    
+
                     if should_send_partial_metrics {
                         if let Some(metrics) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
                         {
+                            metrics_count += 1;
                             let start = Instant::now();
                             if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics))).await {
                                 warn!(e; "stop sending Flight data");
@@ -144,14 +154,15 @@ impl FlightRecordBatchStream {
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
         {
+            metrics_count += 1;
             let start = Instant::now();
             let _ = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await;
             send_metrics_duration += start.elapsed();
         }
 
         info!(
-            "flight_data_stream finished: send_schema_duration={:?}, send_record_batch_duration={:?}, send_metrics_duration={:?}, fetch_content_duration={:?}",
-            send_schema_duration, send_record_batch_duration, send_metrics_duration, fetch_content_duration
+            "flight_data_stream finished: send_schema_duration={:?}, send_record_batch_duration={:?}, send_metrics_duration={:?}, fetch_content_duration={:?}, record_batch_count={}, metrics_count={}, total_rows={}, total_bytes={}",
+            send_schema_duration, send_record_batch_duration, send_metrics_duration, fetch_content_duration, record_batch_count, metrics_count, total_rows, total_bytes
         );
     }
 }
