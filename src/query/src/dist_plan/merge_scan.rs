@@ -580,7 +580,7 @@ impl DisplayAs for MergeScanExec {
                         if j > 0 {
                             write!(f, ",")?;
                         }
-                        write!(f, "{{\"region_id\":{},\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
+                        write!(f, "{{\"region_id\":\"{}\",\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
                                rm.region_id,
                                rm.poll_duration,
                                rm.do_get_cost,
