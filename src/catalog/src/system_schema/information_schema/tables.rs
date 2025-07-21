@@ -402,7 +402,7 @@ impl InformationSchemaTablesBuilder {
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
-        // 1) Build the 24 “base” columns in the correct order
+        // Build the 24 “base” columns in the correct order
         let base_cols: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),
             Arc::new(self.schema_names.finish()),
@@ -430,7 +430,7 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.temporary.finish()),
         ];
 
-        // 2) Duplicate each array so schema(fields).len() == 48
+        // Duplicate each array so schema(fields).len() == 48 for both lower and upper case
         let mut all_cols = Vec::with_capacity(base_cols.len() * 2);
         for col in base_cols.into_iter() {
             all_cols.push(col.clone()); // lowercase field
