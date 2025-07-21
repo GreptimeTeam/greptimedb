@@ -190,7 +190,46 @@ fn expand_proj_step_aggr() {
         "Projection: min(t.number)",
         "  Projection: min(min(t.number)) AS min(t.number)",
         "    Aggregate: groupBy=[[]], aggr=[[min(min(t.number))]]",
-        "      MergeScan [is_placeholder=false]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "  Projection: t.number",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_step_aggr_proj() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    // TODO(discord9): change to partitioned table
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1")], vec![min(col("number"))])
+        .unwrap()
+        .project(vec![col("min(t.number)")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: min(t.number)",
+        "  Projection: t.pk1, min(t.number)",
+        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
+        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "  TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
@@ -225,7 +264,11 @@ fn expand_proj_sort_step_aggr() {
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "  Projection: t.number",
         "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, t.pk1",
+        "  Sort: t.pk1 ASC NULLS LAST",
+        "    TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
@@ -261,7 +304,11 @@ fn expand_proj_sort_part_col_aggr() {
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Projection: t.number, t.pk1, t.pk2",
         "    MergeSort: t.pk3 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: t.number, t.pk1, t.pk2, t.pk3",
+        "  Sort: t.pk3 ASC NULLS LAST",
+        "    TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
@@ -299,7 +346,45 @@ fn expand_proj_sort_limit_part_col_aggr() {
         "  Projection: t.number, t.pk1, t.pk2",
         "    Limit: skip=0, fetch=10",
         "      MergeSort: t.pk3 ASC NULLS LAST",
-        "        MergeScan [is_placeholder=false]",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.number, t.pk1, t.pk2, t.pk3",
+        "    Sort: t.pk3 ASC NULLS LAST",
+        "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_step_aggr_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1")], vec![min(col("number"))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk1, min(t.number)",
+        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
+        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "  TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
@@ -355,7 +440,10 @@ fn transform_aggregator() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = "Projection: avg(t.number)\
-        \n  MergeScan [is_placeholder=false]";
+        \n  MergeScan [is_placeholder=false, remote_input=[\
+        \nAggregate: groupBy=[[]], aggr=[[avg(t.number)]]\
+        \n  TableScan: t\
+        \n]]";
     assert_eq!(expected, result.to_string());
 }
 
@@ -377,7 +465,15 @@ fn transform_distinct_order() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-    let expected = ["Projection: t.number", "  MergeScan [is_placeholder=false]"].join("\n");
+    let expected = [
+        "Projection: t.number",
+        "  MergeScan [is_placeholder=false, remote_input=[
+Sort: t.number ASC NULLS LAST
+  Distinct:
+    TableScan: t
+]]",
+    ]
+    .join("\n");
     assert_eq!(expected, result.to_string());
 }
 
@@ -398,7 +494,10 @@ fn transform_single_limit() {
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = "Projection: t.number\
-        \n  MergeScan [is_placeholder=false]";
+        \n  MergeScan [is_placeholder=false, remote_input=[
+Limit: skip=0, fetch=1
+  TableScan: t
+]]";
     assert_eq!(expected, result.to_string());
 }
 
@@ -439,10 +538,14 @@ fn transform_unalighed_join_with_alias() {
         "Limit: skip=0, fetch=1",
         "  LeftSemi Join:  Filter: t.number = right.number",
         "    Projection: t.number",
-        "      MergeScan [is_placeholder=false]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t",
+        "]]",
         "    SubqueryAlias: right",
         "      Projection: t.number",
-        "        MergeScan [is_placeholder=false]",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());

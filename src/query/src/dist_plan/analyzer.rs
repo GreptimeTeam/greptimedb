@@ -30,6 +30,7 @@ use datafusion_optimizer::{OptimizerContext, OptimizerRule};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
+use tracing::field::debug;
 
 use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
@@ -196,7 +197,7 @@ impl PlanRewriter {
             self.level,
             self.stack
                 .iter()
-                .map(|(p, l)| format!("Level={l}, Plan={}", p.display()))
+                .map(|(p, l)| format!("{l}:{}{}", "  ".repeat(l - 1), p.display()))
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
@@ -217,14 +218,17 @@ impl PlanRewriter {
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
-                    // expand on next call(so `Limit` can be pushed down)
+                    // push down it(so `Limit` can be pushed down)
+
+                    // notice how limit needed to be expanded as well to make sure query is correct
+                    // i.e. `Limit fetch=10` need to be pushed down to the leaf node
                     self.expand_on_next_part_cond_trans_commutative = false;
                     self.expand_on_next_call = true;
                 }
                 Commutativity::ConditionalCommutative(_)
                 | Commutativity::TransformedCommutative { .. } => {
-                    // for conditional commutative and transformed commutative, we can
-                    // expand now
+                    // again a new node that can be push down, we should just
+                    // do push down now and avoid further expansion
                     self.expand_on_next_part_cond_trans_commutative = false;
                     return true;
                 }
@@ -392,12 +396,17 @@ impl PlanRewriter {
         }
         self.set_expanded();
 
-        // recover the schema
+        debug!("Before recover schema: {node}");
+
+        // recover the schema, this make sure after expand the schema is the same as old node
+        // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node
         let node = LogicalPlanBuilder::from(node)
             .project(schema.iter().map(|(qualifier, field)| {
                 Expr::Column(Column::new(qualifier.cloned(), field.name()))
             }))?
             .build()?;
+
+        debug!("After recover schema: {node}");
 
         Ok(node)
     }
@@ -410,10 +419,9 @@ impl PlanRewriter {
 /// - Enforce column requirements for `LogicalPlan::Projection` nodes. Makes sure the
 ///   required columns are available in the sub plan.
 ///
-/// TODO: make this aware of stack depth and scope of column requirements.
 #[derive(Debug)]
 struct EnforceDistRequirementRewriter {
-    // TODO: only enforce column requirements after the expanding node in question
+    // only enforce column requirements after the expanding node in question
     column_requirements: Vec<(HashSet<Column>, usize)>,
     /// only apply column requirements >= `cur_level`
     /// this is used to avoid applying column requirements that are not needed
