@@ -572,7 +572,7 @@ impl DisplayAs for MergeScanExec {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "\"partition_{}\":{{\"regions\":{},\"total_poll_duration\":{:?},\"total_do_get_cost\":{:?},\"region_metrics\":[",
+                    write!(f, "\"partition_{}\":{{\"regions\":{},\"total_poll_duration\":\"{:?}\",\"total_do_get_cost\":\"{:?}\",\"region_metrics\":[",
                            pm.partition, pm.total_regions,
                            pm.total_poll_duration,
                            pm.total_do_get_cost)?;
@@ -580,8 +580,8 @@ impl DisplayAs for MergeScanExec {
                         if j > 0 {
                             write!(f, ",")?;
                         }
-                        write!(f, "{{\"region_id\":{},\"poll_duration\":{:?},\"do_get_cost\":{:?},\"total_cost\":{:?}}}",
-                               rm.region_id.as_u64(),
+                        write!(f, "{{\"region_id\":{},\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
+                               rm.region_id,
                                rm.poll_duration,
                                rm.do_get_cost,
                                rm.total_cost)?;
