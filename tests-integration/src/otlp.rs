@@ -25,6 +25,7 @@ mod test {
     use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
     use opentelemetry_proto::tonic::metrics::v1::{metric, NumberDataPoint, *};
     use opentelemetry_proto::tonic::resource::v1::Resource;
+    use servers::http::otlp::OtlpMetricOptions;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use session::context::QueryContext;
@@ -64,7 +65,11 @@ mod test {
         .unwrap()
         .is_ok());
 
-        let resp = instance.metrics(req, true, ctx.clone()).await;
+        let opts = OtlpMetricOptions {
+            legacy_mode: false,
+            with_metric_engine: true,
+        };
+        let resp = instance.metrics(req, opts, ctx.clone()).await;
         assert!(resp.is_ok());
 
         let mut output = instance

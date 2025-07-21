@@ -15,7 +15,7 @@
 use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
@@ -78,27 +78,32 @@ lazy_static! {
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
+    legacy_mode: bool,
 ) -> Result<(RowInsertRequests, usize)> {
     let mut table_writer = MultiTableData::default();
 
     for resource in &request.resource_metrics {
-        let resource_attrs = resource.resource.as_ref().map(|r| {
-            let mut attrs = r.attributes.clone();
-            for kv in &r.attributes {
-                if kv.key == KEY_SERVICE_NAME {
-                    attrs.push(KeyValue {
-                        key: JOB_KEY.to_string(),
-                        value: kv.value.clone(),
-                    });
-                } else if kv.key == KEY_SERVICE_INSTANCE_ID {
-                    attrs.push(KeyValue {
-                        key: INSTANCE_KEY.to_string(),
-                        value: kv.value.clone(),
-                    });
+        let resource_attrs = if legacy_mode {
+            resource.resource.as_ref().map(|r| r.attributes.clone())
+        } else {
+            resource.resource.as_ref().map(|r| {
+                let mut attrs = r.attributes.clone();
+                for kv in &r.attributes {
+                    if kv.key == KEY_SERVICE_NAME {
+                        attrs.push(KeyValue {
+                            key: JOB_KEY.to_string(),
+                            value: kv.value.clone(),
+                        });
+                    } else if kv.key == KEY_SERVICE_INSTANCE_ID {
+                        attrs.push(KeyValue {
+                            key: INSTANCE_KEY.to_string(),
+                            value: kv.value.clone(),
+                        });
+                    }
                 }
-            }
-            attrs
-        });
+                attrs
+            })
+        };
 
         for scope in &resource.scope_metrics {
             let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
@@ -108,6 +113,7 @@ pub fn to_grpc_insert_requests(
                     metric,
                     resource_attrs.as_ref(),
                     scope_attrs,
+                    legacy_mode,
                 )?;
             }
         }
@@ -131,29 +137,72 @@ fn normalize_metric_name(name: &str) -> String {
     }
 }
 
+/// Normalize otlp instrumentation, metric and attribute names
+///
+/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
+/// - since the name are case-insensitive, we transform them to lowercase for
+///   better sql usability
+/// - replace `.` and `-` with `_`
+fn legacy_normalize_otlp_name(name: &str) -> String {
+    name.to_lowercase().replace(['.', '-'], "_")
+}
+
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
-    let name = normalize_metric_name(&metric.name);
+    let name = if legacy_mode {
+        legacy_normalize_otlp_name(&metric.name)
+    } else {
+        normalize_metric_name(&metric.name)
+    };
 
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(table_writer, &name, gauge, resource_attrs, scope_attrs)?;
+                encode_gauge(
+                    table_writer,
+                    &name,
+                    gauge,
+                    resource_attrs,
+                    scope_attrs,
+                    legacy_mode,
+                )?;
             }
             metric::Data::Sum(sum) => {
-                encode_sum(table_writer, &name, sum, resource_attrs, scope_attrs)?;
+                encode_sum(
+                    table_writer,
+                    &name,
+                    sum,
+                    resource_attrs,
+                    scope_attrs,
+                    legacy_mode,
+                )?;
             }
             metric::Data::Summary(summary) => {
-                encode_summary(table_writer, &name, summary, resource_attrs, scope_attrs)?;
+                encode_summary(
+                    table_writer,
+                    &name,
+                    summary,
+                    resource_attrs,
+                    scope_attrs,
+                    legacy_mode,
+                )?;
             }
             metric::Data::Histogram(hist) => {
-                encode_histogram(table_writer, &name, hist, resource_attrs, scope_attrs)?;
+                encode_histogram(
+                    table_writer,
+                    &name,
+                    hist,
+                    resource_attrs,
+                    scope_attrs,
+                    legacy_mode,
+                )?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
             metric::Data::ExponentialHistogram(_hist) => {}
@@ -167,38 +216,63 @@ fn write_attributes(
     writer: &mut TableData,
     row: &mut Vec<Value>,
     attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
-    if let Some(attrs) = attrs {
-        let tags = attrs
-            .iter()
-            // only keep promoted attributes
-            // TODO(shuiyisong): we need to allow user to configure the wanted attributes
-            .filter(|attr| DEFAULT_ATTRS_HASHSET.contains(&attr.key))
-            .filter_map(|attr| {
-                attr.value
-                    .as_ref()
-                    .and_then(|v| v.value.as_ref())
-                    .and_then(|val| match val {
-                        any_value::Value::StringValue(s) => Some((attr.key.clone(), s.clone())),
-                        any_value::Value::IntValue(v) => Some((attr.key.clone(), v.to_string())),
-                        any_value::Value::DoubleValue(v) => Some((attr.key.clone(), v.to_string())),
-                        _ => None, // TODO(sunng87): allow different type of values
-                    })
-            });
+    let Some(attrs) = attrs else {
+        return Ok(());
+    };
 
-        row_writer::write_tags(writer, tags, row)?;
-    }
+    let tags = attrs
+        .iter()
+        // only keep promoted attributes
+        // TODO(shuiyisong): we need to allow user to configure the wanted attributes
+        .filter(|attr| !legacy_mode && DEFAULT_ATTRS_HASHSET.contains(&attr.key))
+        .filter_map(|attr| {
+            attr.value
+                .as_ref()
+                .and_then(|v| v.value.as_ref())
+                .and_then(|val| {
+                    let key = if legacy_mode {
+                        legacy_normalize_otlp_name(&attr.key)
+                    } else {
+                        attr.key.clone()
+                    };
+                    match val {
+                        any_value::Value::StringValue(s) => Some((key, s.clone())),
+                        any_value::Value::IntValue(v) => Some((key, v.to_string())),
+                        any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
+                        _ => None, // TODO(sunng87): allow different type of values
+                    }
+                })
+        });
+    row_writer::write_tags(writer, tags, row)?;
+
     Ok(())
 }
 
-fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: i64) -> Result<()> {
-    row_writer::write_ts_to_millis(
-        table,
-        GREPTIME_TIMESTAMP,
-        Some(time_nano / 1000000),
-        Precision::Millisecond,
-        row,
-    )
+fn write_timestamp(
+    table: &mut TableData,
+    row: &mut Vec<Value>,
+    time_nano: i64,
+    legacy_mode: bool,
+) -> Result<()> {
+    if legacy_mode {
+        row_writer::write_ts_to_nanos(
+            table,
+            GREPTIME_TIMESTAMP,
+            Some(time_nano),
+            Precision::Nanosecond,
+            row,
+        )
+    } else {
+        row_writer::write_ts_to_millis(
+            table,
+            GREPTIME_TIMESTAMP,
+            Some(time_nano / 1000000),
+            Precision::Millisecond,
+            row,
+        )
+    }
 }
 
 fn write_data_point_value(
@@ -227,12 +301,13 @@ fn write_tags_and_timestamp(
     scope_attrs: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
     timestamp_nanos: i64,
+    legacy_mode: bool,
 ) -> Result<()> {
-    write_attributes(table, row, resource_attrs)?;
-    write_attributes(table, row, scope_attrs)?;
-    write_attributes(table, row, data_point_attrs)?;
+    write_attributes(table, row, resource_attrs, legacy_mode)?;
+    write_attributes(table, row, scope_attrs, legacy_mode)?;
+    write_attributes(table, row, data_point_attrs, legacy_mode)?;
 
-    write_timestamp(table, row, timestamp_nanos)?;
+    write_timestamp(table, row, timestamp_nanos, legacy_mode)?;
 
     Ok(())
 }
@@ -247,6 +322,7 @@ fn encode_gauge(
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -263,6 +339,7 @@ fn encode_gauge(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            legacy_mode,
         )?;
 
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
@@ -281,6 +358,7 @@ fn encode_sum(
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -297,6 +375,7 @@ fn encode_sum(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            legacy_mode,
         )?;
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
         table.add_row(row);
@@ -324,6 +403,7 @@ fn encode_histogram(
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -348,6 +428,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
+                legacy_mode,
             )?;
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
@@ -387,6 +468,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
+                legacy_mode,
             )?;
 
             row_writer::write_f64(&mut sum_table, GREPTIME_VALUE, sum, &mut sum_row)?;
@@ -401,6 +483,7 @@ fn encode_histogram(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            legacy_mode,
         )?;
 
         row_writer::write_f64(
@@ -431,83 +514,125 @@ fn encode_summary(
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    legacy_mode: bool,
 ) -> Result<()> {
-    // 1. quantile table
-    // 2. count table
-    // 3. sum table
+    if legacy_mode {
+        let table = table_writer.get_or_default_table_data(
+            name,
+            APPROXIMATE_COLUMN_COUNT,
+            summary.data_points.len(),
+        );
 
-    let metric_name = name;
-    let count_name = format!("{}{}", metric_name, COUNT_TABLE_SUFFIX);
-    let sum_name = format!("{}{}", metric_name, SUM_TABLE_SUFFIX);
-
-    for data_point in &summary.data_points {
-        {
-            let quantile_table = table_writer.get_or_default_table_data(
-                metric_name,
-                APPROXIMATE_COLUMN_COUNT,
-                summary.data_points.len(),
-            );
+        for data_point in &summary.data_points {
+            let mut row = table.alloc_one_row();
+            write_tags_and_timestamp(
+                table,
+                &mut row,
+                resource_attrs,
+                scope_attrs,
+                Some(data_point.attributes.as_ref()),
+                data_point.time_unix_nano as i64,
+                legacy_mode,
+            )?;
 
             for quantile in &data_point.quantile_values {
-                let mut row = quantile_table.alloc_one_row();
+                row_writer::write_f64(
+                    table,
+                    format!("greptime_p{:02}", quantile.quantile * 100f64),
+                    quantile.value,
+                    &mut row,
+                )?;
+            }
+
+            row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
+            table.add_row(row);
+        }
+    } else {
+        // 1. quantile table
+        // 2. count table
+        // 3. sum table
+
+        let metric_name = name;
+        let count_name = format!("{}{}", metric_name, COUNT_TABLE_SUFFIX);
+        let sum_name = format!("{}{}", metric_name, SUM_TABLE_SUFFIX);
+
+        for data_point in &summary.data_points {
+            {
+                let quantile_table = table_writer.get_or_default_table_data(
+                    metric_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
+
+                for quantile in &data_point.quantile_values {
+                    let mut row = quantile_table.alloc_one_row();
+                    write_tags_and_timestamp(
+                        quantile_table,
+                        &mut row,
+                        resource_attrs,
+                        scope_attrs,
+                        Some(data_point.attributes.as_ref()),
+                        data_point.time_unix_nano as i64,
+                        legacy_mode,
+                    )?;
+                    row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
+                    row_writer::write_f64(
+                        quantile_table,
+                        GREPTIME_VALUE,
+                        quantile.value,
+                        &mut row,
+                    )?;
+                    quantile_table.add_row(row);
+                }
+            }
+            {
+                let count_table = table_writer.get_or_default_table_data(
+                    &count_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
+                let mut row = count_table.alloc_one_row();
                 write_tags_and_timestamp(
-                    quantile_table,
+                    count_table,
                     &mut row,
                     resource_attrs,
                     scope_attrs,
                     Some(data_point.attributes.as_ref()),
                     data_point.time_unix_nano as i64,
+                    legacy_mode,
                 )?;
-                row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
-                row_writer::write_f64(quantile_table, GREPTIME_VALUE, quantile.value, &mut row)?;
-                quantile_table.add_row(row);
+
+                row_writer::write_f64(
+                    count_table,
+                    GREPTIME_VALUE,
+                    data_point.count as f64,
+                    &mut row,
+                )?;
+
+                count_table.add_row(row);
             }
-        }
-        {
-            let count_table = table_writer.get_or_default_table_data(
-                &count_name,
-                APPROXIMATE_COLUMN_COUNT,
-                summary.data_points.len(),
-            );
-            let mut row = count_table.alloc_one_row();
-            write_tags_and_timestamp(
-                count_table,
-                &mut row,
-                resource_attrs,
-                scope_attrs,
-                Some(data_point.attributes.as_ref()),
-                data_point.time_unix_nano as i64,
-            )?;
+            {
+                let sum_table = table_writer.get_or_default_table_data(
+                    &sum_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
 
-            row_writer::write_f64(
-                count_table,
-                GREPTIME_VALUE,
-                data_point.count as f64,
-                &mut row,
-            )?;
+                let mut row = sum_table.alloc_one_row();
+                write_tags_and_timestamp(
+                    sum_table,
+                    &mut row,
+                    resource_attrs,
+                    scope_attrs,
+                    Some(data_point.attributes.as_ref()),
+                    data_point.time_unix_nano as i64,
+                    legacy_mode,
+                )?;
 
-            count_table.add_row(row);
-        }
-        {
-            let sum_table = table_writer.get_or_default_table_data(
-                &sum_name,
-                APPROXIMATE_COLUMN_COUNT,
-                summary.data_points.len(),
-            );
+                row_writer::write_f64(sum_table, GREPTIME_VALUE, data_point.sum, &mut row)?;
 
-            let mut row = sum_table.alloc_one_row();
-            write_tags_and_timestamp(
-                sum_table,
-                &mut row,
-                resource_attrs,
-                scope_attrs,
-                Some(data_point.attributes.as_ref()),
-                data_point.time_unix_nano as i64,
-            )?;
-
-            row_writer::write_f64(sum_table, GREPTIME_VALUE, data_point.sum, &mut row)?;
-
-            sum_table.add_row(row);
+                sum_table.add_row(row);
+            }
         }
     }
 
@@ -523,6 +648,30 @@ mod tests {
     use opentelemetry_proto::tonic::metrics::v1::{HistogramDataPoint, NumberDataPoint};
 
     use super::*;
+
+    #[test]
+    fn test_legacy_normalize_otlp_name() {
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm.memory.free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm-memory-free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm_memory_free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("JVM_MEMORY_FREE"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("JVM_memory_FREE"),
+            "jvm_memory_free"
+        );
+    }
 
     fn keyvalue(key: &str, value: &str) -> KeyValue {
         KeyValue {
@@ -558,6 +707,7 @@ mod tests {
             &gauge,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
+            false,
         )
         .unwrap();
 
@@ -602,6 +752,7 @@ mod tests {
             &sum,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
+            false,
         )
         .unwrap();
 
@@ -646,6 +797,7 @@ mod tests {
             &summary,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
+            false,
         )
         .unwrap();
 
@@ -713,6 +865,7 @@ mod tests {
             &histogram,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
+            false,
         )
         .unwrap();
 

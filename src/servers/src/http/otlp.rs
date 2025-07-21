@@ -21,6 +21,7 @@ use axum::Extension;
 use bytes::Bytes;
 use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_telemetry::tracing;
+use http::HeaderMap;
 use opentelemetry_proto::tonic::collector::logs::v1::{
     ExportLogsServiceRequest, ExportLogsServiceResponse,
 };
@@ -37,6 +38,7 @@ use snafu::prelude::*;
 
 use crate::error::{self, PipelineSnafu, Result};
 use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
+use crate::http::header::constants::GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME;
 use crate::http::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
 use crate::query_handler::{OpenTelemetryProtocolHandlerRef, PipelineHandler};
@@ -47,11 +49,20 @@ pub struct OtlpState {
     pub handler: OpenTelemetryProtocolHandlerRef,
 }
 
+#[derive(Clone)]
+pub struct OtlpMetricOptions {
+    // use the legacy otlp metrics processing
+    // default to true to keep the backward compatibility
+    pub legacy_mode: bool,
+    pub with_metric_engine: bool,
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(skip_all, fields(protocol = "otlp", request_type = "metrics"))]
 pub async fn metrics(
     State(state): State<OtlpState>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
     let db = query_ctx.get_db_string();
@@ -68,8 +79,18 @@ pub async fn metrics(
         handler,
     } = state;
 
+    let legacy_mode = headers
+        .get(GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME)
+        .map(|v| v.to_str().unwrap_or("true") == "true")
+        .unwrap_or(true);
+
+    let metric_options = OtlpMetricOptions {
+        legacy_mode,
+        with_metric_engine,
+    };
+
     handler
-        .metrics(request, with_metric_engine, query_ctx)
+        .metrics(request, metric_options, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportMetricsServiceResponse {
