@@ -46,6 +46,7 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
+use crate::http::otlp::OtlpMetricOptions;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prom_store::Metrics;
@@ -100,7 +101,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
-        with_metric_engine: bool,
+        metric_options: OtlpMetricOptions,
         ctx: QueryContextRef,
     ) -> Result<Output>;
 

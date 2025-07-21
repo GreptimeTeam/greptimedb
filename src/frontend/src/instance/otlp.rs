@@ -23,6 +23,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
+use servers::http::otlp::OtlpMetricOptions;
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -39,7 +40,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
-        with_metric_engine: bool,
+        metric_options: OtlpMetricOptions,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         self.plugins
@@ -53,7 +54,8 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
+        let (requests, rows) =
+            otlp::metrics::to_grpc_insert_requests(request, metric_options.legacy_mode)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let _guard = if let Some(limiter) = &self.limiter {
@@ -66,17 +68,17 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        if with_metric_engine {
+        if metric_options.legacy_mode || !metric_options.with_metric_engine {
+            self.handle_row_inserts(requests, ctx, false, false)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
                 .unwrap_or(GREPTIME_PHYSICAL_TABLE)
                 .to_string();
             self.handle_metric_row_inserts(requests, ctx, physical_table.to_string())
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
-        } else {
-            self.handle_row_inserts(requests, ctx, false, false)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)
