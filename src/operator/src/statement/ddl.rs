@@ -66,6 +66,7 @@ use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::alter::trigger::AlterTrigger;
 use sql::statements::alter::{AlterDatabase, AlterTable};
 #[cfg(feature = "enterprise")]
 use sql::statements::create::trigger::CreateTrigger;
@@ -87,10 +88,10 @@ use crate::error::{
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
     DeserializePartitionSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu, Result,
+    SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper;
 use crate::statement::show::create_partitions_stmt;
@@ -1278,6 +1279,17 @@ impl StatementExecutor {
             .context(error::InvalidateTableCacheSnafu)?;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    pub async fn alter_trigger(
+        &self,
+        _alter_expr: AlterTrigger,
+        _query_context: QueryContextRef,
+    ) -> Result<Output> {
+        NotSupportedSnafu {
+            feat: "alter trigger",
+        }
+        .fail()
     }
 
     #[tracing::instrument(skip_all)]

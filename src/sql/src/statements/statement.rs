@@ -21,6 +21,7 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::admin::Admin;
+use crate::statements::alter::trigger::AlterTrigger;
 use crate::statements::alter::{AlterDatabase, AlterTable};
 use crate::statements::copy::Copy;
 use crate::statements::create::{
@@ -83,6 +84,8 @@ pub enum Statement {
     AlterTable(AlterTable),
     /// ALTER DATABASE
     AlterDatabase(AlterDatabase),
+    /// ALTER TRIGGER
+    AlterTrigger(AlterTrigger),
     // Databases.
     ShowDatabases(ShowDatabases),
     // SHOW TABLES
@@ -194,6 +197,7 @@ impl Statement {
             | Statement::CreateDatabase(_)
             | Statement::AlterTable(_)
             | Statement::AlterDatabase(_)
+            | Statement::AlterTrigger(_)
             | Statement::Copy(_)
             | Statement::TruncateTable(_)
             | Statement::SetVariables(_)
@@ -230,6 +234,7 @@ impl Display for Statement {
             Statement::CreateDatabase(s) => s.fmt(f),
             Statement::AlterTable(s) => s.fmt(f),
             Statement::AlterDatabase(s) => s.fmt(f),
+            Statement::AlterTrigger(s) => s.fmt(f),
             Statement::ShowDatabases(s) => s.fmt(f),
             Statement::ShowTables(s) => s.fmt(f),
             Statement::ShowTableStatus(s) => s.fmt(f),

@@ -336,6 +336,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Duplicate clauses `{}` in a statement", clause))]
+    DuplicateClause {
+        clause: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -371,6 +378,7 @@ impl ErrorExt for Error {
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
+            | DuplicateClause { .. }
             | InvalidPartitionNumber { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]

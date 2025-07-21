@@ -730,7 +730,7 @@ impl<'a> ParserContext<'a> {
                         msg: "dimension should be a positive integer",
                     })?;
 
-            let options = HashMap::from_iter([(VECTOR_OPT_DIM.to_string(), dimension.to_string())]);
+            let options = OptionMap::from([(VECTOR_OPT_DIM.to_string(), dimension.to_string())]);
             column_extensions.vector_options = Some(options.into());
         }
 

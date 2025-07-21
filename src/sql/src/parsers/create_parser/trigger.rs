@@ -82,9 +82,7 @@ impl<'a> ParserContext<'a> {
                     let channels = self.parse_trigger_notify(true)?;
                     notify_channels.extend(channels);
                 }
-                Token::EOF => {
-                    break;
-                }
+                Token::EOF => break,
                 _ => {
                     return self.expected(
                         "`ON` or `LABELS` or `ANNOTATIONS` or `NOTIFY` keyword",
@@ -127,7 +125,10 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword `ON`
     ///     has been matched.
-    fn parse_trigger_on(&mut self, is_first_keyword_matched: bool) -> Result<(Box<Query>, u64)> {
+    pub(crate) fn parse_trigger_on(
+        &mut self,
+        is_first_keyword_matched: bool,
+    ) -> Result<(Box<Query>, u64)> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
                 && w.value.eq_ignore_ascii_case(ON)
@@ -166,7 +167,10 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword `LABELS`
     ///     has been matched.
-    fn parse_trigger_labels(&mut self, is_first_keyword_matched: bool) -> Result<OptionMap> {
+    pub(crate) fn parse_trigger_labels(
+        &mut self,
+        is_first_keyword_matched: bool,
+    ) -> Result<OptionMap> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
                 && w.value.eq_ignore_ascii_case(LABELS)
@@ -204,7 +208,10 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword
     ///     `ANNOTATIONS` has been matched.
-    fn parse_trigger_annotations(&mut self, is_first_keyword_matched: bool) -> Result<OptionMap> {
+    pub(crate) fn parse_trigger_annotations(
+        &mut self,
+        is_first_keyword_matched: bool,
+    ) -> Result<OptionMap> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
                 && w.value.eq_ignore_ascii_case(ANNOTATIONS)
@@ -245,7 +252,7 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword `NOTIFY`
     ///     has been matched.
-    fn parse_trigger_notify(
+    pub(crate) fn parse_trigger_notify(
         &mut self,
         is_first_keyword_matched: bool,
     ) -> Result<Vec<NotifyChannel>> {
@@ -330,6 +337,7 @@ impl<'a> ParserContext<'a> {
         }
 
         let notify_ident = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
+        let notify_ident = Self::canonicalize_identifier(notify_ident);
 
         if let Token::Word(w) = self.parser.peek_token().token
             && w.value.eq_ignore_ascii_case(URL)
