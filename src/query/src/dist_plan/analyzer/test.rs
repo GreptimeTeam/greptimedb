@@ -478,6 +478,83 @@ fn expand_part_col_aggr_step_aggr() {
 }
 
 #[test]
+fn expand_step_aggr_step_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![min(col("max(t.number)"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
+        "  Projection: max(t.number)",
+        "    Projection: max(max(t.number)) AS max(t.number)",
+        "      Aggregate: groupBy=[[]], aggr=[[max(max(t.number))]]",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[max(t.number)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_part_col_aggr_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![max(col("number"))])
+        .unwrap()
+        .aggregate(
+            vec![col("pk1"), col("pk2")],
+            vec![min(col("max(t.number)"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let expected_original = [
+        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]", // notice here `max(t.number)` is added to groupBy due to aggr exprs depend on this column
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
+        "    TableScan: t",
+    ]
+    .join("\n");
+    assert_eq!(expected_original, plan.to_string());
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: t.pk1, t.pk2, max(t.number), min(max(t.number))",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1, t.pk2, max(t.number)]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
 fn expand_step_aggr_proj() {
     // use logging for better debugging
     init_default_ut_logging();
