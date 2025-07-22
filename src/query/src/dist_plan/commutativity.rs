@@ -27,6 +27,7 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
@@ -220,7 +221,7 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
-    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<Vec<String>>) -> Commutativity {
+    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<AliasMapping>) -> Commutativity {
         let partition_cols = partition_cols.unwrap_or_default();
 
         match plan {
@@ -334,17 +335,20 @@ impl Categorizer {
 
     pub fn check_extension_plan(
         plan: &dyn UserDefinedLogicalNode,
-        partition_cols: &[String],
+        partition_cols: &AliasMapping,
     ) -> Commutativity {
         match plan.name() {
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
                 let tags = series_divide.tags().iter().collect::<HashSet<_>>();
-                for partition_col in partition_cols {
-                    if !tags.contains(partition_col) {
+
+                for (_col, all_alias) in partition_cols {
+                    let all_alias = all_alias.iter().map(|c| &c.name).collect::<HashSet<_>>();
+                    if tags.intersection(&all_alias).count() == 0 {
                         return Commutativity::NonCommutative;
                     }
                 }
+
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
@@ -408,7 +412,7 @@ impl Categorizer {
 
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
-    fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
+    fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
         let mut ref_cols = HashSet::new();
         for expr in exprs {
             expr.add_column_refs(&mut ref_cols);
@@ -417,8 +421,13 @@ impl Categorizer {
             .into_iter()
             .map(|c| c.name.clone())
             .collect::<HashSet<_>>();
-        for col in partition_cols {
-            if !ref_cols.contains(col) {
+        for (_col, all_alias) in partition_cols {
+            let all_alias = all_alias
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<HashSet<_>>();
+            // check if ref columns intersect with all alias of partition columns
+            if ref_cols.intersection(&all_alias).count() == 0 {
                 return false;
             }
         }
@@ -465,7 +474,7 @@ mod test {
             fetch: None,
         });
         assert!(matches!(
-            Categorizer::check_plan(&plan, Some(vec![])),
+            Categorizer::check_plan(&plan, Some(Default::default())),
             Commutativity::Commutative
         ));
     }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -40,6 +40,10 @@ use crate::query_engine::DefaultSerializer;
 
 #[cfg(test)]
 mod test;
+
+mod utils;
+
+pub(crate) use utils::{AliasMapping, AliasTracker};
 
 #[derive(Debug)]
 pub struct DistPlannerAnalyzer;
@@ -157,6 +161,7 @@ struct PlanRewriter {
     status: RewriterStatus,
     /// Partition columns of the table in current pass
     partition_cols: Option<Vec<String>>,
+    alias_tracker: Option<AliasTracker>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
     /// ```
@@ -237,7 +242,7 @@ impl PlanRewriter {
         }
 
         if self.expand_on_next_part_cond_trans_commutative {
-            let comm = Categorizer::check_plan(plan, self.partition_cols.clone());
+            let comm = Categorizer::check_plan(plan, self.get_aliased_partition_columns());
             match comm {
                 Commutativity::PartialCommutative => {
                     // a small difference is that for partial commutative, we still need to
@@ -259,7 +264,7 @@ impl PlanRewriter {
             }
         }
 
-        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
+        match Categorizer::check_plan(plan, self.get_aliased_partition_columns()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -347,6 +352,45 @@ impl PlanRewriter {
 
     fn set_unexpanded(&mut self) {
         self.status = RewriterStatus::Unexpanded;
+    }
+
+    /// Maybe update alias for original table columns in the plan
+    fn maybe_update_alias(&mut self, node: &LogicalPlan) {
+        if let Some(alias_tracker) = &mut self.alias_tracker {
+            alias_tracker.update_alias(node);
+            debug!(
+                "Current partition columns are: {:?}",
+                self.get_aliased_partition_columns()
+            );
+        } else if let LogicalPlan::TableScan(table_scan) = node {
+            self.alias_tracker = AliasTracker::new(table_scan);
+            debug!(
+                "Current partition columns are: {:?}",
+                self.get_aliased_partition_columns()
+            );
+        }
+    }
+
+    fn get_aliased_partition_columns(&self) -> Option<AliasMapping> {
+        if let Some(part_cols) = self.partition_cols.as_ref() {
+            let Some(alias_tracker) = &self.alias_tracker else {
+                // no alias tracker meaning no table scan encountered
+                return None;
+            };
+            let mut aliased = HashMap::new();
+            for part_col in part_cols {
+                let all_alias = alias_tracker
+                    .get_all_alias_for_col(&part_col)
+                    .cloned()
+                    .unwrap_or_default();
+
+                // FIXME(discord9): also check for qualifer?
+                aliased.insert(part_col.clone(), all_alias);
+            }
+            Some(aliased)
+        } else {
+            None
+        }
     }
 
     fn maybe_set_partitions(&mut self, plan: &LogicalPlan) {
@@ -548,6 +592,7 @@ impl TreeNodeRewriter for PlanRewriter {
         self.stage.clear();
         self.set_unexpanded();
         self.partition_cols = None;
+        self.alias_tracker = None;
         Ok(Transformed::no(node))
     }
 
@@ -567,6 +612,8 @@ impl TreeNodeRewriter for PlanRewriter {
             self.pop_stack();
             return Ok(Transformed::no(node));
         }
+
+        self.maybe_update_alias(&node);
 
         self.maybe_set_partitions(&node);
 

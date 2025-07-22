@@ -313,9 +313,8 @@ fn expand_proj_step_aggr() {
     assert_eq!(expected, result.to_string());
 }
 
-/// Shouldn't push down the fake partition column aggregate
+/// Shouldn't push down the fake partition column aggregate(which is steppable)
 /// as the `pk1` is a alias for `pk3` which is not partition column
-#[should_panic(expected = "FIXME(discord9): alias tracking problem")]
 #[test]
 fn expand_proj_alias_fake_part_col_aggr() {
     // use logging for better debugging
@@ -347,10 +346,15 @@ fn expand_proj_alias_fake_part_col_aggr() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
+        "Projection: pk1, pk2, min(t.number)",
+        "  Projection: pk1, pk2, min(min(t.number)) AS min(t.number)",
+        "    Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(min(t.number))]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(t.number)]]",
-        " Projection: t.number, pk1 AS pk2, pk3 AS pk1",
-        "   Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
-        "     TableScan: t",
+        "  Projection: t.number, pk1 AS pk2, pk3 AS pk1",
+        "    Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
+        "      TableScan: t",
+        "]]",
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
