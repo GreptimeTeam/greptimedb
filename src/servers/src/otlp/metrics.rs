@@ -83,11 +83,9 @@ pub fn to_grpc_insert_requests(
     let mut table_writer = MultiTableData::default();
 
     for resource in &request.resource_metrics {
-        let resource_attrs = if legacy_mode {
-            resource.resource.as_ref().map(|r| r.attributes.clone())
-        } else {
-            resource.resource.as_ref().map(|r| {
-                let mut attrs = r.attributes.clone();
+        let resource_attrs = resource.resource.as_ref().map(|r| {
+            let mut attrs = r.attributes.clone();
+            if !legacy_mode {
                 for kv in &r.attributes {
                     if kv.key == KEY_SERVICE_NAME {
                         attrs.push(KeyValue {
@@ -101,9 +99,9 @@ pub fn to_grpc_insert_requests(
                         });
                     }
                 }
-                attrs
-            })
-        };
+            }
+            attrs
+        });
 
         for scope in &resource.scope_metrics {
             let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
@@ -226,7 +224,7 @@ fn write_attributes(
         .iter()
         // only keep promoted attributes
         // TODO(shuiyisong): we need to allow user to configure the wanted attributes
-        .filter(|attr| !legacy_mode && DEFAULT_ATTRS_HASHSET.contains(&attr.key))
+        .filter(|attr| legacy_mode || DEFAULT_ATTRS_HASHSET.contains(&attr.key))
         .filter_map(|attr| {
             attr.value
                 .as_ref()
