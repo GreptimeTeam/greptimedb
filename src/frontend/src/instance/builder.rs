@@ -25,6 +25,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_slow_query_recorder::SlowQueryRecorder;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -43,7 +44,6 @@ use crate::frontend::FrontendOptions;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
 use crate::limiter::Limiter;
-use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {

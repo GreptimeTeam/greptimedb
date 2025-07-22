@@ -2708,6 +2708,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-slow-query-recorder"
+version = "0.16.0"
+dependencies = [
+ "api",
+ "catalog",
+ "common-catalog",
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "common-time",
+ "operator",
+ "query",
+ "rand 0.9.0",
+ "session",
+ "snafu 0.8.5",
+ "store-api",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "common-sql"
 version = "0.16.0"
 dependencies = [
@@ -4800,6 +4821,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query-recorder",
  "common-telemetry",
  "common-test-util",
  "common-time",

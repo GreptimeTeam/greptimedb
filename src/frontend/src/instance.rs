@@ -52,6 +52,7 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
+use common_slow_query_recorder::SlowQueryRecorder;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
@@ -92,7 +93,6 @@ use crate::error::{
     StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
-use crate::slow_query_recorder::SlowQueryRecorder;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 /// The frontend instance contains necessary components, and implements many
