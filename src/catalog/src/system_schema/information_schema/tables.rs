@@ -132,7 +132,6 @@ impl InformationSchemaTables {
         let mut all = Vec::with_capacity(cols.len() * 2);
         for (name, dt, nullable) in cols {
             all.push(ColumnSchema::new(name, dt.clone(), nullable));
-            all.push(ColumnSchema::new(&name.to_uppercase(), dt, nullable));
         }
 
         Arc::new(Schema::new(all))
@@ -379,7 +378,7 @@ impl InformationSchemaTablesBuilder {
         self.checksum.push(Some(0));
         self.max_index_length.push(Some(0));
         self.data_free.push(Some(0));
-        self.auto_increment.push(None);
+        self.auto_increment.push(Some(0));
         self.row_format.push(Some("Fixed"));
         self.table_collation.push(Some("utf8_bin"));
         self.update_time.push(None);
@@ -403,7 +402,7 @@ impl InformationSchemaTablesBuilder {
 
     fn finish(&mut self) -> Result<RecordBatch> {
         // Build the 24 “base” columns in the correct order
-        let base_cols: Vec<VectorRef> = vec![
+        let columns: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),
             Arc::new(self.schema_names.finish()),
             Arc::new(self.table_names.finish()),
@@ -430,14 +429,7 @@ impl InformationSchemaTablesBuilder {
             Arc::new(self.temporary.finish()),
         ];
 
-        // Duplicate each array so schema(fields).len() == 48 for both lower and upper case
-        let mut all_cols = Vec::with_capacity(base_cols.len() * 2);
-        for col in base_cols.into_iter() {
-            all_cols.push(col.clone()); // lowercase field
-            all_cols.push(col); // uppercase field
-        }
-
-        RecordBatch::new(self.schema.clone(), all_cols).context(CreateRecordBatchSnafu)
+        RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
 }
 
