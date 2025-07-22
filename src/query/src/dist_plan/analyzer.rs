@@ -263,6 +263,7 @@ impl PlanRewriter {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
+                    // notice this plan is parent of current node, so `self.level - 1` when updating column requirements
                     self.update_column_requirements(&plan, self.level - 1);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
@@ -272,6 +273,7 @@ impl PlanRewriter {
                 if let Some(transformer) = transformer
                     && let Some(plan) = transformer(plan)
                 {
+                    // notice this plan is parent of current node, so `self.level - 1` when updating column requirements
                     self.update_column_requirements(&plan, self.level - 1);
                     self.expand_on_next_part_cond_trans_commutative = true;
                     self.stage.push(plan)
