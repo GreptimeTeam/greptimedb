@@ -1746,9 +1746,9 @@ fn find_partition_entries(
                 ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
                     .context(ColumnDataTypeSnafu)?,
             );
-            (column_name, data_type)
+            Ok((column_name, data_type))
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<Result<HashMap<_, _>>>()?;
 
     // Transform parser expr to partition expr
     let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
