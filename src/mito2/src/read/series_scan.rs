@@ -227,7 +227,7 @@ impl SeriesScan {
 fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
-            let (sender, receiver) = mpsc::channel(32);
+            let (sender, receiver) = mpsc::channel(1);
             (Some(sender), Some(receiver))
         })
         .unzip();
