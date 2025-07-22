@@ -182,30 +182,22 @@ impl ParserContext<'_> {
                 if w.keyword == Keyword::DROP {
                     // consume the current token.
                     self.parser.next_token();
-                    let ts = self.parser.peek_token();
-                    match ts.token {
-                        Token::Word(w) if w.keyword == Keyword::DEFAULT => {
-                            self.parser.next_token();
-                            // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER `a` DROP DEFAULT, MODIFY COLUMN `b` DROP DEFAULT, ...
-                            self.parse_alter_table_drop_default(column_name)
-                        }
-                        _ => self.expected("DEFAULT is expecting after DROP", ts),
-                    }
+                    self.parser
+                        .expect_keyword(Keyword::DEFAULT)
+                        .context(error::SyntaxSnafu)?;
+                    // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER `a` DROP DEFAULT, ALTER `b` DROP DEFAULT, ...
+                    self.parse_alter_table_drop_default(column_name)
                 } else if w.keyword == Keyword::SET {
                     // consume the current token.
                     self.parser.next_token();
-                    let ts = self.parser.peek_token();
-                    match ts.token {
-                        Token::Word(w) if w.keyword == Keyword::DEFAULT => {
-                            self.parser.next_token();
-                            // Parse `SET DEFAULT`: ALTER TABLE `table_name` ALTER `a` SET DEFAULT 10, MODIFY COLUMN `b` SET DEFAULT "b", ...
-                            self.parse_alter_table_set_default(column_name)
-                        }
-                        _ => self.expected("DEFAULT is expecting after SET", ts),
-                    }
+                    self.parser
+                        .expect_keyword(Keyword::DEFAULT)
+                        .context(error::SyntaxSnafu)?;
+                    // Parse `SET DEFAULT`: ALTER TABLE `table_name` ALTER `a` SET DEFAULT 10, ALTER COLUMN `b` SET DEFAULT "b", ...
+                    self.parse_alter_table_set_default(column_name)
                 } else {
                     self.expected(
-                        "SET or UNSET or data type after ALTER [column_name]",
+                        "SET or DROP  after ALTER [column_name]",
                         self.parser.peek_token(),
                     )?
                 }
@@ -1345,7 +1337,7 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected DEFAULT is expecting after SET, found: 100");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected: DEFAULT, found: 100 at Line: 1, Column: 36");
 
         let sql = "ALTER TABLE test_table ALTER a SET DEFAULT 100, b SET DEFAULT 200";
         let result =

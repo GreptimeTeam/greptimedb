@@ -226,7 +226,7 @@ pub fn alter_expr_to_request(
             AlterKind::DropDefaults { names }
         }
         Kind::SetDefaults(o) => {
-            let table_meta = table_meta.context(MissingTableMetaSnafu)?;
+            let table_meta = table_meta.context(MissingTableMetaSnafu { table_id })?;
             let defaults = o
                 .set_defaults
                 .into_iter()
@@ -237,14 +237,15 @@ pub fn alter_expr_to_request(
                         .context(ColumnNotFoundSnafu {
                         column_name: &col.column_name,
                     })?;
+                    let default_constraint = common_sql::convert::deserialize_default_constraint(
+                        col.default_constraint.as_slice(),
+                        &col.column_name,
+                        &column_scheme.data_type,
+                    )
+                    .context(crate::error::SqlCommonSnafu)?;
                     Ok(SetDefaultRequest {
-                        column_name: col.column_name.clone(),
-                        default_constraint: common_sql::convert::deserialize_default_constraint(
-                            col.default_constraint.as_slice(),
-                            &col.column_name,
-                            &column_scheme.data_type,
-                        )
-                        .context(crate::error::SqlCommonSnafu)?,
+                        column_name: col.column_name,
+                        default_constraint,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;

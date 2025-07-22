@@ -178,6 +178,7 @@ pub enum Error {
 
     #[snafu(display("Need table metadata, but not found"))]
     MissingTableMeta {
+        table_id: u32,
         #[snafu(implicit)]
         location: Location,
     },
@@ -212,7 +213,7 @@ impl ErrorExt for Error {
             | Error::InvalidIndexOption { .. } => StatusCode::InvalidArguments,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
             Error::SqlCommon { source, .. } => source.status_code(),
-            Error::MissingTableMeta { .. } => StatusCode::Internal,
+            Error::MissingTableMeta { .. } => StatusCode::Unexpected,
         }
     }
 

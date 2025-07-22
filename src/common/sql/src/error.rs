@@ -155,8 +155,8 @@ impl ErrorExt for Error {
             | InvalidUnaryOp { .. }
             | InvalidCast { .. }
             | ConvertStr { .. }
-            | TimestampOverflow { .. }
-            | Deserialize { .. } => StatusCode::InvalidArguments,
+            | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            Deserialize { .. } => StatusCode::Unexpected,
 
             Datatype { source, .. } => source.status_code(),
             ConvertSqlValue { .. } => StatusCode::Unsupported,
