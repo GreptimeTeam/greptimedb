@@ -162,6 +162,16 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
     }
 
     fn system_table(&self, name: &str) -> Option<SystemTableRef> {
+        #[cfg(feature = "enterprise")]
+        if let Some(factory) = self.extra_table_factories.get(name) {
+            let req = MakeInformationTableRequest {
+                catalog_name: self.catalog_name.clone(),
+                catalog_manager: self.catalog_manager.clone(),
+                kv_backend: self.kv_backend.clone(),
+            };
+            return Some(factory.make_information_table(req));
+        }
+
         match name.to_ascii_lowercase().as_str() {
             TABLES => Some(Arc::new(InformationSchemaTables::new(
                 self.catalog_name.clone(),
@@ -240,22 +250,7 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 .process_manager
                 .as_ref()
                 .map(|p| Arc::new(InformationSchemaProcessList::new(p.clone())) as _),
-            table_name => {
-                #[cfg(feature = "enterprise")]
-                return self.extra_table_factories.get(table_name).map(|factory| {
-                    let req = MakeInformationTableRequest {
-                        catalog_name: self.catalog_name.clone(),
-                        catalog_manager: self.catalog_manager.clone(),
-                        kv_backend: self.kv_backend.clone(),
-                    };
-                    factory.make_information_table(req)
-                });
-                #[cfg(not(feature = "enterprise"))]
-                {
-                    let _ = table_name;
-                    None
-                }
-            }
+            _ => None,
         }
     }
 }

@@ -84,24 +84,33 @@ fn test_to_string() {
     assert_eq!(result.unwrap_err().to_string(), "<root cause>");
 }
 
+fn normalize_path(s: &str) -> String {
+    s.replace('\\', "/")
+}
+
 #[test]
 fn test_debug_format() {
     let result = normal_error();
     let debug_output = format!("{:?}", result.unwrap_err());
-    let normalized_output = debug_output.replace('\\', "/");
+
     assert_eq!(
-        normalized_output,
-        r#"0: A normal error with "display" attribute, message "blabla", at src/common/error/tests/ext.rs:55:22
-1: PlainError { msg: "<root cause>", status_code: Unexpected }"#
+        normalize_path(&debug_output),
+        format!(
+            r#"0: A normal error with "display" attribute, message "blabla", at {}:55:22
+1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
+            normalize_path(file!())
+        )
     );
 
     let result = transparent_error();
     let debug_output = format!("{:?}", result.unwrap_err());
-    let normalized_output = debug_output.replace('\\', "/");
     assert_eq!(
-        normalized_output,
-        r#"0: <transparent>, at src/common/error/tests/ext.rs:60:5
-1: PlainError { msg: "<root cause>", status_code: Unexpected }"#
+        normalize_path(&debug_output),
+        format!(
+            r#"0: <transparent>, at {}:60:5
+1: PlainError {{ msg: "<root cause>", status_code: Unexpected }}"#,
+            normalize_path(file!())
+        )
     );
 }
 

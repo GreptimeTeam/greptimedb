@@ -54,6 +54,7 @@ pub fn get_region_statistic(mito: &MitoEngine, region_id: RegionId) -> Option<Re
             wal_size: metadata_stat.wal_size + data_stat.wal_size,
             manifest_size: metadata_stat.manifest_size + data_stat.manifest_size,
             sst_size: metadata_stat.sst_size + data_stat.sst_size,
+            sst_num: metadata_stat.sst_num + data_stat.sst_num,
             index_size: metadata_stat.index_size + data_stat.index_size,
             manifest: RegionManifestInfo::Metric {
                 data_flushed_entry_id: data_stat.manifest.data_flushed_entry_id(),

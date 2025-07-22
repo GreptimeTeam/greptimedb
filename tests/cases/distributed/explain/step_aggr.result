@@ -55,7 +55,10 @@ FROM
 +-+-+
 | logical_plan_| Projection: sum(count(integers.i)) AS count(integers.i), sum(sum(integers.i)) AS sum(integers.i), uddsketch_calc(Float64(0.5), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i))) AS uddsketch_calc(Float64(0.5),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll_merge(hll(integers.i))) AS hll_count(hll(integers.i))_|
 |_|_Aggregate: groupBy=[[]], aggr=[[sum(count(integers.i)), sum(sum(integers.i)), uddsketch_merge(Int64(128), Float64(0.01), uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_merge(hll(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[count(integers.i), sum(integers.i), uddsketch_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64)), hll(CAST(integers.i AS Utf8))]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | ProjectionExec: expr=[sum(count(integers.i))@0 as count(integers.i), sum(sum(integers.i))@1 as sum(integers.i), uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i))@2) as uddsketch_calc(Float64(0.5),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll_merge(hll(integers.i))@3) as hll_count(hll(integers.i))] |
 |_|_AggregateExec: mode=Final, gby=[], aggr=[sum(count(integers.i)), sum(sum(integers.i)), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_merge(hll(integers.i))]_|
 |_|_CoalescePartitionsExec_|
@@ -156,7 +159,10 @@ ORDER BY
 | logical_plan_| Sort: integers.ts ASC NULLS LAST_|
 |_|_Projection: integers.ts, sum(count(integers.i)) AS count(integers.i), sum(sum(integers.i)) AS sum(integers.i), uddsketch_calc(Float64(0.5), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i))) AS uddsketch_calc(Float64(0.5),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll_merge(hll(integers.i))) AS hll_count(hll(integers.i))_|
 |_|_Aggregate: groupBy=[[integers.ts]], aggr=[[sum(count(integers.i)), sum(sum(integers.i)), uddsketch_merge(Int64(128), Float64(0.01), uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_merge(hll(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[integers.ts]], aggr=[[count(integers.i), sum(integers.i), uddsketch_state(Int64(128), Float64(0.01), CAST(integers.i AS Float64)), hll(CAST(integers.i AS Utf8))]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[ts@0 as ts, sum(count(integers.i))@1 as count(integers.i), sum(sum(integers.i))@2 as sum(integers.i), uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_state(Int64(128),Float64(0.01),integers.i))@3) as uddsketch_calc(Float64(0.5),uddsketch_state(Int64(128),Float64(0.01),integers.i)), hll_count(hll_merge(hll(integers.i))@4) as hll_count(hll(integers.i))] |

@@ -821,6 +821,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     memtable_size: region_stat.memtable_size,
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
+                    sst_num: region_stat.sst_num,
                     index_size: region_stat.index_size,
                     region_manifest: region_stat.manifest.into(),
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,

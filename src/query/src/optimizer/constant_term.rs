@@ -42,11 +42,19 @@ pub struct PreCompiledMatchesTermExpr {
     term: String,
     /// The pre-compiled term finder
     finder: MatchesTermFinder,
+
+    /// No used but show how index tokenizes the term basically.
+    /// Not precise due to column options is unknown but for debugging purpose in most cases it's enough.
+    probes: Vec<String>,
 }
 
 impl fmt::Display for PreCompiledMatchesTermExpr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MatchesConstTerm({}, \"{}\")", self.text, self.term)
+        write!(
+            f,
+            "MatchesConstTerm({}, term: \"{}\", probes: {:?})",
+            self.text, self.term, self.probes
+        )
     }
 }
 
@@ -118,6 +126,7 @@ impl PhysicalExpr for PreCompiledMatchesTermExpr {
             text: children[0].clone(),
             term: self.term.clone(),
             finder: self.finder.clone(),
+            probes: self.probes.clone(),
         }))
     }
 }
@@ -167,10 +176,19 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                             if let Some(lit) = args[1].as_any().downcast_ref::<Literal>() {
                                 if let ScalarValue::Utf8(Some(term)) = lit.value() {
                                     let finder = MatchesTermFinder::new(term);
+
+                                    // For debugging purpose. Not really precise but enough for most cases.
+                                    let probes = term
+                                        .split(|c: char| !c.is_alphanumeric())
+                                        .filter(|s| !s.is_empty())
+                                        .map(|s| s.to_string())
+                                        .collect();
+
                                     let expr = PreCompiledMatchesTermExpr {
                                         text: args[0].clone(),
                                         term: term.to_string(),
                                         finder,
+                                        probes,
                                     };
 
                                     return Ok(Transformed::yes(Arc::new(expr)));
@@ -390,7 +408,7 @@ mod tests {
     async fn test_matches_term_optimization_from_sql() {
         let sql = "WITH base AS (
         SELECT text, timestamp FROM test 
-        WHERE MATCHES_TERM(text, 'hello') 
+        WHERE MATCHES_TERM(text, 'hello world') 
         AND timestamp > '2025-01-01 00:00:00'
     ),
     subquery1 AS (
@@ -448,7 +466,15 @@ mod tests {
             .unwrap();
 
         let plan_str = get_plan_string(&physical_plan).join("\n");
-        assert!(plan_str.contains("MatchesConstTerm"));
+        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
+        assert!(plan_str.contains(
+            "MatchesConstTerm(text@0, term: \"hello world\", probes: [\"hello\", \"world\"]"
+        ));
+        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
+        assert!(plan_str
+            .contains("MatchesConstTerm(text@0, term: \"greeting\", probes: [\"greeting\"]"));
+        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"there\", probes: [\"there\"]"));
+        assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"42\", probes: [\"42\"]"));
         assert!(!plan_str.contains("matches_term"))
     }
 }

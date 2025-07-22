@@ -76,7 +76,7 @@ pub trait CompactionStrategy {
 ```
 
 The most suitable compaction strategy for time-series scenario would be 
-a hybrid strategy that combines time window compaction with size-tired compaction, just like [Cassandra](https://cassandra.apache.org/doc/latest/cassandra/operating/compaction/twcs.html) and [ScyllaDB](https://docs.scylladb.com/stable/architecture/compaction/compaction-strategies.html#time-window-compaction-strategy-twcs) does.
+a hybrid strategy that combines time window compaction with size-tired compaction, just like [Cassandra](https://cassandra.apache.org/doc/latest/cassandra/managing/operating/compaction/twcs.html) and [ScyllaDB](https://docs.scylladb.com/stable/architecture/compaction/compaction-strategies.html#time-window-compaction-strategy-twcs) does.
 
 We can first group SSTs in level n into buckets according to some predefined time window. Within that window, 
 SSTs are compacted in a size-tired manner (find SSTs with similar size and compact them to level n+1). 

@@ -2347,6 +2347,8 @@ dependencies = [
  "api",
  "approx 0.5.1",
  "arc-swap",
+ "arrow 54.2.1",
+ "arrow-schema 54.3.1",
  "async-trait",
  "bincode",
  "catalog",
@@ -2365,8 +2367,10 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions-aggregate-common",
+ "datafusion-physical-expr",
  "datatypes",
  "derive_more",
+ "futures",
  "geo",
  "geo-types",
  "geohash",
@@ -2379,6 +2383,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "pretty_assertions",
  "s2",
  "serde",
  "serde_json",
@@ -5218,7 +5223,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=zhongzc%2Fregion-partition-expr#432b0b7474f0decd1265aab86a3cdda0ee94cb5b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=zhongzc%2Fregion-partition-expr#58507d69bbcd15bef4dc1c34bdbba99d75161551"
 dependencies = [
  "prost 0.13.5",
  "serde",

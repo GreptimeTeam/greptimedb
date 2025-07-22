@@ -10,12 +10,10 @@
 * [NiwakaDev](https://github.com/NiwakaDev)
 * [tisonkun](https://github.com/tisonkun)
 
-
 ## Team Members (in alphabetical order)
 
 * [apdong2022](https://github.com/apdong2022)
 * [beryl678](https://github.com/beryl678)
-* [Breeze-P](https://github.com/Breeze-P)
 * [daviderli614](https://github.com/daviderli614)
 * [discord9](https://github.com/discord9)
 * [evenyag](https://github.com/evenyag)

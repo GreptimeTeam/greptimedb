@@ -877,6 +877,36 @@ pub enum Error {
         #[snafu(source)]
         error: object_store::Error,
     },
+
+    #[snafu(display(
+        "Missing column in column metadata: {}, table: {}, table_id: {}",
+        column_name,
+        table_name,
+        table_id,
+    ))]
+    MissingColumnInColumnMetadata {
+        column_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        table_name: String,
+        table_id: TableId,
+    },
+
+    #[snafu(display(
+        "Mismatch column id: column_name: {}, column_id: {}, table: {}, table_id: {}",
+        column_name,
+        column_id,
+        table_name,
+        table_id,
+    ))]
+    MismatchColumnId {
+        column_name: String,
+        column_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+        table_name: String,
+        table_id: TableId,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -896,7 +926,10 @@ impl ErrorExt for Error {
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
             NoLeader { .. } => StatusCode::TableUnavailable,
-            ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
+            ValueNotExist { .. }
+            | ProcedurePoisonConflict { .. }
+            | MissingColumnInColumnMetadata { .. }
+            | MismatchColumnId { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,

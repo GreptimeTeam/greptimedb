@@ -94,12 +94,7 @@ lazy_static! {
 
 
     // ------ Write related metrics
-    /// Number of stalled write requests in each worker.
-    pub static ref WRITE_STALL_TOTAL: IntGaugeVec = register_int_gauge_vec!(
-            "greptime_mito_write_stall_total",
-            "mito stalled write request in each worker",
-            &[WORKER_LABEL]
-        ).unwrap();
+    //
     /// Counter of rejected write requests.
     pub static ref WRITE_REJECT_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_write_reject_total", "mito write reject total").unwrap();
@@ -402,6 +397,7 @@ lazy_static! {
 
 }
 
+// Use another block to avoid reaching the recursion limit.
 lazy_static! {
     /// Counter for compaction input file size.
     pub static ref COMPACTION_INPUT_BYTES: Counter = register_counter!(
@@ -426,6 +422,27 @@ lazy_static! {
         "greptime_mito_memtable_field_builder_count",
         "active field builder count in TimeSeriesMemtable",
         ).unwrap();
+
+    /// Number of stalling write requests in each worker.
+    pub static ref WRITE_STALLING: IntGaugeVec = register_int_gauge_vec!(
+            "greptime_mito_write_stalling_count",
+            "mito stalled write request in each worker",
+            &[WORKER_LABEL]
+        ).unwrap();
+    /// Total number of stalled write requests.
+    pub static ref WRITE_STALL_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_write_stall_total",
+        "Total number of stalled write requests"
+    ).unwrap();
+    /// Time waiting for requests to be handled by the region worker.
+    pub static ref REQUEST_WAIT_TIME: HistogramVec = register_histogram_vec!(
+            "greptime_mito_request_wait_time",
+            "mito request wait time before being handled by region worker",
+            &[WORKER_LABEL],
+            // 0.001 ~ 10000
+            exponential_buckets(0.001, 10.0, 8).unwrap(),
+        )
+        .unwrap();
 }
 
 /// Stager notifier to collect metrics.

@@ -34,7 +34,7 @@ use crate::region::version::VersionBuilder;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, OptionOutputTx, RegionChangeResult, RegionEditRequest, RegionEditResult,
-    RegionSyncRequest, TruncateResult, WorkerRequest,
+    RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::sst::location;
 use crate::worker::{RegionWorkerLoop, WorkerListener};
@@ -230,7 +230,10 @@ impl<S> RegionWorkerLoop<S> {
                 }),
             };
             // We don't set state back as the worker loop is already exited.
-            if let Err(res) = request_sender.send(notify).await {
+            if let Err(res) = request_sender
+                .send(WorkerRequestWithTime::new(notify))
+                .await
+            {
                 warn!(
                     "Failed to send region edit result back to the worker, region_id: {}, res: {:?}",
                     region_id, res
@@ -318,10 +321,10 @@ impl<S> RegionWorkerLoop<S> {
                 truncated_sequence: truncate.truncated_sequence,
             };
             let _ = request_sender
-                .send(WorkerRequest::Background {
+                .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                     region_id: truncate.region_id,
                     notify: BackgroundNotify::Truncate(truncate_result),
-                })
+                }))
                 .await
                 .inspect_err(|_| warn!("failed to send truncate result"));
         });
@@ -364,7 +367,10 @@ impl<S> RegionWorkerLoop<S> {
                 .on_notify_region_change_result_begin(region.region_id)
                 .await;
 
-            if let Err(res) = request_sender.send(notify).await {
+            if let Err(res) = request_sender
+                .send(WorkerRequestWithTime::new(notify))
+                .await
+            {
                 warn!(
                     "Failed to send region change result back to the worker, region_id: {}, res: {:?}",
                     region.region_id, res

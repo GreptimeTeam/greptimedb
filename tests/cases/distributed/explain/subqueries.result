@@ -14,9 +14,14 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 +-+-+
 | logical_plan_| Sort: integers.i ASC NULLS LAST_|
 |_|_LeftSemi Join: integers.i = __correlated_sq_1.i_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: integers.i_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
@@ -43,10 +48,14 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 | logical_plan_| Sort: i1.i ASC NULLS LAST_|
 |_|_LeftSemi Join: i1.i = __correlated_sq_1.i_|
 |_|_SubqueryAlias: i1_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
 |_|_SubqueryAlias: __correlated_sq_1_|
 |_|_Projection: integers.i_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 ASC NULLS LAST]_|
 |_|_SortExec: expr=[i@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
@@ -85,9 +94,13 @@ order by t.i desc;
 |_|_Cross Join:_|
 |_|_Filter: integers.i IS NOT NULL_|
 |_|_Projection: integers.i_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: integers_|
+|_| ]]_|
 |_|_Projection:_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: other_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [i@0 DESC]_|
 |_|_SortExec: expr=[i@0 DESC], preserve_partitioning=[true]_|
 |_|_CrossJoinExec_|
@@ -116,9 +129,15 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 |                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
 |                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)        |
 |                     |       Projection: integers.i                                      |
-|                     |         MergeScan [is_placeholder=false]                          |
+|                     |         MergeScan [is_placeholder=false, remote_input=[           |
+|                     | TableScan: integers                                               |
+|                     | ]]                                                                |
 |                     |       SubqueryAlias: __scalar_sq_1                                |
-|                     |         MergeScan [is_placeholder=false]                          |
+|                     |         MergeScan [is_placeholder=false, remote_input=[           |
+|                     | Projection: max(integers.i)                                       |
+|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]               |
+|                     |     TableScan: integers                                           |
+|                     | ]]                                                                |
 | physical_plan_error | Error during planning: failed to resolve catalog: datafusion      |
 +---------------------+-------------------------------------------------------------------+
 

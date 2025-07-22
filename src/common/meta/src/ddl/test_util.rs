@@ -17,6 +17,7 @@ pub mod columns;
 pub mod create_table;
 pub mod datanode_handler;
 pub mod flownode_handler;
+pub mod region_metadata;
 
 use std::assert_matches::assert_matches;
 use std::collections::HashMap;

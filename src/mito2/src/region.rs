@@ -310,6 +310,7 @@ impl MitoRegion {
         let wal_usage = self.estimated_wal_usage(memtable_usage);
         let manifest_usage = self.stats.total_manifest_size();
         let num_rows = version.ssts.num_rows() + version.memtables.num_rows();
+        let num_files = version.ssts.num_files();
         let manifest_version = self.stats.manifest_version();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
@@ -320,6 +321,7 @@ impl MitoRegion {
             wal_size: wal_usage,
             manifest_size: manifest_usage,
             sst_size: sst_usage,
+            sst_num: num_files,
             index_size: index_usage,
             manifest: RegionManifestInfo::Mito {
                 manifest_version,

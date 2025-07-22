@@ -39,7 +39,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
-use prometheus::IntGauge;
+use prometheus::{Histogram, IntGauge};
 use rand::{rng, Rng};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
@@ -58,11 +58,11 @@ use crate::error;
 use crate::error::{CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::memtable::MemtableBuilderProvider;
-use crate::metrics::{REGION_COUNT, WRITE_STALL_TOTAL};
+use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::{MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap, RegionMapRef};
 use crate::request::{
     BackgroundNotify, DdlRequest, SenderBulkRequest, SenderDdlRequest, SenderWriteRequest,
-    WorkerRequest,
+    WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::FileId;
@@ -469,8 +469,9 @@ impl<S: LogStore> WorkerStarter<S> {
             last_periodical_check_millis: now,
             flush_sender: self.flush_sender,
             flush_receiver: self.flush_receiver,
-            stalled_count: WRITE_STALL_TOTAL.with_label_values(&[&id_string]),
+            stalling_count: WRITE_STALLING.with_label_values(&[&id_string]),
             region_count: REGION_COUNT.with_label_values(&[&id_string]),
+            request_wait_time: REQUEST_WAIT_TIME.with_label_values(&[&id_string]),
             region_edit_queues: RegionEditQueues::default(),
             schema_metadata_manager: self.schema_metadata_manager,
         };
@@ -498,7 +499,7 @@ pub(crate) struct RegionWorker {
     /// The opening regions.
     opening_regions: OpeningRegionsRef,
     /// Request sender.
-    sender: Sender<WorkerRequest>,
+    sender: Sender<WorkerRequestWithTime>,
     /// Handle to the worker thread.
     handle: Mutex<Option<JoinHandle<()>>>,
     /// Whether to run the worker thread.
@@ -509,7 +510,8 @@ impl RegionWorker {
     /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
-        if self.sender.send(request).await.is_err() {
+        let request_with_time = WorkerRequestWithTime::new(request);
+        if self.sender.send(request_with_time).await.is_err() {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -531,7 +533,12 @@ impl RegionWorker {
             info!("Stop region worker {}", self.id);
 
             self.set_running(false);
-            if self.sender.send(WorkerRequest::Stop).await.is_err() {
+            if self
+                .sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::Stop))
+                .await
+                .is_err()
+            {
                 warn!("Worker {} is already exited before stop", self.id);
             }
 
@@ -669,9 +676,9 @@ struct RegionWorkerLoop<S> {
     /// Regions that are opening.
     opening_regions: OpeningRegionsRef,
     /// Request sender.
-    sender: Sender<WorkerRequest>,
+    sender: Sender<WorkerRequestWithTime>,
     /// Request receiver.
-    receiver: Receiver<WorkerRequest>,
+    receiver: Receiver<WorkerRequestWithTime>,
     /// WAL of the engine.
     wal: Wal<S>,
     /// Manages object stores for manifest and SSTs.
@@ -706,10 +713,12 @@ struct RegionWorkerLoop<S> {
     flush_sender: watch::Sender<()>,
     /// Watch channel receiver to wait for background flush job.
     flush_receiver: watch::Receiver<()>,
-    /// Gauge of stalled request count.
-    stalled_count: IntGauge,
+    /// Gauge of stalling request count.
+    stalling_count: IntGauge,
     /// Gauge of regions in the worker.
     region_count: IntGauge,
+    /// Histogram of request wait time for this worker.
+    request_wait_time: Histogram,
     /// Queues for region edit requests.
     region_edit_queues: RegionEditQueues,
     /// Database level metadata manager.
@@ -749,10 +758,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             tokio::select! {
                 request_opt = self.receiver.recv() => {
                     match request_opt {
-                        Some(request) => match request {
-                            WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
-                            WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
-                            _ => general_req_buffer.push(request),
+                        Some(request_with_time) => {
+                            // Observe the wait time
+                            let wait_time = request_with_time.created_at.elapsed();
+                            self.request_wait_time.observe(wait_time.as_secs_f64());
+
+                            match request_with_time.request {
+                                WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                                WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                                req => general_req_buffer.push(req),
+                            }
                         },
                         // The channel is disconnected.
                         None => break,
@@ -791,11 +806,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             for _ in 1..self.config.worker_request_batch_size {
                 // We have received one request so we start from 1.
                 match self.receiver.try_recv() {
-                    Ok(req) => match req {
-                        WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
-                        WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
-                        _ => general_req_buffer.push(req),
-                    },
+                    Ok(request_with_time) => {
+                        // Observe the wait time
+                        let wait_time = request_with_time.created_at.elapsed();
+                        self.request_wait_time.observe(wait_time.as_secs_f64());
+
+                        match request_with_time.request {
+                            WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                            WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
+                            req => general_req_buffer.push(req),
+                        }
+                    }
                     // We still need to handle remaining requests.
                     Err(_) => break,
                 }

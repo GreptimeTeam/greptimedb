@@ -102,6 +102,14 @@ impl SstVersion {
             .sum()
     }
 
+    /// Returns the number of SST files.
+    pub(crate) fn num_files(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|level_meta| level_meta.files.len() as u64)
+            .sum()
+    }
+
     /// Returns SST data files'space occupied in current version.
     pub(crate) fn sst_usage(&self) -> u64 {
         self.levels

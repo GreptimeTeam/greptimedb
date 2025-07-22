@@ -84,17 +84,37 @@ limit 1;
 |_|_Inner Join: t_2.ts = t_3.ts, t_2.vin = t_3.vin_|
 |_|_Inner Join: t_1.ts = t_2.ts, t_1.vin = t_2.vin_|
 |_|_Filter: t_1.vin IS NOT NULL_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_1_|
+|_| ]]_|
 |_|_Filter: t_2.vin IS NOT NULL_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_2_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_3_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_4_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_5_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_6_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_7_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_8_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_9_|
+|_| ]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: t_10_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
 |_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC], preserve_partitioning=[true]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
