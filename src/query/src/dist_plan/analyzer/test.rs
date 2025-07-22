@@ -309,6 +309,43 @@ fn expand_sort_alias_conflict_limit() {
     assert_eq!(expected, result.to_string());
 }
 
+#[test]
+fn expand_sort_alias_conflict_but_not_really_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .project(vec![col("pk2").alias("\"t.pk1\"")])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: \"t.pk1\"",
+        "  Limit: skip=0, fetch=10",
+        "    MergeSort: t.pk1 ASC NULLS LAST",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk2 AS \"t.pk1\", t.pk1",
+        "    Sort: t.pk1 ASC NULLS LAST",
+        "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// TODO(discord9): it is possible to expand `Sort` and `Limit` in the same step,
 /// but it's too complicated to implement now, and probably not worth it since `Limit` already
 /// greatly reduces the amount of data to sort.
