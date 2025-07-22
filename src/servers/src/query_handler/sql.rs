@@ -19,19 +19,40 @@ use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
 use query::query_engine::DescribeResult;
-use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
-/// Strip backticks and lowercase any simple identifier they quote, e.g. `` `AUTO_INCREMENT` `` -> `auto_increment`.
+/// Walks the SQL string and lowercases only the text between backtick pairs.
+/// Everything else is passed through unchanged.
+/// For example:
+///   `SELECT \`AUTO_INCREMENT\`, col FROM \`MyTable\``
+/// becomes
+///   `SELECT auto_increment, col FROM mytable`
 fn normalize_backticks(sql: &str) -> String {
-    // Matches things like `AUTO_INCREMENT` but skips more complex forms like `schema`.`table`
-    let re = Regex::new(r#"`([A-Za-z_][A-Za-z0-9_]*)`"#).unwrap();
-    re.replace_all(sql, |caps: &regex::Captures| caps[1].to_lowercase())
-        .into_owned()
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            // start of a backtick-quoted identifier
+            let mut ident = String::new();
+            // read until closing backtick (or end)
+            while let Some(c2) = chars.next() {
+                if c2 == '`' {
+                    break;
+                }
+                ident.push(c2);
+            }
+            // lowercase the identifier and append
+            out.push_str(&ident.to_lowercase());
+        } else {
+            // any other character: copy as-is
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
@@ -88,9 +109,8 @@ where
     type Error = error::Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        // normalize any backtick-quoted identifiers ex : `AUTO_INCREMENT` → auto_increment
+        // Lowercase only backtick-quoted identifiers (e.g. `AUTO_INCREMENT` → auto_increment)
         let normalized = normalize_backticks(query);
-        // delegate to the real handler
         self.0
             .do_query(&normalized, query_ctx)
             .await

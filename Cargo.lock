@@ -11386,6 +11386,7 @@ dependencies = [
  "snap",
  "socket2",
  "sql",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
  "store-api",
  "strum 0.27.1",
  "table",
