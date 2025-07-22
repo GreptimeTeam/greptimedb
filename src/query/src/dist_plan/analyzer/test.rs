@@ -23,7 +23,7 @@ use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRe
 use common_telemetry::init_default_ut_logging;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::expr_fn::avg;
-use datafusion::functions_aggregate::min_max::min;
+use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion_common::JoinType;
 use datafusion_expr::{col, lit, Expr, LogicalPlanBuilder};
 use datafusion_sql::TableReference;
@@ -43,7 +43,7 @@ use table::{Table, TableRef};
 
 use super::*;
 
-struct TestTable;
+pub(crate) struct TestTable;
 
 impl TestTable {
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
@@ -289,10 +289,7 @@ fn expand_proj_step_aggr() {
     )));
     let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
         .unwrap()
-        .project(vec![Expr::Column(Column::new(
-            Some(TableReference::bare("t")),
-            "number",
-        ))])
+        .project(vec![col("number")])
         .unwrap()
         .aggregate(Vec::<Expr>::new(), vec![min(col("number"))])
         .unwrap()
@@ -309,6 +306,83 @@ fn expand_proj_step_aggr() {
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
         "  Projection: t.number", // This Projection shouldn't add new column requirements
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// Shouldn't push down the fake partition column aggregate
+/// as the `pk1` is a alias for `pk3` which is not partition column
+#[should_panic(expected = "FIXME(discord9): alias tracking problem")]
+#[test]
+fn expand_proj_alias_fake_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk3").alias("pk1"),
+            col("pk2").alias("pk3"),
+        ])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk1").alias("pk2"),
+            col("pk3").alias("pk1"),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(t.number)]]",
+        " Projection: t.number, pk1 AS pk2, pk3 AS pk1",
+        "   Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
+        "     TableScan: t",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_part_col_aggr_step_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1"), col("pk2")], vec![max(col("number"))])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![min(col("max(t.number)"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: min(max(t.number))",
+        "  Projection: min(min(max(t.number))) AS min(max(t.number))",
+        "    Aggregate: groupBy=[[]], aggr=[[min(min(max(t.number)))]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
         "]]",
     ]
@@ -350,7 +424,9 @@ fn expand_step_aggr_proj() {
     assert_eq!(expected, result.to_string());
 }
 
-/// should only expand `Sort`
+/// should only expand `Sort`, notice `Sort` before `Aggregate` usually can and
+/// will be optimized out, and dist planner shouldn't handle that case, but
+/// for now, still handle that be expanding the `Sort` node
 #[test]
 fn expand_proj_sort_step_aggr_limit() {
     // use logging for better debugging
