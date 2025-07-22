@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
-use common_meta::rpc::router::Partition as MetaPartition;
+use common_meta::rpc::router::LegacyPartition as MetaPartition;
 use datatypes::arrow::array::{BooleanArray, RecordBatch};
 use datatypes::prelude::Value;
 use itertools::Itertools;

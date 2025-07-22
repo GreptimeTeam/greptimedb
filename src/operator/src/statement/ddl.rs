@@ -43,7 +43,7 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
-use common_meta::rpc::router::{Partition, Partition as MetaPartition};
+use common_meta::rpc::router::{LegacyPartition, LegacyPartition as MetaPartition};
 use common_query::Output;
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
@@ -1337,7 +1337,7 @@ impl StatementExecutor {
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
-        partitions: Vec<Partition>,
+        partitions: Vec<LegacyPartition>,
         table_info: RawTableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {

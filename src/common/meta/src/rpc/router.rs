@@ -358,7 +358,7 @@ pub struct Region {
     pub attrs: BTreeMap<String, String>,
 
     /// **Deprecated:** Use `partition_expr` instead.
-    pub partition: Option<Partition>,
+    pub partition: Option<LegacyPartition>,
     /// The partition expression of the region.
     #[serde(default)]
     pub partition_expr: String,
@@ -377,7 +377,7 @@ impl Region {
     pub fn partition_expr(&self) -> String {
         if !self.partition_expr.is_empty() {
             self.partition_expr.clone()
-        } else if let Some(Partition { value_list, .. }) = &self.partition {
+        } else if let Some(LegacyPartition { value_list, .. }) = &self.partition {
             if !value_list.is_empty() {
                 String::from_utf8_lossy(&value_list[0]).to_string()
             } else {
@@ -392,10 +392,10 @@ impl Region {
 /// Gets the partition expression of the `PbRegion` in compatible mode.
 #[allow(deprecated)]
 pub fn pb_region_partition_expr(r: &PbRegion) -> String {
-    if !r.partition_expr.is_empty() {
-        r.partition_expr.clone()
-    } else if let Some(partition) = &r.partition {
-        if !partition.value_list.is_empty() {
+    if let Some(partition) = &r.partition {
+        if !partition.expression.is_empty() {
+            partition.expression.clone()
+        } else if !partition.value_list.is_empty() {
             String::from_utf8_lossy(&partition.value_list[0]).to_string()
         } else {
             "".to_string()
@@ -419,21 +419,22 @@ impl From<PbRegion> for Region {
 }
 
 impl From<Region> for PbRegion {
-    #[allow(deprecated)]
     fn from(region: Region) -> Self {
         let partition_expr = region.partition_expr();
         Self {
             id: region.id.into(),
             name: region.name,
-            partition: None,
-            partition_expr,
+            partition: Some(PbPartition {
+                expression: partition_expr,
+                ..Default::default()
+            }),
             attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Partition {
+pub struct LegacyPartition {
     #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
     #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
@@ -481,20 +482,17 @@ where
     Ok(values)
 }
 
-impl From<Partition> for PbPartition {
-    fn from(p: Partition) -> Self {
-        Self {
-            column_list: p.column_list,
-            value_list: p.value_list,
-        }
-    }
-}
+impl From<LegacyPartition> for PbPartition {
+    fn from(p: LegacyPartition) -> Self {
+        let expression = if !p.value_list.is_empty() {
+            String::from_utf8_lossy(&p.value_list[0]).to_string()
+        } else {
+            "".to_string()
+        };
 
-impl From<PbPartition> for Partition {
-    fn from(p: PbPartition) -> Self {
         Self {
-            column_list: p.column_list,
-            value_list: p.value_list,
+            expression,
+            ..Default::default()
         }
     }
 }
@@ -661,13 +659,13 @@ mod tests {
 
     #[test]
     fn test_de_serialize_partition() {
-        let p = Partition {
+        let p = LegacyPartition {
             column_list: vec![b"a".to_vec(), b"b".to_vec()],
             value_list: vec![b"hi".to_vec(), b",".to_vec()],
         };
 
         let output = serde_json::to_string(&p).unwrap();
-        let got: Partition = serde_json::from_str(&output).unwrap();
+        let got: LegacyPartition = serde_json::from_str(&output).unwrap();
 
         assert_eq!(got, p);
     }
@@ -679,7 +677,6 @@ mod tests {
             id: 1,
             name: "r1".to_string(),
             partition: None,
-            partition_expr: "".to_string(),
             attrs: Default::default(),
         };
         assert_eq!(pb_region_partition_expr(&r), "");
@@ -689,8 +686,7 @@ mod tests {
         assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition_expr, "");
-        assert!(r3.partition.is_none());
+        assert_eq!(r3.partition.as_ref().unwrap().expression, "");
 
         let r = PbRegion {
             id: 1,
@@ -698,8 +694,8 @@ mod tests {
             partition: Some(PbPartition {
                 column_list: vec![b"a".to_vec()],
                 value_list: vec![b"{}".to_vec()],
+                expression: Default::default(),
             }),
-            partition_expr: "".to_string(),
             attrs: Default::default(),
         };
         assert_eq!(pb_region_partition_expr(&r), "{}");
@@ -709,8 +705,7 @@ mod tests {
         assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition_expr, "{}");
-        assert!(r3.partition.is_none());
+        assert_eq!(r3.partition.as_ref().unwrap().expression, "{}");
 
         let r = PbRegion {
             id: 1,
@@ -718,8 +713,8 @@ mod tests {
             partition: Some(PbPartition {
                 column_list: vec![b"a".to_vec()],
                 value_list: vec![b"{}".to_vec()],
+                expression: "a>b".to_string(),
             }),
-            partition_expr: "a>b".to_string(),
             attrs: Default::default(),
         };
         assert_eq!(pb_region_partition_expr(&r), "a>b");
@@ -729,7 +724,6 @@ mod tests {
         assert!(r2.partition.is_none());
 
         let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition_expr, "a>b");
-        assert!(r3.partition.is_none());
+        assert_eq!(r3.partition.as_ref().unwrap().expression, "a>b");
     }
 }

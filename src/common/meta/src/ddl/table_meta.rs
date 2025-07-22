@@ -124,7 +124,7 @@ impl TableMetadataAllocator {
             .map(|(i, partition)| {
                 let region = Region {
                     id: RegionId::new(table_id, i as u32),
-                    partition: Some(partition.clone().into()),
+                    partition_expr: partition.expression.clone(),
                     ..Default::default()
                 };
 
