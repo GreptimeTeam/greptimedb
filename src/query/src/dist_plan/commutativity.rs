@@ -446,7 +446,7 @@ pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<TransformerAction
 pub struct TransformerAction {
     /// list of plans that need to be applied to parent plans, in the order of parent to child.
     /// i.e. if this returns `[Projection, Aggregate]`, then the parent plan should be transformed to
-    /// ```
+    /// ```ignore
     /// Original Parent Plan:
     ///     Projection:
     ///         Aggregate:

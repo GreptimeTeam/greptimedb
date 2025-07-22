@@ -269,6 +269,43 @@ fn expand_limit_sort() {
     assert_eq!(expected, result.to_string());
 }
 
+#[test]
+fn expand_sort_limit_sort() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .sort(vec![col("pk1").sort(true, false)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Sort: t.pk1 ASC NULLS LAST",
+        "  Projection: t.pk1, t.pk2, t.pk3, t.ts, t.number",
+        "    Limit: skip=0, fetch=10",
+        "      MergeSort: t.pk1 ASC NULLS LAST",
+        "        MergeScan [is_placeholder=false, remote_input=[",
+        "Limit: skip=0, fetch=10",
+        "  Sort: t.pk1 ASC NULLS LAST",
+        "    TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// test plan like:
 /// ```
 /// Aggregate: min(t.number)
@@ -353,6 +390,49 @@ fn expand_proj_alias_fake_part_col_aggr() {
         "Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(t.number)]]",
         "  Projection: t.number, pk1 AS pk2, pk3 AS pk1",
         "    Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
+        "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn expand_proj_alias_aliased_part_col_aggr() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk1").alias("pk3"),
+            col("pk2").alias("pk4"),
+        ])
+        .unwrap()
+        .project(vec![
+            col("number"),
+            col("pk3").alias("pk42"),
+            col("pk4").alias("pk43"),
+        ])
+        .unwrap()
+        .aggregate(vec![col("pk42"), col("pk43")], vec![min(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: pk42, pk43, min(t.number)",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[pk42, pk43]], aggr=[[min(t.number)]]",
+        "  Projection: t.number, pk3 AS pk42, pk4 AS pk43",
+        "    Projection: t.number, t.pk1 AS pk3, t.pk2 AS pk4",
         "      TableScan: t",
         "]]",
     ]
@@ -811,6 +891,7 @@ fn expand_proj_limit_sort_part_col_aggr() {
     assert_eq!(expected, result.to_string());
 }
 
+/// Notice how this limit can't be push down, or results will be wrong
 #[test]
 fn expand_step_aggr_limit() {
     // use logging for better debugging

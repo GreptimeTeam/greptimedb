@@ -164,7 +164,7 @@ struct PlanRewriter {
     alias_tracker: Option<AliasTracker>,
     /// use stack count as scope to determine column requirements is needed or not
     /// i.e for a logical plan like:
-    /// ```
+    /// ```ignore
     /// 1: Projection: t.number
     /// 2: Sort: t.pk1+t.pk2
     /// 3. Projection: t.number, t.pk1, t.pk2
@@ -172,7 +172,7 @@ struct PlanRewriter {
     /// `Sort` will make a column requirement for `t.pk1` at level 2.
     /// Which making `Projection` at level 1 need to add a ref to `t.pk1` as well.
     /// So that the expanded plan will be
-    /// ```
+    /// ```ignore
     /// Projection: t.number
     ///   MergeSort: t.pk1
     ///     MergeScan: remote_input=
@@ -197,7 +197,7 @@ struct PlanRewriter {
     /// This is used to handle the case where a plan is transformed, but still
     /// need to push down as many node as possible before next partial/conditional/transformed commutative
     /// plan. I.e.
-    /// ```
+    /// ```ignore
     /// Limit:
     ///     Sort:
     /// ```
@@ -497,7 +497,7 @@ struct EnforceDistRequirementRewriter {
     /// this is used to avoid applying column requirements that are not needed
     /// for the current node, i.e. the node is not in the scope of the column requirements
     /// i.e, for this plan:
-    /// ```
+    /// ```ignore
     /// Aggregate: min(t.number)
     ///   Projection: t.number
     /// ```
