@@ -1732,26 +1732,23 @@ fn find_partition_entries(
     };
 
     // extract concrete data type of partition columns
-    let column_defs = partition_columns
+    let column_name_and_type = partition_columns
         .iter()
         .map(|pc| {
-            create_table
+            let column = create_table
                 .column_defs
                 .iter()
                 .find(|c| &c.name == pc)
                 // unwrap is safe here because we have checked that partition columns are defined
-                .unwrap()
+                .unwrap();
+            let column_name = &column.name;
+            let data_type = ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
+                    .context(ColumnDataTypeSnafu)?,
+            );
+            (column_name, data_type)
         })
-        .collect::<Vec<_>>();
-    let mut column_name_and_type = HashMap::with_capacity(column_defs.len());
-    for column in column_defs {
-        let column_name = &column.name;
-        let data_type = ConcreteDataType::from(
-            ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
-                .context(ColumnDataTypeSnafu)?,
-        );
-        column_name_and_type.insert(column_name, data_type);
-    }
+        .collect::<HashMap<_, _>>();
 
     // Transform parser expr to partition expr
     let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
