@@ -342,7 +342,7 @@ impl Categorizer {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
                 let tags = series_divide.tags().iter().collect::<HashSet<_>>();
 
-                for (_col, all_alias) in partition_cols {
+                for all_alias in partition_cols.values() {
                     let all_alias = all_alias.iter().map(|c| &c.name).collect::<HashSet<_>>();
                     if tags.intersection(&all_alias).count() == 0 {
                         return Commutativity::NonCommutative;

@@ -49,7 +49,7 @@ impl AliasTracker {
                     let schema = info.meta.schema.clone();
                     let col_schema = schema.column_schemas();
                     let mapping = col_schema
-                        .into_iter()
+                        .iter()
                         .map(|col| {
                             (
                                 col.name.clone(),

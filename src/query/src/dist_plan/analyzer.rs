@@ -380,7 +380,7 @@ impl PlanRewriter {
             let mut aliased = HashMap::new();
             for part_col in part_cols {
                 let all_alias = alias_tracker
-                    .get_all_alias_for_col(&part_col)
+                    .get_all_alias_for_col(part_col)
                     .cloned()
                     .unwrap_or_default();
 
