@@ -180,6 +180,8 @@ struct PlanRewriter {
     /// and col requirements at level 2 is not applicable for level 3.
     ///
     /// see more details in test `expand_proj_step_aggr` and `expand_proj_sort_proj`
+    ///
+    /// TODO(discord9): a simpler solution to track column requirements for merge scan
     column_requirements: Vec<(HashSet<Column>, usize)>,
     /// Whether to expand on next call
     /// This is used to handle the case where a plan is transformed, but need to be expanded from it's
@@ -444,6 +446,7 @@ impl PlanRewriter {
 struct EnforceDistRequirementRewriter {
     /// only enforce column requirements after the expanding node in question,
     /// meaning only for node with `cur_level` <= `level` will consider adding those column requirements
+    /// TODO(discord9): a simpler solution to track column requirements for merge scan
     column_requirements: Vec<(HashSet<Column>, usize)>,
     /// only apply column requirements >= `cur_level`
     /// this is used to avoid applying column requirements that are not needed
