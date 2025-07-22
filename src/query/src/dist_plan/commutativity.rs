@@ -421,7 +421,7 @@ impl Categorizer {
             .into_iter()
             .map(|c| c.name.clone())
             .collect::<HashSet<_>>();
-        for (_col, all_alias) in partition_cols {
+        for all_alias in partition_cols.values() {
             let all_alias = all_alias
                 .iter()
                 .map(|c| c.name.clone())

@@ -360,6 +360,9 @@ fn expand_proj_alias_fake_part_col_aggr() {
     assert_eq!(expected, result.to_string());
 }
 
+/// notice that step aggr then part col aggr seems impossible as the partition columns for part col aggr
+/// can't pass through the step aggr without making step aggr also a part col aggr
+/// so here only test part col aggr -> step aggr case
 #[test]
 fn expand_part_col_aggr_step_aggr() {
     // use logging for better debugging
