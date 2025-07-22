@@ -36,6 +36,8 @@ use crate::error;
 use crate::grpc::flight::TonicResult;
 use crate::grpc::FlightCompression;
 
+const CHANNEL_SIZE: usize = 16;
+
 #[pin_project(PinnedDrop)]
 pub struct FlightRecordBatchStream {
     #[pin]
@@ -54,7 +56,7 @@ impl FlightRecordBatchStream {
         query_ctx: QueryContextRef,
     ) -> Self {
         let should_send_partial_metrics = query_ctx.explain_verbose();
-        let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(CHANNEL_SIZE);
         let join_handle = common_runtime::spawn_global(async move {
             Self::flight_data_stream(recordbatches, tx, should_send_partial_metrics)
                 .trace(tracing_context.attach(info_span!("flight_data_stream")))
