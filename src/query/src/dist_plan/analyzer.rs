@@ -384,7 +384,6 @@ impl PlanRewriter {
                     .cloned()
                     .unwrap_or_default();
 
-                // FIXME(discord9): also check for qualifer?
                 aliased.insert(part_col.clone(), all_alias);
             }
             Some(aliased)

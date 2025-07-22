@@ -15,8 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use datafusion::datasource::DefaultTableSource;
-use datafusion::error::Result as DfResult;
-use datafusion_common::{Column, TableReference};
+use datafusion_common::Column;
 use datafusion_expr::{Expr, LogicalPlan, TableScan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -27,8 +26,6 @@ pub type AliasMapping = HashMap<String, HashSet<Column>>;
 /// tracking aliases for the source table columns in the plan
 #[derive(Debug, Clone)]
 pub struct AliasTracker {
-    /// the table id for the source table
-    pub table_id: u32,
     /// mapping from the original table name to the alias used in the plan
     /// notice how one column might have multiple aliases in the plan
     ///
@@ -62,10 +59,7 @@ impl AliasTracker {
                             )
                         })
                         .collect();
-                    return Some(Self {
-                        table_id: info.table_id(),
-                        mapping,
-                    });
+                    return Some(Self { mapping });
                 }
             }
         }
@@ -144,6 +138,7 @@ impl AliasTracker {
         self.mapping.get(col_name)
     }
 
+    #[allow(unused)]
     pub fn is_alias_for(&self, original_col: &str, cur_col: &Column) -> bool {
         self.mapping
             .get(original_col)
@@ -157,6 +152,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_telemetry::init_default_ut_logging;
+    use datafusion::error::Result as DfResult;
     use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
     use datafusion_expr::{col, LogicalPlanBuilder};
 

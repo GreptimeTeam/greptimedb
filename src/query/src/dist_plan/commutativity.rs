@@ -427,6 +427,7 @@ impl Categorizer {
                 .map(|c| c.name.clone())
                 .collect::<HashSet<_>>();
             // check if ref columns intersect with all alias of partition columns
+            // is empty, if it's empty, not all partition columns show up in `exprs`
             if ref_cols.intersection(&all_alias).count() == 0 {
                 return false;
             }
