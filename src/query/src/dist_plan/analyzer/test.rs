@@ -321,7 +321,7 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
         .unwrap()
         .sort(vec![col("pk1").sort(true, false)])
         .unwrap()
-        .project(vec![col("pk2").alias("\"t.pk1\"")])
+        .project(vec![col("pk2").alias("t.pk1")])
         .unwrap()
         .limit(0, Some(10))
         .unwrap()
@@ -332,12 +332,12 @@ fn expand_sort_alias_conflict_but_not_really_limit() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: \"t.pk1\"",
+        "Projection: t.pk1",
         "  Limit: skip=0, fetch=10",
         "    MergeSort: t.pk1 ASC NULLS LAST",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Projection: t.pk2 AS \"t.pk1\", t.pk1",
+        "  Projection: t.pk2 AS t.pk1, t.pk1",
         "    Sort: t.pk1 ASC NULLS LAST",
         "      TableScan: t",
         "]]",

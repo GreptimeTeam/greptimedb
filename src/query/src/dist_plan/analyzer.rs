@@ -295,7 +295,8 @@ impl PlanRewriter {
                             .iter()
                             .enumerate()
                             .map(|(i, p)| format!(
-                                "Extra {i}th parent plan from parent to child = {p}"
+                                "Extra {i}-th parent plan from parent to child = {}",
+                                p.display()
                             ))
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -365,8 +366,9 @@ impl PlanRewriter {
         } else if let LogicalPlan::TableScan(table_scan) = node {
             self.alias_tracker = AliasTracker::new(table_scan);
             debug!(
-                "Current partition columns are: {:?}",
-                self.get_aliased_partition_columns()
+                "Initialize partition columns: {:?} with table={}",
+                self.get_aliased_partition_columns(),
+                table_scan.table_name
             );
         }
     }
@@ -464,8 +466,6 @@ impl PlanRewriter {
         }
         self.set_expanded();
 
-        debug!("Before recover schema: {node}");
-
         // recover the schema, this make sure after expand the schema is the same as old node
         // because after expand the raw top node might have extra columns i.e. sorting columns for `Sort` node
         let node = LogicalPlanBuilder::from(node)
@@ -473,8 +473,6 @@ impl PlanRewriter {
                 Expr::Column(Column::new(qualifier.cloned(), field.name()))
             }))?
             .build()?;
-
-        debug!("After recover schema: {node}");
 
         Ok(node)
     }
@@ -548,7 +546,7 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
             "EnforceDistRequirementRewriter: applicable column requirements at level {} = {:?} for node {}",
             self.cur_level,
             applicable_column_requirements,
-            node
+            node.display()
         );
 
         // make sure all projection applicable scope has the required columns
@@ -612,9 +610,9 @@ impl TreeNodeRewriter for PlanRewriter {
             return Ok(Transformed::no(node));
         }
 
-        self.maybe_update_alias(&node);
-
         self.maybe_set_partitions(&node);
+
+        self.maybe_update_alias(&node);
 
         let Some(parent) = self.get_parent() else {
             debug!("Plan Rewriter: expand now for no parent found for node: {node}");

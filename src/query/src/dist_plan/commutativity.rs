@@ -245,18 +245,7 @@ impl Categorizer {
                     return Commutativity::TransformedCommutative {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
                             debug!("Before Step optimize: {plan}");
-                            let ret = step_aggr_to_upper_aggr(plan).inspect(|plan| {
-                                debug!(
-                                    "Extra parent plan after step optimize: {}",
-                                    plan.iter()
-                                        .enumerate()
-                                        .map(|(i, p)| format!(
-                                            "Extra {i}th parent plan from parent to child = {p}"
-                                        ))
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                );
-                            });
+                            let ret = step_aggr_to_upper_aggr(plan);
                             ret.ok().map(|s| TransformerAction {
                                 extra_parent_plans: s.to_vec(),
                                 new_child_plan: None,
