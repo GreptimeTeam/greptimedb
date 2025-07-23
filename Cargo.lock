@@ -5223,7 +5223,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=zhongzc%2Fregion-partition-expr#7ca906e0abf95ec460b4757893897ba84a41ab3b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7fcaa3e413947a7a28d9af95812af26c1939ce78#7fcaa3e413947a7a28d9af95812af26c1939ce78"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -9669,7 +9669,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -9715,7 +9715,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.100",
