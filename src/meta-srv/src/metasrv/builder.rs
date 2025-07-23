@@ -545,6 +545,7 @@ fn build_procedure_manager(
         kv_state_store.clone(),
         kv_state_store,
         Some(runtime_switch_manager.clone()),
+        None,
     ))
 }
 

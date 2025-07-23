@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder};
+use common_event_recorder::EventRecorderRef;
 use common_telemetry::{debug, error, info};
 use rand::Rng;
 use snafu::ResultExt;
@@ -96,6 +97,7 @@ pub(crate) struct Runner {
     pub(crate) exponential_builder: ExponentialBuilder,
     pub(crate) store: Arc<ProcedureStore>,
     pub(crate) rolling_back: bool,
+    pub(crate) event_recorder: Option<EventRecorderRef>,
 }
 
 impl Runner {
@@ -425,6 +427,8 @@ impl Runner {
             procedure.lock_key(),
             procedure.poison_keys(),
             procedure.type_name(),
+            self.event_recorder.clone(),
+            procedure.dump().unwrap_or_default(),
         ));
         let runner = Runner {
             meta: meta.clone(),
@@ -434,6 +438,7 @@ impl Runner {
             exponential_builder: self.exponential_builder,
             store: self.store.clone(),
             rolling_back: false,
+            event_recorder: self.event_recorder.clone(),
         };
 
         // Insert the procedure. We already check the procedure existence before inserting
@@ -627,6 +632,7 @@ mod tests {
             exponential_builder: ExponentialBuilder::default(),
             store,
             rolling_back: false,
+            event_recorder: None,
         }
     }
 
