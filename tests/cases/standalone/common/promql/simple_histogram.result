@@ -332,3 +332,24 @@ drop table histogram4_bucket;
 
 Affected Rows: 0
 
+CREATE TABLE greptime_servers_postgres_query_elapsed_bucket (
+    pod STRING,
+    instance STRING,
+    le STRING,
+    t TIMESTAMP TIME INDEX,
+    v DOUBLE,
+    PRIMARY KEY (pod, instance, le)
+);
+
+Affected Rows: 0
+
+-- should return empty result instead of error
+tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
+
+++
+++
+
+drop table greptime_servers_postgres_query_elapsed_bucket;
+
+Affected Rows: 0
+

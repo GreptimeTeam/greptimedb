@@ -187,3 +187,17 @@ insert into histogram4_bucket values
 tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
 
 drop table histogram4_bucket;
+
+CREATE TABLE greptime_servers_postgres_query_elapsed_bucket (
+    pod STRING,
+    instance STRING,
+    le STRING,
+    t TIMESTAMP TIME INDEX,
+    v DOUBLE,
+    PRIMARY KEY (pod, instance, le)
+);
+
+-- should return empty result instead of error
+tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
+
+drop table greptime_servers_postgres_query_elapsed_bucket;
