@@ -22,6 +22,7 @@ use crate::key::flow::flow_name::FlowNameKey;
 use crate::key::flow::flow_route::FlowRouteKey;
 use crate::key::flow::flownode_flow::FlownodeFlowKey;
 use crate::key::flow::table_flow::TableFlowKey;
+use crate::key::node_address::NodeAddressKey;
 use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
@@ -53,6 +54,10 @@ pub struct Context {
 #[async_trait::async_trait]
 pub trait CacheInvalidator: Send + Sync {
     async fn invalidate(&self, ctx: &Context, caches: &[CacheIdent]) -> Result<()>;
+
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
@@ -135,6 +140,13 @@ where
                 }
                 CacheIdent::FlowId(flow_id) => {
                     let key = FlowInfoKey::new(*flow_id);
+                    self.invalidate_key(&key.to_bytes()).await;
+                }
+                CacheIdent::FlowNodeAddressChange(node_id) => {
+                    // other caches doesn't need to be invalidated
+                    // since this is only for flownode address change not id change
+                    common_telemetry::info!("Invalidate flow node cache for node_id: {}", node_id);
+                    let key = NodeAddressKey::with_flownode(*node_id);
                     self.invalidate_key(&key.to_bytes()).await;
                 }
             }

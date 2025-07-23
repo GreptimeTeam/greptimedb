@@ -5,23 +5,37 @@ SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
 
 EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
 
-+---------------+----------------------------------+
-| plan_type     | plan                             |
-+---------------+----------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec                        |
-|               |                                  |
-+---------------+----------------------------------+
++---------------+-------------------------------------------------------------------------------+
+| plan_type     | plan                                                                          |
++---------------+-------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                               |
+|               | Limit: skip=0, fetch=0                                                        |
+|               |   Projection: sum(numbers.number)                                             |
+|               |     Limit: skip=0, fetch=100000000000                                         |
+|               |       Projection: sum(numbers.number)                                         |
+|               |         Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]] |
+|               |           TableScan: numbers                                                  |
+|               | ]]                                                                            |
+| physical_plan | EmptyExec                                                                     |
+|               |                                                                               |
++---------------+-------------------------------------------------------------------------------+
 
 EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) WHERE 1=0;
 
-+---------------+----------------------------------+
-| plan_type     | plan                             |
-+---------------+----------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false] |
-| physical_plan | EmptyExec                        |
-|               |                                  |
-+---------------+----------------------------------+
++---------------+-------------------------------------------------------------------------------+
+| plan_type     | plan                                                                          |
++---------------+-------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                               |
+|               | Projection: sum(numbers.number)                                               |
+|               |   Filter: Int64(1) = Int64(0)                                                 |
+|               |     Limit: skip=0, fetch=100000000000                                         |
+|               |       Projection: sum(numbers.number)                                         |
+|               |         Aggregate: groupBy=[[]], aggr=[[sum(CAST(numbers.number AS UInt64))]] |
+|               |           TableScan: numbers                                                  |
+|               | ]]                                                                            |
+| physical_plan | EmptyExec                                                                     |
+|               |                                                                               |
++---------------+-------------------------------------------------------------------------------+
 
 CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
 

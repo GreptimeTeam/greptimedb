@@ -542,6 +542,22 @@ pub(crate) struct SenderBulkRequest {
     pub(crate) region_metadata: RegionMetadataRef,
 }
 
+/// Request sent to a worker with timestamp
+#[derive(Debug)]
+pub(crate) struct WorkerRequestWithTime {
+    pub(crate) request: WorkerRequest,
+    pub(crate) created_at: Instant,
+}
+
+impl WorkerRequestWithTime {
+    pub(crate) fn new(request: WorkerRequest) -> Self {
+        Self {
+            request,
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// Request sent to a worker
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {

@@ -70,8 +70,14 @@ EXPLAIN SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 
 | logical_plan  | Sort: Int64(-1) ASC NULLS LAST                                                                             |
 |               |   Aggregate: groupBy=[[test.a % Int64(2), test.b]], aggr=[[]]                                              |
 |               |     Union                                                                                                  |
-|               |       MergeScan [is_placeholder=false]                                                                     |
-|               |       MergeScan [is_placeholder=false]                                                                     |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                      |
+|               | Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                                  |
+|               |   TableScan: test                                                                                          |
+|               | ]]                                                                                                         |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                      |
+|               | Projection: CAST(test.a AS Int64) % Int64(2) AS test.a % Int64(2), test.b                                  |
+|               |   TableScan: test                                                                                          |
+|               | ]]                                                                                                         |
 | physical_plan | CoalescePartitionsExec                                                                                     |
 |               |   AggregateExec: mode=SinglePartitioned, gby=[test.a % Int64(2)@0 as test.a % Int64(2), b@1 as b], aggr=[] |
 |               |     InterleaveExec                                                                                         |

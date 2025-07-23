@@ -26,7 +26,12 @@ explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY hos
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| MergeSort: demo.host ASC NULLS LAST_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: demo.host ASC NULLS LAST_|
+|_|_Projection: demo.host, demo.ts, demo.cpu, demo.memory, demo.disk_util_|
+|_|_Filter: demo.ts > arrow_cast(Int64(1000000000), Utf8("Timestamp(Millisecond, None)"))_|
+|_|_TableScan: demo_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [host@0 ASC NULLS LAST]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
