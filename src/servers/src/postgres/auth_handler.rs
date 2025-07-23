@@ -24,7 +24,7 @@ use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
-use pgwire::messages::startup::Authentication;
+use pgwire::messages::startup::{Authentication, SecretKey};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::Session;
 use snafu::IntoError;
@@ -126,7 +126,8 @@ where
 
     // pass generated process id and secret key to client, this information will
     // be sent to postgres client for query cancellation.
-    client.set_pid_and_secret_key(session.process_id() as i32, rand::random::<i32>());
+    // use all 0 before we actually supported query cancellation
+    client.set_pid_and_secret_key(0, SecretKey::I32(0));
     // set userinfo outside
 }
 
