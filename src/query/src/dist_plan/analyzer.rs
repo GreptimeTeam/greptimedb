@@ -41,6 +41,7 @@ use crate::query_engine::DefaultSerializer;
 #[cfg(test)]
 mod test;
 
+mod fallback;
 mod utils;
 
 pub(crate) use utils::{AliasMapping, AliasTracker};
@@ -64,15 +65,35 @@ impl AnalyzerRule for DistPlannerAnalyzer {
             .rewrite(plan, &optimizer_context)?
             .data;
 
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::default();
-        let result = plan.data.rewrite(&mut rewriter)?.data;
+        let result = match self.try_push_down(plan.clone()) {
+            Ok(plan) => plan,
+            Err(err) => {
+                common_telemetry::error!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
+                // if push down failed, use fallback plan rewriter
+                self.use_fallback(plan)?
+            }
+        };
 
         Ok(result)
     }
 }
 
 impl DistPlannerAnalyzer {
+    /// Try push down as many nodes as possible
+    fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
+        let mut rewriter = PlanRewriter::default();
+        let result = plan.data.rewrite(&mut rewriter)?.data;
+        Ok(result)
+    }
+
+    /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
+    fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        let mut rewriter = fallback::FallbackPlanRewriter;
+        let result = plan.rewrite(&mut rewriter)?.data;
+        Ok(result)
+    }
+
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
         // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.
