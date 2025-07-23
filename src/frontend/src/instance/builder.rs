@@ -194,12 +194,12 @@ impl FrontendBuilder {
 
         let slow_query_recorder = self.options.slow_query.and_then(|opts| {
             opts.enable.then(|| {
-                SlowQueryRecorder::new(
+                Arc::new(SlowQueryRecorder::new(
                     opts.clone(),
                     inserter.clone(),
                     statement_executor.clone(),
                     self.catalog_manager.clone(),
-                )
+                ))
             })
         });
 

@@ -24,6 +24,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
+use common_slow_query_recorder::SlowQuery;
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
@@ -83,6 +85,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    slow_query_recorder: Option<SlowQueryRecorderRef>,
 }
 
 impl MysqlInstanceShim {
@@ -91,6 +94,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        slow_query_recorder: Option<SlowQueryRecorderRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -118,6 +122,7 @@ impl MysqlInstanceShim {
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            slow_query_recorder,
         }
     }
 
@@ -490,6 +495,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
+
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(SlowQuery::Sql(query.to_string()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let query_upcase = query.to_uppercase();
         if query_upcase.starts_with("PREPARE ") {

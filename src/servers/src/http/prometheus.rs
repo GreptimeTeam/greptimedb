@@ -24,6 +24,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
+use common_slow_query_recorder::SlowQuery;
 use common_telemetry::{debug, tracing};
 use common_time::util::{current_time_rfc3339, yesterday_rfc3339};
 use common_version::OwnedBuildInfo;
@@ -259,6 +260,12 @@ pub async fn instant_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
         .start_timer();
 
+    let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+        recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
+    } else {
+        None
+    };
+
     if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
         && !name_matchers.is_empty()
     {
@@ -368,6 +375,12 @@ pub async fn range_query(
     let _timer = crate::metrics::METRIC_HTTP_PROMETHEUS_PROMQL_ELAPSED
         .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
         .start_timer();
+
+    let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+        recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
+    } else {
+        None
+    };
 
     if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
         && !name_matchers.is_empty()
@@ -567,6 +580,12 @@ pub async fn labels_query(
             end: end.clone(),
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
+        };
+
+        let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+            recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
+        } else {
+            None
         };
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
@@ -1228,6 +1247,13 @@ pub async fn series_query(
             step: DEFAULT_LOOKBACK_STRING.to_string(),
             lookback: lookback.clone(),
         };
+
+        let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+            recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
+        } else {
+            None
+        };
+
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 
         handle_schema_err!(

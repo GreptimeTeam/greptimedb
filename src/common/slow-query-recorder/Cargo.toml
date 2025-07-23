@@ -13,6 +13,7 @@ common-macro.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 operator.workspace = true
+promql-parser.workspace = true
 query.workspace = true
 rand.workspace = true
 session.workspace = true

@@ -231,6 +231,7 @@ where
                     opts.reject_no_database.unwrap_or(false),
                 )),
                 Some(instance.process_manager().clone()),
+                instance.slow_query_recorder().clone(),
             );
             handlers.insert((mysql_server, mysql_addr));
         }

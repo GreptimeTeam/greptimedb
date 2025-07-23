@@ -20,6 +20,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
 use promql_parser::label::Matcher;
 use query::parser::PromQuery;
 use session::context::QueryContextRef;
@@ -52,4 +53,6 @@ pub trait PrometheusHandler {
     ) -> Result<Vec<String>>;
 
     fn catalog_manager(&self) -> CatalogManagerRef;
+
+    fn slow_query_recorder(&self) -> Option<SlowQueryRecorderRef>;
 }

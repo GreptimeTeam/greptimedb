@@ -649,6 +649,7 @@ pub async fn setup_mysql_server_with_user_provider(
             opts.reject_no_database.unwrap_or(false),
         )),
         None,
+        None,
     );
 
     mysql_server

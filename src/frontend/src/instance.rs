@@ -52,7 +52,7 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
-use common_slow_query_recorder::SlowQueryRecorder;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
 use common_telemetry::{debug, error, info, tracing};
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
@@ -108,7 +108,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    slow_query_recorder: Option<SlowQueryRecorder>,
+    slow_query_recorder: Option<SlowQueryRecorderRef>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
 }
@@ -190,6 +190,10 @@ impl Instance {
     pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
         self.statement_executor.procedure_executor()
     }
+
+    pub fn slow_query_recorder(&self) -> Option<SlowQueryRecorderRef> {
+        self.slow_query_recorder.clone()
+    }
 }
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
@@ -203,11 +207,11 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
-        } else {
-            None
-        };
+        // let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+        //     recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        // } else {
+        //     None
+        // };
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
@@ -548,12 +552,6 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(stmt.clone(), query_ctx.clone())
-        } else {
-            None
-        };
-
         let plan = self
             .statement_executor
             .plan(&stmt, query_ctx.clone())
@@ -601,6 +599,10 @@ impl PrometheusHandler for Instance {
 
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
+    }
+
+    fn slow_query_recorder(&self) -> Option<SlowQueryRecorderRef> {
+        self.slow_query_recorder.clone()
     }
 }
 
