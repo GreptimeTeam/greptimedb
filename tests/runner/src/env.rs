@@ -140,7 +140,7 @@ impl Env {
     }
 
     async fn start_standalone(&self, id: usize) -> GreptimeDB {
-        println!("Starting standalone instance {id}");
+        println!("Starting standalone instance id: {id}");
 
         if self.server_addrs.server_addr.is_some() {
             self.connect_db(&self.server_addrs, id).await
