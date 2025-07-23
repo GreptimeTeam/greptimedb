@@ -145,6 +145,7 @@ impl fmt::Debug for ScanMetricsSet {
             stream_eof,
         } = self;
 
+        // Write core metrics
         write!(
             f,
             "{{\"prepare_scan_cost\":\"{prepare_scan_cost:?}\", \
@@ -158,27 +159,66 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_file_ranges\":{num_file_ranges}, \
             \"build_parts_cost\":\"{build_parts_cost:?}\", \
             \"rg_total\":{rg_total}, \
-            \"rg_fulltext_filtered\":{rg_fulltext_filtered}, \
-            \"rg_inverted_filtered\":{rg_inverted_filtered}, \
-            \"rg_minmax_filtered\":{rg_minmax_filtered}, \
-            \"rg_bloom_filtered\":{rg_bloom_filtered}, \
             \"rows_before_filter\":{rows_before_filter}, \
-            \"rows_fulltext_filtered\":{rows_fulltext_filtered}, \
-            \"rows_inverted_filtered\":{rows_inverted_filtered}, \
-            \"rows_bloom_filtered\":{rows_bloom_filtered}, \
-            \"rows_precise_filtered\":{rows_precise_filtered}, \
             \"num_sst_record_batches\":{num_sst_record_batches}, \
             \"num_sst_batches\":{num_sst_batches}, \
             \"num_sst_rows\":{num_sst_rows}, \
-            \"first_poll\":\"{first_poll:?}\", \
-            \"num_series_send_timeout\":{num_series_send_timeout}, \
-            \"num_series_send_full\":{num_series_send_full}, \
-            \"num_distributor_rows\":{num_distributor_rows}, \
-            \"num_distributor_batches\":{num_distributor_batches}, \
-            \"distributor_scan_cost\":\"{distributor_scan_cost:?}\", \
-            \"distributor_yield_cost\":\"{distributor_yield_cost:?}\", \
-            \"stream_eof\":{stream_eof}}}"
-        )
+            \"first_poll\":\"{first_poll:?}\""
+        )?;
+
+        // Write non-zero filter counters
+        if *rg_fulltext_filtered > 0 {
+            write!(f, ", \"rg_fulltext_filtered\":{rg_fulltext_filtered}")?;
+        }
+        if *rg_inverted_filtered > 0 {
+            write!(f, ", \"rg_inverted_filtered\":{rg_inverted_filtered}")?;
+        }
+        if *rg_minmax_filtered > 0 {
+            write!(f, ", \"rg_minmax_filtered\":{rg_minmax_filtered}")?;
+        }
+        if *rg_bloom_filtered > 0 {
+            write!(f, ", \"rg_bloom_filtered\":{rg_bloom_filtered}")?;
+        }
+        if *rows_fulltext_filtered > 0 {
+            write!(f, ", \"rows_fulltext_filtered\":{rows_fulltext_filtered}")?;
+        }
+        if *rows_inverted_filtered > 0 {
+            write!(f, ", \"rows_inverted_filtered\":{rows_inverted_filtered}")?;
+        }
+        if *rows_bloom_filtered > 0 {
+            write!(f, ", \"rows_bloom_filtered\":{rows_bloom_filtered}")?;
+        }
+        if *rows_precise_filtered > 0 {
+            write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
+        }
+
+        // Write non-zero distributor metrics
+        if *num_series_send_timeout > 0 {
+            write!(f, ", \"num_series_send_timeout\":{num_series_send_timeout}")?;
+        }
+        if *num_series_send_full > 0 {
+            write!(f, ", \"num_series_send_full\":{num_series_send_full}")?;
+        }
+        if *num_distributor_rows > 0 {
+            write!(f, ", \"num_distributor_rows\":{num_distributor_rows}")?;
+        }
+        if *num_distributor_batches > 0 {
+            write!(f, ", \"num_distributor_batches\":{num_distributor_batches}")?;
+        }
+        if !distributor_scan_cost.is_zero() {
+            write!(
+                f,
+                ", \"distributor_scan_cost\":\"{distributor_scan_cost:?}\""
+            )?;
+        }
+        if !distributor_yield_cost.is_zero() {
+            write!(
+                f,
+                ", \"distributor_yield_cost\":\"{distributor_yield_cost:?}\""
+            )?;
+        }
+
+        write!(f, ", \"stream_eof\":{stream_eof}}}")
     }
 }
 impl ScanMetricsSet {
