@@ -43,7 +43,7 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
-use common_meta::rpc::router::{Partition, Partition as MetaPartition};
+use common_meta::rpc::router::{LegacyPartition, LegacyPartition as MetaPartition};
 use common_query::Output;
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
@@ -152,14 +152,16 @@ impl StatementExecutor {
         create_stmt.name = stmt.table_name;
         create_stmt.if_not_exists = false;
 
-        let partitions = create_partitions_stmt(partitions)?.and_then(|mut partitions| {
-            if !partitions.column_list.is_empty() {
-                partitions.set_quote(quote_style);
-                Some(partitions)
-            } else {
-                None
-            }
-        });
+        let table_info = table_ref.table_info();
+        let partitions =
+            create_partitions_stmt(&table_info, partitions)?.and_then(|mut partitions| {
+                if !partitions.column_list.is_empty() {
+                    partitions.set_quote(quote_style);
+                    Some(partitions)
+                } else {
+                    None
+                }
+            });
 
         let create_expr = &mut expr_helper::create_to_expr(&create_stmt, &ctx)?;
         self.create_table_inner(create_expr, partitions, ctx).await
@@ -1335,7 +1337,7 @@ impl StatementExecutor {
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
-        partitions: Vec<Partition>,
+        partitions: Vec<LegacyPartition>,
         table_info: RawTableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
@@ -1544,25 +1546,23 @@ pub fn parse_partitions(
         find_partition_entries(create_table, &partitions, &partition_columns, query_ctx)?;
 
     // Validates partition
-    let mut exprs = vec![];
-    for partition in &partition_entries {
-        for bound in partition {
-            if let PartitionBound::Expr(expr) = bound {
-                exprs.push(expr.clone());
-            }
-        }
-    }
+    let exprs = partition_entries.clone();
     MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs, true)
         .context(InvalidPartitionSnafu)?;
 
-    Ok((
-        partition_entries
-            .into_iter()
-            .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
-            .collect::<std::result::Result<_, _>>()
-            .context(DeserializePartitionSnafu)?,
-        partition_columns,
-    ))
+    // TODO(zhongzc): change to PartitionExpr
+    let meta_partitions: Vec<MetaPartition> = partition_entries
+        .into_iter()
+        .map(|x| {
+            MetaPartition::try_from(PartitionDef::new(
+                partition_columns.clone(),
+                vec![PartitionBound::Expr(x)],
+            ))
+        })
+        .collect::<std::result::Result<_, _>>()
+        .context(DeserializePartitionSnafu)?;
+
+    Ok((meta_partitions, partition_columns))
 }
 
 /// Verifies an alter and returns whether it is necessary to perform the alter.
@@ -1726,48 +1726,39 @@ fn find_partition_entries(
     partitions: &Option<Partitions>,
     partition_columns: &[String],
     query_ctx: &QueryContextRef,
-) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(partitions) = partitions {
-        // extract concrete data type of partition columns
-        let column_defs = partition_columns
-            .iter()
-            .map(|pc| {
-                create_table
-                    .column_defs
-                    .iter()
-                    .find(|c| &c.name == pc)
-                    // unwrap is safe here because we have checked that partition columns are defined
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let mut column_name_and_type = HashMap::with_capacity(column_defs.len());
-        for column in column_defs {
+) -> Result<Vec<PartitionExpr>> {
+    let Some(partitions) = partitions else {
+        return Ok(vec![]);
+    };
+
+    // extract concrete data type of partition columns
+    let column_name_and_type = partition_columns
+        .iter()
+        .map(|pc| {
+            let column = create_table
+                .column_defs
+                .iter()
+                .find(|c| &c.name == pc)
+                // unwrap is safe here because we have checked that partition columns are defined
+                .unwrap();
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension)
                     .context(ColumnDataTypeSnafu)?,
             );
-            column_name_and_type.insert(column_name, data_type);
-        }
+            Ok((column_name, data_type))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
 
-        // Transform parser expr to partition expr
-        let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
-        for partition in &partitions.exprs {
-            let partition_expr =
-                convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
-            partition_exprs.push(vec![PartitionBound::Expr(partition_expr)]);
-        }
+    // Transform parser expr to partition expr
+    let mut partition_exprs = Vec::with_capacity(partitions.exprs.len());
+    for partition in &partitions.exprs {
+        let partition_expr =
+            convert_one_expr(partition, &column_name_and_type, &query_ctx.timezone())?;
+        partition_exprs.push(partition_expr);
+    }
 
-        // fallback for no expr
-        if partition_exprs.is_empty() {
-            partition_exprs.push(vec![PartitionBound::MaxValue]);
-        }
-
-        partition_exprs
-    } else {
-        vec![vec![PartitionBound::MaxValue]]
-    };
-    Ok(entries)
+    Ok(partition_exprs)
 }
 
 fn convert_one_expr(
