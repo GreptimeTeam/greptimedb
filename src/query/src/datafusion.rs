@@ -512,12 +512,15 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        common_telemetry::info!("Executing query plan");
+        let explain_verbose = ctx.query_ctx().explain_verbose();
+        let output_partitions = plan.properties().output_partitioning().partition_count();
+        if explain_verbose {
+            common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
+        }
 
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
-        let output_partitions = plan.properties().output_partitioning().partition_count();
         match plan.properties().output_partitioning().partition_count() {
             0 => {
                 let schema = Arc::new(
@@ -538,12 +541,15 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
+                stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    common_telemetry::info!(
-                        "DatafusionQueryEngine execute 1 stream, cost: {:?}s",
-                        exec_timer.stop_and_record()
-                    );
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute 1 stream, cost: {:?}s",
+                            exec_cost,
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }
@@ -567,13 +573,17 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
+                // Also display the CoalescePartitionsExec plan in analyze output.
                 stream.set_metrics2(Arc::new(merged_plan));
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    common_telemetry::info!(
-                        "DatafusionQueryEngine execute {output_partitions} stream, cost: {:?}s",
-                        exec_timer.stop_and_record()
-                    );
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute {output_partitions} stream, cost: {:?}s",
+                            exec_cost
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }
