@@ -917,7 +917,10 @@ impl PromPlanner {
             self.ctx.tag_columns.push(tag);
         }
 
-        builder.build().context(DataFusionPlanningSnafu)
+        let plan = builder.build().context(DataFusionPlanningSnafu)?;
+        common_telemetry::debug!("Created PromQL function plan: {plan:?} for {call_expr:?}");
+
+        Ok(plan)
     }
 
     async fn prom_ext_expr_to_plan(
@@ -1762,6 +1765,16 @@ impl PromPlanner {
             "rad" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::radians()),
             "deg" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::degrees()),
             "sgn" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::signum()),
+            "pi" => {
+                // pi functions doesn't accepts any arguments, needs special processing
+                let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
+                    func: datafusion::functions::math::pi(),
+                    args: vec![],
+                });
+                exprs.push(fn_expr);
+
+                ScalarFunc::GeneratedExpr
+            }
             _ => {
                 if let Some(f) = query_engine_state
                     .session_state()
