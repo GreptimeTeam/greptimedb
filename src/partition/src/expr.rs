@@ -371,4 +371,27 @@ mod tests {
             assert_eq!(case.3, expr.to_string());
         }
     }
+
+    #[test]
+    fn test_serde_partition_expr() {
+        let expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Eq,
+            Operand::Value(Value::UInt32(10)),
+        );
+        let json = expr.as_json_str().unwrap();
+        assert_eq!(
+            json,
+            "{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"Eq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"
+        );
+
+        let json = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+        let expr2 = PartitionExpr::from_json_str(json).unwrap().unwrap();
+        let expected = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::UInt32(10)),
+        );
+        assert_eq!(expr2, expected);
+    }
 }
