@@ -102,7 +102,7 @@ pub enum AlterTableOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
-/// `ALTER <column_name> UNSET DEFAULT`
+/// `ALTER <column_name> DROP DEFAULT`
 pub struct DropDefaultsOperation(pub Ident);
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]

@@ -485,25 +485,25 @@ fn parse_alter_column_set_default(
 ) -> std::result::Result<SetDefaultsOperation, ParserError> {
     parser.expect_keyword(Keyword::ALTER)?;
     let column_name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
-    if parser.parse_keywords(&[Keyword::SET, Keyword::DEFAULT]) {
-        if let Ok(default_constraint) = parser.parse_expr() {
-            Ok(SetDefaultsOperation {
-                column_name,
-                default_constraint,
-            })
-        } else {
-            Err(ParserError::ParserError(format!(
-                "Invalid default value after SET DEFAULT, got: `{}`",
-                parser.peek_token()
-            )))
+    let t = parser.next_token();
+    match t.token {
+        Token::Word(w) if w.keyword == Keyword::SET => {
+            parser.expect_keyword(Keyword::DEFAULT)?;
+            if let Ok(default_constraint) = parser.parse_expr() {
+                Ok(SetDefaultsOperation {
+                    column_name,
+                    default_constraint,
+                })
+            } else {
+                Err(ParserError::ParserError(format!(
+                    "Invalid default value after SET DEFAULT, got: `{}`",
+                    parser.peek_token()
+                )))
+            }
         }
-    } else {
-        let not_set = parser.peek_token();
-        parser.next_token();
-        let not_default = parser.peek_token();
-        Err(ParserError::ParserError(format!(
-            "Unexpected keyword, expect SET DEFAULT, got: `{not_set} {not_default}`"
-        )))
+        _ => Err(ParserError::ParserError(format!(
+            "Unexpected keyword, expect SET, got: `{t}`"
+        ))),
     }
 }
 
@@ -1351,6 +1351,9 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Unexpected keyword, expect SET DEFAULT, got: `DROP DEFAULT`");
+        assert_eq!(
+            err,
+            "Invalid SQL syntax: sql parser error: Unexpected keyword, expect SET, got: `DROP`"
+        );
     }
 }
