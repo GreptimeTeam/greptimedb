@@ -27,6 +27,7 @@ use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 
+use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
@@ -139,9 +140,7 @@ pub fn step_aggr_to_upper_aggr(
         new_projection_exprs.push(aliased_output_aggr_expr);
     }
     let upper_aggr_plan = LogicalPlan::Aggregate(new_aggr);
-    debug!("Before recompute schema: {upper_aggr_plan:?}");
     let upper_aggr_plan = upper_aggr_plan.recompute_schema()?;
-    debug!("After recompute schema: {upper_aggr_plan:?}");
     // create a projection on top of the new aggregate plan
     let new_projection =
         Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
@@ -222,7 +221,7 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
-    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<Vec<String>>) -> Commutativity {
+    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<AliasMapping>) -> Commutativity {
         let partition_cols = partition_cols.unwrap_or_default();
 
         match plan {
@@ -247,7 +246,6 @@ impl Categorizer {
                         transformer: Some(Arc::new(|plan: &LogicalPlan| {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
-                            debug!("After Step Optimize: {ret:?}");
                             ret.ok().map(|s| TransformerAction {
                                 extra_parent_plans: s.to_vec(),
                                 new_child_plan: None,
@@ -264,7 +262,11 @@ impl Categorizer {
                         return commutativity;
                     }
                 }
-                Commutativity::Commutative
+                // all group by expressions are partition columns can push down, unless
+                // another push down(including `Limit` or `Sort`) is already in progress(which will then prvent next cond commutative node from being push down).
+                // TODO(discord9): This is a temporary solution(that works), a better description of
+                // commutativity is needed under this situation.
+                Commutativity::ConditionalCommutative(None)
             }
             LogicalPlan::Sort(_) => {
                 if partition_cols.is_empty() {
@@ -322,17 +324,20 @@ impl Categorizer {
 
     pub fn check_extension_plan(
         plan: &dyn UserDefinedLogicalNode,
-        partition_cols: &[String],
+        partition_cols: &AliasMapping,
     ) -> Commutativity {
         match plan.name() {
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
                 let tags = series_divide.tags().iter().collect::<HashSet<_>>();
-                for partition_col in partition_cols {
-                    if !tags.contains(partition_col) {
+
+                for all_alias in partition_cols.values() {
+                    let all_alias = all_alias.iter().map(|c| &c.name).collect::<HashSet<_>>();
+                    if tags.intersection(&all_alias).count() == 0 {
                         return Commutativity::NonCommutative;
                     }
                 }
+
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
@@ -396,7 +401,7 @@ impl Categorizer {
 
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
-    fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
+    fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
         let mut ref_cols = HashSet::new();
         for expr in exprs {
             expr.add_column_refs(&mut ref_cols);
@@ -405,8 +410,14 @@ impl Categorizer {
             .into_iter()
             .map(|c| c.name.clone())
             .collect::<HashSet<_>>();
-        for col in partition_cols {
-            if !ref_cols.contains(col) {
+        for all_alias in partition_cols.values() {
+            let all_alias = all_alias
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<HashSet<_>>();
+            // check if ref columns intersect with all alias of partition columns
+            // is empty, if it's empty, not all partition columns show up in `exprs`
+            if ref_cols.intersection(&all_alias).count() == 0 {
                 return false;
             }
         }
@@ -424,7 +435,7 @@ pub type StageTransformer = Arc<dyn Fn(&LogicalPlan) -> Option<TransformerAction
 pub struct TransformerAction {
     /// list of plans that need to be applied to parent plans, in the order of parent to child.
     /// i.e. if this returns `[Projection, Aggregate]`, then the parent plan should be transformed to
-    /// ```
+    /// ```ignore
     /// Original Parent Plan:
     ///     Projection:
     ///         Aggregate:
@@ -453,7 +464,7 @@ mod test {
             fetch: None,
         });
         assert!(matches!(
-            Categorizer::check_plan(&plan, Some(vec![])),
+            Categorizer::check_plan(&plan, Some(Default::default())),
             Commutativity::Commutative
         ));
     }
