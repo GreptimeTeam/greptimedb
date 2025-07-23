@@ -573,8 +573,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(error::ConvertDfRecordBatchStreamSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
-                // Also display the CoalescePartitionsExec plan in analyze output.
-                stream.set_metrics2(Arc::new(merged_plan));
+                stream.set_metrics2(plan.clone());
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
