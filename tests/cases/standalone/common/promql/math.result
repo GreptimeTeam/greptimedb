@@ -25,21 +25,45 @@ INSERT INTO TABLE angles VALUES
 
 Affected Rows: 15
 
--- FIXME: test pi() function (returns constant π ≈ 3.141592653589793)
+-- Test pi() function (returns constant π ≈ 3.141592653589793)
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') pi();
 
-Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named value. Valid fields are .time.
++---------------------+-------------------+
+| time                | pi()              |
++---------------------+-------------------+
+| 1970-01-01T00:00:00 | 3.141592653589793 |
+| 1970-01-01T00:00:05 | 3.141592653589793 |
+| 1970-01-01T00:00:10 | 3.141592653589793 |
+| 1970-01-01T00:00:15 | 3.141592653589793 |
+| 1970-01-01T00:00:20 | 3.141592653589793 |
++---------------------+-------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') pi() + 1;
 
-Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named value. Valid fields are .time.
++---------------------+-------------------+
+| time                | pi() + Float64(1) |
++---------------------+-------------------+
+| 1970-01-01T00:00:00 | 4.141592653589793 |
+| 1970-01-01T00:00:05 | 4.141592653589793 |
+| 1970-01-01T00:00:10 | 4.141592653589793 |
+| 1970-01-01T00:00:15 | 4.141592653589793 |
+| 1970-01-01T00:00:20 | 4.141592653589793 |
++---------------------+-------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') angles{unit="radians"} * pi();
 
-Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named value. Valid fields are .time.
++---------------------+--------------------+
+| time                | angles.val * .pi() |
++---------------------+--------------------+
+| 1970-01-01T00:00:00 | 0.0                |
+| 1970-01-01T00:00:05 | 4.934813740258847  |
+| 1970-01-01T00:00:10 | 9.869627480517694  |
+| 1970-01-01T00:00:15 | 14.80444122077654  |
+| 1970-01-01T00:00:20 | 19.73925496103539  |
++---------------------+--------------------+
 
 -- Test rad() function (converts degrees to radians)
 -- SQLNESS SORT_RESULT 3 1

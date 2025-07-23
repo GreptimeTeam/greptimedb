@@ -21,7 +21,7 @@ INSERT INTO TABLE angles VALUES
     (30000, 'small_pos', 0.001),
     (35000, 'small_neg', -0.001);
 
--- FIXME: test pi() function (returns constant π ≈ 3.141592653589793)
+-- Test pi() function (returns constant π ≈ 3.141592653589793)
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 20, '5s') pi();
