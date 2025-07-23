@@ -14,6 +14,7 @@
 
 import os
 from multiprocessing import Pool
+from pathlib import Path
 
 
 def find_rust_files(directory):
@@ -24,7 +25,7 @@ def find_rust_files(directory):
             continue
 
         # Skip the target directory
-        if "target" in root:
+        if "target" in Path(root).parts:
             continue
 
         for file in files:
