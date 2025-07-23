@@ -36,6 +36,61 @@ use crate::error;
 use crate::grpc::flight::TonicResult;
 use crate::grpc::FlightCompression;
 
+/// Metrics collector for Flight stream with RAII logging pattern
+struct StreamMetrics {
+    send_schema_duration: Duration,
+    send_record_batch_duration: Duration,
+    send_metrics_duration: Duration,
+    fetch_content_duration: Duration,
+    record_batch_count: usize,
+    metrics_count: usize,
+    total_rows: usize,
+    total_bytes: usize,
+    should_log: bool,
+}
+
+impl StreamMetrics {
+    fn new(should_log: bool) -> Self {
+        Self {
+            send_schema_duration: Duration::ZERO,
+            send_record_batch_duration: Duration::ZERO,
+            send_metrics_duration: Duration::ZERO,
+            fetch_content_duration: Duration::ZERO,
+            record_batch_count: 0,
+            metrics_count: 0,
+            total_rows: 0,
+            total_bytes: 0,
+            should_log,
+        }
+    }
+}
+
+impl Drop for StreamMetrics {
+    fn drop(&mut self) {
+        if self.should_log {
+            info!(
+                "flight_data_stream finished: \
+                send_schema_duration={:?}, \
+                send_record_batch_duration={:?}, \
+                send_metrics_duration={:?}, \
+                fetch_content_duration={:?}, \
+                record_batch_count={}, \
+                metrics_count={}, \
+                total_rows={}, \
+                total_bytes={}",
+                self.send_schema_duration,
+                self.send_record_batch_duration,
+                self.send_metrics_duration,
+                self.fetch_content_duration,
+                self.record_batch_count,
+                self.metrics_count,
+                self.total_rows,
+                self.total_bytes
+            );
+        }
+    }
+}
+
 #[pin_project(PinnedDrop)]
 pub struct FlightRecordBatchStream {
     #[pin]
@@ -79,15 +134,7 @@ impl FlightRecordBatchStream {
         mut tx: Sender<TonicResult<FlightMessage>>,
         should_send_partial_metrics: bool,
     ) {
-        let mut send_schema_duration = Duration::ZERO;
-        let mut send_record_batch_duration = Duration::ZERO;
-        let mut send_metrics_duration = Duration::ZERO;
-        let mut fetch_content_duration = Duration::ZERO;
-
-        let mut record_batch_count = 0usize;
-        let mut metrics_count = 0usize;
-        let mut total_rows = 0usize;
-        let mut total_bytes = 0usize;
+        let mut metrics = StreamMetrics::new(should_send_partial_metrics);
 
         let schema = recordbatches.schema().arrow_schema().clone();
         let start = Instant::now();
@@ -95,19 +142,19 @@ impl FlightRecordBatchStream {
             warn!(e; "stop sending Flight data");
             return;
         }
-        send_schema_duration += start.elapsed();
+        metrics.send_schema_duration += start.elapsed();
 
         while let Some(batch_or_err) = {
             let start = Instant::now();
             let result = recordbatches.next().in_current_span().await;
-            fetch_content_duration += start.elapsed();
+            metrics.fetch_content_duration += start.elapsed();
             result
         } {
             match batch_or_err {
                 Ok(recordbatch) => {
-                    total_rows += recordbatch.num_rows();
-                    record_batch_count += 1;
-                    total_bytes += recordbatch.df_record_batch().get_array_memory_size();
+                    metrics.total_rows += recordbatch.num_rows();
+                    metrics.record_batch_count += 1;
+                    metrics.total_bytes += recordbatch.df_record_batch().get_array_memory_size();
 
                     let start = Instant::now();
                     if let Err(e) = tx
@@ -119,20 +166,20 @@ impl FlightRecordBatchStream {
                         warn!(e; "stop sending Flight data");
                         return;
                     }
-                    send_record_batch_duration += start.elapsed();
+                    metrics.send_record_batch_duration += start.elapsed();
 
                     if should_send_partial_metrics {
-                        if let Some(metrics) = recordbatches
+                        if let Some(metrics_str) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
                         {
-                            metrics_count += 1;
+                            metrics.metrics_count += 1;
                             let start = Instant::now();
-                            if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics))).await {
+                            if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
                                 warn!(e; "stop sending Flight data");
                                 return;
                             }
-                            send_metrics_duration += start.elapsed();
+                            metrics.send_metrics_duration += start.elapsed();
                         }
                     }
                 }
@@ -154,16 +201,11 @@ impl FlightRecordBatchStream {
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
         {
-            metrics_count += 1;
+            metrics.metrics_count += 1;
             let start = Instant::now();
             let _ = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await;
-            send_metrics_duration += start.elapsed();
+            metrics.send_metrics_duration += start.elapsed();
         }
-
-        info!(
-            "flight_data_stream finished: send_schema_duration={:?}, send_record_batch_duration={:?}, send_metrics_duration={:?}, fetch_content_duration={:?}, record_batch_count={}, metrics_count={}, total_rows={}, total_bytes={}",
-            send_schema_duration, send_record_batch_duration, send_metrics_duration, fetch_content_duration, record_batch_count, metrics_count, total_rows, total_bytes
-        );
     }
 }
 
