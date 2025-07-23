@@ -16,6 +16,7 @@ async-trait.workspace = true
 backon.workspace = true
 common-base.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
 common-macro.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
