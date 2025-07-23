@@ -393,5 +393,19 @@ mod tests {
             Operand::Value(Value::UInt32(10)),
         );
         assert_eq!(expr2, expected);
+
+        // empty string
+        let json = "";
+        let expr3 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr3.is_none());
+
+        // variants other than Expr
+        let json = r#""MaxValue""#;
+        let expr4 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr4.is_none());
+
+        let json = r#"{"Value":{"UInt32":10}}"#;
+        let expr5 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr5.is_none());
     }
 }
