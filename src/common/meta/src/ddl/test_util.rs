@@ -146,10 +146,7 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: vec![Partition::default()],
         table_info,
     }
 }
@@ -184,10 +181,7 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: vec![Partition::default()],
         table_info,
     }
 }

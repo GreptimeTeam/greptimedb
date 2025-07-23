@@ -84,14 +84,7 @@ fn create_table_task(table_name: Option<&str>) -> CreateTableTask {
         .into();
 
     let table_info = build_raw_table_info_from_expr(&expr);
-    CreateTableTask::new(
-        expr,
-        vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
-        table_info,
-    )
+    CreateTableTask::new(expr, vec![Partition::default()], table_info)
 }
 
 #[test]

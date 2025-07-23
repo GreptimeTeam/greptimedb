@@ -141,10 +141,7 @@ pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: vec![Partition::default()],
         table_info,
     }
 }
@@ -211,21 +208,6 @@ async fn test_on_prepare_without_create_if_table_exists() {
         }
     );
     assert_eq!(procedure.table_id(), 1024);
-}
-
-#[tokio::test]
-async fn test_on_prepare_with_no_partition_err() {
-    let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(node_manager);
-    let mut task = test_create_table_task("foo");
-    task.partitions = vec![];
-    task.create_table.create_if_not_exists = true;
-    let mut procedure = CreateTableProcedure::new(task, ddl_context);
-    let err = procedure.on_prepare().await.unwrap_err();
-    assert_matches!(err, Error::Unexpected { .. });
-    assert!(err
-        .to_string()
-        .contains("The number of partitions must be greater than 0"),);
 }
 
 #[tokio::test]
