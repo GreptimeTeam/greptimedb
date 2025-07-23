@@ -188,16 +188,19 @@ tql eval (2900, 3000, '100s') histogram_quantile(0.9, histogram4_bucket);
 
 drop table histogram4_bucket;
 
-CREATE TABLE greptime_servers_postgres_query_elapsed_bucket (
-    pod STRING,
-    instance STRING,
-    le STRING,
-    t TIMESTAMP TIME INDEX,
-    v DOUBLE,
-    PRIMARY KEY (pod, instance, le)
-);
-
--- should return empty result instead of error
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
 
-drop table greptime_servers_postgres_query_elapsed_bucket;
+-- test case where table exists but doesn't have 'le' column should raise error
+CREATE TABLE greptime_servers_postgres_query_elapsed_no_le (
+    pod STRING,
+    instance STRING,
+    t TIMESTAMP TIME INDEX,
+    v DOUBLE,
+    PRIMARY KEY (pod, instance)
+);
+
+-- should return empty result instead of error when 'le' column is missing
+tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
+tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
+
+drop table greptime_servers_postgres_query_elapsed_no_le;
