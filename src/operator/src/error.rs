@@ -851,6 +851,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert partition expression to protobuf"))]
+    PartitionExprToPb {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -891,6 +898,7 @@ impl ErrorExt for Error {
             | Error::InvalidPartition { .. }
             | Error::PhysicalExpr { .. }
             | Error::InvalidJsonFormat { .. }
+            | Error::PartitionExprToPb { .. }
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
