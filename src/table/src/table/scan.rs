@@ -40,7 +40,9 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
+use store_api::region_engine::{
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+};
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -308,11 +310,14 @@ impl ExecutionPlan for RegionScanExec {
         let span =
             tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
 
+        let ctx = QueryScanContext {
+            explain_verbose: self.explain_verbose,
+        };
         let stream = self
             .scanner
             .lock()
             .unwrap()
-            .scan_partition(&self.metric, partition)
+            .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {

@@ -390,6 +390,13 @@ impl PrepareRequest {
     }
 }
 
+/// Necessary context of the query for the scanner.
+#[derive(Clone, Default)]
+pub struct QueryScanContext {
+    /// Whether the query is EXPLAIN ANALYZE VERBOSE.
+    pub explain_verbose: bool,
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -415,6 +422,7 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// Panics if the `partition` is out of bound.
     fn scan_partition(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
@@ -832,6 +840,7 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn scan_partition(
         &self,
+        _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {

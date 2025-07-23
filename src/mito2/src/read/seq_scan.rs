@@ -29,7 +29,9 @@ use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
+use store_api::region_engine::{
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+};
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
@@ -87,7 +89,9 @@ impl SeqScan {
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let streams = (0..self.properties.partitions.len())
-            .map(|partition: usize| self.scan_partition(&metrics_set, partition))
+            .map(|partition: usize| {
+                self.scan_partition(&QueryScanContext::default(), &metrics_set, partition)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
@@ -100,7 +104,7 @@ impl SeqScan {
 
         let streams = (0..self.properties.partitions.len())
             .map(|partition| {
-                let metrics = self.new_partition_metrics(&metrics_set, partition);
+                let metrics = self.new_partition_metrics(false, &metrics_set, partition);
                 self.scan_batch_in_partition(partition, metrics)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -116,7 +120,7 @@ impl SeqScan {
         assert!(self.compaction);
 
         let metrics_set = ExecutionPlanMetricsSet::new();
-        let part_metrics = self.new_partition_metrics(&metrics_set, 0);
+        let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
         debug_assert_eq!(1, self.properties.partitions.len());
         let partition_ranges = &self.properties.partitions[0];
 
@@ -210,15 +214,19 @@ impl SeqScan {
     /// Otherwise the returned stream might not contains any data.
     fn scan_partition_impl(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
-        common_telemetry::info!(
-            "scan partition impl, region_id: {}",
-            self.stream_ctx.input.region_metadata().region_id
-        );
+        if ctx.explain_verbose {
+            common_telemetry::info!(
+                "SeqScan partition {}, region_id: {}",
+                partition,
+                self.stream_ctx.input.region_metadata().region_id
+            );
+        }
 
-        let metrics = self.new_partition_metrics(metrics_set, partition);
+        let metrics = self.new_partition_metrics(ctx.explain_verbose, metrics_set, partition);
 
         let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
 
@@ -350,6 +358,7 @@ impl SeqScan {
     /// Sets the partition metrics for the given partition if it is not for compaction.
     fn new_partition_metrics(
         &self,
+        explain_verbose: bool,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> PartitionMetrics {
@@ -358,6 +367,7 @@ impl SeqScan {
             partition,
             get_scanner_type(self.compaction),
             self.stream_ctx.query_start,
+            explain_verbose,
             metrics_set,
         );
 
@@ -384,10 +394,11 @@ impl RegionScanner for SeqScan {
 
     fn scan_partition(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_impl(metrics_set, partition)
+        self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
     }
 

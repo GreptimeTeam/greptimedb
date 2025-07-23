@@ -338,6 +338,8 @@ struct PartitionMetricsInner {
     scanner_type: &'static str,
     /// Query start time.
     query_start: Instant,
+    /// Whether to use verbose logging.
+    explain_verbose: bool,
     /// Verbose scan metrics that only log to debug logs by default.
     metrics: Mutex<ScanMetricsSet>,
     in_progress_scan: IntGauge,
@@ -374,10 +376,17 @@ impl Drop for PartitionMetricsInner {
         metrics.observe_metrics();
         self.in_progress_scan.dec();
 
-        common_telemetry::info!(
-            "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
-            self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
-        );
+        if self.explain_verbose {
+            common_telemetry::info!(
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
+            );
+        } else {
+            common_telemetry::debug!(
+                "{} finished, region_id: {}, partition: {}, scan_metrics: {:?}, convert_batch_costs: {}",
+                self.scanner_type, self.region_id, self.partition, metrics, self.convert_cost,
+            );
+        }
     }
 }
 
@@ -416,6 +425,7 @@ impl PartitionMetrics {
         partition: usize,
         scanner_type: &'static str,
         query_start: Instant,
+        explain_verbose: bool,
         metrics_set: &ExecutionPlanMetricsSet,
     ) -> Self {
         let partition_str = partition.to_string();
@@ -427,6 +437,7 @@ impl PartitionMetrics {
             partition,
             scanner_type,
             query_start,
+            explain_verbose,
             metrics: Mutex::new(metrics),
             in_progress_scan,
             build_parts_cost: MetricBuilder::new(metrics_set)
