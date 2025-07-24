@@ -51,8 +51,25 @@ use crate::metrics;
 use crate::mito_engine_options::{
     TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
-use crate::path_utils::region_dir;
+use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
+
+/// The type of path to generate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathType {
+    /// A bare path - the original path of an engine.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/`.
+    Bare,
+    /// A path for the data region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/data/`.
+    Data,
+    /// A path for the metadata region of a metric engine table.
+    ///
+    /// The path prefix is `{table_dir}/{table_id}_{region_sequence}/metadata/`.
+    Metadata,
+}
 
 #[derive(Debug, IntoStaticStr)]
 pub enum BatchRegionDdlRequest {
@@ -207,8 +224,8 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
         .into_iter()
         .map(ColumnMetadata::try_from_column_def)
         .collect::<Result<Vec<_>>>()?;
-    let region_id = create.region_id.into();
-    let region_dir = region_dir(&create.path, region_id);
+    let region_id = RegionId::from(create.region_id);
+    let table_dir = table_dir(&create.path, region_id.table_id());
     Ok((
         region_id,
         RegionCreateRequest {
@@ -216,7 +233,8 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             column_metadatas,
             primary_key: create.primary_key,
             options: create.options,
-            region_dir,
+            table_dir,
+            path_type: PathType::Bare,
         },
     ))
 }
@@ -258,13 +276,14 @@ fn make_region_drops(drops: DropRequests) -> Result<Vec<(RegionId, RegionRequest
 }
 
 fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
-    let region_id = open.region_id.into();
-    let region_dir = region_dir(&open.path, region_id);
+    let region_id = RegionId::from(open.region_id);
+    let table_dir = table_dir(&open.path, region_id.table_id());
     Ok(vec![(
         region_id,
         RegionRequest::Open(RegionOpenRequest {
             engine: open.engine,
-            region_dir,
+            table_dir,
+            path_type: PathType::Bare,
             options: open.options,
             skip_wal_replay: false,
         }),
@@ -386,8 +405,10 @@ pub struct RegionCreateRequest {
     pub primary_key: Vec<ColumnId>,
     /// Options of the created region.
     pub options: HashMap<String, String>,
-    /// Directory for region's data home. Usually is composed by catalog and table id
-    pub region_dir: String,
+    /// Directory for table's data home. Usually is composed by catalog and table id
+    pub table_dir: String,
+    /// Path type for generating paths
+    pub path_type: PathType,
 }
 
 impl RegionCreateRequest {
@@ -452,8 +473,10 @@ pub struct RegionDropRequest {
 pub struct RegionOpenRequest {
     /// Region engine name
     pub engine: String,
-    /// Data directory of the region.
-    pub region_dir: String,
+    /// Directory for table's data home. Usually is composed by catalog and table id
+    pub table_dir: String,
+    /// Path type for generating paths
+    pub path_type: PathType,
     /// Options of the opened region.
     pub options: HashMap<String, String>,
     /// To skip replaying the WAL.
@@ -1682,7 +1705,8 @@ mod tests {
             column_metadatas,
             primary_key: vec![3, 4],
             options: HashMap::new(),
-            region_dir: "path".to_string(),
+            table_dir: "path".to_string(),
+            path_type: PathType::Bare,
         };
 
         assert!(create.validate().is_err());

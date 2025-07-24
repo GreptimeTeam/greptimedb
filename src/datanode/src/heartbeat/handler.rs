@@ -168,7 +168,7 @@ mod tests {
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
-    use store_api::path_utils::region_dir;
+    use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionRole;
     use store_api::region_request::{RegionCloseRequest, RegionRequest};
     use store_api::storage::RegionId;
@@ -334,7 +334,7 @@ mod tests {
         let builder = CreateRequestBuilder::new();
         let mut create_req = builder.build();
         let storage_path = "test";
-        create_req.region_dir = region_dir(storage_path, region_id);
+        create_req.table_dir = table_dir(storage_path, region_id.table_id());
 
         region_server
             .handle_request(region_id, RegionRequest::Create(create_req))
@@ -414,7 +414,7 @@ mod tests {
         let builder = CreateRequestBuilder::new();
         let mut create_req = builder.build();
         let storage_path = "test";
-        create_req.region_dir = region_dir(storage_path, region_id);
+        create_req.table_dir = table_dir(storage_path, region_id.table_id());
 
         region_server
             .handle_request(region_id, RegionRequest::Create(create_req))

@@ -117,7 +117,7 @@ impl Scanner {
     }
 
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
@@ -523,7 +523,7 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
@@ -536,6 +536,7 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
@@ -557,11 +558,12 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         BloomFilterIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_bloom_filter_index_cache(bloom_filter_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
@@ -582,12 +584,12 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
-            self.region_id(),
+            self.access_layer.table_dir().to_string(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
         )
+        .with_path_type(self.access_layer.path_type())
         .with_file_cache(file_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
         .with_bloom_filter_cache(bloom_filter_index_cache)
@@ -974,7 +976,7 @@ impl ScanInput {
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
     }
 }

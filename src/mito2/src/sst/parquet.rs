@@ -101,6 +101,7 @@ mod tests {
     use parquet::basic::{Compression, Encoding, ZstdLevel};
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;
+    use store_api::region_request::PathType;
     use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
@@ -109,7 +110,7 @@ mod tests {
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::{BatchBuilder, BatchReader};
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
-    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::file::{FileHandle, FileMeta, RegionFileId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -129,16 +130,16 @@ mod tests {
 
     #[derive(Clone)]
     struct FixedPathProvider {
-        file_id: FileId,
+        region_file_id: RegionFileId,
     }
 
     impl FilePathProvider for FixedPathProvider {
-        fn build_index_file_path(&self, _file_id: FileId) -> String {
-            location::index_file_path(FILE_DIR, self.file_id)
+        fn build_index_file_path(&self, _file_id: RegionFileId) -> String {
+            location::index_file_path(FILE_DIR, self.region_file_id, PathType::Bare)
         }
 
-        fn build_sst_file_path(&self, _file_id: FileId) -> String {
-            location::sst_file_path(FILE_DIR, self.file_id)
+        fn build_sst_file_path(&self, _file_id: RegionFileId) -> String {
+            location::sst_file_path(FILE_DIR, self.region_file_id, PathType::Bare)
         }
     }
 
@@ -157,7 +158,7 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = FixedPathProvider {
-            file_id: handle.file_id(),
+            region_file_id: handle.file_id(),
         };
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
@@ -194,7 +195,12 @@ mod tests {
             info.time_range
         );
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
@@ -231,7 +237,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -248,8 +254,13 @@ mod tests {
                 .page_cache_size(64 * 1024 * 1024)
                 .build(),
         ));
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .cache(cache.clone());
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        )
+        .cache(cache.clone());
         for _ in 0..3 {
             let mut reader = builder.build().await.unwrap();
             check_reader_result(
@@ -266,15 +277,18 @@ mod tests {
         }
 
         // Doesn't have compressed page cached.
-        let page_key = PageKey::new_compressed(metadata.region_id, handle.file_id(), 0, 0);
+        let page_key =
+            PageKey::new_compressed(metadata.region_id, handle.file_id().file_id(), 0, 0);
         assert!(cache.get_pages(&page_key).is_none());
 
         // Cache 4 row groups.
         for i in 0..4 {
-            let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), i, 0);
+            let page_key =
+                PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), i, 0);
             assert!(cache.get_pages(&page_key).is_some());
         }
-        let page_key = PageKey::new_uncompressed(metadata.region_id, handle.file_id(), 5, 0);
+        let page_key =
+            PageKey::new_uncompressed(metadata.region_id, handle.file_id().file_id(), 5, 0);
         assert!(cache.get_pages(&page_key).is_none());
     }
 
@@ -302,7 +316,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -315,7 +329,12 @@ mod tests {
         let writer_metadata = sst_info.file_metadata.unwrap();
 
         // read the sst file metadata
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
 
@@ -344,7 +363,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -361,8 +380,13 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .predicate(predicate);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        )
+        .predicate(predicate);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
@@ -396,7 +420,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -406,7 +430,12 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["a", "z"], 200, 230)]).await;
     }
@@ -433,7 +462,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             FixedPathProvider {
-                file_id: handle.file_id(),
+                region_file_id: handle.file_id(),
             },
         )
         .await;
@@ -451,8 +480,13 @@ mod tests {
             right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
         })]));
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
-            .predicate(predicate);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        )
+        .predicate(predicate);
         let mut reader = builder.build().await.unwrap();
         check_reader_result(&mut reader, &[new_batch_by_range(&["b", "h"], 150, 200)]).await;
     }
@@ -462,7 +496,7 @@ mod tests {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
+        let file_path = handle.file_path(FILE_DIR, PathType::Bare);
 
         let write_opts = WriteOptions {
             row_group_size: 50,
@@ -534,7 +568,12 @@ mod tests {
         writer.write(&result).await.unwrap();
         writer.close().await.unwrap();
 
-        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
         let mut reader = builder.build().await.unwrap();
         check_reader_result(
             &mut reader,
@@ -570,7 +609,8 @@ mod tests {
         };
 
         let path_provider = RegionFilePathFactory {
-            region_dir: "test".to_string(),
+            table_dir: "test".to_string(),
+            path_type: PathType::Bare,
         };
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
@@ -590,8 +630,12 @@ mod tests {
                 f.time_range.0.value(),
                 f.time_range.1.value(),
             );
-            let builder =
-                ParquetReaderBuilder::new("test".to_string(), file_handle, object_store.clone());
+            let builder = ParquetReaderBuilder::new(
+                "test".to_string(),
+                PathType::Bare,
+                file_handle,
+                object_store.clone(),
+            );
             let mut reader = builder.build().await.unwrap();
             while let Some(batch) = reader.next_batch().await.unwrap() {
                 rows_read += batch.num_rows();
@@ -604,7 +648,7 @@ mod tests {
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
-        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string());
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
         let metadata = Arc::new(sst_region_metadata());
         let row_group_size = 50;
 
@@ -752,12 +796,16 @@ mod tests {
         let inverted_index_applier = build_inverted_index_applier(&preds);
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
-                .predicate(Some(Predicate::new(preds)))
-                .inverted_index_applier(inverted_index_applier.clone())
-                .bloom_filter_index_applier(bloom_filter_applier.clone())
-                .cache(CacheStrategy::EnableAll(cache.clone()));
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store.clone(),
+        )
+        .predicate(Some(Predicate::new(preds)))
+        .inverted_index_applier(inverted_index_applier.clone())
+        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
         let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
@@ -773,7 +821,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 inverted_index_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         // inverted index will search all row groups
@@ -804,12 +852,16 @@ mod tests {
         let inverted_index_applier = build_inverted_index_applier(&preds);
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
-                .predicate(Some(Predicate::new(preds)))
-                .inverted_index_applier(inverted_index_applier.clone())
-                .bloom_filter_index_applier(bloom_filter_applier.clone())
-                .cache(CacheStrategy::EnableAll(cache.clone()));
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store.clone(),
+        )
+        .predicate(Some(Predicate::new(preds)))
+        .inverted_index_applier(inverted_index_applier.clone())
+        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
         let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
@@ -825,7 +877,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         assert!(cached.contains_row_group(2));
@@ -857,12 +909,16 @@ mod tests {
         let inverted_index_applier = build_inverted_index_applier(&preds);
         let bloom_filter_applier = build_bloom_filter_applier(&preds);
 
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone())
-                .predicate(Some(Predicate::new(preds)))
-                .inverted_index_applier(inverted_index_applier.clone())
-                .bloom_filter_index_applier(bloom_filter_applier.clone())
-                .cache(CacheStrategy::EnableAll(cache.clone()));
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store.clone(),
+        )
+        .predicate(Some(Predicate::new(preds)))
+        .inverted_index_applier(inverted_index_applier.clone())
+        .bloom_filter_index_applier(bloom_filter_applier.clone())
+        .cache(CacheStrategy::EnableAll(cache.clone()));
 
         let mut metrics = ReaderMetrics::default();
         let (context, selection) = builder.build_reader_input(&mut metrics).await.unwrap();
@@ -887,7 +943,7 @@ mod tests {
         let cached = index_result_cache
             .get(
                 bloom_filter_applier.unwrap().predicate_key(),
-                handle.file_id(),
+                handle.file_id().file_id(),
             )
             .unwrap();
         assert!(cached.contains_row_group(0));
@@ -902,7 +958,7 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = FixedPathProvider {
-            file_id: handle.file_id(),
+            region_file_id: handle.file_id(),
         };
         let metadata = Arc::new(sst_region_metadata());
 
@@ -931,8 +987,12 @@ mod tests {
             .remove(0);
 
         // Read without override sequence (should read sequence 0)
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone());
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store.clone(),
+        );
         let mut reader = builder.build().await.unwrap();
         let mut normal_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {
@@ -949,8 +1009,12 @@ mod tests {
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         );
 
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), override_handle, object_store.clone());
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            override_handle,
+            object_store.clone(),
+        );
         let mut reader = builder.build().await.unwrap();
         let mut override_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {

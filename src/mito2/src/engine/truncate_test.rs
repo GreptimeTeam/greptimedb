@@ -20,7 +20,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    PathType, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
 
@@ -229,7 +229,7 @@ async fn test_engine_truncate_reopen() {
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -260,7 +260,8 @@ async fn test_engine_truncate_reopen() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),
@@ -296,7 +297,7 @@ async fn test_engine_truncate_during_flush() {
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -364,7 +365,8 @@ async fn test_engine_truncate_during_flush() {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: PathType::Bare,
                 options: HashMap::default(),
                 skip_wal_replay: false,
             }),

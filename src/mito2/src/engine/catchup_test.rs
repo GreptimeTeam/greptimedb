@@ -25,7 +25,7 @@ use rstest_reuse::{self, apply};
 use store_api::logstore::provider::RaftEngineProvider;
 use store_api::region_engine::{RegionEngine, RegionRole, SetRegionRoleStateResponse};
 use store_api::region_request::{
-    RegionCatchupRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+    PathType, RegionCatchupRequest, RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -68,7 +68,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     leader_engine
@@ -91,7 +91,8 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),
@@ -188,7 +189,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     leader_engine
@@ -211,7 +212,8 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),
@@ -291,7 +293,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     leader_engine
@@ -314,7 +316,8 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),
@@ -395,7 +398,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
     let request = CreateRequestBuilder::new()
         .kafka_topic(topic.clone())
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     leader_engine
@@ -418,7 +421,8 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir,
+                table_dir,
+                path_type: store_api::region_request::PathType::Bare,
                 options,
                 skip_wal_replay: false,
             }),
@@ -516,7 +520,7 @@ async fn close_region(engine: &MitoEngine, region_id: RegionId) {
 async fn open_region(
     engine: &MitoEngine,
     region_id: RegionId,
-    region_dir: String,
+    table_dir: String,
     skip_wal_replay: bool,
 ) {
     engine
@@ -524,9 +528,10 @@ async fn open_region(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir: region_dir.clone(),
+                table_dir: table_dir.clone(),
                 options: HashMap::new(),
                 skip_wal_replay,
+                path_type: PathType::Bare,
             }),
         )
         .await
@@ -560,7 +565,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     leader_engine
@@ -585,7 +590,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
 
     // Close the region, and open it again.
     close_region(&leader_engine, region_id).await;
-    open_region(&leader_engine, region_id, region_dir.clone(), false).await;
+    open_region(&leader_engine, region_id, table_dir.clone(), false).await;
 
     // Set the region to leader.
     leader_engine
@@ -617,9 +622,10 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir: region_dir.clone(),
+                table_dir: table_dir.clone(),
                 options: HashMap::new(),
                 skip_wal_replay: true,
+                path_type: PathType::Bare,
             }),
         )
         .await

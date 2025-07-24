@@ -30,9 +30,11 @@ use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
     PHYSICAL_TABLE_METADATA_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
+use store_api::path_utils::table_dir;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest, RegionRequest,
+    AddColumn, AlterKind, PathType, RegionAlterRequest, RegionCreateRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ColumnId, RegionId};
@@ -109,7 +111,8 @@ impl TestEnv {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: METRIC_ENGINE_NAME.to_string(),
-                    region_dir: self.default_region_dir(),
+                    table_dir: Self::default_table_dir(),
+                    path_type: PathType::Bare, // Use Bare path type for engine regions
                     options: physical_region_option,
                     skip_wal_replay: true,
                 }),
@@ -120,7 +123,7 @@ impl TestEnv {
     }
 
     /// Create regions in [MetricEngine] with specific `physical_region_id`.
-    pub async fn create_physical_region(&self, physical_region_id: RegionId, region_dir: &str) {
+    pub async fn create_physical_region(&self, physical_region_id: RegionId, table_dir: &str) {
         let region_create_request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             column_metadatas: vec![
@@ -147,7 +150,8 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            region_dir: region_dir.to_string(),
+            table_dir: table_dir.to_string(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
         };
 
         // create physical region
@@ -174,7 +178,7 @@ impl TestEnv {
         let region_create_request = create_logical_region_request(
             &["job"],
             physical_region_id,
-            "test_metric_logical_region",
+            &table_dir("test", logical_region_id.table_id()),
         );
         let response = self
             .metric()
@@ -224,7 +228,7 @@ impl TestEnv {
     /// under [`default_logical_region_id`].
     pub async fn init_metric_region(&self) {
         let physical_region_id = self.default_physical_region_id();
-        self.create_physical_region(physical_region_id, &self.default_region_dir())
+        self.create_physical_region(physical_region_id, &Self::default_table_dir())
             .await;
         let logical_region_id = self.default_logical_region_id();
         self.create_logical_region(physical_region_id, logical_region_id)
@@ -249,8 +253,8 @@ impl TestEnv {
         RegionId::new(3, 2)
     }
 
-    /// Default region dir `test_metric_region`
-    pub fn default_region_dir(&self) -> String {
+    /// Default table dir `test_metric_table`
+    pub fn default_table_dir() -> String {
         "test_metric_region".to_string()
     }
 }
@@ -287,7 +291,7 @@ pub fn alter_logical_region_add_tag_columns(
 pub fn create_logical_region_request(
     tags: &[&str],
     physical_region_id: RegionId,
-    region_dir: &str,
+    table_dir: &str,
 ) -> RegionCreateRequest {
     let mut column_metadatas = vec![
         ColumnMetadata {
@@ -330,7 +334,8 @@ pub fn create_logical_region_request(
         )]
         .into_iter()
         .collect(),
-        region_dir: region_dir.to_string(),
+        table_dir: table_dir.to_string(),
+        path_type: PathType::Bare, // Use Bare path type for engine regions
     }
 }
 
@@ -433,14 +438,15 @@ mod test {
         let builder = Fs::default().root(&env.data_home());
         let object_store = ObjectStore::new(builder).unwrap().finish();
 
-        let region_dir = "test_metric_region";
+        let table_dir = TestEnv::default_table_dir();
+        let region_dir = join_dir(&table_dir, "1_0000000002");
         // assert metadata region's dir
-        let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
+        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
         let exist = object_store.exists(&metadata_region_dir).await.unwrap();
         assert!(exist);
 
         // assert data region's dir
-        let data_region_dir = join_dir(region_dir, DATA_REGION_SUBDIR);
+        let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
         let exist = object_store.exists(&data_region_dir).await.unwrap();
         assert!(exist);
 

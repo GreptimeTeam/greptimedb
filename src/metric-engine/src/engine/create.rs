@@ -23,7 +23,6 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
-use object_store::util::join_dir;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
@@ -35,7 +34,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, PathType, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
@@ -475,9 +474,6 @@ impl MetricEngineInner {
             ),
         };
 
-        // concat region dir
-        let metadata_region_dir = join_dir(&request.region_dir, METADATA_REGION_SUBDIR);
-
         let options = region_options_for_metadata_region(&request.options);
         RegionCreateRequest {
             engine: MITO_ENGINE_NAME.to_string(),
@@ -488,7 +484,8 @@ impl MetricEngineInner {
             ],
             primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
             options,
-            region_dir: metadata_region_dir,
+            table_dir: request.table_dir.clone(),
+            path_type: PathType::Metadata,
         }
     }
 
@@ -505,8 +502,8 @@ impl MetricEngineInner {
         let mut data_region_request = request.clone();
         let mut primary_key = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
 
-        // concat region dir
-        data_region_request.region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
+        data_region_request.table_dir = request.table_dir.clone();
+        data_region_request.path_type = PathType::Data;
 
         // change nullability for tag columns
         data_region_request
@@ -651,7 +648,8 @@ mod test {
                     ),
                 },
             ],
-            region_dir: "test_dir".to_string(),
+            table_dir: "test_dir".to_string(),
+            path_type: PathType::Bare,
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
@@ -694,7 +692,8 @@ mod test {
                     ),
                 },
             ],
-            region_dir: "test_dir".to_string(),
+            table_dir: "test_dir".to_string(),
+            path_type: PathType::Bare,
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
@@ -727,7 +726,8 @@ mod test {
                     ),
                 },
             ],
-            region_dir: "test_dir".to_string(),
+            table_dir: "test_dir".to_string(),
+            path_type: PathType::Bare,
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
@@ -781,7 +781,8 @@ mod test {
             ],
             primary_key: vec![0],
             options,
-            region_dir: "/test_dir".to_string(),
+            table_dir: "/test_dir".to_string(),
+            path_type: PathType::Bare,
         };
 
         // set up
@@ -791,10 +792,8 @@ mod test {
 
         // check create data region request
         let data_region_request = engine_inner.create_request_for_data_region(&request);
-        assert_eq!(
-            data_region_request.region_dir,
-            "/test_dir/data/".to_string()
-        );
+        assert_eq!(data_region_request.table_dir, "/test_dir".to_string());
+        assert_eq!(data_region_request.path_type, PathType::Data);
         assert_eq!(data_region_request.column_metadatas.len(), 4);
         assert_eq!(
             data_region_request.primary_key,
@@ -804,10 +803,8 @@ mod test {
 
         // check create metadata region request
         let metadata_region_request = engine_inner.create_request_for_metadata_region(&request);
-        assert_eq!(
-            metadata_region_request.region_dir,
-            "/test_dir/metadata/".to_string()
-        );
+        assert_eq!(metadata_region_request.table_dir, "/test_dir".to_string());
+        assert_eq!(metadata_region_request.path_type, PathType::Metadata);
         assert_eq!(
             metadata_region_request.options.get("ttl").unwrap(),
             "forever"
