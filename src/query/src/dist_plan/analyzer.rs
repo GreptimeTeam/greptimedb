@@ -35,6 +35,7 @@ use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
@@ -68,8 +69,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
             Err(err) => {
-                common_telemetry::error!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
+                common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
                 // if push down failed, use fallback plan rewriter
+                PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
                 self.use_fallback(plan)?
             }
         };
