@@ -1350,7 +1350,6 @@ async fn check_region_migration_events_system_table(
         .and_where(Expr::col(RegionMigrationEvents::RegionId).eq(region_id))
         .and_where(Expr::col(RegionMigrationEvents::SrcNodeId).eq(from_peer_id))
         .and_where(Expr::col(RegionMigrationEvents::DstNodeId).eq(to_peer_id))
-        .and_where(Expr::col(RegionMigrationEvents::RegionMigrationStatus).eq("Starting"))
         .order_by(RegionMigrationEvents::Timestamp, Order::Asc)
         .to_string(PostgresQueryBuilder);
 
@@ -1364,7 +1363,6 @@ async fn check_region_migration_events_system_table(
 | region_migration_trigger_reason | region_migration_status |
 +---------------------------------+-------------------------+
 | Manual                          | Running                 |
-+---------------------------------+-------------------------+
 | Manual                          | Done                    |
 +---------------------------------+-------------------------+";
     check_output_stream(result.unwrap().data, expected).await;
