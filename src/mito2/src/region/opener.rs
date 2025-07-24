@@ -93,6 +93,7 @@ impl RegionOpener {
     pub(crate) fn new(
         region_id: RegionId,
         table_dir: &str,
+        path_type: PathType,
         memtable_builder_provider: MemtableBuilderProvider,
         object_store_manager: ObjectStoreManagerRef,
         purge_scheduler: SchedulerRef,
@@ -106,7 +107,7 @@ impl RegionOpener {
             memtable_builder_provider,
             object_store_manager,
             table_dir: normalize_dir(table_dir),
-            path_type: PathType::Bare, // Default to Bare
+            path_type,
             purge_scheduler,
             options: None,
             cache_manager: None,
@@ -122,12 +123,6 @@ impl RegionOpener {
     /// Sets metadata builder of the region to create.
     pub(crate) fn metadata_builder(mut self, builder: RegionMetadataBuilder) -> Self {
         self.metadata_builder = Some(builder);
-        self
-    }
-
-    /// Sets the path type for the region.
-    pub(crate) fn path_type(mut self, path_type: PathType) -> Self {
-        self.path_type = path_type;
         self
     }
 

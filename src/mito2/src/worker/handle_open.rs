@@ -96,6 +96,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let opener = match RegionOpener::new(
             region_id,
             &request.table_dir,
+            request.path_type,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),
@@ -103,7 +104,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.intermediate_manager.clone(),
             self.time_provider.clone(),
         )
-        .path_type(request.path_type)
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))

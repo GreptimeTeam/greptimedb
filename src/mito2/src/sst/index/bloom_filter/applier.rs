@@ -50,8 +50,8 @@ pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
 /// `BloomFilterIndexApplier` applies bloom filter predicates to the SST file.
 pub struct BloomFilterIndexApplier {
-    /// Directory of the region.
-    region_dir: String,
+    /// Directory of the table.
+    table_dir: String,
 
     /// Path type for generating file paths.
     path_type: PathType,
@@ -84,7 +84,7 @@ impl BloomFilterIndexApplier {
     ///
     /// For each column, the value will be retained only if it contains __all__ predicates.
     pub fn new(
-        region_dir: String,
+        table_dir: String,
         path_type: PathType,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
@@ -92,7 +92,7 @@ impl BloomFilterIndexApplier {
     ) -> Self {
         let predicates = Arc::new(predicates);
         Self {
-            region_dir,
+            table_dir,
             path_type,
             object_store,
             file_cache: None,
@@ -293,7 +293,7 @@ impl BloomFilterIndexApplier {
             .puffin_manager_factory
             .build(
                 self.object_store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone(), self.path_type),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
@@ -363,7 +363,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn tester(
-        region_dir: String,
+        table_dir: String,
         object_store: ObjectStore,
         metadata: &RegionMetadata,
         puffin_manager_factory: PuffinManagerFactory,
@@ -371,15 +371,16 @@ mod tests {
     ) -> impl Fn(&[Expr], Vec<(usize, bool)>) -> BoxFuture<'static, Vec<(usize, Vec<Range<usize>>)>>
            + use<'_> {
         move |exprs, row_groups| {
-            let region_dir = region_dir.clone();
-            let object_store = object_store.clone();
+            let table_dir = table_dir.clone();
+            let object_store: ObjectStore = object_store.clone();
             let metadata = metadata.clone();
             let puffin_manager_factory = puffin_manager_factory.clone();
             let exprs = exprs.to_vec();
 
             Box::pin(async move {
                 let builder = BloomFilterIndexApplierBuilder::new(
-                    region_dir,
+                    table_dir,
+                    PathType::Bare,
                     object_store,
                     &metadata,
                     puffin_manager_factory,
@@ -423,7 +424,7 @@ mod tests {
         let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
         let memory_usage_threshold = Some(1024);
         let file_id = RegionFileId::new(region_metadata.region_id, FileId::random());
-        let region_dir = "region_dir".to_string();
+        let table_dir = "table_dir".to_string();
 
         let mut indexer = BloomFilterIndexer::new(
             file_id.file_id(),
@@ -442,7 +443,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
 
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
@@ -450,7 +451,7 @@ mod tests {
         puffin_writer.finish().await.unwrap();
 
         let tester = tester(
-            region_dir.clone(),
+            table_dir.clone(),
             object_store.clone(),
             &region_metadata,
             factory.clone(),

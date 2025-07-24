@@ -144,6 +144,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             RegionOpener::new(
                 region_id,
                 region.table_dir(),
+                region.access_layer.path_type(),
                 self.memtable_builder_provider.clone(),
                 self.object_store_manager.clone(),
                 self.purge_scheduler.clone(),
@@ -151,7 +152,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.intermediate_manager.clone(),
                 self.time_provider.clone(),
             )
-            .path_type(region.access_layer.path_type())
             .cache(Some(self.cache_manager.clone()))
             .options(region.version().options.clone())?
             .skip_wal_replay(true)

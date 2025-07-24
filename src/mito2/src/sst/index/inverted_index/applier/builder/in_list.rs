@@ -55,6 +55,8 @@ impl InvertedIndexApplierBuilder<'_> {
 mod tests {
     use std::collections::HashSet;
 
+    use store_api::region_request::PathType;
+
     use super::*;
     use crate::error::Error;
     use crate::sst::index::inverted_index::applier::builder::tests::{
@@ -69,6 +71,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
@@ -100,6 +103,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
@@ -123,6 +127,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
@@ -154,6 +159,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
@@ -179,6 +185,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),
