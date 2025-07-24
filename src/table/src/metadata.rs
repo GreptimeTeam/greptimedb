@@ -218,6 +218,13 @@ impl TableMeta {
             .map(|(_, cs)| &cs.name)
     }
 
+    pub fn partition_column_names(&self) -> impl Iterator<Item = &String> {
+        let columns_schemas = &self.schema.column_schemas();
+        self.partition_key_indices
+            .iter()
+            .map(|idx| &columns_schemas[*idx].name)
+    }
+
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.
     ///
     /// The returned builder would derive the next column id of this meta.
@@ -985,6 +992,7 @@ impl TableMeta {
         Ok(meta_builder)
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {

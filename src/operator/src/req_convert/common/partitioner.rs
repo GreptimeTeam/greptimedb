@@ -16,7 +16,8 @@ use api::v1::region::{DeleteRequest, InsertRequest};
 use api::v1::Rows;
 use partition::manager::PartitionRuleManager;
 use snafu::ResultExt;
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
+use table::metadata::TableInfo;
 
 use crate::error::{Result, SplitDeleteSnafu, SplitInsertSnafu};
 
@@ -31,12 +32,13 @@ impl<'a> Partitioner<'a> {
 
     pub async fn partition_insert_requests(
         &self,
-        table_id: TableId,
+        table_info: &TableInfo,
         rows: Rows,
     ) -> Result<Vec<InsertRequest>> {
+        let table_id = table_info.table_id();
         let requests = self
             .partition_manager
-            .split_rows(table_id, rows)
+            .split_rows(table_info, rows)
             .await
             .context(SplitInsertSnafu)?
             .into_iter()
@@ -50,12 +52,13 @@ impl<'a> Partitioner<'a> {
 
     pub async fn partition_delete_requests(
         &self,
-        table_id: TableId,
+        table_info: &TableInfo,
         rows: Rows,
     ) -> Result<Vec<DeleteRequest>> {
+        let table_id = table_info.table_id();
         let requests = self
             .partition_manager
-            .split_rows(table_id, rows)
+            .split_rows(table_info, rows)
             .await
             .context(SplitDeleteSnafu)?
             .into_iter()

@@ -153,9 +153,10 @@ async fn main() {
         || args.setup_pg
         || args.setup_mysql
         || args.kafka_wal_broker_endpoints.is_some()
+        || args.test_filter != ".*"
     {
         args.jobs = 1;
-        println!("Normalizing parallelism to 1 due to server addresses or etcd/pg/mysql setup");
+        println!("Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql setup, or test filter usage");
     }
 
     let config = ConfigBuilder::default()

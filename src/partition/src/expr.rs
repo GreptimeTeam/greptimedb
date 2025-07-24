@@ -29,6 +29,7 @@ use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
 use crate::error;
+use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
 /// by [`Self::to_parser_expr`].
@@ -267,6 +268,29 @@ impl PartitionExpr {
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
         PartitionExpr::new(Operand::Expr(self), RestrictedOp::And, Operand::Expr(rhs))
     }
+
+    /// Serializes `PartitionExpr` to json string.
+    ///
+    /// Wraps `PartitionBound::Expr` for compatibility.
+    pub fn as_json_str(&self) -> error::Result<String> {
+        serde_json::to_string(&PartitionBound::Expr(self.clone()))
+            .context(error::SerializeJsonSnafu)
+    }
+
+    /// Deserializes `PartitionExpr` from json string.
+    ///
+    /// Deserializes to `PartitionBound` for compatibility.
+    pub fn from_json_str(s: &str) -> error::Result<Option<Self>> {
+        if s.is_empty() {
+            return Ok(None);
+        }
+
+        let bound: PartitionBound = serde_json::from_str(s).context(error::DeserializeJsonSnafu)?;
+        match bound {
+            PartitionBound::Expr(expr) => Ok(Some(expr)),
+            _ => Ok(None),
+        }
+    }
 }
 
 impl Display for PartitionExpr {
@@ -346,5 +370,42 @@ mod tests {
             let expr = PartitionExpr::new(case.0, case.1.clone(), case.2);
             assert_eq!(case.3, expr.to_string());
         }
+    }
+
+    #[test]
+    fn test_serde_partition_expr() {
+        let expr = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::Eq,
+            Operand::Value(Value::UInt32(10)),
+        );
+        let json = expr.as_json_str().unwrap();
+        assert_eq!(
+            json,
+            "{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"Eq\",\"rhs\":{\"Value\":{\"UInt32\":10}}}}"
+        );
+
+        let json = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+        let expr2 = PartitionExpr::from_json_str(json).unwrap().unwrap();
+        let expected = PartitionExpr::new(
+            Operand::Column("a".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::UInt32(10)),
+        );
+        assert_eq!(expr2, expected);
+
+        // empty string
+        let json = "";
+        let expr3 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr3.is_none());
+
+        // variants other than Expr
+        let json = r#""MaxValue""#;
+        let expr4 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr4.is_none());
+
+        let json = r#"{"Value":{"UInt32":10}}"#;
+        let expr5 = PartitionExpr::from_json_str(json).unwrap();
+        assert!(expr5.is_none());
     }
 }

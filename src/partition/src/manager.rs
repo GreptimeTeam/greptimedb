@@ -23,11 +23,11 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{self, RegionRoute};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfo};
 
 use crate::error::{FindLeaderSnafu, Result};
+use crate::expr::PartitionExpr;
 use crate::multi_dim::MultiDimPartitionRule;
-use crate::partition::{PartitionBound, PartitionDef};
 use crate::splitter::RowSplitter;
 use crate::{error, PartitionRuleRef};
 
@@ -52,7 +52,7 @@ pub struct PartitionRuleManager {
 #[derive(Debug)]
 pub struct PartitionInfo {
     pub id: RegionId,
-    pub partition: PartitionDef,
+    pub partition_expr: Option<PartitionExpr>,
 }
 
 impl PartitionRuleManager {
@@ -149,11 +149,11 @@ impl PartitionRuleManager {
         Ok(results)
     }
 
-    pub async fn find_table_partition_rule(&self, table_id: TableId) -> Result<PartitionRuleRef> {
-        let partitions = self.find_table_partitions(table_id).await?;
-
-        let partition_columns = partitions[0].partition.partition_columns();
-
+    pub async fn find_table_partition_rule(
+        &self,
+        table_info: &TableInfo,
+    ) -> Result<PartitionRuleRef> {
+        let partitions = self.find_table_partitions(table_info.table_id()).await?;
         let regions = partitions
             .iter()
             .map(|x| x.id.region_number())
@@ -161,14 +161,16 @@ impl PartitionRuleManager {
 
         let exprs = partitions
             .iter()
-            .filter_map(|x| match &x.partition.partition_bounds()[0] {
-                PartitionBound::Expr(e) => Some(e.clone()),
-                _ => None,
-            })
+            .filter_map(|x| x.partition_expr.as_ref())
+            .cloned()
             .collect::<Vec<_>>();
 
-        let rule =
-            MultiDimPartitionRule::try_new(partition_columns.clone(), regions, exprs, false)?;
+        let partition_columns = table_info
+            .meta
+            .partition_column_names()
+            .cloned()
+            .collect::<Vec<_>>();
+        let rule = MultiDimPartitionRule::try_new(partition_columns, regions, exprs, false)?;
         Ok(Arc::new(rule) as _)
     }
 
@@ -189,10 +191,10 @@ impl PartitionRuleManager {
 
     pub async fn split_rows(
         &self,
-        table_id: TableId,
+        table_info: &TableInfo,
         rows: Rows,
     ) -> Result<HashMap<RegionNumber, Rows>> {
-        let partition_rule = self.find_table_partition_rule(table_id).await?;
+        let partition_rule = self.find_table_partition_rule(table_info).await?;
         RowSplitter::new(partition_rule).split(rows)
     }
 }
@@ -203,40 +205,14 @@ fn create_partitions_from_region_routes(
 ) -> Result<Vec<PartitionInfo>> {
     let mut partitions = Vec::with_capacity(region_routes.len());
     for r in region_routes {
-        let partition = r
-            .region
-            .partition
-            .as_ref()
-            .context(error::FindRegionRoutesSnafu {
-                region_id: r.region.id,
-                table_id,
-            })?;
-        let partition_def = PartitionDef::try_from(partition)?;
+        let partition_expr = PartitionExpr::from_json_str(&r.region.partition_expr())?;
 
         // The region routes belong to the physical table but are shared among all logical tables.
         // That it to say, the region id points to the physical table, so we need to use the actual
         // table id (which may be a logical table) to renew the region id.
         let id = RegionId::new(table_id, r.region.id.region_number());
-        partitions.push(PartitionInfo {
-            id,
-            partition: partition_def,
-        });
+        partitions.push(PartitionInfo { id, partition_expr });
     }
-    partitions.sort_by(|a, b| {
-        a.partition
-            .partition_bounds()
-            .cmp(b.partition.partition_bounds())
-    });
-
-    ensure!(
-        partitions
-            .windows(2)
-            .all(|w| w[0].partition.partition_columns() == w[1].partition.partition_columns()),
-        error::InvalidTableRouteDataSnafu {
-            table_id,
-            err_msg: "partition columns of all regions are not the same"
-        }
-    );
 
     Ok(partitions)
 }
