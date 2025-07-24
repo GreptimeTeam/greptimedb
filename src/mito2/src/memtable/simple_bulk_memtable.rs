@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
@@ -30,8 +31,8 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::{Series, Values};
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
+    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::dedup::LastNonNullIter;
@@ -240,7 +241,7 @@ impl Memtable for SimpleBulkMemtable {
         _predicate: Option<Predicate>,
         sequence: Option<SequenceNumber>,
     ) -> error::Result<BoxedBatchIterator> {
-        let iter = self.create_iter(projection, sequence)?.build()?;
+        let iter = self.create_iter(projection, sequence)?.build(None)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -330,11 +331,12 @@ struct BatchIterBuilder {
 }
 
 impl IterBuilder for BatchIterBuilder {
-    fn build(&self) -> error::Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> error::Result<BoxedBatchIterator> {
         let Some(values) = self.values.clone() else {
             return Ok(Box::new(Iter { batch: None }));
         };
 
+        let start_time = Instant::now();
         let maybe_batch = values
             .to_batch(&[], &self.region_metadata, &self.projection, self.dedup)
             .and_then(|mut b| {
@@ -343,6 +345,21 @@ impl IterBuilder for BatchIterBuilder {
             })
             .map(Some)
             .transpose();
+
+        // Collect metrics from the batch
+        if let Some(metrics) = metrics {
+            let (num_rows, num_batches) = match &maybe_batch {
+                Some(Ok(batch)) => (batch.num_rows(), 1),
+                _ => (0, 0),
+            };
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 1,
+                num_rows,
+                num_batches,
+                scan_cost: start_time.elapsed(),
+            };
+            metrics.merge_inner(&inner);
+        }
 
         let iter = Iter { batch: maybe_batch };
 

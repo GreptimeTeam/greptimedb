@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use bulk::part::EncodedBulkPart;
 use common_time::Timestamp;
@@ -351,11 +352,43 @@ impl MemtableBuilderProvider {
     }
 }
 
+/// Metrics for scanning a memtable.
+#[derive(Clone, Default)]
+pub struct MemScanMetrics(Arc<Mutex<MemScanMetricsData>>);
+
+impl MemScanMetrics {
+    /// Merges the metrics.
+    pub(crate) fn merge_inner(&self, inner: &MemScanMetricsData) {
+        let mut metrics = self.0.lock().unwrap();
+        metrics.total_series += inner.total_series;
+        metrics.num_rows += inner.num_rows;
+        metrics.num_batches += inner.num_batches;
+        metrics.scan_cost += inner.scan_cost;
+    }
+
+    /// Gets the metrics data.
+    pub(crate) fn data(&self) -> MemScanMetricsData {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MemScanMetricsData {
+    /// Total series in the memtable.
+    pub(crate) total_series: usize,
+    /// Number of rows read.
+    pub(crate) num_rows: usize,
+    /// Number of batch read.
+    pub(crate) num_batches: usize,
+    /// Duration to scan the memtable.
+    pub(crate) scan_cost: Duration,
+}
+
 /// Builder to build an iterator to read the range.
 /// The builder should know the projection and the predicate to build the iterator.
 pub trait IterBuilder: Send + Sync {
     /// Returns the iterator to read the range.
-    fn build(&self) -> Result<BoxedBatchIterator>;
+    fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator>;
 }
 
 pub type BoxedIterBuilder = Box<dyn IterBuilder>;
@@ -404,8 +437,12 @@ impl MemtableRange {
     /// Builds an iterator to read the range.
     /// Filters the result by the specific time range, this ensures memtable won't return
     /// rows out of the time range when new rows are inserted.
-    pub fn build_iter(&self, time_range: FileTimeRange) -> Result<BoxedBatchIterator> {
-        let iter = self.context.builder.build()?;
+    pub fn build_iter(
+        &self,
+        time_range: FileTimeRange,
+        metrics: Option<MemScanMetrics>,
+    ) -> Result<BoxedBatchIterator> {
+        let iter = self.context.builder.build(metrics)?;
         let time_filters = self.context.predicate.time_filters();
         Ok(Box::new(PruneTimeIterator::new(
             iter,

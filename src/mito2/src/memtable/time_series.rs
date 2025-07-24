@@ -51,9 +51,9 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableBuilder,
-    MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
-    PredicateGroup,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable,
+    MemtableBuilder, MemtableId, MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef,
+    MemtableStats, PredicateGroup,
 };
 use crate::metrics::{
     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT, MEMTABLE_ACTIVE_SERIES_COUNT, READ_ROWS_TOTAL,
@@ -278,7 +278,7 @@ impl Memtable for TimeSeriesMemtable {
 
         let iter = self
             .series_set
-            .iter_series(projection, filters, self.dedup, sequence)?;
+            .iter_series(projection, filters, self.dedup, sequence, None)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -455,6 +455,7 @@ impl SeriesSet {
         predicate: Option<Predicate>,
         dedup: bool,
         sequence: Option<SequenceNumber>,
+        mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Iter> {
         let primary_key_schema = primary_key_schema(&self.region_metadata);
         let primary_key_datatypes = self
@@ -473,6 +474,7 @@ impl SeriesSet {
             self.codec.clone(),
             dedup,
             sequence,
+            mem_scan_metrics,
         )
     }
 }
@@ -522,6 +524,7 @@ struct Iter {
     dedup: bool,
     sequence: Option<SequenceNumber>,
     metrics: Metrics,
+    mem_scan_metrics: Option<MemScanMetrics>,
 }
 
 impl Iter {
@@ -536,6 +539,7 @@ impl Iter {
         codec: Arc<DensePrimaryKeyCodec>,
         dedup: bool,
         sequence: Option<SequenceNumber>,
+        mem_scan_metrics: Option<MemScanMetrics>,
     ) -> Result<Self> {
         let predicate = predicate
             .map(|predicate| {
@@ -558,7 +562,20 @@ impl Iter {
             dedup,
             sequence,
             metrics: Metrics::default(),
+            mem_scan_metrics,
         })
+    }
+
+    fn report_mem_scan_metrics(&mut self) {
+        if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: self.metrics.total_series,
+                num_rows: self.metrics.num_rows,
+                num_batches: self.metrics.num_batches,
+                scan_cost: self.metrics.scan_cost,
+            };
+            mem_scan_metrics.merge_inner(&inner);
+        }
     }
 }
 
@@ -568,6 +585,9 @@ impl Drop for Iter {
             "Iter {} time series memtable, metrics: {:?}",
             self.metadata.region_id, self.metrics
         );
+
+        // Report MemScanMetrics if not already reported
+        self.report_mem_scan_metrics();
 
         READ_ROWS_TOTAL
             .with_label_values(&["time_series_memtable"])
@@ -629,7 +649,11 @@ impl Iterator for Iter {
             });
             return Some(batch);
         }
+        drop(map); // Explicitly drop the read lock
         self.metrics.scan_cost += start.elapsed();
+
+        // Report MemScanMetrics before returning None
+        self.report_mem_scan_metrics();
 
         None
     }
@@ -1109,12 +1133,13 @@ struct TimeSeriesIterBuilder {
 }
 
 impl IterBuilder for TimeSeriesIterBuilder {
-    fn build(&self) -> Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> Result<BoxedBatchIterator> {
         let iter = self.series_set.iter_series(
             self.projection.clone(),
             self.predicate.clone(),
             self.dedup,
             self.sequence,
+            metrics,
         )?;
 
         if self.merge_mode == MergeMode::LastNonNull {

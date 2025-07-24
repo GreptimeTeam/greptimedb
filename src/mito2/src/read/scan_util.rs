@@ -26,6 +26,7 @@ use smallvec::SmallVec;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROWS_IN_ROW_GROUP_TOTAL,
     READ_ROWS_RETURN, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED,
@@ -39,7 +40,7 @@ use crate::sst::parquet::reader::{ReaderFilterMetrics, ReaderMetrics};
 
 /// Verbose scan metrics for a partition.
 #[derive(Default)]
-struct ScanMetricsSet {
+pub(crate) struct ScanMetricsSet {
     /// Duration to prepare the scan task.
     prepare_scan_cost: Duration,
     /// Duration to build the (merge) reader.
@@ -58,6 +59,16 @@ struct ScanMetricsSet {
     num_mem_ranges: usize,
     /// Number of file ranges scanned.
     num_file_ranges: usize,
+
+    // Memtable related metrics:
+    /// Duration to scan memtables.
+    mem_scan_cost: Duration,
+    /// Number of rows read from memtables.
+    mem_rows: usize,
+    /// Number of batches read from memtables.
+    mem_batches: usize,
+    /// Number of series read from memtables.
+    mem_series: usize,
 
     // SST related metrics:
     /// Duration to build file ranges.
@@ -143,6 +154,10 @@ impl fmt::Debug for ScanMetricsSet {
             distributor_scan_cost,
             distributor_yield_cost,
             stream_eof,
+            mem_scan_cost,
+            mem_rows,
+            mem_batches,
+            mem_series,
         } = self;
 
         // Write core metrics
@@ -216,6 +231,20 @@ impl fmt::Debug for ScanMetricsSet {
                 f,
                 ", \"distributor_yield_cost\":\"{distributor_yield_cost:?}\""
             )?;
+        }
+
+        // Write non-zero memtable metrics
+        if *mem_rows > 0 {
+            write!(f, ", \"mem_rows\":{mem_rows}")?;
+        }
+        if *mem_batches > 0 {
+            write!(f, ", \"mem_batches\":{mem_batches}")?;
+        }
+        if *mem_series > 0 {
+            write!(f, ", \"mem_series\":{mem_series}")?;
+        }
+        if !mem_scan_cost.is_zero() {
+            write!(f, ", \"mem_scan_cost\":\"{mem_scan_cost:?}\"")?;
         }
 
         write!(f, ", \"stream_eof\":{stream_eof}}}")
@@ -518,6 +547,15 @@ impl PartitionMetrics {
         self.0.convert_cost.add_duration(cost);
     }
 
+    /// Reports memtable scan metrics.
+    pub(crate) fn report_mem_scan_metrics(&self, data: &crate::memtable::MemScanMetricsData) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.mem_scan_cost += data.scan_cost;
+        metrics.mem_rows += data.num_rows;
+        metrics.mem_batches += data.num_batches;
+        metrics.mem_series += data.total_series;
+    }
+
     /// Merges [ScannerMetrics], `build_reader_cost`, `scan_cost` and `yield_cost`.
     pub(crate) fn merge_metrics(&self, metrics: &ScannerMetrics) {
         self.0
@@ -590,12 +628,19 @@ pub(crate) fn scan_mem_ranges(
         part_metrics.inc_num_mem_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
-            let iter = range.build_iter(time_range)?;
+            let mem_scan_metrics = Some(MemScanMetrics::default());
+            let iter = range.build_iter(time_range, mem_scan_metrics.clone())?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             let mut source = Source::Iter(iter);
             while let Some(batch) = source.next_batch().await? {
                 yield batch;
+            }
+
+            // Report the memtable scan metrics to partition metrics
+            if let Some(ref metrics) = mem_scan_metrics {
+                let data = metrics.data();
+                part_metrics.report_mem_scan_metrics(&data);
             }
         }
     }
