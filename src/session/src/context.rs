@@ -593,6 +593,7 @@ impl AsRef<str> for Channel {
 pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
+    allow_query_fallback: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -600,6 +601,7 @@ impl Clone for ConfigurationVariables {
         Self {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
+            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
         }
     }
 }
@@ -623,6 +625,14 @@ impl ConfigurationVariables {
 
     pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
         self.pg_datestyle_format.swap(Arc::new((style, order)));
+    }
+
+    pub fn allow_query_fallback(&self) -> bool {
+        **self.allow_query_fallback.load()
+    }
+
+    pub fn set_allow_query_fallback(&self, allow: bool) {
+        self.allow_query_fallback.swap(Arc::new(allow));
     }
 }
 

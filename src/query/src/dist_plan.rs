@@ -18,6 +18,6 @@ mod merge_scan;
 mod merge_sort;
 mod planner;
 
-pub use analyzer::DistPlannerAnalyzer;
+pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
