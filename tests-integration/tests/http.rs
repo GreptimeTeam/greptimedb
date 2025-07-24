@@ -1220,6 +1220,7 @@ ttl = "30d"
 
 [query]
 parallelism = 0
+allow_query_fallback = false
 "#,
     )
     .trim()
