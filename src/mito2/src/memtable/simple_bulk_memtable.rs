@@ -354,7 +354,12 @@ impl IterBuilder for BatchRangeBuilder {
         let iter = Iter {
             batch: Some(Ok(batch)),
         };
-        Ok(Box::new(iter))
+
+        if self.merge_mode == MergeMode::LastNonNull {
+            Ok(Box::new(LastNonNullIter::new(iter)))
+        } else {
+            Ok(Box::new(iter))
+        }
     }
 }
 
@@ -587,9 +592,10 @@ mod tests {
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
         memtable.freeze().unwrap();
+
         let kvs = build_key_values(
             &memtable.region_metadata,
-            0,
+            1,
             &[(1, 1.0, "a".to_string())],
             OpType::Delete,
         );
@@ -608,10 +614,82 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(true));
+
+        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false));
         let mut num_rows = 0;
         while let Some(b) = reader.next_batch().await.unwrap() {
             num_rows += b.num_rows();
+        }
+        assert_eq!(num_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_only() {
+        let memtable = new_test_memtable(true, MergeMode::LastRow);
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string())],
+            OpType::Delete,
+        );
+        let kv = kvs.iter().next().unwrap();
+        memtable.write_one(kv).unwrap();
+        memtable.freeze().unwrap();
+
+        let ranges = memtable
+            .ranges(None, PredicateGroup::default(), None)
+            .unwrap();
+        let mut source = vec![];
+        for r in ranges.ranges.values() {
+            source.push(Source::Iter(r.build_iter().unwrap()));
+        }
+
+        let reader = MergeReaderBuilder::from_sources(source)
+            .build()
+            .await
+            .unwrap();
+
+        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(false));
+        let mut num_rows = 0;
+        while let Some(b) = reader.next_batch().await.unwrap() {
+            num_rows += b.num_rows();
+            assert_eq!(b.num_rows(), 1);
+            assert_eq!(b.op_types().get_data(0).unwrap(), OpType::Delete as u8);
+        }
+        assert_eq!(num_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn test_single_range() {
+        let memtable = new_test_memtable(true, MergeMode::LastRow);
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string())],
+            OpType::Put,
+        );
+        memtable.write_one(kvs.iter().next().unwrap()).unwrap();
+
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            1,
+            &[(1, 2.0, "b".to_string())],
+            OpType::Put,
+        );
+        memtable.write_one(kvs.iter().next().unwrap()).unwrap();
+        memtable.freeze().unwrap();
+
+        let ranges = memtable
+            .ranges(None, PredicateGroup::default(), None)
+            .unwrap();
+        assert_eq!(ranges.ranges.len(), 1);
+        let range = ranges.ranges.into_values().next().unwrap();
+        let mut reader = range.context.builder.build().unwrap();
+
+        let mut num_rows = 0;
+        while let Some(b) = reader.next().transpose().unwrap() {
+            num_rows += b.num_rows();
+            assert_eq!(b.fields()[1].data.get(0).as_string(), Some("b".to_string()));
         }
         assert_eq!(num_rows, 1);
     }

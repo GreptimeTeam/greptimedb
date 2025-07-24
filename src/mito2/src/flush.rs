@@ -37,7 +37,7 @@ use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
-use crate::read::dedup::{DedupReader, LastNonNull, LastNonNullIter, LastRow};
+use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::PredicateGroup;
 use crate::read::Source;
@@ -357,16 +357,9 @@ impl RegionFlushTask {
             let max_sequence = stats.max_sequence();
             series_count += stats.series_count();
 
-            let merge_mode = version.options.merge_mode.unwrap_or(MergeMode::LastRow);
-
             let source = if ranges.len() == 1 {
                 let only_range = ranges.into_values().next().unwrap();
                 let iter = only_range.build_iter()?;
-                let iter = if merge_mode == MergeMode::LastNonNull {
-                    Box::new(LastNonNullIter::new(iter)) as _
-                } else {
-                    Box::new(iter) as _
-                };
                 Source::Iter(iter)
             } else {
                 // todo(hl): a workaround since sync version of MergeReader is wip.
@@ -382,10 +375,10 @@ impl RegionFlushTask {
                     // dedup according to merge mode
                     match version.options.merge_mode.unwrap_or(MergeMode::LastRow) {
                         MergeMode::LastRow => {
-                            Box::new(DedupReader::new(merge_reader, LastRow::new(true))) as _
+                            Box::new(DedupReader::new(merge_reader, LastRow::new(false))) as _
                         }
                         MergeMode::LastNonNull => {
-                            Box::new(DedupReader::new(merge_reader, LastNonNull::new(true))) as _
+                            Box::new(DedupReader::new(merge_reader, LastNonNull::new(false))) as _
                         }
                     }
                 };
