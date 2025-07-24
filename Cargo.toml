@@ -220,6 +220,8 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
 tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
