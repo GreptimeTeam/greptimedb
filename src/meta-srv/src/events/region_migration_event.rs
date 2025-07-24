@@ -76,13 +76,13 @@ pub(crate) struct RegionMigrationEvent {
 #[derive(Debug, Serialize, Deserialize, strum::Display)]
 #[strum(serialize_all = "PascalCase")]
 pub enum RegionMigrationStatus {
-    // The region migration procedure is running.
+    /// The region migration procedure is running.
     Running,
-    // The region migration procedure is finished successfully.
+    /// The region migration procedure is finished successfully.
     Done,
-    // The region migration procedure is failed.
+    /// The region migration procedure is failed.
     Failed,
-    // The region migration procedure is retrying.
+    /// The region migration procedure is retrying.
     Retrying,
 }
 

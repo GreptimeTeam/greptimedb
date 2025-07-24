@@ -27,7 +27,6 @@ use common_event_recorder::EventRecorderRef;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
-use common_time::timestamp::{TimeUnit, Timestamp};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
@@ -128,12 +127,11 @@ impl ProcedureMeta {
     /// Update current [ProcedureState].
     fn set_state(&self, state: ProcedureState) {
         if let Some(event_recorder) = &self.event_recorder {
-            event_recorder.record(Box::new(ProcedureEvent {
-                procedure_id: self.id,
-                procedure_dump_data: self.procedure_dump_data.clone(),
-                state: state.clone(),
-                timestamp: Timestamp::current_time(TimeUnit::Nanosecond),
-            }));
+            event_recorder.record(Box::new(ProcedureEvent::new(
+                self.id,
+                self.procedure_dump_data.clone(),
+                state.clone(),
+            )));
         }
         // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.
         self.state_sender.send(state).unwrap();
@@ -624,6 +622,7 @@ impl LocalManager {
     ) -> Result<Watcher> {
         ensure!(self.manager_ctx.running(), ManagerNotStartSnafu);
 
+        let procedure_dump_data = procedure.dump()?;
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
             procedure_state,
@@ -632,7 +631,7 @@ impl LocalManager {
             procedure.poison_keys(),
             procedure.type_name(),
             self.event_recorder.clone(),
-            procedure.dump()?,
+            procedure_dump_data.clone(),
         ));
         let runner = Runner {
             meta: meta.clone(),
@@ -646,6 +645,14 @@ impl LocalManager {
             rolling_back: false,
             event_recorder: self.event_recorder.clone(),
         };
+
+        if let Some(event_recorder) = self.event_recorder.as_ref() {
+            event_recorder.record(Box::new(ProcedureEvent::new(
+                procedure_id,
+                procedure_dump_data,
+                ProcedureState::Running,
+            )));
+        }
 
         let watcher = meta.state_receiver.clone();
 
