@@ -2334,10 +2334,14 @@ impl PromPlanner {
         let input_plan = self.prom_expr_to_plan(&input, session_state).await?;
 
         if !self.ctx.has_le_tag() {
-            return ColumnNotFoundSnafu {
-                col: LE_COLUMN_NAME.to_string(),
-            }
-            .fail();
+            // Return empty result instead of error when 'le' column is not found
+            // This handles the case when histogram metrics don't exist
+            return Ok(LogicalPlan::EmptyRelation(
+                datafusion::logical_expr::EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(DFSchema::empty()),
+                },
+            ));
         }
         let time_index_column =
             self.ctx
@@ -4727,5 +4731,54 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         \n          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_histogram_quantile_missing_le_column() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        // Test case: histogram_quantile with a table that doesn't have 'le' column
+        let case = r#"histogram_quantile(0.99, sum by(pod,instance,le) (rate(non_existent_histogram_bucket{instance=~"xxx"}[1m])))"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+
+        // Create a table provider with a table that doesn't have 'le' column
+        let table_provider = build_test_table_provider_with_fields(
+            &[(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                "non_existent_histogram_bucket".to_string(),
+            )],
+            &["pod", "instance"], // Note: no 'le' column
+        )
+        .await;
+
+        // Should return empty result instead of error
+        let result =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
+
+        // This should succeed now (returning empty result) instead of failing with "Cannot find column le"
+        assert!(
+            result.is_ok(),
+            "Expected successful plan creation with empty result, but got error: {:?}",
+            result.err()
+        );
+
+        // Verify that the result is an EmptyRelation
+        let plan = result.unwrap();
+        match plan {
+            LogicalPlan::EmptyRelation(_) => {
+                // This is what we expect
+            }
+            _ => panic!("Expected EmptyRelation, but got: {:?}", plan),
+        }
     }
 }
