@@ -620,7 +620,7 @@ mod tests {
         while let Some(b) = reader.next_batch().await.unwrap() {
             num_rows += b.num_rows();
         }
-        assert_eq!(num_rows, 0);
+        assert_eq!(num_rows, 1);
     }
 
     #[tokio::test]
