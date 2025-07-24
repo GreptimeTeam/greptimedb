@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use client::client_manager::NodeClients;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
+use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
@@ -48,6 +49,7 @@ use snafu::{ensure, ResultExt};
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
 use crate::error::{self, BuildWalOptionsAllocatorSnafu, Result};
+use crate::events::EventHandlerImpl;
 use crate::flow_meta_alloc::FlowPeerAllocator;
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
@@ -191,12 +193,23 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+
+        // Builds the event recorder to record important events and persist them as the system table.
+        let event_recorder = Arc::new(EventRecorderImpl::new(
+            Box::new(EventHandlerImpl::new(meta_peer_client.clone())),
+            options.event_recorder.clone(),
+        ));
+
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
-        let procedure_manager =
-            build_procedure_manager(&options, &kv_backend, &runtime_switch_manager);
+        let procedure_manager = build_procedure_manager(
+            &options,
+            &kv_backend,
+            &runtime_switch_manager,
+            event_recorder,
+        );
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
@@ -524,6 +537,7 @@ fn build_procedure_manager(
     options: &MetasrvOptions,
     kv_backend: &KvBackendRef,
     runtime_switch_manager: &RuntimeSwitchManagerRef,
+    event_recorder: EventRecorderRef,
 ) -> ProcedureManagerRef {
     let manager_config = ManagerConfig {
         max_retry_times: options.procedure.max_retry_times,
@@ -545,7 +559,7 @@ fn build_procedure_manager(
         kv_state_store.clone(),
         kv_state_store,
         Some(runtime_switch_manager.clone()),
-        None,
+        Some(event_recorder),
     ))
 }
 

@@ -75,21 +75,21 @@ pub const DEFAULT_REGION_MIGRATION_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The table catalog.
-    catalog: String,
+    pub(crate) catalog: String,
     /// The table schema.
-    schema: String,
+    pub(crate) schema: String,
     /// The [Peer] of migration source.
-    from_peer: Peer,
+    pub(crate) from_peer: Peer,
     /// The [Peer] of migration destination.
-    to_peer: Peer,
+    pub(crate) to_peer: Peer,
     /// The [RegionId] of migration region.
-    region_id: RegionId,
+    pub(crate) region_id: RegionId,
     /// The timeout for downgrading leader region and upgrading candidate region operations.
     #[serde(with = "humantime_serde", default = "default_timeout")]
-    timeout: Duration,
+    pub(crate) timeout: Duration,
     /// The trigger reason of region migration.
     #[serde(default)]
-    trigger_reason: RegionMigrationTriggerReason,
+    pub(crate) trigger_reason: RegionMigrationTriggerReason,
 }
 
 fn default_timeout() -> Duration {
@@ -564,8 +564,8 @@ pub(crate) trait State: Sync + Send + Debug {
 /// Persistent data of [RegionMigrationProcedure].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegionMigrationDataOwned {
-    persistent_ctx: PersistentContext,
-    state: Box<dyn State>,
+    pub(crate) persistent_ctx: PersistentContext,
+    pub(crate) state: Box<dyn State>,
 }
 
 /// Persistent data of [RegionMigrationProcedure].

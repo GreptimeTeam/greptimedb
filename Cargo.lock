@@ -7369,6 +7369,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-event-recorder",
  "common-greptimedb-telemetry",
  "common-grpc",
  "common-macro",

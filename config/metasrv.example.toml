@@ -240,6 +240,11 @@ create_topic_timeout = "30s"
 # client_cert_path = "/path/to/client_cert"
 # client_key_path = "/path/to/key"
 
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events.
+ttl = "30d"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.
