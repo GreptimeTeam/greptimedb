@@ -27,6 +27,7 @@ use common_event_recorder::EventRecorderRef;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{error, info, tracing};
+use common_time::timestamp::{TimeUnit, Timestamp};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
@@ -90,6 +91,7 @@ pub(crate) struct ProcedureMeta {
 }
 
 impl ProcedureMeta {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         id: ProcedureId,
         procedure_state: ProcedureState,
@@ -130,6 +132,7 @@ impl ProcedureMeta {
                 procedure_id: self.id,
                 procedure_dump_data: self.procedure_dump_data.clone(),
                 state: state.clone(),
+                timestamp: Timestamp::current_time(TimeUnit::Nanosecond),
             }));
         }
         // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.

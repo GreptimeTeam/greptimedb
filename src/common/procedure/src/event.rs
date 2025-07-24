@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_event_recorder::Event;
+use common_time::timestamp::Timestamp;
 
 use crate::{ProcedureId, ProcedureState};
 
@@ -28,6 +29,8 @@ pub struct ProcedureEvent {
     pub procedure_dump_data: String,
     /// The state of the procedure.
     pub state: ProcedureState,
+    /// The timestamp of the event.
+    pub timestamp: Timestamp,
 }
 
 impl Event for ProcedureEvent {
