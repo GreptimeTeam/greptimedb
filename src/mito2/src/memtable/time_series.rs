@@ -686,21 +686,27 @@ pub struct Series {
     active: ValueBuilder,
     frozen: Vec<Values>,
     region_metadata: RegionMetadataRef,
+    capacity: usize,
 }
 
 impl Series {
-    pub(crate) fn with_capacity(region_metadata: &RegionMetadataRef, builder_cap: usize) -> Self {
+    pub(crate) fn with_capacity(
+        region_metadata: &RegionMetadataRef,
+        init_capacity: usize,
+        capacity: usize,
+    ) -> Self {
         MEMTABLE_ACTIVE_SERIES_COUNT.inc();
         Self {
             pk_cache: None,
-            active: ValueBuilder::new(region_metadata, builder_cap),
+            active: ValueBuilder::new(region_metadata, init_capacity),
             frozen: vec![],
             region_metadata: region_metadata.clone(),
+            capacity,
         }
     }
 
     pub(crate) fn new(region_metadata: &RegionMetadataRef) -> Self {
-        Self::with_capacity(region_metadata, INITIAL_BUILDER_CAPACITY)
+        Self::with_capacity(region_metadata, INITIAL_BUILDER_CAPACITY, BUILDER_CAPACITY)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -716,7 +722,7 @@ impl Series {
         values: impl Iterator<Item = ValueRef<'a>>,
     ) -> usize {
         // + 10 to avoid potential reallocation.
-        if self.active.len() + 10 > BUILDER_CAPACITY {
+        if self.active.len() + 10 > self.capacity {
             let region_metadata = self.region_metadata.clone();
             self.freeze(&region_metadata);
         }

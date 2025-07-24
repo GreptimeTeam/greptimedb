@@ -37,10 +37,11 @@ use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
 };
+use crate::read::dedup::{DedupReader, LastNonNull, LastNonNullIter, LastRow};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::scan_region::PredicateGroup;
 use crate::read::Source;
-use crate::region::options::IndexOptions;
+use crate::region::options::{IndexOptions, MergeMode};
 use crate::region::version::{VersionControlData, VersionControlRef};
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
@@ -356,9 +357,17 @@ impl RegionFlushTask {
             let max_sequence = stats.max_sequence();
             series_count += stats.series_count();
 
+            let merge_mode = version.options.merge_mode.unwrap_or(MergeMode::LastRow);
+
             let source = if ranges.len() == 1 {
                 let only_range = ranges.into_values().next().unwrap();
-                Source::Iter(only_range.build_iter()?)
+                let iter = only_range.build_iter()?;
+                let iter = if merge_mode == MergeMode::LastNonNull {
+                    Box::new(LastNonNullIter::new(iter)) as _
+                } else {
+                    Box::new(iter) as _
+                };
+                Source::Iter(iter)
             } else {
                 // todo(hl): a workaround since sync version of MergeReader is wip.
                 let sources = ranges
@@ -366,7 +375,21 @@ impl RegionFlushTask {
                     .map(|r| r.build_iter().map(Source::Iter))
                     .collect::<Result<Vec<_>>>()?;
                 let merge_reader = MergeReaderBuilder::from_sources(sources).build().await?;
-                Source::Reader(Box::new(merge_reader))
+                let maybe_dedup = if version.options.append_mode {
+                    // no dedup in append mode
+                    Box::new(merge_reader) as _
+                } else {
+                    // dedup according to merge mode
+                    match version.options.merge_mode.unwrap_or(MergeMode::LastRow) {
+                        MergeMode::LastRow => {
+                            Box::new(DedupReader::new(merge_reader, LastRow::new(true))) as _
+                        }
+                        MergeMode::LastNonNull => {
+                            Box::new(DedupReader::new(merge_reader, LastNonNull::new(true))) as _
+                        }
+                    }
+                };
+                Source::Reader(maybe_dedup)
             };
 
             // Flush to level 0.

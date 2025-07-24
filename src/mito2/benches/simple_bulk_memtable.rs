@@ -21,6 +21,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::simple_bulk_memtable::SimpleBulkMemtable;
 use mito2::memtable::{KeyValues, Memtable, MemtableRanges};
+use mito2::read;
+use mito2::read::dedup::DedupReader;
 use mito2::read::merge::MergeReaderBuilder;
 use mito2::read::scan_region::PredicateGroup;
 use mito2::read::Source;
@@ -99,13 +101,14 @@ fn build_key_values(
 
 fn create_memtable_with_rows(num_batches: usize) -> SimpleBulkMemtable {
     let memtable = new_test_memtable(false, MergeMode::LastRow);
+    let batch_size = 10000;
     for i in 0..num_batches {
-        let data: Vec<_> = (0..10000)
+        let data: Vec<_> = (0..batch_size)
             .map(|j| {
                 (
-                    (i * 10000 + j) as i64,
-                    (i * 10000 + j) as f64,
-                    format!("value_{}", i * 10000 + j),
+                    (i * batch_size + j) as i64,
+                    (i * batch_size + j) as f64,
+                    format!("value_{}", i * batch_size + j),
                 )
             })
             .collect();
@@ -127,9 +130,9 @@ async fn flush(mem: &SimpleBulkMemtable) {
 
     let mut source = if ranges.len() == 1 {
         let only_range = ranges.into_values().next().unwrap();
-        Source::Iter(only_range.build_iter().unwrap())
+        let iter = only_range.build_iter().unwrap();
+        Source::Iter(iter)
     } else {
-        // todo(hl): a workaround since sync version of MergeReader is wip.
         let sources = ranges
             .into_values()
             .map(|r| r.build_iter().map(Source::Iter))
@@ -139,7 +142,11 @@ async fn flush(mem: &SimpleBulkMemtable) {
             .build()
             .await
             .unwrap();
-        Source::Reader(Box::new(merge_reader))
+        let reader = Box::new(DedupReader::new(
+            merge_reader,
+            read::dedup::LastRow::new(true),
+        ));
+        Source::Reader(reader)
     };
 
     while let Some(b) = source.next_batch().await.unwrap() {

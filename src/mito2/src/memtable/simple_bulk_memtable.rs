@@ -75,7 +75,7 @@ impl SimpleBulkMemtable {
         } else {
             dedup
         };
-        let series = RwLock::new(Series::with_capacity(&region_metadata, 1024));
+        let series = RwLock::new(Series::with_capacity(&region_metadata, 1024, 8192));
 
         Self {
             id,
@@ -260,7 +260,7 @@ impl Memtable for SimpleBulkMemtable {
             .map(|result| {
                 result.map(|batch| {
                     let num_rows = batch.num_rows();
-                    let builder = BatchIterBuilder {
+                    let builder = BatchRangeBuilder {
                         batch,
                         merge_mode: self.merge_mode,
                     };
@@ -343,23 +343,18 @@ impl Memtable for SimpleBulkMemtable {
 }
 
 #[derive(Clone)]
-pub struct BatchIterBuilder {
+pub struct BatchRangeBuilder {
     pub batch: Batch,
     pub merge_mode: MergeMode,
 }
 
-impl IterBuilder for BatchIterBuilder {
+impl IterBuilder for BatchRangeBuilder {
     fn build(&self) -> error::Result<BoxedBatchIterator> {
         let batch = self.batch.clone();
         let iter = Iter {
             batch: Some(Ok(batch)),
         };
-
-        if self.merge_mode == MergeMode::LastNonNull {
-            Ok(Box::new(LastNonNullIter::new(iter)))
-        } else {
-            Ok(Box::new(iter))
-        }
+        Ok(Box::new(iter))
     }
 }
 
@@ -394,8 +389,10 @@ mod tests {
     use store_api::storage::{RegionId, SequenceNumber};
 
     use super::*;
+    use crate::read;
+    use crate::read::dedup::DedupReader;
     use crate::read::merge::MergeReaderBuilder;
-    use crate::read::Source;
+    use crate::read::{BatchReader, Source};
     use crate::region::options::MergeMode;
     use crate::test_util::column_metadata_to_column_schema;
 
@@ -432,6 +429,7 @@ mod tests {
         metadata: &RegionMetadataRef,
         sequence: SequenceNumber,
         row_values: &[(i64, f64, String)],
+        op_type: OpType,
     ) -> KeyValues {
         let column_schemas: Vec<_> = metadata
             .column_metadatas
@@ -456,7 +454,7 @@ mod tests {
             })
             .collect();
         let mutation = Mutation {
-            op_type: OpType::Put as i32,
+            op_type: op_type as i32,
             sequence,
             rows: Some(Rows {
                 schema: column_schemas,
@@ -475,6 +473,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         memtable
@@ -482,6 +481,7 @@ mod tests {
                 &memtable.region_metadata,
                 1,
                 &[(2, 2.0, "b".to_string())],
+                OpType::Put,
             ))
             .unwrap();
 
@@ -506,6 +506,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
 
@@ -539,6 +540,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         memtable
@@ -546,6 +548,7 @@ mod tests {
                 &memtable.region_metadata,
                 1,
                 &[(1, 2.0, "b".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         let mut iter = memtable.iter(None, None, None).unwrap();
@@ -558,13 +561,59 @@ mod tests {
     #[test]
     fn test_write_one() {
         let memtable = new_test_memtable(false, MergeMode::LastRow);
-        let kvs = build_key_values(&memtable.region_metadata, 0, &[(1, 1.0, "a".to_string())]);
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string())],
+            OpType::Put,
+        );
         let kv = kvs.iter().next().unwrap();
         memtable.write_one(kv).unwrap();
 
         let mut iter = memtable.iter(None, None, None).unwrap();
         let batch = iter.next().unwrap().unwrap();
         assert_eq!(1, batch.num_rows());
+    }
+
+    #[tokio::test]
+    async fn test_write_dedup() {
+        let memtable = new_test_memtable(true, MergeMode::LastRow);
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string())],
+            OpType::Put,
+        );
+        let kv = kvs.iter().next().unwrap();
+        memtable.write_one(kv).unwrap();
+        memtable.freeze().unwrap();
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            0,
+            &[(1, 1.0, "a".to_string())],
+            OpType::Delete,
+        );
+        let kv = kvs.iter().next().unwrap();
+        memtable.write_one(kv).unwrap();
+
+        let ranges = memtable
+            .ranges(None, PredicateGroup::default(), None)
+            .unwrap();
+        let mut source = vec![];
+        for r in ranges.ranges.values() {
+            source.push(Source::Iter(r.build_iter().unwrap()));
+        }
+
+        let reader = MergeReaderBuilder::from_sources(source)
+            .build()
+            .await
+            .unwrap();
+        let mut reader = DedupReader::new(reader, read::dedup::LastRow::new(true));
+        let mut num_rows = 0;
+        while let Some(b) = reader.next_batch().await.unwrap() {
+            num_rows += b.num_rows();
+        }
+        assert_eq!(num_rows, 1);
     }
 
     #[test]
@@ -600,7 +649,12 @@ mod tests {
             stats.time_range
         );
 
-        let kvs = build_key_values(&memtable.region_metadata, 2, &[(3, 3.0, "c".to_string())]);
+        let kvs = build_key_values(
+            &memtable.region_metadata,
+            2,
+            &[(3, 3.0, "c".to_string())],
+            OpType::Put,
+        );
         memtable.write(&kvs).unwrap();
         let mut iter = memtable.iter(None, None, None).unwrap();
         let batch = iter.next().unwrap().unwrap();
@@ -628,6 +682,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         assert!(!memtable.is_empty());
@@ -645,6 +700,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         let stats = memtable.stats();
@@ -660,6 +716,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
 
@@ -675,6 +732,7 @@ mod tests {
                 &memtable.region_metadata,
                 0,
                 &[(1, 1.0, "a".to_string())],
+                OpType::Put,
             ))
             .unwrap();
         memtable
@@ -682,6 +740,7 @@ mod tests {
                 &memtable.region_metadata,
                 1,
                 &[(2, 2.0, "b".to_string())],
+                OpType::Put,
             ))
             .unwrap();
 
