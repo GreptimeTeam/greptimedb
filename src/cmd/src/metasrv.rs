@@ -341,7 +341,7 @@ impl StartCommand {
             .context(error::BuildMetaServerSnafu)?;
         let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
 
-        let instance = MetasrvInstance::new(opts, plugins, metasrv)
+        let instance = MetasrvInstance::new(metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

@@ -71,6 +71,7 @@ use crate::selector::round_robin::RoundRobinSelector;
 use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
 use crate::selector::SelectorType;
 use crate::service::admin;
+use crate::service::admin::admin_axum_router;
 use crate::{error, Result};
 
 pub struct MetasrvInstance {
@@ -94,17 +95,20 @@ pub struct MetasrvInstance {
 }
 
 impl MetasrvInstance {
-    pub async fn new(
-        opts: MetasrvOptions,
-        plugins: Plugins,
-        metasrv: Metasrv,
-    ) -> Result<MetasrvInstance> {
+    pub async fn new(metasrv: Metasrv) -> Result<MetasrvInstance> {
+        let opts = metasrv.options().clone();
+        let plugins = metasrv.plugins().clone();
+        let metasrv = Arc::new(metasrv);
+
+        // Wire up the admin_axum_router as an extra router
+        let extra_routers = admin_axum_router(metasrv.clone());
+
         let http_server = HttpServerBuilder::new(opts.http.clone())
             .with_metrics_handler(MetricsHandler)
             .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?)
+            .with_extra_router(extra_routers)
             .build();
 
-        let metasrv = Arc::new(metasrv);
         // put metasrv into plugins for later use
         plugins.insert::<Arc<Metasrv>>(metasrv.clone());
         let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
@@ -132,6 +136,7 @@ impl MetasrvInstance {
 
         self.signal_sender = Some(tx);
 
+        // Start gRPC server with admin services for backward compatibility
         let mut router = router(self.metasrv.clone());
         if let Some(configurator) = self.metasrv.plugins().get::<ConfiguratorRef>() {
             router = configurator.config_grpc(router);
