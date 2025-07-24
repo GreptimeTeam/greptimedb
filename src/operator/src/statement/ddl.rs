@@ -43,7 +43,6 @@ use common_meta::rpc::ddl::{
     CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
-use common_meta::rpc::router::{LegacyPartition, LegacyPartition as MetaPartition};
 use common_query::Output;
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
@@ -56,7 +55,6 @@ use datatypes::value::Value;
 use lazy_static::lazy_static;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::multi_dim::MultiDimPartitionRule;
-use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
 use query::query_engine::DefaultSerializer;
@@ -85,9 +83,9 @@ use table::TableRef;
 use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu, CreateTableInfoSnafu,
-    DeserializePartitionSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, Result, SchemaInUseSnafu,
+    EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu, FlowNotFoundSnafu,
+    InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu,
+    InvalidViewNameSnafu, InvalidViewStmtSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
     SchemaNotFoundSnafu, SchemaReadOnlySnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
     ViewAlreadyExistsSnafu,
@@ -1337,11 +1335,14 @@ impl StatementExecutor {
     async fn create_table_procedure(
         &self,
         create_table: CreateTableExpr,
-        partitions: Vec<LegacyPartition>,
+        partitions: Vec<PartitionExpr>,
         table_info: RawTableInfo,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let partitions = partitions.into_iter().map(Into::into).collect();
+        let partitions = partitions
+            .into_iter()
+            .map(|expr| expr.as_pb_partition().context(PartitionExprToPbSnafu))
+            .collect::<Result<Vec<_>>>()?;
 
         let request = SubmitDdlTaskRequest {
             query_context,
@@ -1533,36 +1534,24 @@ impl StatementExecutor {
     }
 }
 
-/// Parse partition statement [Partitions] into [MetaPartition] and partition columns.
+/// Parse partition statement [Partitions] into [PartitionExpr] and partition columns.
 pub fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
     query_ctx: &QueryContextRef,
-) -> Result<(Vec<MetaPartition>, Vec<String>)> {
+) -> Result<(Vec<PartitionExpr>, Vec<String>)> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
     let partition_columns = find_partition_columns(&partitions)?;
-    let partition_entries =
+    let partition_exprs =
         find_partition_entries(create_table, &partitions, &partition_columns, query_ctx)?;
 
     // Validates partition
-    let exprs = partition_entries.clone();
+    let exprs = partition_exprs.clone();
     MultiDimPartitionRule::try_new(partition_columns.clone(), vec![], exprs, true)
         .context(InvalidPartitionSnafu)?;
 
-    // TODO(zhongzc): change to PartitionExpr
-    let meta_partitions: Vec<MetaPartition> = partition_entries
-        .into_iter()
-        .map(|x| {
-            MetaPartition::try_from(PartitionDef::new(
-                partition_columns.clone(),
-                vec![PartitionBound::Expr(x)],
-            ))
-        })
-        .collect::<std::result::Result<_, _>>()
-        .context(DeserializePartitionSnafu)?;
-
-    Ok((meta_partitions, partition_columns))
+    Ok((partition_exprs, partition_columns))
 }
 
 /// Verifies an alter and returns whether it is necessary to perform the alter.
@@ -1720,7 +1709,7 @@ fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>
 
 /// Parse [Partitions] into a group of partition entries.
 ///
-/// Returns a list of [PartitionBound], each of which defines a partition.
+/// Returns a list of [PartitionExpr], each of which defines a partition.
 fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
