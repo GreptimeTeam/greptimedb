@@ -292,6 +292,14 @@ fn expand_sort_alias_conflict_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan.clone(), &config);
+    assert!(result.is_err(), "Expected error for ambiguous alias");
+    assert!(format!("{result:?}").contains("AmbiguousReference"));
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        allow_query_fallback: true,
+    });
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
