@@ -57,6 +57,11 @@ lazy_static! {
         "query merge scan errors total"
     )
     .unwrap();
+    pub static ref PUSH_DOWN_FALLBACK_ERRORS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_push_down_fallback_errors_total",
+        "query push down fallback errors total"
+    )
+    .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.
