@@ -116,7 +116,7 @@ impl GrpcOptions {
     }
 }
 
-pub const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
+const DEFAULT_GRPC_ADDR_PORT: &str = "4001";
 
 impl Default for GrpcOptions {
     fn default() -> Self {
