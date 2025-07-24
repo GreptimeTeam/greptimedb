@@ -167,6 +167,7 @@ pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
 pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
 pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
 pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
+pub const RECOVERY_MODE_KEY: &str = "__switches/recovery";
 
 pub const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";

@@ -21,7 +21,7 @@ use moka::future::Cache;
 use snafu::ResultExt;
 
 use crate::error::{GetCacheSnafu, Result};
-use crate::key::{LEGACY_MAINTENANCE_KEY, MAINTENANCE_KEY, PAUSE_PROCEDURE_KEY};
+use crate::key::{LEGACY_MAINTENANCE_KEY, MAINTENANCE_KEY, PAUSE_PROCEDURE_KEY, RECOVERY_MODE_KEY};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{BatchDeleteRequest, PutRequest};
 
@@ -131,6 +131,21 @@ impl RuntimeSwitchManager {
     pub async fn is_procedure_paused(&self) -> Result<bool> {
         self.exists(PAUSE_PROCEDURE_KEY).await
     }
+
+    /// Enables recovery mode.
+    pub async fn set_recovery_mode(&self) -> Result<()> {
+        self.put_key(RECOVERY_MODE_KEY).await
+    }
+
+    /// Unsets recovery mode.
+    pub async fn unset_recovery_mode(&self) -> Result<()> {
+        self.delete_keys(&[RECOVERY_MODE_KEY]).await
+    }
+
+    /// Returns true if the system is currently in recovery mode.
+    pub async fn recovery_mode(&self) -> Result<bool> {
+        self.exists(RECOVERY_MODE_KEY).await
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +235,16 @@ mod tests {
         assert!(runtime_switch_manager.is_procedure_paused().await.unwrap());
         runtime_switch_manager.resume_procedure().await.unwrap();
         assert!(!runtime_switch_manager.is_procedure_paused().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_recovery_mode() {
+        let runtime_switch_manager =
+            Arc::new(RuntimeSwitchManager::new(Arc::new(MemoryKvBackend::new())));
+        assert!(!runtime_switch_manager.recovery_mode().await.unwrap());
+        runtime_switch_manager.set_recovery_mode().await.unwrap();
+        assert!(runtime_switch_manager.recovery_mode().await.unwrap());
+        runtime_switch_manager.unset_recovery_mode().await.unwrap();
+        assert!(!runtime_switch_manager.recovery_mode().await.unwrap());
     }
 }
