@@ -646,7 +646,7 @@ async fn open_all_regions(
     }
 
     let open_regions = region_server
-        .handle_batch_open_requests(init_regions_parallelism, region_requests)
+        .handle_batch_open_requests(init_regions_parallelism, region_requests, false)
         .await?;
     ensure!(
         open_regions.len() == num_regions,
@@ -691,7 +691,7 @@ async fn open_all_regions(
         }
 
         let open_regions = region_server
-            .handle_batch_open_requests(init_regions_parallelism, region_requests)
+            .handle_batch_open_requests(init_regions_parallelism, region_requests, false)
             .await?;
 
         ensure!(
