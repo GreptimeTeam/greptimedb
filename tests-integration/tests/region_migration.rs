@@ -1329,7 +1329,7 @@ async fn check_region_migration_events_system_table(
     from_peer_id: u64,
     to_peer_id: u64,
 ) {
-    // Sleep for while to ensure the event is recorded.
+    // Sleep enough time to ensure the event is recorded.
     tokio::time::sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
 
     // The query is equivalent to the following SQL:

@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::net::TcpListener;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,9 +59,10 @@ use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
+use rand::Rng;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
-use servers::grpc::{GrpcOptions, DEFAULT_GRPC_ADDR_PORT};
+use servers::grpc::GrpcOptions;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::server::ServerHandlers;
 use tempfile::TempDir;
@@ -399,9 +402,7 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
         ]);
 
-        let mut fe_opts = FrontendOptions::default();
-        // Setup the server addr for local test.
-        fe_opts.grpc.server_addr = format!("127.0.0.1:{}", DEFAULT_GRPC_ADDR_PORT);
+        let fe_opts = self.build_frontend_options();
 
         let heartbeat_task = HeartbeatTask::new(
             &fe_opts,
@@ -441,6 +442,56 @@ impl GreptimeDbClusterBuilder {
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }
+    }
+
+    fn build_frontend_options(&self) -> FrontendOptions {
+        let mut fe_opts = FrontendOptions::default();
+
+        // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
+        let port_range = 14000..=24000;
+        let max_attempts = 10;
+        let localhost = "127.0.0.1";
+        let construct_addr = |port: u16| format!("{}:{}", localhost, port);
+
+        fe_opts.http.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+
+        let grpc_port = self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
+        fe_opts.grpc.bind_addr = construct_addr(grpc_port);
+        fe_opts.grpc.server_addr = construct_addr(grpc_port);
+        fe_opts.mysql.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+        fe_opts.postgres.addr =
+            construct_addr(self.choose_random_unused_port(port_range, max_attempts, localhost));
+
+        fe_opts
+    }
+
+    // Choose a random unused port between [start, end].
+    fn choose_random_unused_port(
+        &self,
+        port_range: RangeInclusive<u16>,
+        max_attempts: u16,
+        addr: &str,
+    ) -> u16 {
+        let mut rng = rand::rng();
+
+        let mut attempts = 0;
+        while attempts < max_attempts {
+            let port = rng.random_range(port_range.clone());
+            if TcpListener::bind(format!("{}:{}", addr, port)).is_ok() {
+                return port;
+            }
+            attempts += 1;
+        }
+
+        panic!("No unused port found");
     }
 }
 

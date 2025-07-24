@@ -60,6 +60,7 @@ object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
+rand.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
 sea-query.workspace = true
