@@ -57,6 +57,15 @@ impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
     }
 }
 
+impl TryFrom<&ColumnDefaultConstraint> for Vec<u8> {
+    type Error = error::Error;
+
+    fn try_from(value: &ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
+        let s = serde_json::to_string(value).context(error::SerializeSnafu)?;
+        Ok(s.into_bytes())
+    }
+}
+
 impl Display for ColumnDefaultConstraint {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {

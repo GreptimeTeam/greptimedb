@@ -44,6 +44,7 @@ pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
+pub(crate) use create_table_template::{build_template_from_raw_table_info, CreateRequestBuilder};
 pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;
