@@ -958,7 +958,7 @@ mod tests {
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
         let file_path = FixedPathProvider {
-            file_id: handle.file_id(),
+            region_file_id: handle.file_id(),
         };
         let metadata = Arc::new(sst_region_metadata());
 
@@ -987,8 +987,12 @@ mod tests {
             .remove(0);
 
         // Read without override sequence (should read sequence 0)
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store.clone());
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store.clone(),
+        );
         let mut reader = builder.build().await.unwrap();
         let mut normal_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {
@@ -1005,8 +1009,12 @@ mod tests {
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         );
 
-        let builder =
-            ParquetReaderBuilder::new(FILE_DIR.to_string(), override_handle, object_store.clone());
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            override_handle,
+            object_store.clone(),
+        );
         let mut reader = builder.build().await.unwrap();
         let mut override_batches = Vec::new();
         while let Some(batch) = reader.next_batch().await.unwrap() {
