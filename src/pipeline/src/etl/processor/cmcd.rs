@@ -18,20 +18,22 @@
 
 use std::collections::BTreeMap;
 
+use ordered_float::NotNan;
 use snafu::{OptionExt, ResultExt};
 use urlencoding::decode;
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     CmcdMissingKeySnafu, CmcdMissingValueSnafu, Error, FailedToParseFloatKeySnafu,
-    FailedToParseIntKeySnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
-    ProcessorMissingFieldSnafu, Result,
+    FailedToParseIntKeySnafu, FloatIsNanSnafu, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
+    ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME,
 };
-use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_CMCD: &str = "cmcd";
 
@@ -76,42 +78,43 @@ const CMCD_KEYS: [&str; 18] = [
 ];
 
 /// function to resolve CMCD_KEY_BS | CMCD_KEY_SU
-fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<Value> {
-    Ok(Value::Boolean(true))
+fn bs_su(_: &str, _: &str, _: Option<&str>) -> Result<VrlValue> {
+    Ok(VrlValue::Boolean(true))
 }
 
 /// function to resolve CMCD_KEY_BR | CMCD_KEY_BL | CMCD_KEY_D | CMCD_KEY_DL | CMCD_KEY_MTP | CMCD_KEY_RTP | CMCD_KEY_TB
-fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+fn br_tb(s: &str, k: &str, v: Option<&str>) -> Result<VrlValue> {
     let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val: i64 = v
         .parse()
         .context(FailedToParseIntKeySnafu { key: k, value: v })?;
-    Ok(Value::Int64(val))
+    Ok(VrlValue::Integer(val))
 }
 
 /// function to resolve CMCD_KEY_CID | CMCD_KEY_NRR | CMCD_KEY_OT | CMCD_KEY_SF | CMCD_KEY_SID | CMCD_KEY_V
-fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+fn cid_v(s: &str, k: &str, v: Option<&str>) -> Result<VrlValue> {
     let v = v.context(CmcdMissingValueSnafu { k, s })?;
-    Ok(Value::String(v.to_string()))
+    Ok(VrlValue::Bytes(Bytes::from(v.to_string())))
 }
 
 /// function to resolve CMCD_KEY_NOR
-fn nor(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+fn nor(s: &str, k: &str, v: Option<&str>) -> Result<VrlValue> {
     let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val = match decode(v) {
         Ok(val) => val.to_string(),
         Err(_) => v.to_string(),
     };
-    Ok(Value::String(val))
+    Ok(VrlValue::Bytes(Bytes::from(val)))
 }
 
 /// function to resolve CMCD_KEY_PR
-fn pr(s: &str, k: &str, v: Option<&str>) -> Result<Value> {
+fn pr(s: &str, k: &str, v: Option<&str>) -> Result<VrlValue> {
     let v = v.context(CmcdMissingValueSnafu { k, s })?;
     let val: f64 = v
         .parse()
         .context(FailedToParseFloatKeySnafu { key: k, value: v })?;
-    Ok(Value::Float64(val))
+    let val = NotNan::new(val).context(FloatIsNanSnafu)?;
+    Ok(VrlValue::Float(val))
 }
 
 /// Common Media Client Data Specification:
@@ -156,11 +159,11 @@ pub struct CmcdProcessor {
 }
 
 impl CmcdProcessor {
-    fn generate_key(prefix: &str, key: &str) -> String {
-        format!("{}_{}", prefix, key)
+    fn generate_key(prefix: &str, key: &str) -> KeyString {
+        KeyString::from(format!("{}_{}", prefix, key))
     }
 
-    fn parse(&self, name: &str, value: &str) -> Result<BTreeMap<String, Value>> {
+    fn parse(&self, name: &str, value: &str) -> Result<BTreeMap<KeyString, VrlValue>> {
         let mut working_set = BTreeMap::new();
 
         let parts = value.split(',');
@@ -250,16 +253,18 @@ impl Processor for CmcdProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let name = field.input_field();
-
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(name) {
-                Some(Value::String(s)) => {
-                    let results = self.parse(field.target_or_input_field(), s)?;
-                    val.extend(results.into())?;
+                Some(VrlValue::Bytes(s)) => {
+                    let s = String::from_utf8_lossy(s);
+                    let results = self.parse(field.target_or_input_field(), &s)?;
+
+                    val.extend(results);
                 }
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind().to_string(),
@@ -288,7 +293,6 @@ mod tests {
 
     use super::*;
     use crate::etl::field::{Field, Fields};
-    use crate::etl::value::Value;
 
     #[test]
     fn test_cmcd() {
@@ -297,23 +301,23 @@ mod tests {
                 "sid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![(
                     "prefix_sid",
-                    Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                    VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                 )],
             ),
             (
                 "br%3D3200%2Cbs%2Cd%3D4004%2Cmtp%3D25400%2Cot%3Dv%2Crtp%3D15000%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22%2Ctb%3D6000",
                 vec![
-                    ("prefix_bs", Value::Boolean(true)),
-                    ("prefix_ot", Value::String("v".into())),
-                    ("prefix_rtp", Value::Int64(15000)),
-                    ("prefix_br", Value::Int64(3200)),
-                    ("prefix_tb", Value::Int64(6000)),
-                    ("prefix_d", Value::Int64(4004)),
+                    ("prefix_bs", VrlValue::Boolean(true)),
+                    ("prefix_ot", VrlValue::Bytes(Bytes::from("v"))),
+                    ("prefix_rtp", VrlValue::Integer(15000)),
+                    ("prefix_br", VrlValue::Integer(3200)),
+                    ("prefix_tb", VrlValue::Integer(6000)),
+                    ("prefix_d", VrlValue::Integer(4004)),
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
-                    ("prefix_mtp", Value::Int64(25400)),
+                    ("prefix_mtp", VrlValue::Integer(25400)),
                 ],
             ),
             (
@@ -322,16 +326,16 @@ mod tests {
                 vec![
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
-                    ("prefix_rtp", Value::Int64(15000)),
+                    ("prefix_rtp", VrlValue::Integer(15000)),
                 ],
             ),
             (
                 "bs%2Csu",
                 vec![
-                    ("prefix_su", Value::Boolean(true)),
-                    ("prefix_bs", Value::Boolean(true)),
+                    ("prefix_su", VrlValue::Boolean(true)),
+                    ("prefix_bs", VrlValue::Boolean(true)),
                 ],
             ),
             (
@@ -346,7 +350,7 @@ mod tests {
                     //     "prefix_com.examplemyStringKey",
                     //     Value::String("\"myStringValue\"".into()),
                     // ),
-                    ("prefix_d", Value::Int64(4004)),
+                    ("prefix_d", VrlValue::Integer(4004)),
                 ],
             ),
             (
@@ -354,11 +358,11 @@ mod tests {
                 vec![
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
                     (
                         "prefix_nor",
-                        Value::String("\"../300kbps/segment35.m4v\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"../300kbps/segment35.m4v\"")),
 
                     ),
                 ],
@@ -366,56 +370,56 @@ mod tests {
             (
                 "nrr%3D%2212323-48763%22%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![
-                    ("prefix_nrr", Value::String("\"12323-48763\"".into())),
+                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
                 ],
             ),
             (
                 "nor%3D%22..%252F300kbps%252Ftrack.m4v%22%2Cnrr%3D%2212323-48763%22%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22",
                 vec![
-                    ("prefix_nrr", Value::String("\"12323-48763\"".into())),
+                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
                     (
                         "prefix_nor",
-                        Value::String("\"../300kbps/track.m4v\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"../300kbps/track.m4v\"")),
                     ),
                 ],
             ),
             (
                 "bl%3D21300%2Cbr%3D3200%2Cbs%2Ccid%3D%22faec5fc2-ac30-11eabb37-0242ac130002%22%2Cd%3D4004%2Cdl%3D18500%2Cmtp%3D48100%2Cnor%3D%22..%252F300kbps%252Ftrack.m4v%22%2Cnrr%3D%2212323-48763%22%2Cot%3Dv%2Cpr%3D1.08%2Crtp%3D12000%2Csf%3Dd%2Csid%3D%226e2fb550-c457-11e9-bb97-0800200c9a66%22%2Cst%3Dv%2Csu%2Ctb%3D6000",
                 vec![
-                    ("prefix_bl", Value::Int64(21300)),
-                    ("prefix_bs", Value::Boolean(true)),
-                    ("prefix_st", Value::String("v".into())),
-                    ("prefix_ot", Value::String("v".into())),
+                    ("prefix_bl", VrlValue::Integer(21300)),
+                    ("prefix_bs", VrlValue::Boolean(true)),
+                    ("prefix_st", VrlValue::Bytes(Bytes::from("v"))),
+                    ("prefix_ot", VrlValue::Bytes(Bytes::from("v"))),
                     (
                         "prefix_sid",
-                        Value::String("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"6e2fb550-c457-11e9-bb97-0800200c9a66\"")),
                     ),
-                    ("prefix_tb", Value::Int64(6000)),
-                    ("prefix_d", Value::Int64(4004)),
+                    ("prefix_tb", VrlValue::Integer(6000)),
+                    ("prefix_d", VrlValue::Integer(4004)),
                     (
                         "prefix_cid",
-                        Value::String("\"faec5fc2-ac30-11eabb37-0242ac130002\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"faec5fc2-ac30-11eabb37-0242ac130002\"")),
                     ),
-                    ("prefix_mtp", Value::Int64(48100)),
-                    ("prefix_rtp", Value::Int64(12000)),
+                    ("prefix_mtp", VrlValue::Integer(48100)),
+                    ("prefix_rtp", VrlValue::Integer(12000)),
                     (
                         "prefix_nor",
-                        Value::String("\"../300kbps/track.m4v\"".into()),
+                        VrlValue::Bytes(Bytes::from("\"../300kbps/track.m4v\"")),
                     ),
-                    ("prefix_sf", Value::String("d".into())),
-                    ("prefix_br", Value::Int64(3200)),
-                    ("prefix_nrr", Value::String("\"12323-48763\"".into())),
-                    ("prefix_pr", Value::Float64(1.08)),
-                    ("prefix_su", Value::Boolean(true)),
-                    ("prefix_dl", Value::Int64(18500)),
+                    ("prefix_sf", VrlValue::Bytes(Bytes::from("d"))),
+                    ("prefix_br", VrlValue::Integer(3200)),
+                    ("prefix_nrr", VrlValue::Bytes(Bytes::from("\"12323-48763\""))),
+                    ("prefix_pr", VrlValue::Float(NotNan::new(1.08).unwrap())),
+                    ("prefix_su", VrlValue::Boolean(true)),
+                    ("prefix_dl", VrlValue::Integer(18500)),
                 ],
             ),
         ];
@@ -432,8 +436,8 @@ mod tests {
 
             let expected = vec
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect::<BTreeMap<String, Value>>();
+                .map(|(k, v)| (KeyString::from(k.to_string()), v))
+                .collect::<BTreeMap<KeyString, VrlValue>>();
 
             let actual = processor.parse("prefix", &decoded).unwrap();
             assert_eq!(actual, expected);

@@ -71,6 +71,7 @@ store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 unescaper = "0.1"
 uuid.workspace = true
 

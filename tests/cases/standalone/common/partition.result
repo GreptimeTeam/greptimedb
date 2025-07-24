@@ -18,8 +18,8 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 | table_catalog | table_schema | table_name | partition_name | partition_expression   | greptime_partition_id |
 +---------------+--------------+------------+----------------+------------------------+-----------------------+
 | greptime      | public       | my_table   | p0             | a < 1000               | ID         |
-| greptime      | public       | my_table   | p1             | a >= 2000              | ID         |
-| greptime      | public       | my_table   | p2             | a >= 1000 AND a < 2000 | ID         |
+| greptime      | public       | my_table   | p1             | a >= 1000 AND a < 2000 | ID         |
+| greptime      | public       | my_table   | p2             | a >= 2000              | ID         |
 +---------------+--------------+------------+----------------+------------------------+-----------------------+
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID
@@ -126,7 +126,7 @@ SELECT table_catalog, table_schema, table_name, partition_name, partition_expres
 +---------------+--------------+------------+----------------+----------------------+-----------------------+
 | table_catalog | table_schema | table_name | partition_name | partition_expression | greptime_partition_id |
 +---------------+--------------+------------+----------------+----------------------+-----------------------+
-| greptime      | public       | my_table   | p0             | MAXVALUE             | ID         |
+| greptime      | public       | my_table   | p0             |                      | ID         |
 +---------------+--------------+------------+----------------+----------------------+-----------------------+
 
 -- SQLNESS REPLACE (\d{13}) REGION_ID

@@ -23,16 +23,17 @@ use std::borrow::Cow;
 
 use regex::Regex;
 use snafu::OptionExt;
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     DigestPatternInvalidSnafu, Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu,
-    ProcessorMissingFieldSnafu, Result,
+    ProcessorMissingFieldSnafu, Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_DIGEST: &str = "digest";
 
@@ -100,7 +101,7 @@ impl DigestProcessor {
         re.replace_all(val, "").to_string()
     }
 
-    fn process_string(&self, val: &str) -> Result<Value> {
+    fn process_string(&self, val: &str) -> Result<VrlValue> {
         let mut input = Cow::from(val);
         for pattern in &self.patterns {
             if let Cow::Owned(new_string) = pattern.replace_all(&input, "") {
@@ -108,12 +109,12 @@ impl DigestProcessor {
             }
         }
 
-        Ok(Value::String(input.into_owned()))
+        Ok(VrlValue::Bytes(Bytes::from(input.to_string())))
     }
 
-    fn process(&self, val: &Value) -> Result<Value> {
+    fn process(&self, val: &VrlValue) -> Result<VrlValue> {
         match val {
-            Value::String(val) => self.process_string(val),
+            VrlValue::Bytes(val) => self.process_string(String::from_utf8_lossy(val).as_ref()),
             _ => ProcessorExpectStringSnafu {
                 processor: PROCESSOR_DIGEST,
                 v: val.clone(),
@@ -200,11 +201,12 @@ impl crate::etl::processor::Processor for DigestProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -216,7 +218,7 @@ impl crate::etl::processor::Processor for DigestProcessor {
                 Some(v) => {
                     let result = self.process(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), result)?;
+                    val.insert(KeyString::from(output_index), result);
                 }
             }
         }
@@ -237,24 +239,31 @@ mod tests {
             patterns: vec![PresetPattern::Ip.regex()],
         };
 
-        let input = Value::String("192.168.1.1".to_string());
+        let input = VrlValue::Bytes(Bytes::from("192.168.1.1".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
-        let input = Value::String("192.168.1.1:8080".to_string());
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
+        let input = VrlValue::Bytes(Bytes::from("192.168.1.1:8080".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("not an ip".to_string());
+        let input = VrlValue::Bytes(Bytes::from("not an ip".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("not an ip".to_string()));
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("not an ip".to_string()))
+        );
     }
 
     #[test]
@@ -265,29 +274,40 @@ mod tests {
             patterns: vec![PresetPattern::Uuid.regex()],
         };
         // UUID v4
-        let input = Value::String("123e4567-e89b-12d3-a456-426614174000".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "123e4567-e89b-12d3-a456-426614174000".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // UUID v1
-        let input = Value::String("6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // UUID v5
-        let input = Value::String("886313e1-3b8a-5372-9b90-0c9aee199e5d".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "886313e1-3b8a-5372-9b90-0c9aee199e5d".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // UUID with uppercase letters
-        let input = Value::String("A987FBC9-4BED-3078-CF07-9141BA07C9F3".to_string());
+        let input = VrlValue::Bytes(Bytes::from(
+            "A987FBC9-4BED-3078-CF07-9141BA07C9F3".to_string(),
+        ));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // Negative case
-        let input = Value::String("not a uuid".to_string());
+        let input = VrlValue::Bytes(Bytes::from("not a uuid".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("not a uuid".to_string()));
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("not a uuid".to_string()))
+        );
     }
 
     #[test]
@@ -299,45 +319,48 @@ mod tests {
         };
 
         // Basic brackets
-        let input = Value::String("[content]".to_string());
+        let input = VrlValue::Bytes(Bytes::from("[content]".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("(content)".to_string());
+        let input = VrlValue::Bytes(Bytes::from("(content)".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // Chinese brackets
-        let input = Value::String("「content」".to_string());
+        let input = VrlValue::Bytes(Bytes::from("「content」".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("『content』".to_string());
+        let input = VrlValue::Bytes(Bytes::from("『content』".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("【content】".to_string());
+        let input = VrlValue::Bytes(Bytes::from("【content】".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // Unmatched/unclosed brackets should not match
-        let input = Value::String("[content".to_string());
+        let input = VrlValue::Bytes(Bytes::from("[content".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("[content".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("[content".to_string())));
 
-        let input = Value::String("content]".to_string());
+        let input = VrlValue::Bytes(Bytes::from("content]".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("content]".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("content]".to_string())));
 
         // Bad case
-        let input = Value::String("[content}".to_string());
+        let input = VrlValue::Bytes(Bytes::from("[content}".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
         // Negative case
-        let input = Value::String("no brackets".to_string());
+        let input = VrlValue::Bytes(Bytes::from("no brackets".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("no brackets".to_string()));
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("no brackets".to_string()))
+        );
     }
 
     #[test]
@@ -348,16 +371,19 @@ mod tests {
             patterns: vec![PresetPattern::Quoted.regex()],
         };
 
-        let input = Value::String("\"quoted content\"".to_string());
+        let input = VrlValue::Bytes(Bytes::from("\"quoted content\"".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("no quotes".to_string());
+        let input = VrlValue::Bytes(Bytes::from("no quotes".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("no quotes".to_string()));
-        let input = Value::String("".to_string());
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("no quotes".to_string()))
+        );
+        let input = VrlValue::Bytes(Bytes::from("".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
     }
 
     #[test]
@@ -368,15 +394,18 @@ mod tests {
             patterns: vec![Regex::new(r"\d+").unwrap()],
         };
 
-        let input = Value::String("12345".to_string());
+        let input = VrlValue::Bytes(Bytes::from("12345".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
 
-        let input = Value::String("no digits".to_string());
+        let input = VrlValue::Bytes(Bytes::from("no digits".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("no digits".to_string()));
-        let input = Value::String("".to_string());
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("no digits".to_string()))
+        );
+        let input = VrlValue::Bytes(Bytes::from("".to_string()));
         let result = processor.process(&input).unwrap();
-        assert_eq!(result, Value::String("".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("".to_string())));
     }
 }

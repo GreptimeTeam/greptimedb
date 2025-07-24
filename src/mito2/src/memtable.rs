@@ -98,6 +98,12 @@ impl MemtableStats {
         self
     }
 
+    #[cfg(feature = "test")]
+    pub fn with_max_sequence(mut self, max_sequence: SequenceNumber) -> Self {
+        self.max_sequence = max_sequence;
+        self
+    }
+
     /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes

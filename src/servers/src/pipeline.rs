@@ -20,12 +20,13 @@ use api::greptime_proto;
 use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequest, Rows, SemanticType};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
-    unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline, PipelineContext,
-    PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput, TransformerMode, Value,
-    GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
+    identity_pipeline, unwrap_or_continue_if_err, ContextReq, DispatchedTo, Pipeline,
+    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput,
+    TransformerMode, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME,
 };
 use session::context::{Channel, QueryContextRef};
 use snafu::ResultExt;
+use vrl::value::Value as VrlValue;
 
 use crate::error::{CatalogSnafu, PipelineSnafu, Result};
 use crate::http::event::PipelineIngestRequest;
@@ -93,7 +94,7 @@ async fn run_identity_pipeline(
             .await
             .context(CatalogSnafu)?
     };
-    pipeline::identity_pipeline(data_array, table, pipeline_ctx)
+    identity_pipeline(data_array, table, pipeline_ctx)
         .map(|opt_map| ContextReq::from_opt_map(opt_map, table_name))
         .context(PipelineSnafu)
 }
@@ -117,7 +118,7 @@ async fn run_custom_pipeline(
     } = pipeline_req;
     let arr_len = pipeline_maps.len();
     let mut transformed_map = HashMap::new();
-    let mut dispatched: BTreeMap<DispatchedTo, Vec<Value>> = BTreeMap::new();
+    let mut dispatched: BTreeMap<DispatchedTo, Vec<VrlValue>> = BTreeMap::new();
 
     let mut schema_info = match pipeline.transformer() {
         TransformerMode::GreptimeTransformer(greptime_transformer) => {
@@ -166,6 +167,9 @@ async fn run_custom_pipeline(
             }
             PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
+            }
+            PipelineExecOutput::Filtered => {
+                continue;
             }
         }
     }

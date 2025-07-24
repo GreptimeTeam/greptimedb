@@ -1603,6 +1603,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acbc26382d871df4b7442e3df10a9402bf3cf5e55cbd66f12be38861425f0564"
 
 [[package]]
+name = "cargo-manifest"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d8af896b707212cd0e99c112a78c9497dd32994192a463ed2f7419d29bd8c6"
+dependencies = [
+ "serde",
+ "thiserror 2.0.12",
+ "toml 0.8.19",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2292,6 +2303,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-event-recorder"
+version = "0.16.0"
+dependencies = [
+ "api",
+ "async-trait",
+ "backon",
+ "client",
+ "common-error",
+ "common-macro",
+ "common-meta",
+ "common-telemetry",
+ "common-time",
+ "serde",
+ "serde_json",
+ "snafu 0.8.5",
+ "store-api",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "common-frontend"
 version = "0.16.0"
 dependencies = [
@@ -2315,6 +2347,8 @@ dependencies = [
  "api",
  "approx 0.5.1",
  "arc-swap",
+ "arrow 54.2.1",
+ "arrow-schema 54.3.1",
  "async-trait",
  "bincode",
  "catalog",
@@ -2333,8 +2367,10 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions-aggregate-common",
+ "datafusion-physical-expr",
  "datatypes",
  "derive_more",
+ "futures",
  "geo",
  "geo-types",
  "geohash",
@@ -2347,6 +2383,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "pretty_assertions",
  "s2",
  "serde",
  "serde_json",
@@ -2408,6 +2445,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.12.3",
  "tower 0.5.2",
+ "vec1",
 ]
 
 [[package]]
@@ -2520,6 +2558,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tonic 0.12.3",
+ "tracing",
  "typetag",
  "uuid",
 ]
@@ -2669,11 +2708,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-sql"
+version = "0.16.0"
+dependencies = [
+ "common-base",
+ "common-datasource",
+ "common-decimal",
+ "common-error",
+ "common-macro",
+ "common-time",
+ "datafusion-sql",
+ "datatypes",
+ "hex",
+ "jsonb",
+ "snafu 0.8.5",
+ "sqlparser 0.54.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0cf6c04490d59435ee965edd2078e8855bd8471e)",
+]
+
+[[package]]
 name = "common-telemetry"
 version = "0.16.0"
 dependencies = [
  "backtrace",
  "common-error",
+ "common-version",
  "console-subscriber",
  "greptime-proto",
  "humantime-serde",
@@ -2731,6 +2789,7 @@ name = "common-version"
 version = "0.16.0"
 dependencies = [
  "build-data",
+ "cargo-manifest",
  "const_format",
  "serde",
  "shadow-rs",
@@ -2964,9 +3023,9 @@ dependencies = [
 
 [[package]]
 name = "crc"
-version = "3.2.1"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69e6e4d7b33a94f0991c26729976b10ebde1d34c3ee82408fb536164fa10d636"
+checksum = "9710d3b3739c2e349eb44fe848ad0b7c8cb1e42bd87ee49371df2f7acaf3e675"
 dependencies = [
  "crc-catalog",
 ]
@@ -3775,6 +3834,7 @@ dependencies = [
  "tokio",
  "toml 0.8.19",
  "tonic 0.12.3",
+ "tracing",
 ]
 
 [[package]]
@@ -3797,7 +3857,7 @@ dependencies = [
  "jsonb",
  "num",
  "num-traits",
- "ordered-float 3.9.2",
+ "ordered-float 4.3.0",
  "paste",
  "serde",
  "serde_json",
@@ -4118,12 +4178,16 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.10.4"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c84070523f8ba0f9127ff156920f27eb27b302b425efe60bf5f41ec244d1c60"
+checksum = "a11dd7f04a6a6d2aea0153c6e31f5ea7af8b2efdf52cdaeea7a9a592c7fefef9"
 dependencies = [
+ "bumpalo",
  "bytes",
+ "domain-macros",
  "futures-util",
+ "hashbrown 0.14.5",
+ "log",
  "moka",
  "octseq",
  "rand 0.8.5",
@@ -4132,6 +4196,17 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "domain-macros"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e197fdfd2cdb5fdeb7f8ddcf3aed5d5d04ecde2890d448b14ffb716f7376b70"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -4619,6 +4694,7 @@ dependencies = [
  "get-size2",
  "greptime-proto",
  "http 1.1.0",
+ "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "meta-client",
@@ -4763,6 +4839,7 @@ dependencies = [
  "toml 0.8.19",
  "tonic 0.12.3",
  "tower 0.5.2",
+ "tracing",
  "uuid",
 ]
 
@@ -5146,7 +5223,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ceb1af4fa9309ce65bda0367db7b384df2bb4d4f#ceb1af4fa9309ce65bda0367db7b384df2bb4d4f"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7fcaa3e413947a7a28d9af95812af26c1939ce78#7fcaa3e413947a7a28d9af95812af26c1939ce78"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -6697,7 +6774,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -7266,6 +7343,7 @@ dependencies = [
  "snafu 0.8.5",
  "store-api",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7379,6 +7457,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "dotenv",
+ "either",
  "futures",
  "humantime-serde",
  "index",
@@ -7414,6 +7493,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml 0.8.19",
+ "tracing",
  "uuid",
 ]
 
@@ -8457,6 +8537,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-sql",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -8492,6 +8573,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tonic 0.12.3",
+ "tracing",
 ]
 
 [[package]]
@@ -8530,22 +8612,13 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
-version = "3.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1e1c390732d15f1d48471625cd92d154e66db2c56645e29a9cd26f4699f72dc"
-dependencies = [
- "num-traits",
- "rand 0.8.5",
- "serde",
-]
-
-[[package]]
-name = "ordered-float"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44d501f1a72f71d3c063a6bbc8f7271fa73aa09fe5d6283b6571e2ed176a2537"
 dependencies = [
  "num-traits",
+ "rand 0.8.5",
+ "serde",
 ]
 
 [[package]]
@@ -9082,6 +9155,7 @@ dependencies = [
  "moka",
  "once_cell",
  "operator",
+ "ordered-float 4.3.0",
  "paste",
  "prometheus",
  "query",
@@ -9522,8 +9596,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.5.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=0410e8b459dda7cb222ce9596f8bf3971bd07bd2#0410e8b459dda7cb222ce9596f8bf3971bd07bd2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328fe69c2443ec4f8e6c33ea925dde04a1026e6c95928e89ed02343944cac9bf"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -9594,7 +9669,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -9640,7 +9715,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.100",
@@ -9892,6 +9967,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-stream",
+ "tracing",
  "unescaper",
  "uuid",
 ]
@@ -11243,6 +11319,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-session",
+ "common-sql",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -11324,8 +11401,10 @@ dependencies = [
  "tonic-reflection",
  "tower 0.5.2",
  "tower-http 0.6.2",
+ "tracing",
  "urlencoding",
  "uuid",
+ "vrl",
  "zstd 0.13.2",
 ]
 
@@ -11681,6 +11760,7 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-query",
+ "common-sql",
  "common-time",
  "datafusion",
  "datafusion-common",
@@ -12987,9 +13067,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.44.2"
+version = "1.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6b88822cbe49de4185e3a4cbf8321dd487cf5fe0c5c65695fef6346371e9c48"
+checksum = "75ef51a33ef1da925cea3e4eb122833cb377c61439ca401b770f54902b806779"
 dependencies = [
  "backtrace",
  "bytes",
@@ -13155,6 +13235,7 @@ version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1ed1f98e3fdc28d6d910e6737ae6ab1a93bf1985935a1193e68f93eeb68d24e"
 dependencies = [
+ "indexmap 2.9.0",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -13915,6 +13996,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
+name = "vec1"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab68b56840f69efb0fefbe3ab6661499217ffdc58e2eef7c3f6f69835386322"
+
+[[package]]
 name = "vergen"
 version = "8.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13944,9 +14031,9 @@ dependencies = [
 
 [[package]]
 name = "vrl"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9ceadaa40aef567a26079ff014ca7a567ba85344f1b81090b5ec7d7bb16a219"
+checksum = "4f49394b948406ea1564aa00152e011d87a38ad35d277ebddda257a9ee39c419"
 dependencies = [
  "aes",
  "aes-siv",
@@ -14266,7 +14353,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

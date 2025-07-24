@@ -97,6 +97,7 @@ mod tests {
                 memtable_size: 0,
                 manifest_size: 0,
                 sst_size: 0,
+                sst_num: 0,
                 index_size: 0,
                 region_manifest: RegionManifestInfo::Mito {
                     manifest_version: 0,

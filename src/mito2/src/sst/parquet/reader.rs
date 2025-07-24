@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, warn};
 use datafusion_expr::Expr;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
@@ -55,7 +56,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
-use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::format::{need_override_sequence, ReadFormat};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
@@ -225,7 +226,7 @@ impl ParquetReaderBuilder {
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
-        let read_format = if let Some(column_ids) = &self.projection {
+        let mut read_format = if let Some(column_ids) = &self.projection {
             ReadFormat::new(region_meta.clone(), column_ids.iter().copied())
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
@@ -238,6 +239,10 @@ impl ParquetReaderBuilder {
                     .map(|col| col.column_id),
             )
         };
+        if need_override_sequence(&parquet_meta) {
+            read_format
+                .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
+        }
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
@@ -1227,12 +1232,7 @@ pub(crate) type RowGroupReader = RowGroupReaderBase<FileRangeContextRef>;
 impl RowGroupReader {
     /// Creates a new reader from file range.
     pub(crate) fn new(context: FileRangeContextRef, reader: ParquetRecordBatchReader) -> Self {
-        Self {
-            context,
-            reader,
-            batches: VecDeque::new(),
-            metrics: ReaderMetrics::default(),
-        }
+        Self::create(context, reader)
     }
 }
 
@@ -1246,6 +1246,8 @@ pub(crate) struct RowGroupReaderBase<T> {
     batches: VecDeque<Batch>,
     /// Local scan metrics.
     metrics: ReaderMetrics,
+    /// Cached sequence array to override sequences.
+    override_sequence: Option<ArrayRef>,
 }
 
 impl<T> RowGroupReaderBase<T>
@@ -1254,11 +1256,16 @@ where
 {
     /// Creates a new reader.
     pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
+        // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
+        let override_sequence = context
+            .read_format()
+            .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
         Self {
             context,
             reader,
             batches: VecDeque::new(),
             metrics: ReaderMetrics::default(),
+            override_sequence,
         }
     }
 
@@ -1294,9 +1301,11 @@ where
             };
             self.metrics.num_record_batches += 1;
 
-            self.context
-                .read_format()
-                .convert_record_batch(&record_batch, &mut self.batches)?;
+            self.context.read_format().convert_record_batch(
+                &record_batch,
+                self.override_sequence.as_ref(),
+                &mut self.batches,
+            )?;
             self.metrics.num_batches += self.batches.len();
         }
         let batch = self.batches.pop_front();

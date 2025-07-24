@@ -14,11 +14,12 @@
 
 use std::fmt::Display;
 use std::path;
+use std::time::Duration;
 
-use common_telemetry::{debug, error, info, trace};
-use opendal::layers::{LoggingInterceptor, LoggingLayer, TracingLayer};
+use common_telemetry::{debug, error, info, trace, warn};
+use opendal::layers::{LoggingInterceptor, LoggingLayer, RetryInterceptor, TracingLayer};
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
-use opendal::ErrorKind;
+use opendal::{Error, ErrorKind};
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
@@ -227,6 +228,16 @@ pub fn clean_temp_dir(dir: &str) -> error::Result<()> {
     }
 
     Ok(())
+}
+
+/// PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.
+pub struct PrintDetailedError;
+
+// PrintDetailedError is a retry interceptor that prints error in Debug format in retrying.
+impl RetryInterceptor for PrintDetailedError {
+    fn intercept(&self, err: &Error, dur: Duration) {
+        warn!("Retry after {}s, error: {:#?}", dur.as_secs_f64(), err);
+    }
 }
 
 #[cfg(test)]

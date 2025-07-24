@@ -22,7 +22,8 @@ use common_telemetry::warn;
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::fulltext_index::search::{FulltextIndexSearcher, RowId, TantivyFulltextIndexSearcher};
-use index::fulltext_index::Config;
+use index::fulltext_index::tokenizer::{ChineseTokenizer, EnglishTokenizer, Tokenizer};
+use index::fulltext_index::{Analyzer, Config};
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
@@ -394,21 +395,7 @@ impl FulltextIndexApplier {
                 // lowercased terms are not indexed
                 continue;
             }
-
-            let ts = term
-                .term
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|&t| !t.is_empty())
-                .map(|t| {
-                    if !config.case_sensitive {
-                        t.to_lowercase()
-                    } else {
-                        t.to_string()
-                    }
-                    .into_bytes()
-                });
-
-            probes.extend(ts);
+            probes.extend(Self::term_to_probes(&term.term, config));
         }
 
         probes
@@ -417,6 +404,22 @@ impl FulltextIndexApplier {
                 list: iter::once(p).collect(),
             })
             .collect::<Vec<_>>()
+    }
+
+    fn term_to_probes<'a>(term: &'a str, config: &'a Config) -> impl Iterator<Item = Vec<u8>> + 'a {
+        let tokens = match config.analyzer {
+            Analyzer::English => EnglishTokenizer {}.tokenize(term),
+            Analyzer::Chinese => ChineseTokenizer {}.tokenize(term),
+        };
+
+        tokens.into_iter().map(|t| {
+            if !config.case_sensitive {
+                t.to_lowercase()
+            } else {
+                t.to_string()
+            }
+            .into_bytes()
+        })
     }
 }
 

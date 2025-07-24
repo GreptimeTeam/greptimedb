@@ -151,7 +151,9 @@ impl Deleter {
             .into_iter()
             .map(|resp| resp.map(|r| r.affected_rows))
             .sum::<Result<AffectedRows>>()?;
-        crate::metrics::DIST_DELETE_ROW_COUNT.inc_by(affected_rows as u64);
+        crate::metrics::DIST_DELETE_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_ref()])
+            .inc_by(affected_rows as u64);
         Ok(affected_rows)
     }
 

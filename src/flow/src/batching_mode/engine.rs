@@ -14,7 +14,7 @@
 
 //! Batching mode engine
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::flow::{DirtyWindowRequests, FlowResponse};
@@ -34,9 +34,10 @@ use store_api::storage::{RegionId, TableId};
 use tokio::sync::{oneshot, RwLock};
 
 use crate::batching_mode::frontend_client::FrontendClient;
-use crate::batching_mode::task::BatchingTask;
+use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
 use crate::batching_mode::utils::sql_to_df_plan;
+use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
     ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
@@ -57,6 +58,9 @@ pub struct BatchingEngine {
     table_meta: TableMetadataManagerRef,
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
+    /// Batching mode options for control how batching mode query works
+    ///
+    pub(crate) batch_opts: Arc<BatchingModeOptions>,
 }
 
 impl BatchingEngine {
@@ -66,6 +70,7 @@ impl BatchingEngine {
         flow_metadata_manager: FlowMetadataManagerRef,
         table_meta: TableMetadataManagerRef,
         catalog_manager: CatalogManagerRef,
+        batch_opts: BatchingModeOptions,
     ) -> Self {
         Self {
             tasks: Default::default(),
@@ -75,6 +80,7 @@ impl BatchingEngine {
             table_meta,
             catalog_manager,
             query_engine,
+            batch_opts: Arc::new(batch_opts),
         }
     }
 
@@ -142,7 +148,7 @@ impl BatchingEngine {
 
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
-                let mut all_dirty_windows = vec![];
+                let mut all_dirty_windows = HashSet::new();
                 for src_table_name in src_table_names {
                     if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
                         let Some(expr) = &task.config.time_window_expr else {
@@ -155,7 +161,7 @@ impl BatchingEngine {
                                 .context(UnexpectedSnafu {
                                     reason: "Failed to eval start value",
                                 })?;
-                            all_dirty_windows.push(align_start);
+                            all_dirty_windows.insert(align_start);
                         }
                     }
                 }
@@ -424,18 +430,21 @@ impl BatchingEngine {
                 .unwrap_or("None".to_string())
         );
 
-        let task = BatchingTask::try_new(
+        let task_args = TaskArgs {
             flow_id,
-            &sql,
+            query: &sql,
             plan,
-            phy_expr,
+            time_window_expr: phy_expr,
             expire_after,
             sink_table_name,
             source_table_names,
             query_ctx,
-            self.catalog_manager.clone(),
-            rx,
-        )?;
+            catalog_manager: self.catalog_manager.clone(),
+            shutdown_rx: rx,
+            batch_opts: self.batch_opts.clone(),
+        };
+
+        let task = BatchingTask::try_new(task_args)?;
 
         let task_inner = task.clone();
         let engine = self.query_engine.clone();

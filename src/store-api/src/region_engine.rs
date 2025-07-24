@@ -444,6 +444,8 @@ pub struct RegionStatistic {
     pub manifest_size: u64,
     /// The size of SST data files in bytes.
     pub sst_size: u64,
+    /// The num of SST files.
+    pub sst_num: u64,
     /// The size of SST index files in bytes.
     #[serde(default)]
     pub index_size: u64,

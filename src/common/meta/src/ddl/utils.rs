@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod raw_table_info;
+#[allow(dead_code)]
+pub(crate) mod region_metadata_lister;
+pub(crate) mod table_id;
+pub(crate) mod table_info;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -442,6 +448,7 @@ pub fn extract_column_metadatas(
         .collect::<Vec<_>>();
 
     if schemas.is_empty() {
+        warn!("extract_column_metadatas: no extension key `{key}` found in results");
         return Ok(None);
     }
 

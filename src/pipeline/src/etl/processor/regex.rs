@@ -23,18 +23,19 @@ use std::collections::BTreeMap;
 use lazy_static::lazy_static;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu,
     RegexNamedGroupNotFoundSnafu, RegexNoValidFieldSnafu, RegexNoValidPatternSnafu, RegexSnafu,
-    Result,
+    Result, ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, yaml_strings, Processor, FIELDS_NAME,
     FIELD_NAME, IGNORE_MISSING_NAME, PATTERN_NAME,
 };
-use crate::etl::value::Value;
 
 lazy_static! {
     static ref GROUPS_NAME_REGEX: Regex = Regex::new(r"\(\?P?<([[:word:]]+)>.+?\)").unwrap();
@@ -168,14 +169,17 @@ impl RegexProcessor {
         Ok(())
     }
 
-    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<String, Value>> {
+    fn process(&self, prefix: &str, val: &str) -> Result<BTreeMap<KeyString, VrlValue>> {
         let mut result = BTreeMap::new();
         for gr in self.patterns.iter() {
             if let Some(captures) = gr.regex.captures(val) {
                 for group in gr.groups.iter() {
                     if let Some(capture) = captures.name(group) {
                         let value = capture.as_str().to_string();
-                        result.insert(generate_key(prefix, group), Value::String(value));
+                        result.insert(
+                            KeyString::from(generate_key(prefix, group)),
+                            VrlValue::Bytes(Bytes::from(value)),
+                        );
                     }
                 }
             }
@@ -193,16 +197,17 @@ impl Processor for RegexProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
             let prefix = field.target_or_input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
-                Some(Value::String(s)) => {
-                    let result = self.process(prefix, s)?;
-                    val.extend(result.into())?;
+                Some(VrlValue::Bytes(s)) => {
+                    let result = self.process(prefix, String::from_utf8_lossy(s).as_ref())?;
+                    val.extend(result);
                 }
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -226,12 +231,11 @@ impl Processor for RegexProcessor {
 }
 #[cfg(test)]
 mod tests {
-    use ahash::{HashMap, HashMapExt};
     use itertools::Itertools;
+    use vrl::value::Value as VrlValue;
 
     use super::*;
     use crate::etl::processor::regex::RegexProcessor;
-    use crate::etl::value::{Map, Value};
 
     #[test]
     fn test_simple_parse() {
@@ -250,15 +254,11 @@ ignore_missing: false"#;
 
         let result = processor.process("a", "123").unwrap();
 
-        let map = Map { values: result };
+        let v = vec![(KeyString::from("a_ar"), VrlValue::Bytes(Bytes::from("1")))]
+            .into_iter()
+            .collect::<BTreeMap<KeyString, VrlValue>>();
 
-        let v = Map {
-            values: vec![("a_ar".to_string(), Value::String("1".to_string()))]
-                .into_iter()
-                .collect(),
-        };
-
-        assert_eq!(v, map);
+        assert_eq!(v, result);
     }
 
     #[test]
@@ -270,15 +270,30 @@ ignore_missing: false"#;
         let cw = "[c=w,n=US_CA_SANJOSE,o=55155]";
         let breadcrumbs_str = [cc, cg, co, cp, cw].iter().join(",");
 
-        let temporary_map: BTreeMap<String, Value> = [
-            ("breadcrumbs_parent", Value::String(cc.to_string())),
-            ("breadcrumbs_edge", Value::String(cg.to_string())),
-            ("breadcrumbs_origin", Value::String(co.to_string())),
-            ("breadcrumbs_peer", Value::String(cp.to_string())),
-            ("breadcrumbs_wrapper", Value::String(cw.to_string())),
+        let temporary_map: BTreeMap<KeyString, VrlValue> = [
+            (
+                "breadcrumbs_parent",
+                VrlValue::Bytes(Bytes::from(cc.to_string())),
+            ),
+            (
+                "breadcrumbs_edge",
+                VrlValue::Bytes(Bytes::from(cg.to_string())),
+            ),
+            (
+                "breadcrumbs_origin",
+                VrlValue::Bytes(Bytes::from(co.to_string())),
+            ),
+            (
+                "breadcrumbs_peer",
+                VrlValue::Bytes(Bytes::from(cp.to_string())),
+            ),
+            (
+                "breadcrumbs_wrapper",
+                VrlValue::Bytes(Bytes::from(cw.to_string())),
+            ),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
+        .map(|(k, v)| (KeyString::from(k), v))
         .collect();
 
         {
@@ -331,35 +346,66 @@ ignore_missing: false"#;
             let processor_yaml_hash = processor_yaml.as_hash().unwrap();
             let processor = RegexProcessor::try_from(processor_yaml_hash).unwrap();
 
-            let mut result = HashMap::new();
+            let mut result = BTreeMap::new();
             for field in processor.fields.iter() {
-                let s = temporary_map
-                    .get(field.input_field())
-                    .unwrap()
-                    .to_str_value();
+                let s = temporary_map.get(field.input_field()).unwrap();
+                let s = s.to_string_lossy();
                 let prefix = field.target_or_input_field();
 
-                let r = processor.process(prefix, &s).unwrap();
+                let r = processor.process(prefix, s.as_ref()).unwrap();
 
                 result.extend(r);
             }
 
             let new_values = vec![
-                ("edge_ip", Value::String("12.34.567.89".to_string())),
-                ("edge_request_id", Value::String("12345678".to_string())),
-                ("edge_geo", Value::String("US_CA_SANJOSE".to_string())),
-                ("edge_asn", Value::String("20940".to_string())),
-                ("origin_ip", Value::String("987.654.321.09".to_string())),
-                ("peer_asn", Value::String("55155".to_string())),
-                ("peer_geo", Value::String("US_CA_SANJOSE".to_string())),
-                ("parent_asn", Value::String("55155".to_string())),
-                ("parent_geo", Value::String("US_CA_SANJOSE".to_string())),
-                ("wrapper_asn", Value::String("55155".to_string())),
-                ("wrapper_geo", Value::String("US_CA_SANJOSE".to_string())),
+                (
+                    "edge_ip",
+                    VrlValue::Bytes(Bytes::from("12.34.567.89".to_string())),
+                ),
+                (
+                    "edge_request_id",
+                    VrlValue::Bytes(Bytes::from("12345678".to_string())),
+                ),
+                (
+                    "edge_geo",
+                    VrlValue::Bytes(Bytes::from("US_CA_SANJOSE".to_string())),
+                ),
+                (
+                    "edge_asn",
+                    VrlValue::Bytes(Bytes::from("20940".to_string())),
+                ),
+                (
+                    "origin_ip",
+                    VrlValue::Bytes(Bytes::from("987.654.321.09".to_string())),
+                ),
+                (
+                    "peer_asn",
+                    VrlValue::Bytes(Bytes::from("55155".to_string())),
+                ),
+                (
+                    "peer_geo",
+                    VrlValue::Bytes(Bytes::from("US_CA_SANJOSE".to_string())),
+                ),
+                (
+                    "parent_asn",
+                    VrlValue::Bytes(Bytes::from("55155".to_string())),
+                ),
+                (
+                    "parent_geo",
+                    VrlValue::Bytes(Bytes::from("US_CA_SANJOSE".to_string())),
+                ),
+                (
+                    "wrapper_asn",
+                    VrlValue::Bytes(Bytes::from("55155".to_string())),
+                ),
+                (
+                    "wrapper_geo",
+                    VrlValue::Bytes(Bytes::from("US_CA_SANJOSE".to_string())),
+                ),
             ]
             .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+            .map(|(k, v)| (KeyString::from(k), v))
+            .collect::<BTreeMap<KeyString, VrlValue>>();
 
             assert_eq!(result, new_values);
         }

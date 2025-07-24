@@ -66,7 +66,6 @@ pub fn generate_alter_table_expr_for_all_columns(
 pub fn make_alter_region_request_for_peer(
     logical_table_id: TableId,
     alter_table_expr: &AlterTableExpr,
-    schema_version: u64,
     peer: &Peer,
     region_routes: &[RegionRoute],
 ) -> Result<RegionRequest> {
@@ -74,7 +73,7 @@ pub fn make_alter_region_request_for_peer(
     let mut requests = Vec::with_capacity(regions_on_this_peer.len());
     for region_number in &regions_on_this_peer {
         let region_id = RegionId::new(logical_table_id, *region_number);
-        let request = make_alter_region_request(region_id, alter_table_expr, schema_version);
+        let request = make_alter_region_request(region_id, alter_table_expr);
         requests.push(request);
     }
 

@@ -17,18 +17,16 @@ use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
 use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
-use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
-use sql::ast::Ident;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
     ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::OptionMap;
-use table::metadata::TableType;
+use table::metadata::{TableInfo, TableType};
 use table::table_name::TableName;
 use table::TableRef;
 
@@ -143,13 +141,13 @@ impl StatementExecutor {
 
         let partitions = self
             .partition_manager
-            .find_table_partitions(table.table_info().table_id())
+            .find_table_partitions(table_info.table_id())
             .await
             .context(error::FindTablePartitionRuleSnafu {
                 table_name: &table_name.table_name,
             })?;
 
-        let partitions = create_partitions_stmt(partitions)?;
+        let partitions = create_partitions_stmt(&table_info, partitions)?;
 
         query::sql::show_create_table(table, schema_options, partitions, query_ctx)
             .context(ExecuteStatementSnafu)
@@ -329,15 +327,17 @@ impl StatementExecutor {
     }
 }
 
-pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Partitions>> {
+pub(crate) fn create_partitions_stmt(
+    table_info: &TableInfo,
+    partitions: Vec<PartitionInfo>,
+) -> Result<Option<Partitions>> {
     if partitions.is_empty() {
         return Ok(None);
     }
 
-    let column_list: Vec<Ident> = partitions[0]
-        .partition
-        .partition_columns()
-        .iter()
+    let column_list = table_info
+        .meta
+        .partition_column_names()
         .map(|name| name[..].into())
         .collect();
 
@@ -345,16 +345,9 @@ pub(crate) fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<O
         .iter()
         .filter_map(|partition| {
             partition
-                .partition
-                .partition_bounds()
-                .first()
-                .and_then(|bound| {
-                    if let PartitionBound::Expr(expr) = bound {
-                        Some(expr.to_parser_expr())
-                    } else {
-                        None
-                    }
-                })
+                .partition_expr
+                .as_ref()
+                .map(|expr| expr.to_parser_expr())
         })
         .collect();
 

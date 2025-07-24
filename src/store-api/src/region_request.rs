@@ -27,8 +27,8 @@ use api::v1::region::{
     DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
-    self, set_index, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption,
-    Rows, SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
+    self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
+    SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
@@ -554,9 +554,9 @@ pub enum AlterKind {
     /// Unset region options.
     UnsetRegionOptions { keys: Vec<UnsetRegionOption> },
     /// Set index options.
-    SetIndex { options: ApiSetIndexOptions },
+    SetIndexes { options: Vec<SetIndexOption> },
     /// Unset index options.
-    UnsetIndex { options: ApiUnsetIndexOptions },
+    UnsetIndexes { options: Vec<UnsetIndexOption> },
     /// Drop column default value.
     DropDefaults {
         /// Name of columns to drop.
@@ -565,7 +565,7 @@ pub enum AlterKind {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ApiSetIndexOptions {
+pub enum SetIndexOption {
     Fulltext {
         column_name: String,
         options: FulltextOptions,
@@ -579,46 +579,118 @@ pub enum ApiSetIndexOptions {
     },
 }
 
-impl ApiSetIndexOptions {
+impl SetIndexOption {
+    /// Returns the column name of the index option.
     pub fn column_name(&self) -> &String {
         match self {
-            ApiSetIndexOptions::Fulltext { column_name, .. } => column_name,
-            ApiSetIndexOptions::Inverted { column_name } => column_name,
-            ApiSetIndexOptions::Skipping { column_name, .. } => column_name,
+            SetIndexOption::Fulltext { column_name, .. } => column_name,
+            SetIndexOption::Inverted { column_name } => column_name,
+            SetIndexOption::Skipping { column_name, .. } => column_name,
         }
     }
 
+    /// Returns true if the index option is fulltext.
     pub fn is_fulltext(&self) -> bool {
         match self {
-            ApiSetIndexOptions::Fulltext { .. } => true,
-            ApiSetIndexOptions::Inverted { .. } => false,
-            ApiSetIndexOptions::Skipping { .. } => false,
+            SetIndexOption::Fulltext { .. } => true,
+            SetIndexOption::Inverted { .. } => false,
+            SetIndexOption::Skipping { .. } => false,
         }
     }
 }
 
+impl TryFrom<v1::SetIndex> for SetIndexOption {
+    type Error = MetadataError;
+
+    fn try_from(value: v1::SetIndex) -> Result<Self> {
+        let option = value.options.context(InvalidRawRegionRequestSnafu {
+            err: "missing options in SetIndex",
+        })?;
+
+        let opt = match option {
+            v1::set_index::Options::Fulltext(x) => SetIndexOption::Fulltext {
+                column_name: x.column_name.clone(),
+                options: FulltextOptions::new(
+                    x.enable,
+                    as_fulltext_option_analyzer(
+                        Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
+                    ),
+                    x.case_sensitive,
+                    as_fulltext_option_backend(
+                        PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
+                    ),
+                    x.granularity as u32,
+                    x.false_positive_rate,
+                )
+                .context(InvalidIndexOptionSnafu)?,
+            },
+            v1::set_index::Options::Inverted(i) => SetIndexOption::Inverted {
+                column_name: i.column_name,
+            },
+            v1::set_index::Options::Skipping(s) => SetIndexOption::Skipping {
+                column_name: s.column_name,
+                options: SkippingIndexOptions::new(
+                    s.granularity as u32,
+                    s.false_positive_rate,
+                    as_skipping_index_type(
+                        PbSkippingIndexType::try_from(s.skipping_index_type)
+                            .context(DecodeProtoSnafu)?,
+                    ),
+                )
+                .context(InvalidIndexOptionSnafu)?,
+            },
+        };
+
+        Ok(opt)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ApiUnsetIndexOptions {
+pub enum UnsetIndexOption {
     Fulltext { column_name: String },
     Inverted { column_name: String },
     Skipping { column_name: String },
 }
 
-impl ApiUnsetIndexOptions {
+impl UnsetIndexOption {
     pub fn column_name(&self) -> &String {
         match self {
-            ApiUnsetIndexOptions::Fulltext { column_name } => column_name,
-            ApiUnsetIndexOptions::Inverted { column_name } => column_name,
-            ApiUnsetIndexOptions::Skipping { column_name } => column_name,
+            UnsetIndexOption::Fulltext { column_name } => column_name,
+            UnsetIndexOption::Inverted { column_name } => column_name,
+            UnsetIndexOption::Skipping { column_name } => column_name,
         }
     }
 
     pub fn is_fulltext(&self) -> bool {
         match self {
-            ApiUnsetIndexOptions::Fulltext { .. } => true,
-            ApiUnsetIndexOptions::Inverted { .. } => false,
-            ApiUnsetIndexOptions::Skipping { .. } => false,
+            UnsetIndexOption::Fulltext { .. } => true,
+            UnsetIndexOption::Inverted { .. } => false,
+            UnsetIndexOption::Skipping { .. } => false,
         }
+    }
+}
+
+impl TryFrom<v1::UnsetIndex> for UnsetIndexOption {
+    type Error = MetadataError;
+
+    fn try_from(value: v1::UnsetIndex) -> Result<Self> {
+        let option = value.options.context(InvalidRawRegionRequestSnafu {
+            err: "missing options in UnsetIndex",
+        })?;
+
+        let opt = match option {
+            v1::unset_index::Options::Fulltext(f) => UnsetIndexOption::Fulltext {
+                column_name: f.column_name,
+            },
+            v1::unset_index::Options::Inverted(i) => UnsetIndexOption::Inverted {
+                column_name: i.column_name,
+            },
+            v1::unset_index::Options::Skipping(s) => UnsetIndexOption::Skipping {
+                column_name: s.column_name,
+            },
+        };
+
+        Ok(opt)
     }
 }
 
@@ -645,19 +717,23 @@ impl AlterKind {
             }
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
-            AlterKind::SetIndex { options } => {
-                Self::validate_column_alter_index_option(
-                    options.column_name(),
-                    metadata,
-                    options.is_fulltext(),
-                )?;
+            AlterKind::SetIndexes { options } => {
+                for option in options {
+                    Self::validate_column_alter_index_option(
+                        option.column_name(),
+                        metadata,
+                        option.is_fulltext(),
+                    )?;
+                }
             }
-            AlterKind::UnsetIndex { options } => {
-                Self::validate_column_alter_index_option(
-                    options.column_name(),
-                    metadata,
-                    options.is_fulltext(),
-                )?;
+            AlterKind::UnsetIndexes { options } => {
+                for option in options {
+                    Self::validate_column_alter_index_option(
+                        option.column_name(),
+                        metadata,
+                        option.is_fulltext(),
+                    )?;
+                }
             }
             AlterKind::DropDefaults { names } => {
                 names
@@ -687,12 +763,12 @@ impl AlterKind {
                 true
             }
             AlterKind::UnsetRegionOptions { .. } => true,
-            AlterKind::SetIndex { options, .. } => {
-                metadata.column_by_name(options.column_name()).is_some()
-            }
-            AlterKind::UnsetIndex { options } => {
-                metadata.column_by_name(options.column_name()).is_some()
-            }
+            AlterKind::SetIndexes { options, .. } => options
+                .iter()
+                .any(|option| metadata.column_by_name(option.column_name()).is_some()),
+            AlterKind::UnsetIndexes { options } => options
+                .iter()
+                .any(|option| metadata.column_by_name(option.column_name()).is_some()),
             AlterKind::DropDefaults { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
@@ -783,61 +859,25 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .map(|key| UnsetRegionOption::try_from(key.as_str()))
                     .collect::<Result<Vec<_>>>()?,
             },
-            alter_request::Kind::SetIndex(o) => match o.options.unwrap() {
-                set_index::Options::Fulltext(x) => AlterKind::SetIndex {
-                    options: ApiSetIndexOptions::Fulltext {
-                        column_name: x.column_name.clone(),
-                        options: FulltextOptions::new(
-                            x.enable,
-                            as_fulltext_option_analyzer(
-                                Analyzer::try_from(x.analyzer).context(DecodeProtoSnafu)?,
-                            ),
-                            x.case_sensitive,
-                            as_fulltext_option_backend(
-                                PbFulltextBackend::try_from(x.backend).context(DecodeProtoSnafu)?,
-                            ),
-                            x.granularity as u32,
-                            x.false_positive_rate,
-                        )
-                        .context(InvalidIndexOptionSnafu)?,
-                    },
-                },
-                set_index::Options::Inverted(i) => AlterKind::SetIndex {
-                    options: ApiSetIndexOptions::Inverted {
-                        column_name: i.column_name,
-                    },
-                },
-                set_index::Options::Skipping(s) => AlterKind::SetIndex {
-                    options: ApiSetIndexOptions::Skipping {
-                        column_name: s.column_name,
-                        options: SkippingIndexOptions::new(
-                            s.granularity as u32,
-                            s.false_positive_rate,
-                            as_skipping_index_type(
-                                PbSkippingIndexType::try_from(s.skipping_index_type)
-                                    .context(DecodeProtoSnafu)?,
-                            ),
-                        )
-                        .context(InvalidIndexOptionSnafu)?,
-                    },
-                },
+            alter_request::Kind::SetIndex(o) => AlterKind::SetIndexes {
+                options: vec![SetIndexOption::try_from(o)?],
             },
-            alter_request::Kind::UnsetIndex(o) => match o.options.unwrap() {
-                v1::unset_index::Options::Fulltext(f) => AlterKind::UnsetIndex {
-                    options: ApiUnsetIndexOptions::Fulltext {
-                        column_name: f.column_name,
-                    },
-                },
-                v1::unset_index::Options::Inverted(i) => AlterKind::UnsetIndex {
-                    options: ApiUnsetIndexOptions::Inverted {
-                        column_name: i.column_name,
-                    },
-                },
-                v1::unset_index::Options::Skipping(s) => AlterKind::UnsetIndex {
-                    options: ApiUnsetIndexOptions::Skipping {
-                        column_name: s.column_name,
-                    },
-                },
+            alter_request::Kind::UnsetIndex(o) => AlterKind::UnsetIndexes {
+                options: vec![UnsetIndexOption::try_from(o)?],
+            },
+            alter_request::Kind::SetIndexes(o) => AlterKind::SetIndexes {
+                options: o
+                    .set_indexes
+                    .into_iter()
+                    .map(SetIndexOption::try_from)
+                    .collect::<Result<Vec<_>>>()?,
+            },
+            alter_request::Kind::UnsetIndexes(o) => AlterKind::UnsetIndexes {
+                options: o
+                    .unset_indexes
+                    .into_iter()
+                    .map(UnsetIndexOption::try_from)
+                    .collect::<Result<Vec<_>>>()?,
             },
             alter_request::Kind::DropDefaults(x) => AlterKind::DropDefaults {
                 names: x.drop_defaults.into_iter().map(|x| x.column_name).collect(),
@@ -1674,8 +1714,8 @@ mod tests {
 
     #[test]
     fn test_validate_modify_column_fulltext_options() {
-        let kind = AlterKind::SetIndex {
-            options: ApiSetIndexOptions::Fulltext {
+        let kind = AlterKind::SetIndexes {
+            options: vec![SetIndexOption::Fulltext {
                 column_name: "tag_0".to_string(),
                 options: FulltextOptions::new_unchecked(
                     true,
@@ -1685,17 +1725,17 @@ mod tests {
                     1000,
                     0.01,
                 ),
-            },
+            }],
         };
         let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();
         metadata.schema_version = 1;
         request.validate(&metadata).unwrap();
 
-        let kind = AlterKind::UnsetIndex {
-            options: ApiUnsetIndexOptions::Fulltext {
+        let kind = AlterKind::UnsetIndexes {
+            options: vec![UnsetIndexOption::Fulltext {
                 column_name: "tag_0".to_string(),
-            },
+            }],
         };
         let request = RegionAlterRequest { kind };
         let mut metadata = new_metadata();

@@ -957,8 +957,6 @@ pub async fn show_triggers(
     catalog_manager: &CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    use catalog::information_schema::TRIGGER_LIST;
-
     const TRIGGER_NAME: &str = "trigger_name";
     const TRIGGERS_COLUMN: &str = "Triggers";
 
@@ -970,7 +968,7 @@ pub async fn show_triggers(
         query_engine,
         catalog_manager,
         query_ctx,
-        TRIGGER_LIST,
+        catalog::information_schema::TRIGGERS,
         vec![],
         projects,
         vec![],

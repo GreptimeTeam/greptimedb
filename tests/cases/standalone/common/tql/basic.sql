@@ -35,6 +35,13 @@ TQL EVAL (0, 10, '5s') test{k="a"};
 
 TQL EVAL (0, 10, '1s', '2s') test{k="a"};
 
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, '0.5') test;
+
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 10, 0.5) test;
+
+
 TQL EVAL ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '1s') test{k="a"};
 
 TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s')  test{k="a"};

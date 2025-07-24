@@ -18,7 +18,7 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
-mod ddl;
+pub mod ddl;
 mod describe;
 mod dml;
 mod kill;
@@ -512,6 +512,14 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })
+    }
+
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
+    }
+
+    pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
+        &self.cache_invalidator
     }
 }
 

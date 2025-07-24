@@ -19,6 +19,7 @@ pub mod decolorize;
 pub mod digest;
 pub mod dissect;
 pub mod epoch;
+pub mod filter;
 pub mod gsub;
 pub mod join;
 pub mod json_parse;
@@ -28,7 +29,7 @@ pub mod regex;
 pub mod select;
 pub mod simple_extract;
 pub mod urlencoding;
-pub mod vrl;
+pub mod vrl_processor;
 
 use std::str::FromStr;
 
@@ -47,6 +48,7 @@ use letter::LetterProcessor;
 use regex::RegexProcessor;
 use snafu::{OptionExt, ResultExt};
 use urlencoding::UrlEncodingProcessor;
+use vrl::value::Value as VrlValue;
 
 use crate::error::{
     Error, FailedParseFieldFromStringSnafu, FieldMustBeTypeSnafu, InvalidFieldRenameSnafu,
@@ -54,11 +56,11 @@ use crate::error::{
     Result, UnsupportedProcessorSnafu,
 };
 use crate::etl::field::{Field, Fields};
+use crate::etl::processor::filter::FilterProcessor;
 use crate::etl::processor::json_parse::JsonParseProcessor;
 use crate::etl::processor::select::SelectProcessor;
 use crate::etl::processor::simple_extract::SimpleExtractProcessor;
-use crate::etl::processor::vrl::VrlProcessor;
-use crate::Value;
+use crate::etl::processor::vrl_processor::VrlProcessor;
 
 const FIELD_NAME: &str = "field";
 const FIELDS_NAME: &str = "fields";
@@ -123,7 +125,7 @@ pub trait Processor: std::fmt::Debug + Send + Sync + 'static {
     fn ignore_missing(&self) -> bool;
 
     /// Execute the processor on a vector which be preprocessed by the pipeline
-    fn exec_mut(&self, val: Value) -> Result<Value>;
+    fn exec_mut(&self, val: VrlValue) -> Result<VrlValue>;
 }
 
 #[derive(Debug)]
@@ -146,6 +148,7 @@ pub enum ProcessorKind {
     Digest(DigestProcessor),
     Select(SelectProcessor),
     Vrl(VrlProcessor),
+    Filter(FilterProcessor),
 }
 
 #[derive(Debug, Default)]
@@ -224,8 +227,9 @@ fn parse_processor(doc: &yaml_rust::Yaml) -> Result<ProcessorKind> {
         json_parse::PROCESSOR_JSON_PARSE => {
             ProcessorKind::JsonParse(JsonParseProcessor::try_from(value)?)
         }
-        vrl::PROCESSOR_VRL => ProcessorKind::Vrl(VrlProcessor::try_from(value)?),
+        vrl_processor::PROCESSOR_VRL => ProcessorKind::Vrl(VrlProcessor::try_from(value)?),
         select::PROCESSOR_SELECT => ProcessorKind::Select(SelectProcessor::try_from(value)?),
+        filter::PROCESSOR_FILTER => ProcessorKind::Filter(FilterProcessor::try_from(value)?),
         _ => return UnsupportedProcessorSnafu { processor: str_key }.fail(),
     };
 

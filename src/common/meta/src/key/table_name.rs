@@ -103,6 +103,26 @@ pub fn table_decoder(kv: KeyValue) -> Result<(String, TableNameValue)> {
     Ok((table_name_key.table.to_string(), table_name_value))
 }
 
+impl<'a> From<&TableReference<'a>> for TableNameKey<'a> {
+    fn from(value: &TableReference<'a>) -> Self {
+        Self {
+            catalog: value.catalog,
+            schema: value.schema,
+            table: value.table,
+        }
+    }
+}
+
+impl<'a> From<TableReference<'a>> for TableNameKey<'a> {
+    fn from(value: TableReference<'a>) -> Self {
+        Self {
+            catalog: value.catalog,
+            schema: value.schema,
+            table: value.table,
+        }
+    }
+}
+
 impl<'a> From<&'a TableName> for TableNameKey<'a> {
     fn from(value: &'a TableName) -> Self {
         Self {

@@ -43,6 +43,7 @@ use crate::http::result::error_result::ErrorResponse;
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
 use crate::http::result::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::result::json_result::JsonResponse;
+use crate::http::result::null_result::NullResponse;
 use crate::http::result::table_result::TableResponse;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
@@ -91,7 +92,7 @@ pub async fn sql(
     }
     let db = query_ctx.get_db_string();
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::HttpSql);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
@@ -145,6 +146,7 @@ pub async fn sql(
         ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
         ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
         ResponseFormat::Json => JsonResponse::from_output(outputs).await,
+        ResponseFormat::Null => NullResponse::from_output(outputs).await,
     };
 
     if let Some(limit) = query_params.limit {
@@ -298,7 +300,7 @@ pub async fn promql(
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
 
-    query_ctx.set_channel(Channel::Http);
+    query_ctx.set_channel(Channel::Promql);
     let query_ctx = Arc::new(query_ctx);
 
     let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
@@ -336,6 +338,7 @@ pub async fn promql(
             ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
             ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, epoch).await,
             ResponseFormat::Json => JsonResponse::from_output(outputs).await,
+            ResponseFormat::Null => NullResponse::from_output(outputs).await,
         }
     };
 

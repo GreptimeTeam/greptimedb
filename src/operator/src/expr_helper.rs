@@ -26,9 +26,9 @@ use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
     DropColumn, DropColumns, DropDefaults, ExpireAfter, FulltextBackend as PbFulltextBackend,
     ModifyColumnType, ModifyColumnTypes, RenameTable, SemanticType, SetDatabaseOptions,
-    SetFulltext, SetIndex, SetInverted, SetSkipping, SetTableOptions,
+    SetFulltext, SetIndex, SetIndexes, SetInverted, SetSkipping, SetTableOptions,
     SkippingIndexType as PbSkippingIndexType, TableName, UnsetDatabaseOptions, UnsetFulltext,
-    UnsetIndex, UnsetInverted, UnsetSkipping, UnsetTableOptions,
+    UnsetIndex, UnsetIndexes, UnsetInverted, UnsetSkipping, UnsetTableOptions,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -89,7 +89,7 @@ pub fn create_table_expr_by_column_schemas(
     Ok(expr)
 }
 
-pub(crate) fn extract_add_columns_expr(
+pub fn extract_add_columns_expr(
     schema: &Schema,
     column_exprs: Vec<ColumnExpr>,
 ) -> Result<Option<AddColumns>> {
@@ -576,64 +576,83 @@ pub(crate) fn to_alter_table_expr(
         AlterTableOperation::UnsetTableOptions { keys } => {
             AlterTableKind::UnsetTableOptions(UnsetTableOptions { keys })
         }
-        AlterTableOperation::SetIndex { options } => AlterTableKind::SetIndex(match options {
-            sql::statements::alter::SetIndexOperation::Fulltext {
-                column_name,
-                options,
-            } => SetIndex {
-                options: Some(set_index::Options::Fulltext(SetFulltext {
-                    column_name: column_name.value,
-                    enable: options.enable,
-                    analyzer: match options.analyzer {
-                        FulltextAnalyzer::English => Analyzer::English.into(),
-                        FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
-                    },
-                    case_sensitive: options.case_sensitive,
-                    backend: match options.backend {
-                        FulltextBackend::Bloom => PbFulltextBackend::Bloom.into(),
-                        FulltextBackend::Tantivy => PbFulltextBackend::Tantivy.into(),
-                    },
-                    granularity: options.granularity as u64,
-                    false_positive_rate: options.false_positive_rate(),
-                })),
-            },
-            sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
-                options: Some(set_index::Options::Inverted(SetInverted {
-                    column_name: column_name.value,
-                })),
-            },
-            sql::statements::alter::SetIndexOperation::Skipping {
-                column_name,
-                options,
-            } => SetIndex {
-                options: Some(set_index::Options::Skipping(SetSkipping {
-                    column_name: column_name.value,
-                    enable: true,
-                    granularity: options.granularity as u64,
-                    false_positive_rate: options.false_positive_rate(),
-                    skipping_index_type: match options.index_type {
-                        SkippingIndexType::BloomFilter => PbSkippingIndexType::BloomFilter.into(),
-                    },
-                })),
-            },
-        }),
-        AlterTableOperation::UnsetIndex { options } => AlterTableKind::UnsetIndex(match options {
-            sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => UnsetIndex {
-                options: Some(unset_index::Options::Fulltext(UnsetFulltext {
-                    column_name: column_name.value,
-                })),
-            },
-            sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => UnsetIndex {
-                options: Some(unset_index::Options::Inverted(UnsetInverted {
-                    column_name: column_name.value,
-                })),
-            },
-            sql::statements::alter::UnsetIndexOperation::Skipping { column_name } => UnsetIndex {
-                options: Some(unset_index::Options::Skipping(UnsetSkipping {
-                    column_name: column_name.value,
-                })),
-            },
-        }),
+        AlterTableOperation::SetIndex { options } => {
+            let option = match options {
+                sql::statements::alter::SetIndexOperation::Fulltext {
+                    column_name,
+                    options,
+                } => SetIndex {
+                    options: Some(set_index::Options::Fulltext(SetFulltext {
+                        column_name: column_name.value,
+                        enable: options.enable,
+                        analyzer: match options.analyzer {
+                            FulltextAnalyzer::English => Analyzer::English.into(),
+                            FulltextAnalyzer::Chinese => Analyzer::Chinese.into(),
+                        },
+                        case_sensitive: options.case_sensitive,
+                        backend: match options.backend {
+                            FulltextBackend::Bloom => PbFulltextBackend::Bloom.into(),
+                            FulltextBackend::Tantivy => PbFulltextBackend::Tantivy.into(),
+                        },
+                        granularity: options.granularity as u64,
+                        false_positive_rate: options.false_positive_rate(),
+                    })),
+                },
+                sql::statements::alter::SetIndexOperation::Inverted { column_name } => SetIndex {
+                    options: Some(set_index::Options::Inverted(SetInverted {
+                        column_name: column_name.value,
+                    })),
+                },
+                sql::statements::alter::SetIndexOperation::Skipping {
+                    column_name,
+                    options,
+                } => SetIndex {
+                    options: Some(set_index::Options::Skipping(SetSkipping {
+                        column_name: column_name.value,
+                        enable: true,
+                        granularity: options.granularity as u64,
+                        false_positive_rate: options.false_positive_rate(),
+                        skipping_index_type: match options.index_type {
+                            SkippingIndexType::BloomFilter => {
+                                PbSkippingIndexType::BloomFilter.into()
+                            }
+                        },
+                    })),
+                },
+            };
+            AlterTableKind::SetIndexes(SetIndexes {
+                set_indexes: vec![option],
+            })
+        }
+        AlterTableOperation::UnsetIndex { options } => {
+            let option = match options {
+                sql::statements::alter::UnsetIndexOperation::Fulltext { column_name } => {
+                    UnsetIndex {
+                        options: Some(unset_index::Options::Fulltext(UnsetFulltext {
+                            column_name: column_name.value,
+                        })),
+                    }
+                }
+                sql::statements::alter::UnsetIndexOperation::Inverted { column_name } => {
+                    UnsetIndex {
+                        options: Some(unset_index::Options::Inverted(UnsetInverted {
+                            column_name: column_name.value,
+                        })),
+                    }
+                }
+                sql::statements::alter::UnsetIndexOperation::Skipping { column_name } => {
+                    UnsetIndex {
+                        options: Some(unset_index::Options::Skipping(UnsetSkipping {
+                            column_name: column_name.value,
+                        })),
+                    }
+                }
+            };
+
+            AlterTableKind::UnsetIndexes(UnsetIndexes {
+                unset_indexes: vec![option],
+            })
+        }
         AlterTableOperation::DropDefaults { columns } => {
             AlterTableKind::DropDefaults(DropDefaults {
                 drop_defaults: columns

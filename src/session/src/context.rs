@@ -518,7 +518,7 @@ pub enum Channel {
 
     Mysql = 1,
     Postgres = 2,
-    Http = 3,
+    HttpSql = 3,
     Prometheus = 4,
     Otlp = 5,
     Grpc = 6,
@@ -527,6 +527,8 @@ pub enum Channel {
     Loki = 9,
     Elasticsearch = 10,
     Jaeger = 11,
+    Log = 12,
+    Promql = 13,
 }
 
 impl From<u32> for Channel {
@@ -534,7 +536,7 @@ impl From<u32> for Channel {
         match value {
             1 => Self::Mysql,
             2 => Self::Postgres,
-            3 => Self::Http,
+            3 => Self::HttpSql,
             4 => Self::Prometheus,
             5 => Self::Otlp,
             6 => Self::Grpc,
@@ -543,6 +545,8 @@ impl From<u32> for Channel {
             9 => Self::Loki,
             10 => Self::Elasticsearch,
             11 => Self::Jaeger,
+            12 => Self::Log,
+            13 => Self::Promql,
             _ => Self::Unknown,
         }
     }
@@ -560,19 +564,27 @@ impl Channel {
 
 impl Display for Channel {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+impl AsRef<str> for Channel {
+    fn as_ref(&self) -> &str {
         match self {
-            Channel::Mysql => write!(f, "mysql"),
-            Channel::Postgres => write!(f, "postgres"),
-            Channel::Http => write!(f, "http"),
-            Channel::Prometheus => write!(f, "prometheus"),
-            Channel::Otlp => write!(f, "otlp"),
-            Channel::Grpc => write!(f, "grpc"),
-            Channel::Influx => write!(f, "influx"),
-            Channel::Opentsdb => write!(f, "opentsdb"),
-            Channel::Loki => write!(f, "loki"),
-            Channel::Elasticsearch => write!(f, "elasticsearch"),
-            Channel::Jaeger => write!(f, "jaeger"),
-            Channel::Unknown => write!(f, "unknown"),
+            Channel::Mysql => "mysql",
+            Channel::Postgres => "postgres",
+            Channel::HttpSql => "httpsql",
+            Channel::Prometheus => "prometheus",
+            Channel::Otlp => "otlp",
+            Channel::Grpc => "grpc",
+            Channel::Influx => "influx",
+            Channel::Opentsdb => "opentsdb",
+            Channel::Loki => "loki",
+            Channel::Elasticsearch => "elasticsearch",
+            Channel::Jaeger => "jaeger",
+            Channel::Log => "log",
+            Channel::Promql => "promql",
+            Channel::Unknown => "unknown",
         }
     }
 }

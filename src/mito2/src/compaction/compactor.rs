@@ -20,6 +20,7 @@ use api::v1::region::compact_request;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{info, warn};
 use common_time::TimeToLive;
+use either::Either;
 use itertools::Itertools;
 use object_store::manager::ObjectStoreManagerRef;
 use serde::{Deserialize, Serialize};
@@ -118,7 +119,7 @@ pub async fn open_compaction_region(
     req: &OpenCompactionRegionRequest,
     mito_config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
-    schema_metadata_manager: SchemaMetadataManagerRef,
+    ttl_provider: Either<TimeToLive, SchemaMetadataManagerRef>,
 ) -> Result<CompactionRegion> {
     let object_store = {
         let name = &req.region_options.storage;
@@ -204,16 +205,22 @@ pub async fn open_compaction_region(
         }
     };
 
-    let ttl = find_ttl(
-        req.region_id.table_id(),
-        current_version.options.ttl,
-        &schema_metadata_manager,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-        TimeToLive::default()
-    });
+    let ttl = match ttl_provider {
+        // Use the specified ttl.
+        Either::Left(ttl) => ttl,
+        // Get the ttl from the schema metadata manager.
+        Either::Right(schema_metadata_manager) => find_ttl(
+            req.region_id.table_id(),
+            current_version.options.ttl,
+            &schema_metadata_manager,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+            TimeToLive::default()
+        }),
+    };
+
     Ok(CompactionRegion {
         region_id: req.region_id,
         region_options: req.region_options.clone(),

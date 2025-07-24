@@ -38,6 +38,7 @@ smallvec.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 common-meta = { workspace = true, features = ["testing"] }

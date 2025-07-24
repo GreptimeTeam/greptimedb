@@ -20,17 +20,19 @@ use csv::{ReaderBuilder, Trim};
 use itertools::EitherOrBoth::{Both, Left, Right};
 use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     CsvNoRecordSnafu, CsvQuoteNameSnafu, CsvReadSnafu, CsvSeparatorNameSnafu, Error,
     KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
+    ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, yaml_string, Processor, FIELDS_NAME, FIELD_NAME,
     IGNORE_MISSING_NAME,
 };
-use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_CSV: &str = "csv";
 
@@ -60,8 +62,8 @@ pub struct CsvProcessor {
 
 impl CsvProcessor {
     // process the csv format string to a map with target_fields as keys
-    fn process(&self, val: &str) -> Result<BTreeMap<String, Value>> {
-        let mut reader = self.reader.from_reader(val.as_bytes());
+    fn process(&self, val: &[u8]) -> Result<BTreeMap<KeyString, VrlValue>> {
+        let mut reader = self.reader.from_reader(val);
 
         if let Some(result) = reader.records().next() {
             let record: csv::StringRecord = result.context(CsvReadSnafu)?;
@@ -71,17 +73,18 @@ impl CsvProcessor {
                 .iter()
                 .zip_longest(record.iter())
                 .filter_map(|zipped| match zipped {
-                    Both(target_field, val) => {
-                        Some((target_field.clone(), Value::String(val.into())))
-                    }
+                    Both(target_field, val) => Some((
+                        KeyString::from(target_field.clone()),
+                        VrlValue::Bytes(Bytes::from(val.to_string())),
+                    )),
                     // if target fields are more than extracted fields, fill the rest with empty value
                     Left(target_field) => {
                         let value = self
                             .empty_value
                             .as_ref()
-                            .map(|s| Value::String(s.clone()))
-                            .unwrap_or(Value::Null);
-                        Some((target_field.clone(), value))
+                            .map(|s| VrlValue::Bytes(Bytes::from(s.clone())))
+                            .unwrap_or(VrlValue::Null);
+                        Some((KeyString::from(target_field.clone()), value))
                     }
                     // if extracted fields are more than target fields, ignore the rest
                     Right(_) => None,
@@ -190,16 +193,18 @@ impl Processor for CsvProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let name = field.input_field();
 
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
+
             match val.get(name) {
-                Some(Value::String(v)) => {
+                Some(VrlValue::Bytes(v)) => {
                     let results = self.process(v)?;
-                    val.extend(results.into())?;
+                    val.extend(results);
                 }
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind().to_string(),
@@ -238,11 +243,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = processor.process("1,2").unwrap();
+        let result = processor.process(b"1,2").unwrap();
 
-        let values: BTreeMap<String, Value> = [
-            ("a".into(), Value::String("1".into())),
-            ("b".into(), Value::String("2".into())),
+        let values: BTreeMap<KeyString, VrlValue> = [
+            (KeyString::from("a"), VrlValue::Bytes(Bytes::from("1"))),
+            (KeyString::from("b"), VrlValue::Bytes(Bytes::from("2"))),
         ]
         .into_iter()
         .collect();
@@ -264,12 +269,12 @@ mod tests {
                 ..Default::default()
             };
 
-            let result = processor.process("1,2").unwrap();
+            let result = processor.process(b"1,2").unwrap();
 
-            let values: BTreeMap<String, Value> = [
-                ("a".into(), Value::String("1".into())),
-                ("b".into(), Value::String("2".into())),
-                ("c".into(), Value::Null),
+            let values: BTreeMap<KeyString, VrlValue> = [
+                (KeyString::from("a"), VrlValue::Bytes(Bytes::from("1"))),
+                (KeyString::from("b"), VrlValue::Bytes(Bytes::from("2"))),
+                (KeyString::from("c"), VrlValue::Null),
             ]
             .into_iter()
             .collect();
@@ -289,12 +294,15 @@ mod tests {
                 ..Default::default()
             };
 
-            let result = processor.process("1,2").unwrap();
+            let result = processor.process(b"1,2").unwrap();
 
-            let values: BTreeMap<String, Value> = [
-                ("a".into(), Value::String("1".into())),
-                ("b".into(), Value::String("2".into())),
-                ("c".into(), Value::String("default".into())),
+            let values: BTreeMap<KeyString, VrlValue> = [
+                (KeyString::from("a"), VrlValue::Bytes(Bytes::from("1"))),
+                (KeyString::from("b"), VrlValue::Bytes(Bytes::from("2"))),
+                (
+                    KeyString::from("c"),
+                    VrlValue::Bytes(Bytes::from("default")),
+                ),
             ]
             .into_iter()
             .collect();
@@ -315,11 +323,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = processor.process("1,2").unwrap();
+        let result = processor.process(b"1,2").unwrap();
 
-        let values: BTreeMap<String, Value> = [
-            ("a".into(), Value::String("1".into())),
-            ("b".into(), Value::String("2".into())),
+        let values: BTreeMap<KeyString, VrlValue> = [
+            (KeyString::from("a"), VrlValue::Bytes(Bytes::from("1"))),
+            (KeyString::from("b"), VrlValue::Bytes(Bytes::from("2"))),
         ]
         .into_iter()
         .collect();

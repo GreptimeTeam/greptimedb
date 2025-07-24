@@ -95,11 +95,10 @@ pub struct MetasrvInstance {
 }
 
 impl MetasrvInstance {
-    pub async fn new(
-        opts: MetasrvOptions,
-        plugins: Plugins,
-        metasrv: Metasrv,
-    ) -> Result<MetasrvInstance> {
+    pub async fn new(metasrv: Metasrv) -> Result<MetasrvInstance> {
+        let opts = metasrv.options().clone();
+        let plugins = metasrv.plugins().clone();
+
         let builder = HttpServerBuilder::new(opts.http.clone())
             .with_metrics_handler(MetricsHandler)
             .with_greptime_config_options(opts.to_toml().context(error::TomlFormatSnafu)?);

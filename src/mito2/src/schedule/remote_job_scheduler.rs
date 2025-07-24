@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_telemetry::error;
+use common_time::TimeToLive;
 use serde::{Deserialize, Serialize};
 use snafu::{Location, ResultExt, Snafu};
 use store_api::storage::RegionId;
@@ -30,6 +31,7 @@ use crate::manifest::action::RegionEdit;
 use crate::metrics::{COMPACTION_FAILURE_COUNT, INFLIGHT_COMPACTION_COUNT};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
+    WorkerRequestWithTime,
 };
 
 pub type RemoteJobSchedulerRef = Arc<dyn RemoteJobScheduler>;
@@ -108,6 +110,7 @@ pub struct CompactionJob {
     pub compaction_region: CompactionRegion,
     pub picker_output: PickerOutput,
     pub start_time: Instant,
+    pub ttl: TimeToLive,
     /// Send the result of the compaction job to these waiters.
     pub waiters: Vec<OutputTx>,
 }
@@ -130,7 +133,7 @@ pub struct CompactionJobResult {
 /// DefaultNotifier is a default implementation of Notifier that sends WorkerRequest to the mito engine.
 pub(crate) struct DefaultNotifier {
     /// The sender to send WorkerRequest to the mito engine. This is used to notify the mito engine when a remote job is completed.
-    pub(crate) request_sender: Sender<WorkerRequest>,
+    pub(crate) request_sender: Sender<WorkerRequestWithTime>,
 }
 
 impl DefaultNotifier {
@@ -173,10 +176,10 @@ impl Notifier for DefaultNotifier {
 
                 if let Err(e) = self
                     .request_sender
-                    .send(WorkerRequest::Background {
+                    .send(WorkerRequestWithTime::new(WorkerRequest::Background {
                         region_id: result.region_id,
                         notify,
-                    })
+                    }))
                     .await
                 {
                     error!(

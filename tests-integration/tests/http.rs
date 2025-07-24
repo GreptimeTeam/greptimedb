@@ -112,6 +112,7 @@ macro_rules! http_tests {
                 test_pipeline_with_hint_vrl,
                 test_pipeline_2,
                 test_pipeline_skip_error,
+                test_pipeline_filter,
 
                 test_otlp_metrics,
                 test_otlp_traces_v0,
@@ -479,6 +480,15 @@ pub async fn test_sql_api(store_type: StorageType) {
         body,
         "cpu,ts,host\r\nFloat64,TimestampMillisecond,String\r\n66.6,0,\"host, \"\"name\"\r\n"
     );
+    // test null format
+    let res = client
+        .get("/v1/sql?format=null&sql=select cpu,ts,host from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = &res.text().await;
+    assert!(body.contains("1 rows in set."));
+    assert!(body.ends_with("sec.\n"));
 
     // test parse method
     let res = client.get("/v1/sql/parse?sql=desc table t").send().await;
@@ -612,6 +622,17 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/v1/prometheus/api/v1/query_range?query=count(count(up))&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/prometheus/api/v1/query_range?query=up&start=1&end=100&step=0.5")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -1118,6 +1139,17 @@ retry_delay = "500ms"
 max_running_procedures = 128
 
 [flow]
+
+[flow.batching_mode]
+query_timeout = "10m"
+slow_query_threshold = "1m"
+experimental_min_refresh_duration = "5s"
+grpc_conn_timeout = "5s"
+experimental_grpc_max_retries = 3
+experimental_frontend_scan_timeout = "30s"
+experimental_frontend_activity_timeout = "1m"
+experimental_max_filter_num_per_query = 20
+experimental_time_window_merge_threshold = 3
 
 [logging]
 max_log_files = 720
@@ -1945,6 +1977,78 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_filter(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_filter").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+  - filter:
+      field: name
+      targets:
+        - John
+transform:
+  - field: name
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+    "name": "John"
+  },
+  {
+    "time": "2024-05-25 20:16:37.218",
+    "name": "JoHN"
+  },
+  {
+    "time": "2024-05-25 20:16:37.328",
+    "name": "Jane"
+  }
+]
+"#;
+
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    validate_data(
+        "pipeline_filter",
+        &client,
+        "select * from logs1",
+        "[[\"Jane\",1716668197328000000]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_pipeline_dispatcher(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -2405,14 +2509,19 @@ processors:
       ignore_missing: true
   - vrl:
       source: |
-        .log_id = .id
-        del(.id)
+        .from_source = "channel_2"
+        cond, err = .id1 > .id2
+        if (cond) {
+            .from_source = "channel_1"
+        }
+        del(.id1)
+        del(.id2)
         .
 
 transform:
   - fields:
-      - log_id
-    type: int32
+      - from_source
+    type: string
   - field: time
     type: time
     index: timestamp
@@ -2432,7 +2541,8 @@ transform:
     let data_body = r#"
 [
   {
-    "id": "2436",
+    "id1": 2436,
+    "id2": 123,
     "time": "2024-05-25 20:16:37.217"
   }
 ]
@@ -2449,7 +2559,7 @@ transform:
         "test_pipeline_with_vrl",
         &client,
         "select * from d_table",
-        "[[2436,1716668197217000000]]",
+        "[[\"channel_1\",1716668197217000000]]",
     )
     .await;
 
@@ -3706,7 +3816,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= 'f',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  append_mode = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,

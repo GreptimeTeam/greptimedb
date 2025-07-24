@@ -32,7 +32,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_telemetry::info;
 use common_telemetry::logging::{TracingOptions, DEFAULT_LOGGING_DIR};
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use flow::{
     get_flow_auth_options, FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder,
     FrontendClient, FrontendInvoker,
@@ -279,7 +279,7 @@ impl StartCommand {
             None,
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Flownode start command: {:#?}", self);
@@ -374,6 +374,7 @@ impl StartCommand {
             meta_client.clone(),
             flow_auth_header,
             opts.query.clone(),
+            opts.flow.batching_mode.clone(),
         );
         let frontend_client = Arc::new(frontend_client);
         let flownode_builder = FlownodeBuilder::new(

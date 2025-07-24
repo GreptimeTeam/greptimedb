@@ -28,8 +28,8 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
-    AddColumn, AddColumnLocation, AlterKind, ApiSetIndexOptions, PathType, RegionAlterRequest,
-    RegionOpenRequest, RegionRequest, SetRegionOption,
+    AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest, RegionOpenRequest,
+    RegionRequest, SetIndexOption, SetRegionOption,
 };
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
 
@@ -73,18 +73,18 @@ fn add_tag1() -> RegionAlterRequest {
 
 fn alter_column_inverted_index() -> RegionAlterRequest {
     RegionAlterRequest {
-        kind: AlterKind::SetIndex {
-            options: ApiSetIndexOptions::Inverted {
+        kind: AlterKind::SetIndexes {
+            options: vec![SetIndexOption::Inverted {
                 column_name: "tag_0".to_string(),
-            },
+            }],
         },
     }
 }
 
 fn alter_column_fulltext_options() -> RegionAlterRequest {
     RegionAlterRequest {
-        kind: AlterKind::SetIndex {
-            options: ApiSetIndexOptions::Fulltext {
+        kind: AlterKind::SetIndexes {
+            options: vec![SetIndexOption::Fulltext {
                 column_name: "tag_0".to_string(),
                 options: FulltextOptions::new_unchecked(
                     true,
@@ -94,7 +94,7 @@ fn alter_column_fulltext_options() -> RegionAlterRequest {
                     1000,
                     0.01,
                 ),
-            },
+            }],
         },
     }
 }

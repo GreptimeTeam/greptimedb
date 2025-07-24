@@ -54,7 +54,10 @@ pub(crate) fn build_new_physical_table_info(
                 }
             }
             SemanticType::Field => value_indices.push(idx),
-            SemanticType::Timestamp => *time_index = Some(idx),
+            SemanticType::Timestamp => {
+                value_indices.push(idx);
+                *time_index = Some(idx);
+            }
         }
 
         columns.push(col.column_schema.clone());

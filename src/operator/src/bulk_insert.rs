@@ -27,7 +27,7 @@ use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_grpc::FlightData;
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::metadata::TableInfoRef;
 use table::TableRef;
@@ -45,6 +45,7 @@ impl Inserter {
     ) -> error::Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
+        let db_name = table_info.get_db_string();
         let decode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["decode_request"])
             .start_timer();
@@ -52,7 +53,10 @@ impl Inserter {
         // Build region server requests
         let message = decoder
             .try_decode(&data)
-            .context(error::DecodeFlightDataSnafu)?;
+            .context(error::DecodeFlightDataSnafu)?
+            .context(error::NotSupportedSnafu {
+                feat: "bulk insert RecordBatch with dictionary arrays",
+            })?;
         let FlightMessage::RecordBatch(record_batch) = message else {
             return Ok(0);
         };
@@ -63,7 +67,7 @@ impl Inserter {
         }
 
         // notify flownode to update dirty timestamps if flow is configured.
-        self.maybe_update_flow_dirty_window(table_info, record_batch.clone());
+        self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
 
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
@@ -77,7 +81,7 @@ impl Inserter {
             .start_timer();
         let partition_rule = self
             .partition_manager
-            .find_table_partition_rule(table_id)
+            .find_table_partition_rule(&table_info)
             .await
             .context(error::InvalidPartitionSnafu)?;
 
@@ -126,7 +130,9 @@ impl Inserter {
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
             if let Ok(rows) = result {
-                crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows as u64);
+                crate::metrics::DIST_INGEST_ROW_COUNT
+                    .with_label_values(&[db_name.as_str()])
+                    .inc_by(rows as u64);
             }
             return result;
         }
@@ -192,8 +198,20 @@ impl Inserter {
                             let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["encode"])
                                 .start_timer();
-                            let flight_data =
-                                FlightEncoder::default().encode(FlightMessage::RecordBatch(batch));
+                            let mut iter = FlightEncoder::default()
+                                .encode(FlightMessage::RecordBatch(batch))
+                                .into_iter();
+                            let Some(flight_data) = iter.next() else {
+                                // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
+                                // at least one element.
+                                unreachable!()
+                            };
+                            ensure!(
+                                iter.next().is_none(),
+                                error::NotSupportedSnafu {
+                                    feat: "bulk insert RecordBatch with dictionary arrays",
+                                }
+                            );
                             encode_timer.observe_duration();
                             (flight_data.data_header, flight_data.data_body)
                         };
@@ -233,7 +251,9 @@ impl Inserter {
         for res in region_responses {
             rows_inserted += res?.affected_rows;
         }
-        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(rows_inserted as u64);
+        crate::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[db_name.as_str()])
+            .inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
 

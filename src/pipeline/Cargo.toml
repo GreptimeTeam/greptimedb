@@ -47,6 +47,7 @@ lazy_static.workspace = true
 moka = { workspace = true, features = ["sync"] }
 once_cell.workspace = true
 operator.workspace = true
+ordered-float.workspace = true
 paste.workspace = true
 prometheus.workspace = true
 query.workspace = true
@@ -59,7 +60,7 @@ sql.workspace = true
 table.workspace = true
 tokio.workspace = true
 urlencoding = "2.1"
-vrl = "0.24"
+vrl.workspace = true
 yaml-rust = "0.4"
 
 [dev-dependencies]

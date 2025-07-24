@@ -17,6 +17,7 @@ pub mod columns;
 pub mod create_table;
 pub mod datanode_handler;
 pub mod flownode_handler;
+pub mod region_metadata;
 
 use std::assert_matches::assert_matches;
 use std::collections::HashMap;
@@ -145,10 +146,7 @@ pub fn test_create_logical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: vec![Partition::default()],
         table_info,
     }
 }
@@ -183,10 +181,7 @@ pub fn test_create_physical_table_task(name: &str) -> CreateTableTask {
     CreateTableTask {
         create_table,
         // Single region
-        partitions: vec![Partition {
-            column_list: vec![],
-            value_list: vec![],
-        }],
+        partitions: vec![Partition::default()],
         table_info,
     }
 }

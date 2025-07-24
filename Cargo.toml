@@ -13,6 +13,7 @@ members = [
     "src/common/datasource",
     "src/common/decimal",
     "src/common/error",
+    "src/common/event-recorder",
     "src/common/frontend",
     "src/common/function",
     "src/common/greptimedb-telemetry",
@@ -30,6 +31,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/session",
+    "src/common/sql",
     "src/common/stat",
     "src/common/substrait",
     "src/common/telemetry",
@@ -138,7 +140,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ceb1af4fa9309ce65bda0367db7b384df2bb4d4f" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7fcaa3e413947a7a28d9af95812af26c1939ce78" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -166,14 +168,13 @@ opentelemetry-proto = { version = "0.27", features = [
     "with-serde",
     "logs",
 ] }
+ordered-float = { version = "4.3", features = ["serde"] }
 parking_lot = "0.12"
 parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "0410e8b459dda7cb222ce9596f8bf3971bd07bd2", features = [
-    "ser",
-] }
+promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
 raft-engine = { version = "0.4.1", default-features = false }
 rand = "0.9"
@@ -224,10 +225,12 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
 tower = "0.5"
+tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"
 uuid = { version = "1.7", features = ["serde", "v4", "fast-rng"] }
+vrl = "0.25"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
@@ -245,6 +248,7 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
+common-event-recorder = { path = "src/common/event-recorder" }
 common-frontend = { path = "src/common/frontend" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
@@ -262,6 +266,7 @@ common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
+common-sql = { path = "src/common/sql" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }

@@ -33,7 +33,7 @@ use crate::error::Result;
 use crate::flush::FlushScheduler;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::region::{ManifestContext, ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::WorkerRequest;
+use crate::request::{WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::scheduler::{Job, LocalScheduler, Scheduler, SchedulerRef};
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -87,7 +87,7 @@ impl SchedulerEnv {
     /// Creates a new compaction scheduler.
     pub(crate) fn mock_compaction_scheduler(
         &self,
-        request_sender: Sender<WorkerRequest>,
+        request_sender: Sender<WorkerRequestWithTime>,
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 

@@ -50,7 +50,10 @@ FROM
 +-+-+
 | logical_plan_| Projection: sum(count(integers.i)) AS count(integers.i)_|
 |_|_Aggregate: groupBy=[[]], aggr=[[sum(count(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[count(integers.i)]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | ProjectionExec: expr=[sum(count(integers.i))@0 as count(integers.i)]_|
 |_|_AggregateExec: mode=Final, gby=[], aggr=[sum(count(integers.i))]_|
 |_|_CoalescePartitionsExec_|
@@ -144,7 +147,10 @@ ORDER BY
 | logical_plan_| Sort: integers.ts ASC NULLS LAST, count(integers.i) ASC NULLS LAST_|
 |_|_Projection: integers.ts, sum(count(integers.i)) AS count(integers.i)_|
 |_|_Aggregate: groupBy=[[integers.ts]], aggr=[[sum(count(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[integers.ts]], aggr=[[count(integers.i)]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, count(integers.i)@1 ASC NULLS LAST]_|
 |_|_SortExec: expr=[ts@0 ASC NULLS LAST, count(integers.i)@1 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[ts@0 as ts, sum(count(integers.i))@1 as count(integers.i)]_|
@@ -253,7 +259,10 @@ ORDER BY
 | logical_plan_| Sort: time_window ASC NULLS LAST, count(integers.i) ASC NULLS LAST_|
 |_|_Projection: date_bin(Utf8("1 hour"),integers.ts) AS time_window, sum(count(integers.i)) AS count(integers.i)_|
 |_|_Aggregate: groupBy=[[date_bin(Utf8("1 hour"),integers.ts)]], aggr=[[sum(count(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[date_bin(CAST(Utf8("1 hour") AS Interval(MonthDayNano)), integers.ts)]], aggr=[[count(integers.i)]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [time_window@0 ASC NULLS LAST, count(integers.i)@1 ASC NULLS LAST]_|
 |_|_SortExec: expr=[time_window@0 ASC NULLS LAST, count(integers.i)@1 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[date_bin(Utf8("1 hour"),integers.ts)@0 as time_window, sum(count(integers.i))@1 as count(integers.i)]_|
@@ -369,7 +378,10 @@ ORDER BY
 | logical_plan_| Sort: integers.ts + Int64(1) ASC NULLS LAST, integers.i / Int64(2) ASC NULLS LAST_|
 |_|_Projection: integers.ts + Int64(1), integers.i / Int64(2), sum(count(integers.i)) AS count(integers.i)_|
 |_|_Aggregate: groupBy=[[integers.ts + Int64(1), integers.i / Int64(2)]], aggr=[[sum(count(integers.i))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[CAST(integers.ts AS Int64) + Int64(1), integers.i / Int64(2)]], aggr=[[count(integers.i)]]_|
+|_|_TableScan: integers_|
+|_| ]]_|
 | physical_plan | SortPreservingMergeExec: [integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST]_|
 |_|_SortExec: expr=[integers.ts + Int64(1)@0 ASC NULLS LAST, integers.i / Int64(2)@1 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_ProjectionExec: expr=[integers.ts + Int64(1)@0 as integers.ts + Int64(1), integers.i / Int64(2)@1 as integers.i / Int64(2), sum(count(integers.i))@2 as count(integers.i)]_|
@@ -497,7 +509,10 @@ FROM
 +-+-+
 | logical_plan_| Projection: uddsketch_calc(Float64(0.5), uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state))) AS udd_result, hll_count(hll_merge(hll_merge(sink_table.hll_state))) AS hll_result_|
 |_|_Aggregate: groupBy=[[]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))]]_|
-|_|_MergeScan [is_placeholder=false]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[uddsketch_merge(Int64(128), Float64(0.01), sink_table.udd_state), hll_merge(sink_table.hll_state)]]_|
+|_|_TableScan: sink_table_|
+|_| ]]_|
 | physical_plan | ProjectionExec: expr=[uddsketch_calc(0.5, uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state))@0) as udd_result, hll_count(hll_merge(hll_merge(sink_table.hll_state))@1) as hll_result] |
 |_|_AggregateExec: mode=Final, gby=[], aggr=[uddsketch_merge(Int64(128),Float64(0.01),uddsketch_merge(Int64(128),Float64(0.01),sink_table.udd_state)), hll_merge(hll_merge(sink_table.hll_state))]_|
 |_|_CoalescePartitionsExec_|

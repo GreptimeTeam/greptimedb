@@ -50,6 +50,7 @@ use crate::adapter::refill::RefillTask;
 use crate::adapter::table_source::ManagedTableSource;
 use crate::adapter::util::relation_desc_to_column_schemas_with_fallback;
 pub(crate) use crate::adapter::worker::{create_worker, Worker, WorkerHandle};
+use crate::batching_mode::BatchingModeOptions;
 use crate::compute::ErrCollector;
 use crate::df_optimizer::sql_to_flow_plan;
 use crate::error::{EvalSnafu, ExternalSnafu, InternalSnafu, InvalidQuerySnafu, UnexpectedSnafu};
@@ -84,12 +85,14 @@ pub const AUTO_CREATED_UPDATE_AT_TS_COL: &str = "update_at";
 #[serde(default)]
 pub struct FlowConfig {
     pub num_workers: usize,
+    pub batching_mode: BatchingModeOptions,
 }
 
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
             num_workers: (common_config::utils::get_cpus() / 2).max(1),
+            batching_mode: BatchingModeOptions::default(),
         }
     }
 }
@@ -497,7 +500,7 @@ impl StreamingEngine {
         &self,
         schema: &RelationDesc,
     ) -> Result<(Vec<String>, Vec<ColumnSchema>, bool), Error> {
-        // TODO(discord9): condiser remove buggy auto create by schema
+        // TODO(discord9): consider remove buggy auto create by schema
 
         // TODO(discord9): use default key from schema
         let primary_keys = schema

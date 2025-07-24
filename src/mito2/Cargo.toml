@@ -42,6 +42,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes.workspace = true
 dotenv.workspace = true
+either.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
 index.workspace = true
@@ -75,6 +76,7 @@ table.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

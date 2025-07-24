@@ -93,23 +93,33 @@ impl TryFrom<BulkWalEntry> for BulkPart {
     }
 }
 
-impl From<&BulkPart> for BulkWalEntry {
-    fn from(value: &BulkPart) -> Self {
+impl TryFrom<&BulkPart> for BulkWalEntry {
+    type Error = error::Error;
+
+    fn try_from(value: &BulkPart) -> Result<Self> {
         if let Some(ipc) = &value.raw_data {
-            BulkWalEntry {
+            Ok(BulkWalEntry {
                 sequence: value.sequence,
                 max_ts: value.max_ts,
                 min_ts: value.min_ts,
                 timestamp_index: value.timestamp_index as u32,
                 body: Some(Body::ArrowIpc(ipc.clone())),
-            }
+            })
         } else {
             let mut encoder = FlightEncoder::default();
             let schema_bytes = encoder
-                .encode(FlightMessage::Schema(value.batch.schema()))
+                .encode_schema(value.batch.schema().as_ref())
                 .data_header;
-            let rb_data = encoder.encode(FlightMessage::RecordBatch(value.batch.clone()));
-            BulkWalEntry {
+            let [rb_data] = encoder
+                .encode(FlightMessage::RecordBatch(value.batch.clone()))
+                .try_into()
+                .map_err(|_| {
+                    error::UnsupportedOperationSnafu {
+                        err_msg: "create BulkWalEntry from RecordBatch with dictionary arrays",
+                    }
+                    .build()
+                })?;
+            Ok(BulkWalEntry {
                 sequence: value.sequence,
                 max_ts: value.max_ts,
                 min_ts: value.min_ts,
@@ -119,14 +129,19 @@ impl From<&BulkPart> for BulkWalEntry {
                     data_header: rb_data.data_header,
                     payload: rb_data.data_body,
                 })),
-            }
+            })
         }
     }
 }
 
 impl BulkPart {
     pub(crate) fn estimated_size(&self) -> usize {
-        self.batch.get_array_memory_size()
+        self.batch
+            .columns()
+            .iter()
+            // If can not get slice memory size, assume 0 here.
+            .map(|c| c.to_data().get_slice_memory_size().unwrap_or(0))
+            .sum()
     }
 
     /// Converts [BulkPart] to [Mutation] for fallback `write_bulk` implementation.
@@ -694,7 +709,7 @@ mod tests {
         let read_format = ReadFormat::new_with_all_columns(metadata.clone());
         let mut batches = VecDeque::new();
         read_format
-            .convert_record_batch(&batch, &mut batches)
+            .convert_record_batch(&batch, None, &mut batches)
             .unwrap();
         if !dedup {
             assert_eq!(

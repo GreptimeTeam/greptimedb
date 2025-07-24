@@ -19,6 +19,7 @@ use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use either::Either;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
@@ -483,7 +484,7 @@ async fn test_open_compaction_region() {
         &req,
         &mito_config,
         object_store_manager.clone(),
-        schema_metadata_manager,
+        Either::Right(schema_metadata_manager),
     )
     .await
     .unwrap();

@@ -37,11 +37,12 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
-use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContext, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{
@@ -88,7 +89,7 @@ impl GreptimeRequestHandler {
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(header, hints)?;
+        let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -176,8 +177,9 @@ impl GreptimeRequestHandler {
                 let result = result
                     .map(|x| DoPutResponse::new(request_id, x))
                     .map_err(Into::into);
-                if result_sender.try_send(result).is_err() {
-                    warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
+                if let Err(e)= result_sender.try_send(result)
+                    && let TrySendError::Closed(_) = e {
+                    warn!(r#""DoPut" client with request_id {} maybe unreachable, abort handling its message"#, request_id);
                     break;
                 }
             }
@@ -284,7 +286,10 @@ pub(crate) async fn auth(
     })
 }
 
+/// Creates a new `QueryContext` from the provided request header and extensions.
+/// Strongly recommend setting an appropriate channel, as this is very helpful for statistics.
 pub(crate) fn create_query_context(
+    channel: Channel,
     header: Option<&RequestHeader>,
     mut extensions: Vec<(String, String)>,
 ) -> Result<QueryContextRef> {
@@ -319,7 +324,8 @@ pub(crate) fn create_query_context(
     let mut ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .timezone(timezone);
+        .timezone(timezone)
+        .channel(channel);
 
     if let Some(x) = extensions
         .iter()
@@ -395,6 +401,7 @@ mod tests {
             ..Default::default()
         };
         let query_context = create_query_context(
+            Channel::Unknown,
             Some(&header),
             vec![
                 ("auto_create_table".to_string(), "true".to_string()),

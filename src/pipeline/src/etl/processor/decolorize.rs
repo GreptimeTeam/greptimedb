@@ -21,15 +21,17 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use snafu::OptionExt;
+use vrl::prelude::Bytes;
+use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
     Error, KeyMustBeStringSnafu, ProcessorExpectStringSnafu, ProcessorMissingFieldSnafu, Result,
+    ValueMustBeMapSnafu,
 };
 use crate::etl::field::Fields;
 use crate::etl::processor::{
     yaml_bool, yaml_new_field, yaml_new_fields, FIELDS_NAME, FIELD_NAME, IGNORE_MISSING_NAME,
 };
-use crate::etl::value::Value;
 
 pub(crate) const PROCESSOR_DECOLORIZE: &str = "decolorize";
 
@@ -43,13 +45,15 @@ pub struct DecolorizeProcessor {
 }
 
 impl DecolorizeProcessor {
-    fn process_string(&self, val: &str) -> Result<Value> {
-        Ok(Value::String(RE.replace_all(val, "").into_owned()))
+    fn process_string(&self, val: &str) -> Result<VrlValue> {
+        Ok(VrlValue::Bytes(Bytes::from(
+            RE.replace_all(val, "").to_string(),
+        )))
     }
 
-    fn process(&self, val: &Value) -> Result<Value> {
+    fn process(&self, val: &VrlValue) -> Result<VrlValue> {
         match val {
-            Value::String(val) => self.process_string(val),
+            VrlValue::Bytes(val) => self.process_string(String::from_utf8_lossy(val).as_ref()),
             _ => ProcessorExpectStringSnafu {
                 processor: PROCESSOR_DECOLORIZE,
                 v: val.clone(),
@@ -101,11 +105,12 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
         self.ignore_missing
     }
 
-    fn exec_mut(&self, mut val: Value) -> Result<Value> {
+    fn exec_mut(&self, mut val: VrlValue) -> Result<VrlValue> {
         for field in self.fields.iter() {
             let index = field.input_field();
+            let val = val.as_object_mut().context(ValueMustBeMapSnafu)?;
             match val.get(index) {
-                Some(Value::Null) | None => {
+                Some(VrlValue::Null) | None => {
                     if !self.ignore_missing {
                         return ProcessorMissingFieldSnafu {
                             processor: self.kind(),
@@ -117,7 +122,7 @@ impl crate::etl::processor::Processor for DecolorizeProcessor {
                 Some(v) => {
                     let result = self.process(v)?;
                     let output_index = field.target_or_input_field();
-                    val.insert(output_index.to_string(), result)?;
+                    val.insert(KeyString::from(output_index), result);
                 }
             }
         }
@@ -136,16 +141,19 @@ mod tests {
             ignore_missing: false,
         };
 
-        let val = Value::String("\x1b[32mGreen\x1b[0m".to_string());
+        let val = VrlValue::Bytes(Bytes::from("\x1b[32mGreen\x1b[0m".to_string()));
         let result = processor.process(&val).unwrap();
-        assert_eq!(result, Value::String("Green".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("Green".to_string())));
 
-        let val = Value::String("Plain text".to_string());
+        let val = VrlValue::Bytes(Bytes::from("Plain text".to_string()));
         let result = processor.process(&val).unwrap();
-        assert_eq!(result, Value::String("Plain text".to_string()));
+        assert_eq!(
+            result,
+            VrlValue::Bytes(Bytes::from("Plain text".to_string()))
+        );
 
-        let val = Value::String("\x1b[46mfoo\x1b[0m bar".to_string());
+        let val = VrlValue::Bytes(Bytes::from("\x1b[46mfoo\x1b[0m bar".to_string()));
         let result = processor.process(&val).unwrap();
-        assert_eq!(result, Value::String("foo bar".to_string()));
+        assert_eq!(result, VrlValue::Bytes(Bytes::from("foo bar".to_string())));
     }
 }

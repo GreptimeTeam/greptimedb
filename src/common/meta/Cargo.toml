@@ -69,6 +69,7 @@ table = { workspace = true, features = ["testing"] }
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
 tonic.workspace = true
+tracing.workspace = true
 typetag.workspace = true
 
 [dev-dependencies]

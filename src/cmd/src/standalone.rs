@@ -51,7 +51,7 @@ use common_telemetry::logging::{
     LoggingOptions, SlowQueryOptions, TracingOptions, DEFAULT_LOGGING_DIR,
 };
 use common_time::timezone::set_default_timezone;
-use common_version::{short_version, version};
+use common_version::{short_version, verbose_version};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -485,7 +485,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
-        log_versions(version(), short_version(), APP_NAME);
+        log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Standalone start command: {:#?}", self);
@@ -821,6 +821,7 @@ impl InformationExtension for StandaloneInformationExtension {
                     memtable_size: region_stat.memtable_size,
                     manifest_size: region_stat.manifest_size,
                     sst_size: region_stat.sst_size,
+                    sst_num: region_stat.sst_num,
                     index_size: region_stat.index_size,
                     region_manifest: region_stat.manifest.into(),
                     data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
