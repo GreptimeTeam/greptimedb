@@ -78,6 +78,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
+use crate::statement::set::set_allow_query_fallback;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
@@ -409,6 +410,9 @@ impl StatementExecutor {
             // Not harmful since it only relates to how date is viewed in client app's output.
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
+
+            // Allow query to fallback when failed to push down.
+            "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
