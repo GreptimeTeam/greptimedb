@@ -31,12 +31,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ::auth::UserProviderRef;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
 use derive_builder::Builder;
-use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::ErrorHandler;
-use pgwire::api::{ClientInfo, PgWireServerHandlers};
+use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -80,6 +79,7 @@ pub struct PostgresServerHandlerInner {
 
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
+    slow_query_recorder: Option<SlowQueryRecorderRef>,
 }
 
 #[derive(Builder)]
@@ -112,7 +112,12 @@ impl PgWireServerHandlers for PostgresServerHandler {
 }
 
 impl MakePostgresServerHandler {
-    fn make(&self, addr: Option<SocketAddr>, process_id: u32) -> PostgresServerHandler {
+    fn make(
+        &self,
+        addr: Option<SocketAddr>,
+        process_id: u32,
+        slow_query_recorder: Option<SlowQueryRecorderRef>,
+    ) -> PostgresServerHandler {
         let session = Arc::new(Session::new(
             addr,
             Channel::Postgres,
@@ -127,6 +132,7 @@ impl MakePostgresServerHandler {
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            slow_query_recorder,
         };
         PostgresServerHandler(Arc::new(handler))
     }

@@ -700,6 +700,7 @@ pub async fn setup_pg_server_with_user_provider(
         runtime,
         user_provider,
         None,
+        None,
     ));
 
     pg_server

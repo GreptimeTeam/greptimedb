@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_slow_query_recorder::slow_query_recorder::SlowQuery;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
@@ -59,6 +60,15 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(
+                SlowQuery::Sql(query.query.clone()),
+                self.session.new_query_context(),
+            )
+        } else {
+            None
+        };
+
         let result = self._on_query(client, query).await;
         println!("post processing...");
         result

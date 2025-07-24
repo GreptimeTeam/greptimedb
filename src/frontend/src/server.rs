@@ -255,6 +255,7 @@ where
                 common_runtime::global_runtime(),
                 user_provider.clone(),
                 Some(self.instance.process_manager().clone()),
+                self.instance.slow_query_recorder().clone(),
             )) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr));
