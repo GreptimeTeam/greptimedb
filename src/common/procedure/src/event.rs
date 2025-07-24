@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use common_event_recorder::Event;
-use common_time::timestamp::Timestamp;
+use common_time::timestamp::{TimeUnit, Timestamp};
 
 use crate::{ProcedureId, ProcedureState};
 
@@ -31,6 +31,21 @@ pub struct ProcedureEvent {
     pub state: ProcedureState,
     /// The timestamp of the event.
     pub timestamp: Timestamp,
+}
+
+impl ProcedureEvent {
+    pub fn new(
+        procedure_id: ProcedureId,
+        procedure_dump_data: String,
+        state: ProcedureState,
+    ) -> Self {
+        Self {
+            procedure_id,
+            procedure_dump_data,
+            state,
+            timestamp: Timestamp::current_time(TimeUnit::Nanosecond),
+        }
+    }
 }
 
 impl Event for ProcedureEvent {
