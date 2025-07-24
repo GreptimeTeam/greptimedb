@@ -49,7 +49,7 @@ use table::TableRef;
 use crate::analyze::DistAnalyzeExec;
 use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::MergeScanLogicalPlan;
+use crate::dist_plan::{DistPlannerOptions, MergeScanLogicalPlan};
 use crate::error::{
     CatalogSnafu, ConvertSchemaSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -496,6 +496,15 @@ impl QueryEngine for DatafusionQueryEngine {
                     parallelism
                 );
             }
+        }
+        if query_ctx.configuration_parameter().allow_query_fallback() {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: true,
+                });
         }
         QueryEngineContext::new(state, query_ctx)
     }
