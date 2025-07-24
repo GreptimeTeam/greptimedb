@@ -66,6 +66,9 @@ use crate::{metrics, QueryEngine};
 /// This hint can be set in the query context to control the parallelism of the query execution.
 pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 
+/// Whether to fallback to the original plan when failed to push down.
+pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
+
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
     plugins: Plugins,
@@ -505,6 +508,18 @@ impl QueryEngine for DatafusionQueryEngine {
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
                 });
+        } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
+            // also check the query context for fallback hint
+            // if it is set, we will enable the fallback
+            if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
+                state
+                    .config_mut()
+                    .options_mut()
+                    .extensions
+                    .insert(DistPlannerOptions {
+                        allow_query_fallback: true,
+                    });
+            }
         }
         QueryEngineContext::new(state, query_ctx)
     }
