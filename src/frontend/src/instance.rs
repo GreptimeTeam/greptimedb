@@ -353,7 +353,7 @@ impl Instance {
         let cache = self
             .otlp_metrics_table_legacy_cache
             .entry(db_string)
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         // check cache
         let hit_cache = names
