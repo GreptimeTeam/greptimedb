@@ -116,6 +116,10 @@ impl Memtable for EmptyMemtable {
     fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(EmptyMemtable::new(id))
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        true
+    }
 }
 
 /// Empty memtable builder.

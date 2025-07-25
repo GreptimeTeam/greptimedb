@@ -374,6 +374,10 @@ impl Memtable for TimeSeriesMemtable {
             self.merge_mode,
         ))
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]

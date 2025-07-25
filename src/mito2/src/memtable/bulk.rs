@@ -93,4 +93,8 @@ impl Memtable for BulkMemtable {
             parts: RwLock::new(vec![]),
         })
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        true
+    }
 }

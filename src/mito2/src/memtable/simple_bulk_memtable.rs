@@ -340,6 +340,10 @@ impl Memtable for SimpleBulkMemtable {
             self.merge_mode,
         ))
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone)]
