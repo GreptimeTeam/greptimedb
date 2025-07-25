@@ -15,7 +15,7 @@
 use std::any::Any;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{FlushRegion, Instruction, InstructionReply, SimpleReply};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,11 @@ impl PreFlushRegion {
     fn build_flush_leader_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
-        Instruction::FlushRegion(region_id)
+        Instruction::FlushRegion(FlushRegion {
+            region_ids: vec![region_id],
+            is_hint: false,
+            fail_fast: true,
+        })
     }
 
     /// Tries to flush a leader region.
