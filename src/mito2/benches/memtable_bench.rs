@@ -21,6 +21,7 @@ use datafusion_common::Column;
 use datafusion_expr::{lit, Expr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use mito2::memtable::bulk::part::BulkPartConverter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
@@ -359,5 +360,39 @@ fn cpu_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-criterion_group!(benches, write_rows, full_scan, filter_1_host);
+fn bulk_part_converter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_converter");
+
+    for &rows in &[1024, 2048, 4096, 8192] {
+        group.bench_with_input(format!("{}_rows", rows), &rows, |b, &rows| {
+            b.iter(|| {
+                // Generate N hosts for N rows
+                let generator =
+                    CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                let mut converter = BulkPartConverter::new(&metadata, rows, codec);
+
+                // Each iteration generates one KeyValues with N rows (one per host)
+                for kvs in generator.iter() {
+                    converter.append_key_values(&kvs).unwrap();
+                    break; // Only need one iteration since we have N hosts
+                }
+
+                // Convert to BulkPart
+                let _bulk_part = converter.convert().unwrap();
+            });
+        });
+    }
+}
+
+criterion_group!(
+    benches,
+    write_rows,
+    full_scan,
+    filter_1_host,
+    bulk_part_converter
+);
 criterion_main!(benches);
