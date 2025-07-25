@@ -74,12 +74,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MismatchedSchema { .. }
-            | Error::SerializeEvent { .. }
-            | Error::DeserializeEvent { .. } => StatusCode::InvalidArguments,
+            Error::MismatchedSchema { .. } => StatusCode::InvalidArguments,
             Error::NoAvailableFrontend { .. }
             | Error::InsertEvents { .. }
             | Error::KvBackend { .. } => StatusCode::Internal,
+            Error::SerializeEvent { .. } | Error::DeserializeEvent { .. } => StatusCode::Internal,
         }
     }
 
