@@ -189,6 +189,17 @@ impl TableRouteValue {
         }
     }
 
+    /// Converts to [`LogicalTableRouteValue`].
+    ///
+    /// # Panic
+    /// If it is not the [`LogicalTableRouteValue`].
+    pub fn into_logical_table_route(self) -> LogicalTableRouteValue {
+        match self {
+            TableRouteValue::Logical(x) => x,
+            _ => unreachable!("Mistakenly been treated as a Logical TableRoute: {self:?}"),
+        }
+    }
+
     pub fn region_numbers(&self) -> Vec<RegionNumber> {
         match self {
             TableRouteValue::Physical(x) => x
