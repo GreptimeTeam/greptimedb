@@ -19,6 +19,7 @@ pub(crate) mod maintenance;
 pub(crate) mod node_lease;
 pub(crate) mod procedure;
 pub(crate) mod recovery;
+pub(crate) mod sequencer;
 mod util;
 
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ use crate::service::admin::procedure::ProcedureManagerHandler;
 use crate::service::admin::recovery::{
     get_recovery_mode, set_recovery_mode, unset_recovery_mode, RecoveryHandler,
 };
+use crate::service::admin::sequencer::TableIdSequenceHandler;
 use crate::service::admin::util::{to_axum_json_response, to_axum_not_found_response};
 
 pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
@@ -257,6 +259,17 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
     let recovery_handler = Arc::new(RecoveryHandler {
         manager: metasrv.runtime_switch_manager().clone(),
     });
+    let table_id_sequence_handler = Arc::new(TableIdSequenceHandler {
+        table_id_sequence: metasrv.table_id_sequence().clone(),
+        runtime_switch_manager: metasrv.runtime_switch_manager().clone(),
+    });
+    let sequence_router = AxumRouter::new().nest(
+        "/table",
+        AxumRouter::new()
+            .route("/next-id", routing::get(sequencer::get_next_table_id))
+            .route("/next-id", routing::post(sequencer::set_next_table_id))
+            .with_state(table_id_sequence_handler),
+    );
 
     let health_router = AxumRouter::new().route(
         "/",
@@ -477,7 +490,8 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
         .nest("/heartbeat", heartbeat_router)
         .nest("/maintenance", maintenance_router)
         .nest("/procedure-manager", procedure_router)
-        .nest("/recovery", recovery_router);
+        .nest("/recovery", recovery_router)
+        .nest("/sequence", sequence_router);
 
     AxumRouter::new().nest("/admin", admin_router)
 }
@@ -830,6 +844,7 @@ mod axum_admin_tests {
     use super::*;
     use crate::metasrv::builder::MetasrvBuilder;
     use crate::metasrv::MetasrvOptions;
+    use crate::service::admin::sequencer::NextTableIdResponse;
 
     async fn setup_axum_app() -> AxumRouter {
         let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -846,6 +861,11 @@ mod axum_admin_tests {
     async fn get_body_string(resp: axum::response::Response) -> String {
         let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         String::from_utf8_lossy(&body_bytes).to_string()
+    }
+
+    async fn into_bytes(resp: axum::response::Response) -> Vec<u8> {
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        body_bytes.to_vec()
     }
 
     #[tokio::test]
@@ -1123,5 +1143,120 @@ mod axum_admin_tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = get_body_string(response).await;
         assert!(body.contains("false"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_sequence_table_id() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions::default())
+            .kv_backend(kv_backend)
+            .build()
+            .await
+            .unwrap();
+        let metasrv = Arc::new(metasrv);
+        let runtime_switch_manager = metasrv.runtime_switch_manager().clone();
+        let app = admin_axum_router(metasrv);
+        // Set recovery mode to true
+        runtime_switch_manager.set_recovery_mode().await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = into_bytes(response).await;
+        let resp: NextTableIdResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.next_table_id, 1024);
+
+        // Bad request
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Bad next id
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::from(r#"{"next_table_id": 0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = get_body_string(response).await;
+        assert!(body.contains("is not greater than the current next value"));
+
+        // Set next id
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::from(r#"{"next_table_id": 2048}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Set next id
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = into_bytes(response).await;
+        let resp: NextTableIdResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(resp.next_table_id, 2048);
+
+        // Set recovery mode to false
+        runtime_switch_manager.unset_recovery_mode().await.unwrap();
+        // Set next id with recovery mode disabled
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .uri("/admin/sequence/table/next-id")
+                    .body(Body::from(r#"{"next_table_id": 2049}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = get_body_string(response).await;
+        assert!(body.contains("Setting next table id is only allowed in recovery mode"));
     }
 }
