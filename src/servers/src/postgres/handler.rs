@@ -114,14 +114,6 @@ where
 
 fn convert_err(e: impl ErrorExt) -> Response<'static> {
     let status_code = e.status_code();
-    debug!(
-        "Failed to handle postgres query, code!!!!!!!!!!!!: {}",
-        status_code
-    );
-    println!(
-        "Failed to handle postgres queryfafafafafa, code!!!!!!!!!!!!: {}",
-        status_code
-    );
     if status_code.should_log_error() {
         let root_error = e.root_cause().unwrap_or(&e);
         error!(e; "Failed to handle postgres query, code: {}, error: {}", status_code, root_error.to_string());
@@ -157,8 +149,6 @@ pub(crate) fn output_to_query_response<'a>(
     output: Result<Output>,
     field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
-    debug!("output_to_query_response, output!!!!!!!!!: {:?}", output);
-    println!("output_to_query_response, output!!!!!!!!!: {:?}", output);
     match output {
         Ok(o) => match o.data {
             OutputData::AffectedRows(rows) => {
@@ -191,14 +181,6 @@ fn recordbatches_to_query_response<'a, S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    println!(
-        "recordbatches_to_query_response, schema!!!!!!!!!: {:?}",
-        schema
-    );
-    debug!(
-        "recordbatches_to_query_response, schema!!!!!!!!!: {:?}",
-        schema
-    );
     let pg_schema = match schema_to_pg(schema.as_ref(), field_format) {
         Ok(s) => Arc::new(s),
         Err(e) => return Ok(convert_err(e)),
