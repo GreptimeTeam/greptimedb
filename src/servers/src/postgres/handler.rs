@@ -36,10 +36,11 @@ use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
 use session::Session;
+use snafu::ResultExt;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::{ParseOptions, ParserContext};
 
-use crate::error::Result;
+use crate::error::{DataFusionSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
 use crate::postgres::{fixtures, PostgresServerHandlerInner};
@@ -296,9 +297,8 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .replace_params_with_values(&ParamValues::List(parameters_to_scalar_values(
                     plan, portal,
                 )?))
-                .map_err(|e: datafusion_common::DataFusionError| {
-                    PgWireError::ApiError(Box::new(e))
-                })?;
+                .context(DataFusionSnafu)
+                .map_err(convert_err)?;
             self.query_handler
                 .do_exec_plan(plan, query_ctx.clone())
                 .await
@@ -333,7 +333,8 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         let (param_types, sql_plan, format) = if let Some(plan) = &sql_plan.plan {
             let param_types = plan
                 .get_parameter_types()
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                .context(DataFusionSnafu)
+                .map_err(convert_err)?
                 .into_iter()
                 .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
                 .collect();
