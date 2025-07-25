@@ -17,6 +17,7 @@ use std::str::FromStr;
 use common_time::timezone::Timezone;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::types::{parse_string_to_json_type_value, parse_string_to_vector_type_value};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -29,8 +30,8 @@ pub use sqlparser::ast::{
 
 use crate::error::{
     ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertStrSnafu, DatatypeSnafu,
-    InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu, ParseSqlValueSnafu, Result,
-    TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
+    DeserializeSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, InvalidUnaryOpSnafu,
+    ParseSqlValueSnafu, Result, TimestampOverflowSnafu, UnsupportedUnaryOpSnafu,
 };
 
 fn parse_sql_number<R: FromStr + std::fmt::Debug>(n: &str) -> Result<R>
@@ -366,6 +367,27 @@ pub(crate) fn parse_hex_string(s: &str) -> Result<Value> {
         }
         .fail(),
     }
+}
+
+/// Deserialize default constraint from json bytes
+pub fn deserialize_default_constraint(
+    bytes: &[u8],
+    column_name: &str,
+    data_type: &ConcreteDataType,
+) -> Result<Option<ColumnDefaultConstraint>> {
+    let json = String::from_utf8_lossy(bytes);
+    let default_constraint = serde_json::from_str(&json).context(DeserializeSnafu { json })?;
+    let column_def = sqlparser::ast::ColumnOptionDef {
+        name: None,
+        option: sqlparser::ast::ColumnOption::Default(default_constraint),
+    };
+
+    crate::default_constraint::parse_column_default_constraint(
+        column_name,
+        data_type,
+        &[column_def],
+        None,
+    )
 }
 
 #[cfg(test)]

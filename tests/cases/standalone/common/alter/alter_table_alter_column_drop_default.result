@@ -51,11 +51,11 @@ SELECT * FROM test1;
 | 1 | 2024-01-30T12:00:00 | 100 | 200 | 2024-01-30T00:00:00 | 300 |
 +---+---------------------+-----+-----+---------------------+-----+
 
-ALTER TABLE test1 ALTER k DROP DEFAULT;
+ALTER TABLE test1 MODIFY COLUMN k DROP DEFAULT;
 
 Affected Rows: 0
 
-ALTER TABLE test1 ALTER l DROP DEFAULT, ALTER m DROP DEFAULT, ALTER n DROP DEFAULT;
+ALTER TABLE test1 MODIFY COLUMN l DROP DEFAULT, MODIFY COLUMN m DROP DEFAULT, MODIFY COLUMN n DROP DEFAULT;
 
 Affected Rows: 0
 
@@ -103,7 +103,7 @@ SELECT * FROM test1;
 | 1 | 2024-01-30T12:00:00 |   |   |   |   | 400 |
 +---+---------------------+---+---+---+---+-----+
 
-ALTER TABLE test1 ALTER o DROP DEFAULT;
+ALTER TABLE test1 MODIFY COLUMN o DROP DEFAULT;
 
 Error: 1004(InvalidArguments), Invalid alter table(test1) request: column o is not nullable and `default` cannot be dropped
 
