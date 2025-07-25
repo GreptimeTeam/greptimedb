@@ -192,10 +192,10 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let slow_query_recorder = self.options.slow_query.and_then(|opts| {
-            opts.enable.then(|| {
+        let slow_query_recorder = self.options.slow_query.and_then(|slow_query_opts| {
+            slow_query_opts.enable.then(|| {
                 Arc::new(SlowQueryRecorder::new(
-                    opts.clone(),
+                    slow_query_opts.clone(),
                     inserter.clone(),
                     statement_executor.clone(),
                     self.catalog_manager.clone(),

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_config::Configurable;
+use common_slow_query_recorder::SlowQueryRecorder;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::frontend_grpc_handler::FrontendGrpcHandler;
@@ -73,8 +74,21 @@ where
     }
 
     pub fn http_server_builder(&self, opts: &FrontendOptions) -> HttpServerBuilder {
-        let mut builder = HttpServerBuilder::new(opts.http.clone())
-            .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(self.instance.clone()));
+        let slow_query_recorder = opts.slow_query.as_ref().and_then(|slow_query_opts| {
+            slow_query_opts.enable.then(|| {
+                Arc::new(SlowQueryRecorder::new(
+                    slow_query_opts.clone(),
+                    self.instance.inserter().clone(),
+                    self.instance.statement_executor().clone(),
+                    self.instance.catalog_manager().clone(),
+                ))
+            })
+        });
+
+        let mut builder = HttpServerBuilder::new(opts.http.clone()).with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(self.instance.clone()),
+            slow_query_recorder,
+        );
 
         let validator = self.plugins.get::<LogValidatorRef>();
         let ingest_interceptor = self.plugins.get::<LogIngestInterceptorRef<ServerError>>();

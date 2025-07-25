@@ -480,9 +480,16 @@ impl SlowQueryTimer {
 
         match &self.query {
             SlowQuery::Sql(query) => {
+                if query.is_empty() {
+                    return;
+                }
                 slow_query_event.query = query.to_string();
             }
             SlowQuery::Promql(query) => {
+                if query.query.is_empty() {
+                    return;
+                }
+
                 let start = QueryLanguageParser::parse_promql_timestamp(&query.start)
                     .ok()
                     .and_then(|s| s.duration_since(UNIX_EPOCH).ok())

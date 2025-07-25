@@ -25,6 +25,7 @@ use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
 use common_recordbatch::util;
+use common_slow_query_recorder::SlowQuery;
 use common_telemetry::tracing;
 use query::parser::{PromQuery, DEFAULT_LOOKBACK_STRING};
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,14 @@ pub async fn sql(
         .start_timer();
 
     let sql = query_params.sql.or(form_params.sql);
+    let _slow_query_timer = if let Some(recorder) = &state.slow_query_recorder {
+        recorder.start(
+            SlowQuery::Sql(sql.clone().unwrap_or_default()),
+            query_ctx.clone(),
+        )
+    } else {
+        None
+    };
     let format = query_params
         .format
         .or(form_params.format)

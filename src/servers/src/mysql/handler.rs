@@ -496,12 +496,6 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
             .start_timer();
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(SlowQuery::Sql(query.to_string()), query_ctx.clone())
-        } else {
-            None
-        };
-
         let query_upcase = query.to_uppercase();
         if query_upcase.starts_with("PREPARE ") {
             match ParserContext::parse_mysql_prepare_stmt(query, query_ctx.sql_dialect()) {
@@ -573,6 +567,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             }
         }
+
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(SlowQuery::Sql(query.to_string()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
         writer::write_output(writer, query_ctx, outputs).await?;
