@@ -2100,6 +2100,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-macro",
+ "common-mem-prof",
  "common-meta",
  "common-options",
  "common-procedure",
