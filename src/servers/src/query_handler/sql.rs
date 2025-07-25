@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,15 +18,45 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use datafusion_expr::LogicalPlan;
 use query::parser::PromQuery;
+use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
+/// Walks the SQL string and lowercases only the text between backtick pairs.
+/// Everything else is passed through unchanged.
+/// For example:
+///   `SELECT \`AUTO_INCREMENT\`, col FROM \`MyTable\``
+/// becomes
+///   `SELECT auto_increment, col FROM mytable`
+fn normalize_backticks(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            // start of a backtick-quoted identifier
+            let mut ident = String::new();
+            // read until closing backtick (or end)
+            while let Some(c2) = chars.next() {
+                if c2 == '`' {
+                    break;
+                }
+                ident.push(c2);
+            }
+            // lowercase the identifier and append
+            out.push_str(&ident.to_lowercase());
+        } else {
+            // any other character: copy as-is
+            out.push(ch);
+        }
+    }
+    out
+}
+
 pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
 pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef<error::Error>;
-use query::query_engine::DescribeResult;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -80,8 +109,10 @@ where
     type Error = error::Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        // Lowercase only backtick-quoted identifiers (e.g. `AUTO_INCREMENT` → auto_increment)
+        let normalized = normalize_backticks(query);
         self.0
-            .do_query(query, query_ctx)
+            .do_query(&normalized, query_ctx)
             .await
             .into_iter()
             .map(|x| x.map_err(BoxedError::new).context(error::ExecuteQuerySnafu))

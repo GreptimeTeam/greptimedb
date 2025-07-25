@@ -129,6 +129,7 @@ tracing.workspace = true
 urlencoding = "2.1"
 uuid.workspace = true
 vrl.workspace = true
+sqlparser = { workspace = true, features = ["visitor", "serde"] }
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
