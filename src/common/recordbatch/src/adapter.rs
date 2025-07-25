@@ -16,6 +16,7 @@ use std::fmt::{self, Display};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -34,8 +35,10 @@ use datafusion::physical_plan::{
 use datafusion_common::arrow::error::ArrowError;
 use datafusion_common::{DataFusionError, ToDFSchema};
 use datatypes::arrow::array::Array;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::schema::{ColumnExtType, Schema, SchemaRef};
 use futures::ready;
+use jsonb;
 use pin_project::pin_project;
 use snafu::ResultExt;
 
@@ -141,12 +144,9 @@ where
                 let mut columns = Vec::with_capacity(projected_schema.fields.len());
                 for (idx,field) in projected_schema.fields.iter().enumerate() {
                     let column = projected_column.column(idx);
-                    if column.data_type() != field.data_type() {
-                        let output = cast(&column, field.data_type())?;
-                        columns.push(output)
-                    } else {
-                        columns.push(column.clone())
-                    }
+                    let extype = field.metadata().get("greptime:type").and_then(|s| ColumnExtType::from_str(s).ok());
+                    let output = custom_cast(&column, field.data_type(), extype)?;
+                    columns.push(output)
                 }
                 let record_batch = DfRecordBatch::try_new(projected_schema, columns)?;
                 let record_batch = if let Some(predicate) = predicate {
@@ -542,11 +542,137 @@ impl Stream for AsyncRecordBatchStreamAdapter {
     }
 }
 
+/// Custom cast function that handles Map -> Binary (JSON) conversion
+fn custom_cast(
+    array: &dyn Array,
+    target_type: &ArrowDataType,
+    extype: Option<ColumnExtType>,
+) -> std::result::Result<Arc<dyn Array>, ArrowError> {
+    if let ArrowDataType::Map(_, _) = array.data_type() {
+        if let ArrowDataType::Binary = target_type {
+            return convert_map_to_json_binary(array, extype);
+        }
+    }
+
+    cast(array, target_type)
+}
+
+/// Convert a Map array to a Binary array containing JSON data
+fn convert_map_to_json_binary(
+    array: &dyn Array,
+    extype: Option<ColumnExtType>,
+) -> std::result::Result<Arc<dyn Array>, ArrowError> {
+    use datatypes::arrow::array::{BinaryArray, MapArray};
+    use serde_json::Value;
+
+    let map_array = array
+        .as_any()
+        .downcast_ref::<MapArray>()
+        .ok_or_else(|| ArrowError::CastError("Failed to downcast to MapArray".to_string()))?;
+
+    let mut json_values = Vec::with_capacity(map_array.len());
+
+    for i in 0..map_array.len() {
+        if map_array.is_null(i) {
+            json_values.push(None);
+        } else {
+            // Extract the map entry at index i
+            let map_entry = map_array.value(i);
+            let key_value_array = map_entry
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StructArray>()
+                .ok_or_else(|| {
+                    ArrowError::CastError("Failed to downcast to StructArray".to_string())
+                })?;
+
+            // Convert to JSON object
+            let mut json_obj = serde_json::Map::with_capacity(key_value_array.len());
+
+            for j in 0..key_value_array.len() {
+                if key_value_array.is_null(j) {
+                    continue;
+                }
+                let key_field = key_value_array.column(0);
+                let value_field = key_value_array.column(1);
+
+                if key_field.is_null(j) {
+                    continue;
+                }
+
+                let key = key_field
+                    .as_any()
+                    .downcast_ref::<datatypes::arrow::array::StringArray>()
+                    .ok_or_else(|| {
+                        ArrowError::CastError("Failed to downcast key to StringArray".to_string())
+                    })?
+                    .value(j);
+
+                let value = if value_field.is_null(j) {
+                    Value::Null
+                } else {
+                    let value_str = value_field
+                        .as_any()
+                        .downcast_ref::<datatypes::arrow::array::StringArray>()
+                        .ok_or_else(|| {
+                            ArrowError::CastError(
+                                "Failed to downcast value to StringArray".to_string(),
+                            )
+                        })?
+                        .value(j);
+                    Value::String(value_str.to_string())
+                };
+
+                json_obj.insert(key.to_string(), value);
+            }
+
+            let json_value = Value::Object(json_obj);
+            let json_bytes = match extype {
+                Some(ColumnExtType::Json) => {
+                    let json_string = match serde_json::to_string(&json_value) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Err(ArrowError::CastError(format!(
+                                "Failed to serialize JSON: {}",
+                                e
+                            )))
+                        }
+                    };
+                    match jsonb::parse_value(json_string.as_bytes()) {
+                        Ok(jsonb_value) => jsonb_value.to_vec(),
+                        Err(e) => {
+                            return Err(ArrowError::CastError(format!(
+                                "Failed to serialize JSONB: {}",
+                                e
+                            )))
+                        }
+                    }
+                }
+                _ => match serde_json::to_vec(&json_value) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return Err(ArrowError::CastError(format!(
+                            "Failed to serialize JSON: {}",
+                            e
+                        )))
+                    }
+                },
+            };
+            json_values.push(Some(json_bytes));
+        }
+    }
+
+    let binary_array = BinaryArray::from_iter(json_values);
+    Ok(Arc::new(binary_array))
+}
+
 #[cfg(test)]
 mod test {
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use datatypes::arrow::array::{ArrayRef, MapArray, StringArray, StructArray};
+    use datatypes::arrow::buffer::OffsetBuffer;
+    use datatypes::arrow::datatypes::Field;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::Int32Vector;
@@ -649,5 +775,78 @@ mod test {
             matches!(err, Error::External { .. }),
             "unexpected err {err}"
         );
+    }
+
+    #[test]
+    fn test_convert_map_to_json_binary() {
+        let keys = StringArray::from(vec![Some("a"), Some("b"), Some("c"), Some("x")]);
+        let values = StringArray::from(vec![Some("1"), None, Some("3"), Some("42")]);
+        let key_field = Arc::new(Field::new("key", ArrowDataType::Utf8, false));
+        let value_field = Arc::new(Field::new("value", ArrowDataType::Utf8, true));
+        let struct_type = ArrowDataType::Struct(vec![key_field, value_field].into());
+
+        let entries_field = Arc::new(Field::new("entries", struct_type, false));
+
+        let struct_array = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", ArrowDataType::Utf8, false)),
+                Arc::new(keys) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("value", ArrowDataType::Utf8, true)),
+                Arc::new(values) as ArrayRef,
+            ),
+        ]);
+
+        let offsets = OffsetBuffer::from_lengths([3, 0, 1]);
+        let nulls = datatypes::arrow::buffer::NullBuffer::from(vec![true, false, true]);
+
+        let map_array = MapArray::new(
+            entries_field,
+            offsets,
+            struct_array,
+            Some(nulls), // nulls
+            false,
+        );
+
+        let result = convert_map_to_json_binary(&map_array, None).unwrap();
+        let binary_array = result
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::BinaryArray>()
+            .unwrap();
+
+        let expected_jsons = [
+            Some(r#"{"a":"1","b":null,"c":"3"}"#),
+            None,
+            Some(r#"{"x":"42"}"#),
+        ];
+
+        for (i, _) in expected_jsons.iter().enumerate() {
+            if let Some(expected) = &expected_jsons[i] {
+                assert!(!binary_array.is_null(i));
+                let actual_bytes = binary_array.value(i);
+                let actual_str = std::str::from_utf8(actual_bytes).unwrap();
+                assert_eq!(actual_str, *expected);
+            } else {
+                assert!(binary_array.is_null(i));
+            }
+        }
+
+        let result_json =
+            convert_map_to_json_binary(&map_array, Some(ColumnExtType::Json)).unwrap();
+        let binary_array_json = result_json
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::BinaryArray>()
+            .unwrap();
+
+        for (i, _) in expected_jsons.iter().enumerate() {
+            if expected_jsons[i].is_some() {
+                assert!(!binary_array_json.is_null(i));
+                let actual_bytes = binary_array_json.value(i);
+                assert_ne!(actual_bytes, expected_jsons[i].unwrap().as_bytes());
+            } else {
+                assert!(binary_array_json.is_null(i));
+            }
+        }
     }
 }
