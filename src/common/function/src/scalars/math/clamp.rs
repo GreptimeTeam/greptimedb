@@ -81,7 +81,8 @@ impl Function for ClampFunction {
             }
         );
         ensure!(
-            columns[1].len() == 1 && columns[2].len() == 1,
+            (columns[1].len() == 1 || columns[1].is_const())
+                && (columns[2].len() == 1 || columns[2].is_const()),
             InvalidFuncArgsSnafu {
                 err_msg: format!(
                     "The second and third args should be scalar, have: {:?}, {:?}",
@@ -204,7 +205,7 @@ impl Function for ClampMinFunction {
             }
         );
         ensure!(
-            columns[1].len() == 1,
+            columns[1].len() == 1 || columns[1].is_const(),
             InvalidFuncArgsSnafu {
                 err_msg: format!(
                     "The second arg (min) should be scalar, have: {:?}",
@@ -292,7 +293,7 @@ impl Function for ClampMaxFunction {
             }
         );
         ensure!(
-            columns[1].len() == 1,
+            columns[1].len() == 1 || columns[1].is_const(),
             InvalidFuncArgsSnafu {
                 err_msg: format!(
                     "The second arg (max) should be scalar, have: {:?}",
