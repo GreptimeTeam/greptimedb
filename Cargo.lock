@@ -9059,7 +9059,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.31.0"
-source = "git+https://github.com/sunng87/pgwire?rev=4ada5bc54d0940b322de04fc060f6828017bb6b8#4ada5bc54d0940b322de04fc060f6828017bb6b8"
+source = "git+https://github.com/sunng87/pgwire?rev=573bb87a81791fe1cddf51eff0ec631fb41a81df#573bb87a81791fe1cddf51eff0ec631fb41a81df"
 dependencies = [
  "async-trait",
  "bytes",

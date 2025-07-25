@@ -207,12 +207,6 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        // let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-        //     recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
-        // } else {
-        //     None
-        // };
-
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
