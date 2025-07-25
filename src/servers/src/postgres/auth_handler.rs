@@ -31,7 +31,8 @@ use snafu::IntoError;
 
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
-use crate::postgres::types::{convert_err, PgErrorCode};
+use crate::postgres::types::PgErrorCode;
+use crate::postgres::utils::convert_err;
 use crate::postgres::PostgresServerHandlerInner;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 

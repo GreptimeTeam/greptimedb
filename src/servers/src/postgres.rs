@@ -17,6 +17,7 @@ mod fixtures;
 mod handler;
 mod server;
 mod types;
+mod utils;
 
 pub(crate) const METADATA_USER: &str = "user";
 pub(crate) const METADATA_DATABASE: &str = "database";

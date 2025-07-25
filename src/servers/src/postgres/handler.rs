@@ -41,6 +41,7 @@ use sql::parser::{ParseOptions, ParserContext};
 
 use crate::error::Result;
 use crate::postgres::types::*;
+use crate::postgres::utils::convert_err;
 use crate::postgres::{fixtures, PostgresServerHandlerInner};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::SqlPlan;

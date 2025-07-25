@@ -21,8 +21,6 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use common_error::ext::ErrorExt;
-use common_telemetry::{debug, error};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
@@ -43,6 +41,7 @@ use self::datetime::{StylingDate, StylingDateTime};
 pub use self::error::{PgErrorCode, PgErrorSeverity};
 use self::interval::PgInterval;
 use crate::error::{self as server_error, Error, Result};
+use crate::postgres::utils::convert_err;
 use crate::SqlPlan;
 
 pub(super) fn schema_to_pg(origin: &Schema, field_formats: &Format) -> Result<Vec<FieldInfo>> {
@@ -350,23 +349,6 @@ fn encode_array(
             ),
         }))),
     }
-}
-
-pub fn convert_err(e: impl ErrorExt) -> PgWireError {
-    let status_code = e.status_code();
-    if status_code.should_log_error() {
-        let root_error = e.root_cause().unwrap_or(&e);
-        error!(e; "Failed to handle postgres query, code: {}, error: {}", status_code, root_error.to_string());
-    } else {
-        debug!(
-            "Failed to handle postgres query, code: {}, error: {:?}",
-            status_code, e
-        );
-    }
-
-    PgWireError::UserError(Box::new(
-        PgErrorCode::from(status_code).to_err_info(e.output_msg()),
-    ))
 }
 
 pub(super) fn encode_value(
