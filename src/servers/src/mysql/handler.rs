@@ -455,6 +455,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let params: Vec<ParamValue> = p.into_iter().collect();
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
 
+        let _slow_query_timer = self.plan(&stmt_key).and_then(|plan| {
+            self.slow_query_recorder
+                .as_ref()
+                .and_then(|recorder| recorder.start(SlowQuery::Sql(plan.query), query_ctx.clone()))
+        });
+
         let outputs = match self
             .do_execute(query_ctx.clone(), stmt_key, Params::ProtocolParams(params))
             .await
