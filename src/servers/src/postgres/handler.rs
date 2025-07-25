@@ -112,7 +112,7 @@ where
     Ok(())
 }
 
-fn convert_err(e: impl ErrorExt) -> Response<'static> {
+fn convert_err(e: impl ErrorExt) -> PgWireError {
     let status_code = e.status_code();
     if status_code.should_log_error() {
         let root_error = e.root_cause().unwrap_or(&e);
@@ -123,7 +123,8 @@ fn convert_err(e: impl ErrorExt) -> Response<'static> {
             status_code, e
         );
     }
-    Response::Error(Box::new(
+
+    PgWireError::UserError(Box::new(
         PgErrorCode::from(status_code).to_err_info(e.output_msg()),
     ))
 }
@@ -131,17 +132,9 @@ fn convert_err(e: impl ErrorExt) -> Response<'static> {
 fn convert_error_future<E: ErrorExt>(
     e: E,
 ) -> BoxStream<'static, Result<Vec<datatypes::prelude::Value>, PgWireError>> {
-    let response = convert_err(e);
-    let pg_wire_error = if let Response::Error(err_info) = response {
-        PgWireError::ApiError(Box::<dyn std::error::Error + Send + Sync>::from(
-            err_info.to_string(),
-        ))
-    } else {
-        PgWireError::ApiError(Box::<dyn std::error::Error + Send + Sync>::from(
-            "An unexpected error occurred while processing the stream.".to_string(),
-        ))
-    };
-    futures::stream::once(futures::future::err(pg_wire_error)).boxed()
+    let pgwire_error = convert_err(e);
+
+    futures::stream::once(futures::future::err(pgwire_error)).boxed()
 }
 
 pub(crate) fn output_to_query_response<'a>(
@@ -168,7 +161,7 @@ pub(crate) fn output_to_query_response<'a>(
                 )
             }
         },
-        Err(e) => Ok(convert_err(e)),
+        Err(e) => Err(convert_err(e)),
     }
 }
 
@@ -181,10 +174,7 @@ fn recordbatches_to_query_response<'a, S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    let pg_schema = match schema_to_pg(schema.as_ref(), field_format) {
-        Ok(s) => Arc::new(s),
-        Err(e) => return Ok(convert_err(e)),
-    };
+    let pg_schema = Arc::new(schema_to_pg(schema.as_ref(), field_format).map_err(convert_err)?);
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
