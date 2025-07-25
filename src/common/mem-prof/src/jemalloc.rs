@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use error::{
     ActivateProfSnafu, BuildTempPathSnafu, DeactivateProfSnafu, DumpProfileDataSnafu,
-    OpenTempFileSnafu, ProfilingNotEnabledSnafu, ReadOptProfSnafu,
+    OpenTempFileSnafu, ProfilingNotEnabledSnafu, ReadOptProfSnafu, ReadProfActiveSnafu,
 };
 use jemalloc_pprof_mappings::MAPPINGS;
 use jemalloc_pprof_utils::{parse_jeheap, FlamegraphOptions, StackProfile};
@@ -94,6 +94,7 @@ pub async fn dump_flamegraph() -> Result<Vec<u8>> {
     let flamegraph = profile.to_flamegraph(&mut opts).context(FlamegraphSnafu)?;
     Ok(flamegraph)
 }
+
 pub fn activate_heap_profile() -> Result<()> {
     unsafe {
         tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, true).context(ActivateProfSnafu)?;
@@ -106,6 +107,10 @@ pub fn deactivate_heap_profile() -> Result<()> {
         tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, false).context(DeactivateProfSnafu)?;
     }
     Ok(())
+}
+
+pub fn is_heap_profile_active() -> Result<bool> {
+    unsafe { Ok(tikv_jemalloc_ctl::raw::read::<bool>(PROF_ACTIVE).context(ReadProfActiveSnafu)?) }
 }
 
 fn is_prof_enabled() -> Result<bool> {

@@ -65,6 +65,12 @@ pub enum Error {
         #[snafu(source)]
         error: tikv_jemalloc_ctl::Error,
     },
+
+    #[snafu(display("Failed to read heap profiling status"))]
+    ReadProfActive {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -77,6 +83,7 @@ impl ErrorExt for Error {
             Error::DumpProfileData { .. } => StatusCode::StorageUnavailable,
             Error::ActivateProf { .. } => StatusCode::Internal,
             Error::DeactivateProf { .. } => StatusCode::Internal,
+            Error::ReadProfActive { .. } => StatusCode::Internal,
         }
     }
 
