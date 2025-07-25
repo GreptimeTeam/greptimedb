@@ -56,9 +56,53 @@ pub async fn mem_prof_handler(
     Ok((StatusCode::OK, dump))
 }
 
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn activate_heap_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
+    common_mem_prof::activate_heap_profile()
+        .context(DumpProfileDataSnafu)?;
+
+    Ok((StatusCode::OK, "Heap profiling activated"))
+}
+
+#[cfg(feature = "mem-prof")]
+#[axum_macros::debug_handler]
+pub async fn deactivate_heap_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    use snafu::ResultExt;
+
+    use crate::error::DumpProfileDataSnafu;
+
+    common_mem_prof::deactivate_heap_profile()
+        .context(DumpProfileDataSnafu)?;
+
+    Ok((StatusCode::OK, "Heap profiling deactivated"))
+}
+
 #[cfg(not(feature = "mem-prof"))]
 #[axum_macros::debug_handler]
 pub async fn mem_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
+    ))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn activate_heap_prof_handler() -> crate::error::Result<impl IntoResponse> {
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        "The 'mem-prof' feature is disabled",
+    ))
+}
+
+#[cfg(not(feature = "mem-prof"))]
+#[axum_macros::debug_handler]
+pub async fn deactivate_heap_prof_handler() -> crate::error::Result<impl IntoResponse> {
     Ok((
         StatusCode::NOT_IMPLEMENTED,
         "The 'mem-prof' feature is disabled",
