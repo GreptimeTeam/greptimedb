@@ -105,7 +105,33 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
+        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+
+        let schema_options = self
+            .table_metadata_manager
+            .schema_manager()
+            .get(SchemaNameKey {
+                catalog: &catalog,
+                schema: &schema,
+            })
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner());
+
         let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
+        // We don't put ttl into the table options
+        // Because it will be used directly while compaction.
+        if let Some(schema_options) = schema_options {
+            for (key, value) in schema_options.extra_options.iter() {
+                create_expr
+                    .table_options
+                    .entry(key.clone())
+                    .or_insert(value.clone());
+            }
+        }
+
         self.create_table_inner(create_expr, stmt.partitions, ctx)
             .await
     }
