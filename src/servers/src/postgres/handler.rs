@@ -69,9 +69,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             None
         };
 
-        let result = self._on_query(client, query).await;
-        println!("post processing...");
-        result
+        self._on_query(client, query).await
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
@@ -293,9 +291,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let result = self._on_execute(client, message).await;
-        println!("post processing...");
-        result
+        self._on_execute(client, message).await
     }
 
     async fn do_query<'a, C>(

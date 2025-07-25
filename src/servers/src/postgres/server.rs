@@ -45,6 +45,7 @@ pub struct PostgresServer {
 
 impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_handler: ServerSqlQueryHandlerRef,
         force_tls: bool,
