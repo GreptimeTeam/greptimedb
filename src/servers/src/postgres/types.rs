@@ -333,8 +333,7 @@ fn encode_array(
                 .map(|v| match v {
                     Value::Null => Ok(None),
                     Value::Binary(v) => {
-                        let s =
-                            json_type_value_to_string(v, &j.format).map_err(|e| convert_err(e))?;
+                        let s = json_type_value_to_string(v, &j.format).map_err(convert_err)?;
                         Ok(Some(s))
                     }
                     _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
@@ -392,7 +391,7 @@ pub(super) fn encode_value(
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
             ConcreteDataType::Json(j) => {
-                let s = json_type_value_to_string(v, &j.format).map_err(|e| convert_err(e))?;
+                let s = json_type_value_to_string(v, &j.format).map_err(convert_err)?;
                 builder.encode_field(&s)
             }
             _ => {
@@ -609,7 +608,7 @@ where
     if let Some(n) = data {
         Value::Timestamp(unit.create_timestamp(n.into()))
             .try_to_scalar_value(ctype)
-            .map_err(|e| convert_err(e))
+            .map_err(convert_err)
     } else {
         Ok(ScalarValue::Null)
     }
@@ -638,7 +637,7 @@ pub(super) fn parameters_to_scalar_values(
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
             client_given_type.clone()
         } else if let Some(server_provided_type) = &server_type {
-            type_gt_to_pg(server_provided_type).map_err(|e| convert_err(e))?
+            type_gt_to_pg(server_provided_type).map_err(convert_err)?
         } else {
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",

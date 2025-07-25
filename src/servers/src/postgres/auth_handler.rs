@@ -247,7 +247,7 @@ where
         if query_handler
             .is_valid_schema(&catalog, &schema)
             .await
-            .map_err(|e| convert_err(e))?
+            .map_err(convert_err)?
         {
             Ok(DbResolution::Resolved(catalog, schema))
         } else {

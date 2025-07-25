@@ -217,7 +217,7 @@ impl QueryParser for DefaultQueryParser {
 
         let mut stmts =
             ParserContext::create_with_dialect(sql, &PostgreSqlDialect {}, ParseOptions::default())
-                .map_err(|e| convert_err(e))?;
+                .map_err(convert_err)?;
         if stmts.len() != 1 {
             Err(PgWireError::UserError(Box::new(ErrorInfo::from(
                 PgErrorCode::Ec42P14,
@@ -229,7 +229,7 @@ impl QueryParser for DefaultQueryParser {
                 .query_handler
                 .do_describe(stmt, query_ctx)
                 .await
-                .map_err(|e| convert_err(e))?;
+                .map_err(convert_err)?;
 
             let (plan, schema) = if let Some(DescribeResult {
                 logical_plan,
@@ -295,7 +295,9 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .replace_params_with_values(&ParamValues::List(parameters_to_scalar_values(
                     plan, portal,
                 )?))
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                .map_err(|e: datafusion_common::DataFusionError| {
+                    PgWireError::ApiError(Box::new(e))
+                })?;
             self.query_handler
                 .do_exec_plan(plan, query_ctx.clone())
                 .await
@@ -335,7 +337,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .map(|(k, v)| (k, v.map(|v| ConcreteDataType::from_arrow_type(&v))))
                 .collect();
 
-            let types = param_types_to_pg_types(&param_types).map_err(|e| convert_err(e))?;
+            let types = param_types_to_pg_types(&param_types).map_err(convert_err)?;
 
             (types, sql_plan, &Format::UnifiedBinary)
         } else {
@@ -346,7 +348,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         if let Some(schema) = &sql_plan.schema {
             schema_to_pg(schema, format)
                 .map(|fields| DescribeStatementResponse::new(param_types, fields))
-                .map_err(|e| convert_err(e))
+                .map_err(convert_err)
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
@@ -377,7 +379,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         if let Some(schema) = &sql_plan.schema {
             schema_to_pg(schema, format)
                 .map(DescribePortalResponse::new)
-                .map_err(|e| convert_err(e))
+                .map_err(convert_err)
         } else {
             if let Some(mut resp) =
                 fixtures::process(&sql_plan.query, self.session.new_query_context())
