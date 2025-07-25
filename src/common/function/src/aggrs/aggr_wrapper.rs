@@ -26,6 +26,11 @@ use std::sync::Arc;
 
 use arrow::array::StructArray;
 use arrow_schema::Fields;
+use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::first_last::{first_value_udaf, last_value_udaf};
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
@@ -38,6 +43,10 @@ use datafusion_expr::{
 };
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
+
+use crate::aggrs::approximate::hll::HllState;
+use crate::aggrs::approximate::uddsketch::UddSketchState;
+use crate::function_registry::FunctionRegistry;
 
 /// Returns the name of the state function for the given aggregate function name.
 /// The state function is used to compute the state of the aggregate function.
@@ -65,9 +74,9 @@ pub struct StateMergeHelper;
 #[derive(Debug, Clone)]
 pub struct StepAggrPlan {
     /// Upper merge plan, which is the aggregate plan that merges the states of the state function.
-    pub upper_merge: Arc<LogicalPlan>,
+    pub upper_merge: LogicalPlan,
     /// Lower state plan, which is the aggregate plan that computes the state of the aggregate function.
-    pub lower_state: Arc<LogicalPlan>,
+    pub lower_state: LogicalPlan,
 }
 
 pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFunction> {
@@ -83,6 +92,44 @@ pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFun
 }
 
 impl StateMergeHelper {
+    /// Register all the `state` function of supported aggregate functions.
+    /// Note that can't register `merge` function here, as it needs to be created from the original aggregate function with given input types.
+    pub fn register(registry: &FunctionRegistry) {
+        // TODO(discord9): support more aggregate functions. and move
+        // this list to somewhere else. Or just iter over all exisiting aggr funciton and add state wrapper fn def to it.
+        let supported = vec![
+            count_udaf(),
+            sum_udaf(),
+            avg_udaf(),
+            min_udaf(),
+            max_udaf(),
+            first_value_udaf(),
+            last_value_udaf(),
+            Arc::new(UddSketchState::state_udf_impl()),
+            Arc::new(UddSketchState::merge_udf_impl()),
+            Arc::new(HllState::state_udf_impl()),
+            Arc::new(HllState::merge_udf_impl()),
+        ];
+        let state_func = supported
+            .into_iter()
+            .filter_map(|f| {
+                StateWrapper::new((*f).clone())
+                    .inspect_err(|e| {
+                        common_telemetry::error!(
+                            "Failed to register state function for {:?} with error={e:?}",
+                            f
+                        )
+                    })
+                    .ok()
+                    .map(|state_fn| AggregateUDF::new_from_impl(state_fn))
+            })
+            .collect::<Vec<_>>();
+
+        for func in state_func {
+            registry.register_aggr(func);
+        }
+    }
+
     /// Split an aggregate plan into two aggregate plans, one for the state function and one for the merge function.
     pub fn split_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<StepAggrPlan> {
         let aggr = {
@@ -166,18 +213,18 @@ impl StateMergeHelper {
         let lower_plan = LogicalPlan::Aggregate(lower);
 
         // update aggregate's output schema
-        let lower_plan = Arc::new(lower_plan.recompute_schema()?);
+        let lower_plan = lower_plan.recompute_schema()?;
 
         let mut upper = aggr.clone();
         let aggr_plan = LogicalPlan::Aggregate(aggr);
         upper.aggr_expr = upper_aggr_exprs;
-        upper.input = lower_plan.clone();
+        upper.input = Arc::new(lower_plan.clone());
         // upper schema's output schema should be the same as the original aggregate plan's output schema
-        let upper_check = upper.clone();
-        let upper_plan = Arc::new(LogicalPlan::Aggregate(upper_check).recompute_schema()?);
+        let upper_check = upper;
+        let upper_plan = LogicalPlan::Aggregate(upper_check).recompute_schema()?;
         if *upper_plan.schema() != *aggr_plan.schema() {
             return Err(datafusion_common::DataFusionError::Internal(format!(
-                 "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: \n[transformed]:{}\n[   original]{}",
+                 "Upper aggregate plan's schema is not the same as the original aggregate plan's schema: \n[transformed]:{}\n[original]:{}",
                 upper_plan.schema(), aggr_plan.schema()
             )));
         }

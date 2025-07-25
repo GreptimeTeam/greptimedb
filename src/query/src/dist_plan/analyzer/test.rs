@@ -456,10 +456,9 @@ fn expand_proj_step_aggr() {
 
     let expected = [
         "Projection: min(t.number)",
-        "  Projection: min(min(t.number)) AS min(t.number)",
-        "    Aggregate: groupBy=[[]], aggr=[[min(min(t.number))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[min(t.number)]]",
+        "  Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__min_state(t.number)]]",
         "  Projection: t.number", // This Projection shouldn't add new column requirements
         "    TableScan: t",
         "]]",
@@ -502,10 +501,9 @@ fn expand_proj_alias_fake_part_col_aggr() {
 
     let expected = [
         "Projection: pk1, pk2, min(t.number)",
-        "  Projection: pk1, pk2, min(min(t.number)) AS min(t.number)",
-        "    Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(min(t.number))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[pk1, pk2]], aggr=[[min(t.number)]]",
+        "  Aggregate: groupBy=[[pk1, pk2]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[pk1, pk2]], aggr=[[__min_state(t.number)]]",
         "  Projection: t.number, pk1 AS pk2, pk3 AS pk1",
         "    Projection: t.number, t.pk3 AS pk1, t.pk2 AS pk3",
         "      TableScan: t",
@@ -583,10 +581,9 @@ fn expand_part_col_aggr_step_aggr() {
 
     let expected = [
         "Projection: min(max(t.number))",
-        "  Projection: min(min(max(t.number))) AS min(max(t.number))",
-        "    Aggregate: groupBy=[[]], aggr=[[min(min(max(t.number)))]]",
-        "      MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
+        "  Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(max(t.number))) AS min(max(t.number))]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__min_state(max(t.number))]]",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[max(t.number)]]",
         "    TableScan: t",
         "]]",
@@ -618,10 +615,9 @@ fn expand_step_aggr_step_aggr() {
     let expected = [
         "Aggregate: groupBy=[[]], aggr=[[min(max(t.number))]]",
         "  Projection: max(t.number)",
-        "    Projection: max(max(t.number)) AS max(t.number)",
-        "      Aggregate: groupBy=[[]], aggr=[[max(max(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[max(t.number)]]",
+        "    Aggregate: groupBy=[[]], aggr=[[__max_merge(__max_state(t.number)) AS max(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[]], aggr=[[__max_state(t.number)]]",
         "  TableScan: t",
         "]]",
     ]
@@ -695,10 +691,9 @@ fn expand_step_aggr_proj() {
     let expected = [
         "Projection: min(t.number)",
         "  Projection: t.pk1, min(t.number)",
-        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
-        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__min_state(t.number)]]",
         "  TableScan: t",
         "]]",
     ]
@@ -1109,10 +1104,42 @@ fn expand_step_aggr_limit() {
     let expected = [
         "Limit: skip=0, fetch=10",
         "  Projection: t.pk1, min(t.number)",
-        "    Projection: t.pk1, min(min(t.number)) AS min(t.number)",
-        "      Aggregate: groupBy=[[t.pk1]], aggr=[[min(min(t.number))]]",
-        "        MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[t.pk1]], aggr=[[min(t.number)]]",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__min_state(t.number)]]",
+        "  TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// Test how avg get expanded
+#[test]
+fn expand_step_aggr_avg_limit() {
+    // use logging for better debugging
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(vec![col("pk1")], vec![avg(col("number"))])
+        .unwrap()
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let expected = [
+        "Limit: skip=0, fetch=10",
+        "  Projection: t.pk1, avg(t.number)",
+        "    Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_merge(__avg_state(t.number)) AS avg(t.number)]]",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[t.pk1]], aggr=[[__avg_state(CAST(t.number AS Float64))]]",
         "  TableScan: t",
         "]]",
     ]
