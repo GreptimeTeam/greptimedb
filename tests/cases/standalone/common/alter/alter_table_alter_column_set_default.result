@@ -20,11 +20,11 @@ ALTER TABLE test1 ADD COLUMN n INTEGER DEFAULT 300;
 Affected Rows: 0
 
 --- set default value for k, l, n, n ---
-ALTER TABLE test1 ALTER k SET DEFAULT 101;
+ALTER TABLE test1 MODIFY COLUMN k SET DEFAULT 101;
 
 Affected Rows: 0
 
-ALTER TABLE test1 ALTER l SET DEFAULT 201, ALTER m SET DEFAULT '2024-01-30 00:00:00', ALTER n SET DEFAULT 300;
+ALTER TABLE test1 MODIFY COLUMN l SET DEFAULT 201, MODIFY COLUMN m SET DEFAULT '2024-01-30 00:00:00', MODIFY COLUMN n SET DEFAULT 300;
 
 Affected Rows: 0
 
@@ -61,7 +61,7 @@ SELECT * FROM test1;
 +---+---------------------+-----+-----+---------------------+-----+
 
 --- SET `CURRENT_TIMESTAMP` as default
-ALTER TABLE test1 ALTER m SET DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE test1 MODIFY COLUMN m SET DEFAULT CURRENT_TIMESTAMP;
 
 Affected Rows: 0
 
@@ -89,7 +89,7 @@ ALTER TABLE test1 ADD COLUMN o INTEGER NOT NULL DEFAULT 400;
 
 Affected Rows: 0
 
-ALTER TABLE test1 ALTER o SET DEFAULT 401;
+ALTER TABLE test1 MODIFY COLUMN o SET DEFAULT 401;
 
 Affected Rows: 0
 
@@ -114,11 +114,11 @@ SHOW CREATE TABLE test1;
 |       |                                                      |
 +-------+------------------------------------------------------+
 
-ALTER TABLE test1 ALTER o SET DEFAULT "not allow";
+ALTER TABLE test1 MODIFY COLUMN o SET DEFAULT "not allow";
 
 Error: 1001(Unsupported), Unsupported expr in default constraint: "not allow" for column: o
 
-ALTER TABLE test1 ALTER o SET DEFAULT NULL;
+ALTER TABLE test1 MODIFY COLUMN o SET DEFAULT NULL;
 
 Error: 1004(InvalidArguments), Default value should not be null for non null column
 

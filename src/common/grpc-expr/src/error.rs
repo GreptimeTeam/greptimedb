@@ -176,7 +176,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Need table metadata, but not found"))]
+    #[snafu(display("Need table metadata, but not found, table_id: {}", table_id))]
     MissingTableMeta {
         table_id: u32,
         #[snafu(implicit)]

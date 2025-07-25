@@ -224,7 +224,7 @@ impl Display for AlterTableOperation {
             AlterTableOperation::DropDefaults { columns } => {
                 let columns = columns
                     .iter()
-                    .map(|column| format!("ALTER {} DROP DEFAULT", column.0))
+                    .map(|column| format!("MODIFY COLUMN {} DROP DEFAULT", column.0))
                     .join(", ");
                 write!(f, "{columns}")
             }
@@ -233,7 +233,7 @@ impl Display for AlterTableOperation {
                     .iter()
                     .map(|column| {
                         format!(
-                            "ALTER {} SET DEFAULT {}",
+                            "MODIFY COLUMN {} SET DEFAULT {}",
                             column.column_name, column.default_constraint
                         )
                     })
@@ -524,7 +524,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor ALTER a DROP DEFAULT";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a DROP DEFAULT";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -536,7 +536,7 @@ ALTER TABLE monitor MODIFY COLUMN a SET INVERTED INDEX"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ALTER a DROP DEFAULT"#,
+ALTER TABLE monitor MODIFY COLUMN a DROP DEFAULT"#,
                     &new_sql
                 );
             }
@@ -545,7 +545,7 @@ ALTER TABLE monitor ALTER a DROP DEFAULT"#,
             }
         }
 
-        let sql = "ALTER TABLE monitor ALTER a SET DEFAULT 'default_for_a'";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'";
         let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -557,7 +557,7 @@ ALTER TABLE monitor ALTER a DROP DEFAULT"#,
                 let new_sql = format!("\n{}", set);
                 assert_eq!(
                     r#"
-ALTER TABLE monitor ALTER a SET DEFAULT 'default_for_a'"#,
+ALTER TABLE monitor MODIFY COLUMN a SET DEFAULT 'default_for_a'"#,
                     &new_sql
                 );
             }

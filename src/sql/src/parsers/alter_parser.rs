@@ -157,7 +157,6 @@ impl ParserContext<'_> {
                                 .collect();
                             AlterTableOperation::SetTableOptions { options }
                         }
-                        Keyword::ALTER => self.parse_alter_columns()?,
                         _ => self.expected(
                             "ADD or DROP or MODIFY or RENAME or SET after ALTER TABLE",
                             self.parser.peek_token(),
@@ -168,42 +167,6 @@ impl ParserContext<'_> {
             unexpected => self.unsupported(unexpected.to_string())?,
         };
         Ok(AlterTable::new(table_name, alter_operation))
-    }
-
-    // Parse the following: ALTER TABLE table_name ALTER ...
-    fn parse_alter_columns(&mut self) -> Result<AlterTableOperation> {
-        let _ = self.parser.next_token();
-        let column_name = Self::canonicalize_identifier(
-            self.parser.parse_identifier().context(error::SyntaxSnafu)?,
-        );
-
-        match self.parser.peek_token().token {
-            Token::Word(w) => {
-                if w.keyword == Keyword::DROP {
-                    // consume the current token.
-                    self.parser.next_token();
-                    self.parser
-                        .expect_keyword(Keyword::DEFAULT)
-                        .context(error::SyntaxSnafu)?;
-                    // Parse `DROP DEFAULT`: ALTER TABLE `table_name` ALTER `a` DROP DEFAULT, ALTER `b` DROP DEFAULT, ...
-                    self.parse_alter_table_drop_default(column_name)
-                } else if w.keyword == Keyword::SET {
-                    // consume the current token.
-                    self.parser.next_token();
-                    self.parser
-                        .expect_keyword(Keyword::DEFAULT)
-                        .context(error::SyntaxSnafu)?;
-                    // Parse `SET DEFAULT`: ALTER TABLE `table_name` ALTER `a` SET DEFAULT 10, ALTER COLUMN `b` SET DEFAULT "b", ...
-                    self.parse_alter_table_set_default(column_name)
-                } else {
-                    self.expected(
-                        "SET or DROP  after ALTER [column_name]",
-                        self.parser.peek_token(),
-                    )?
-                }
-            }
-            unexpected => self.unsupported(unexpected.to_string())?,
-        }
     }
 
     fn parse_alter_table_unset(&mut self) -> Result<AlterTableOperation> {
@@ -293,7 +256,23 @@ impl ParserContext<'_> {
                 } else if w.keyword == Keyword::SET {
                     // consume the current token.
                     self.parser.next_token();
-                    self.parse_alter_column_set_index(column_name)
+                    if let Token::Word(w) = self.parser.peek_token().token
+                        && matches!(w.keyword, Keyword::DEFAULT)
+                    {
+                        self.parser
+                            .expect_keyword(Keyword::DEFAULT)
+                            .context(error::SyntaxSnafu)?;
+                        self.parse_alter_table_set_default(column_name)
+                    } else {
+                        self.parse_alter_column_set_index(column_name)
+                    }
+                } else if w.keyword == Keyword::DROP {
+                    // consume the current token.
+                    self.parser.next_token();
+                    self.parser
+                        .expect_keyword(Keyword::DEFAULT)
+                        .context(error::SyntaxSnafu)?;
+                    self.parse_alter_table_drop_default(column_name)
                 } else {
                     let data_type = self.parser.parse_data_type().context(error::SyntaxSnafu)?;
                     Ok(AlterTableOperation::ModifyColumnType {
@@ -393,9 +372,9 @@ impl ParserContext<'_> {
                     .context(error::SyntaxSnafu)?;
                 self.parse_alter_column_skipping(column_name)
             }
-            _ => self.expected(
+            t => self.expected(
                 format!("{:?} OR INVERTED OR SKIPPING INDEX", Keyword::FULLTEXT).as_str(),
-                self.parser.peek_token(),
+                t,
             ),
         }
     }
@@ -465,7 +444,7 @@ impl ParserContext<'_> {
 fn parse_alter_column_drop_default(
     parser: &mut Parser,
 ) -> std::result::Result<DropDefaultsOperation, ParserError> {
-    parser.expect_keyword(Keyword::ALTER)?;
+    parser.expect_keywords(&[Keyword::MODIFY, Keyword::COLUMN])?;
     let column_name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
     let t = parser.next_token();
     match t.token {
@@ -479,11 +458,10 @@ fn parse_alter_column_drop_default(
     }
 }
 
-// Support parse multiple `SET DEFAULT`
 fn parse_alter_column_set_default(
     parser: &mut Parser,
 ) -> std::result::Result<SetDefaultsOperation, ParserError> {
-    parser.expect_keyword(Keyword::ALTER)?;
+    parser.expect_keywords(&[Keyword::MODIFY, Keyword::COLUMN])?;
     let column_name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
     let t = parser.next_token();
     match t.token {
@@ -1256,7 +1234,7 @@ mod tests {
         for col in columns {
             let sql = col
                 .iter()
-                .map(|x| format!("ALTER {x} DROP DEFAULT"))
+                .map(|x| format!("MODIFY COLUMN {x} DROP DEFAULT"))
                 .collect::<Vec<String>>()
                 .join(",");
             let sql = format!("ALTER TABLE test_table {sql}");
@@ -1294,7 +1272,7 @@ mod tests {
         for col in columns {
             let sql = col
                 .iter()
-                .map(|x| format!("ALTER {x} SET DEFAULT 100"))
+                .map(|x| format!("MODIFY COLUMN {x} SET DEFAULT 100"))
                 .collect::<Vec<String>>()
                 .join(",");
             let sql = format!("ALTER TABLE test_table {sql}");
@@ -1332,21 +1310,21 @@ mod tests {
 
     #[test]
     fn test_parse_alter_set_default_invalid() {
-        let sql = "ALTER TABLE test_table ALTER a SET 100;";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET 100;";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected: DEFAULT, found: 100 at Line: 1, Column: 36");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected FULLTEXT OR INVERTED OR SKIPPING INDEX, found: 100");
 
-        let sql = "ALTER TABLE test_table ALTER a SET DEFAULT 100, b SET DEFAULT 200";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET DEFAULT 100, b SET DEFAULT 200";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
         let err = result.output_msg();
-        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected: ALTER, found: b at Line: 1, Column: 49");
+        assert_eq!(err, "Invalid SQL syntax: sql parser error: Expected: MODIFY, found: b at Line: 1, Column: 57");
 
-        let sql = "ALTER TABLE test_table ALTER a SET DEFAULT 100, ALTER b DROP DEFAULT 200";
+        let sql = "ALTER TABLE test_table MODIFY COLUMN a SET DEFAULT 100, MODIFY COLUMN b DROP DEFAULT 200";
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap_err();
