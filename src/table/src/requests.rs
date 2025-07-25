@@ -14,7 +14,7 @@
 
 //! Table and TableEngine requests
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
@@ -28,6 +28,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions};
 use greptime_proto::v1::region::compact_request;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
     is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
@@ -50,11 +51,10 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
-use std::collections::HashSet;
+pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
+pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 
-use once_cell::sync::Lazy;
-
-pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
+pub const VALID_TABLE_OPTION_KEYS: [&str; 12] = [
     // common keys:
     WRITE_BUFFER_SIZE_KEY,
     TTL_KEY,
@@ -70,6 +70,7 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
     LOGICAL_TABLE_METADATA_KEY,
     // table model info
     TABLE_DATA_MODEL,
+    OTLP_METRIC_COMPAT_KEY,
 ];
 
 // Valid option keys when creating a db.

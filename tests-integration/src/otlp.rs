@@ -25,7 +25,6 @@ mod test {
     use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
     use opentelemetry_proto::tonic::metrics::v1::{metric, NumberDataPoint, *};
     use opentelemetry_proto::tonic::resource::v1::Resource;
-    use servers::http::otlp::OtlpMetricOptions;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use session::context::QueryContext;
@@ -48,7 +47,6 @@ mod test {
         let instance = tests::create_distributed_instance("test_standalone_otlp").await;
 
         test_otlp(&instance.frontend()).await;
-        test_otlp_legacy(&instance.frontend()).await;
     }
 
     async fn test_otlp(instance: &Arc<Instance>) {
@@ -66,11 +64,7 @@ mod test {
         .unwrap()
         .is_ok());
 
-        let opts = OtlpMetricOptions {
-            legacy_mode: false,
-            with_metric_engine: true,
-        };
-        let resp = instance.metrics(req, opts, ctx.clone()).await;
+        let resp = instance.metrics(req, true, ctx.clone()).await;
         assert!(resp.is_ok());
 
         let mut output = instance
@@ -151,110 +145,6 @@ mod test {
 +---------------------+----------------+
 | 1970-01-01T00:00:00 | 4.0            |
 +---------------------+----------------+",
-        );
-    }
-
-    async fn test_otlp_legacy(instance: &Arc<Instance>) {
-        let req = build_request();
-        let db = "otlp_legacy";
-        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
-
-        assert!(SqlQueryHandler::do_query(
-            instance.as_ref(),
-            &format!("CREATE DATABASE IF NOT EXISTS {db}"),
-            ctx.clone(),
-        )
-        .await
-        .first()
-        .unwrap()
-        .is_ok());
-
-        let opts = OtlpMetricOptions {
-            legacy_mode: true,
-            with_metric_engine: true,
-        };
-        let resp = instance.metrics(req, opts, ctx.clone()).await;
-        assert!(resp.is_ok());
-
-        let mut output = instance
-            .do_query(
-                "SELECT * FROM my_test_metric ORDER BY greptime_timestamp",
-                ctx.clone(),
-            )
-            .await;
-        let output = output.remove(0).unwrap();
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(
-            recordbatches.pretty_print().unwrap(),
-            "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testsevrer | 1970-01-01T00:00:00.000000100 | 100.0          |
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000105 | 105.0          |
-+------------+-------+--------------------+------------+-------------------------------+----------------+",
-        );
-
-        let mut output = instance
-            .do_query(
-                "SELECT le, greptime_value FROM my_test_histo_bucket order by le",
-                ctx.clone(),
-            )
-            .await;
-        let output = output.remove(0).unwrap();
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(
-            recordbatches.pretty_print().unwrap(),
-            "\
-+-----+----------------+
-| le  | greptime_value |
-+-----+----------------+
-| 1   | 1.0            |
-| 5   | 3.0            |
-| inf | 4.0            |
-+-----+----------------+",
-        );
-
-        let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
-            .await;
-        let output = output.remove(0).unwrap();
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(
-            recordbatches.pretty_print().unwrap(),
-            "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000100 | 51.0           |
-+------------+-------+--------------------+------------+-------------------------------+----------------+",
-        );
-
-        let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
-            .await;
-        let output = output.remove(0).unwrap();
-        let OutputData::Stream(stream) = output.data else {
-            unreachable!()
-        };
-        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(
-            recordbatches.pretty_print().unwrap(),
-            "\
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp            | greptime_value |
-+------------+-------+--------------------+------------+-------------------------------+----------------+
-| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00.000000100 | 4.0            |
-+------------+-------+--------------------+------------+-------------------------------+----------------+"
         );
     }
 

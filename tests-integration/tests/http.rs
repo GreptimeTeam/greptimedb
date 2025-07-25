@@ -35,8 +35,7 @@ use prost::Message;
 use serde_json::{json, Value};
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
-    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME,
-    GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::jaeger::JAEGER_TIME_RANGE_FOR_OPERATIONS_HEADER;
@@ -115,7 +114,6 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
 
-                test_otlp_metrics_legacy,
                 test_otlp_metrics_new,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
@@ -3589,70 +3587,6 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_otlp_metrics_legacy(store_type: StorageType) {
-    // init
-    common_telemetry::init_default_ut_logging();
-    let (app, mut guard) =
-        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_legacy").await;
-
-    let content = r#"
-{"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
-    "#;
-
-    let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
-    let body = req.encode_to_vec();
-
-    // handshake
-    let client = TestClient::new(app).await;
-
-    // write metrics data
-    let res = send_req(
-        &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-
-    // select metrics data
-    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
-    validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
-
-    // drop table
-    let res = client.get("/v1/sql?sql=drop table gen;").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // write metrics data with gzip
-    let res = send_req(
-        &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        true,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-
-    // select metrics data again
-    validate_data(
-        "otlp_metrics_with_gzip",
-        &client,
-        "select * from gen;",
-        expected,
-    )
-    .await;
-
-    guard.remove_all().await;
-}
-
 pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
@@ -3672,16 +3606,10 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // write metrics data
     let res = send_req(
         &client,
-        vec![
-            (
-                HeaderName::from_static("content-type"),
-                HeaderValue::from_static("application/x-protobuf"),
-            ),
-            (
-                HeaderName::from_static(GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME),
-                HeaderValue::from_static("false"),
-            ),
-        ],
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
         "/v1/otlp/v1/metrics",
         body.clone(),
         false,
@@ -3700,16 +3628,10 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // write metrics data with gzip
     let res = send_req(
         &client,
-        vec![
-            (
-                HeaderName::from_static("content-type"),
-                HeaderValue::from_static("application/x-protobuf"),
-            ),
-            (
-                HeaderName::from_static(GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME),
-                HeaderValue::from_static("false"),
-            ),
-        ],
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        )],
         "/v1/otlp/v1/metrics",
         body.clone(),
         true,

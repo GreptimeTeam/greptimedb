@@ -230,6 +230,22 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
+    #[snafu(display(
+        "OTLP metric input have incompatible existing tables, please refer to docs for details"
+    ))]
+    OtlpMetricModeIncompatible {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Common Meta error"))]
+    CommonMeta {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to decompress snappy prometheus remote request"))]
     DecompressSnappyPromRemoteRequest {
         #[snafu(implicit)]
@@ -646,7 +662,8 @@ impl ErrorExt for Error {
 
             AddressBind { .. }
             | AlreadyStarted { .. }
-            | InvalidPromRemoteReadQueryResult { .. } => StatusCode::IllegalState,
+            | InvalidPromRemoteReadQueryResult { .. }
+            | OtlpMetricModeIncompatible { .. } => StatusCode::IllegalState,
 
             UnsupportedDataType { .. } => StatusCode::Unsupported,
 
@@ -662,6 +679,7 @@ impl ErrorExt for Error {
             | CheckDatabaseValidity { source, .. } => source.status_code(),
 
             Pipeline { source, .. } => source.status_code(),
+            CommonMeta { source, .. } => source.status_code(),
 
             NotSupported { .. }
             | InvalidParameter { .. }
