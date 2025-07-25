@@ -31,7 +31,7 @@ use snafu::IntoError;
 
 use crate::error::{AuthSnafu, Result};
 use crate::metrics::METRIC_AUTH_FAILURE;
-use crate::postgres::types::PgErrorCode;
+use crate::postgres::types::{convert_err, PgErrorCode};
 use crate::postgres::PostgresServerHandlerInner;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -247,7 +247,7 @@ where
         if query_handler
             .is_valid_schema(&catalog, &schema)
             .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            .map_err(|e| convert_err(e))?
         {
             Ok(DbResolution::Resolved(catalog, schema))
         } else {

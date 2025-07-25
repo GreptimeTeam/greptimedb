@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use common_error::ext::ErrorExt;
+use common_telemetry::{debug, error};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
@@ -331,8 +333,8 @@ fn encode_array(
                 .map(|v| match v {
                     Value::Null => Ok(None),
                     Value::Binary(v) => {
-                        let s = json_type_value_to_string(v, &j.format)
-                            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                        let s =
+                            json_type_value_to_string(v, &j.format).map_err(|e| convert_err(e))?;
                         Ok(Some(s))
                     }
                     _ => Err(PgWireError::ApiError(Box::new(Error::Internal {
@@ -349,6 +351,23 @@ fn encode_array(
             ),
         }))),
     }
+}
+
+pub fn convert_err(e: impl ErrorExt) -> PgWireError {
+    let status_code = e.status_code();
+    if status_code.should_log_error() {
+        let root_error = e.root_cause().unwrap_or(&e);
+        error!(e; "Failed to handle postgres query, code: {}, error: {}", status_code, root_error.to_string());
+    } else {
+        debug!(
+            "Failed to handle postgres query, code: {}, error: {:?}",
+            status_code, e
+        );
+    }
+
+    PgWireError::UserError(Box::new(
+        PgErrorCode::from(status_code).to_err_info(e.output_msg()),
+    ))
 }
 
 pub(super) fn encode_value(
@@ -373,8 +392,7 @@ pub(super) fn encode_value(
         Value::String(v) => builder.encode_field(&v.as_utf8()),
         Value::Binary(v) => match datatype {
             ConcreteDataType::Json(j) => {
-                let s = json_type_value_to_string(v, &j.format)
-                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                let s = json_type_value_to_string(v, &j.format).map_err(|e| convert_err(e))?;
                 builder.encode_field(&s)
             }
             _ => {
@@ -591,7 +609,7 @@ where
     if let Some(n) = data {
         Value::Timestamp(unit.create_timestamp(n.into()))
             .try_to_scalar_value(ctype)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))
+            .map_err(|e| convert_err(e))
     } else {
         Ok(ScalarValue::Null)
     }
@@ -620,7 +638,7 @@ pub(super) fn parameters_to_scalar_values(
         let client_type = if let Some(client_given_type) = client_param_types.get(idx) {
             client_given_type.clone()
         } else if let Some(server_provided_type) = &server_type {
-            type_gt_to_pg(server_provided_type).map_err(|e| PgWireError::ApiError(Box::new(e)))?
+            type_gt_to_pg(server_provided_type).map_err(|e| convert_err(e))?
         } else {
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",
