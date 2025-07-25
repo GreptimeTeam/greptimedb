@@ -148,6 +148,8 @@ pub struct MergeScanExec {
     properties: PlanProperties,
     /// Metrics from sub stages
     sub_stage_metrics: Arc<Mutex<HashMap<RegionId, RecordBatchMetrics>>>,
+    /// Metrics for each partition
+    partition_metrics: Arc<Mutex<HashMap<usize, PartitionMetrics>>>,
     query_ctx: QueryContextRef,
     target_partition: usize,
     partition_cols: Vec<String>,
@@ -244,6 +246,7 @@ impl MergeScanExec {
             region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
             sub_stage_metrics: Arc::default(),
+            partition_metrics: Arc::default(),
             properties,
             query_ctx,
             target_partition,
@@ -263,12 +266,14 @@ impl MergeScanExec {
         let schema = self.schema.clone();
         let query_ctx = self.query_ctx.clone();
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
+        let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
         let target_partition = self.target_partition;
         let dbname = context.task_id().unwrap_or_default();
         let tracing_context = TracingContext::from_json(context.session_id().as_str());
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
+        let explain_verbose = self.query_ctx.explain_verbose();
 
         let stream = Box::pin(stream!({
             // only report metrics once for each MergeScan
@@ -295,7 +300,17 @@ impl MergeScanExec {
                     region_id,
                     plan: plan.clone(),
                 };
+                let region_start = Instant::now();
                 let do_get_start = Instant::now();
+
+                if explain_verbose {
+                    common_telemetry::info!(
+                        "Merge scan one region, partition: {}, region_id: {}",
+                        partition,
+                        region_id
+                    );
+                }
+
                 let mut stream = region_query_handler
                     .do_get(read_preference, request)
                     .await
@@ -332,10 +347,31 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                common_telemetry::debug!(
-                    "Merge scan stop poll stream, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
-                    partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
-                );
+                let total_cost = region_start.elapsed();
+
+                // Record region metrics and push to global partition_metrics
+                let region_metrics = RegionMetrics {
+                    region_id,
+                    poll_duration,
+                    do_get_cost,
+                    total_cost,
+                };
+
+                // Push RegionMetrics to global partition_metrics immediately after scanning this region
+                {
+                    let mut partition_metrics_guard = partition_metrics_moved.lock().unwrap();
+                    let partition_metrics = partition_metrics_guard
+                        .entry(partition)
+                        .or_insert_with(|| PartitionMetrics::new(partition, explain_verbose));
+                    partition_metrics.add_region_metrics(region_metrics);
+                }
+
+                if explain_verbose {
+                    common_telemetry::info!(
+                        "Merge scan finish one region, partition: {}, region_id: {}, poll_duration: {:?}, first_consume: {}, do_get_cost: {:?}",
+                        partition, region_id, poll_duration, metric.first_consume_time(), do_get_cost
+                    );
+                }
 
                 // process metrics after all data is drained.
                 if let Some(metrics) = stream.metrics() {
@@ -357,6 +393,14 @@ impl MergeScanExec {
                 }
 
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
+            }
+
+            // Finish partition metrics and log results
+            {
+                let mut partition_metrics_guard = partition_metrics_moved.lock().unwrap();
+                if let Some(partition_metrics) = partition_metrics_guard.get_mut(&partition) {
+                    partition_metrics.finish();
+                }
             }
         }));
 
@@ -409,6 +453,7 @@ impl MergeScanExec {
                 self.properties.boundedness,
             ),
             sub_stage_metrics: self.sub_stage_metrics.clone(),
+            partition_metrics: self.partition_metrics.clone(),
             query_ctx: self.query_ctx.clone(),
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
@@ -435,6 +480,90 @@ impl MergeScanExec {
 
     pub fn region_count(&self) -> usize {
         self.regions.len()
+    }
+
+    fn partition_metrics(&self) -> Vec<PartitionMetrics> {
+        self.partition_metrics
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+}
+
+/// Metrics for a region of a partition.
+#[derive(Debug, Clone)]
+struct RegionMetrics {
+    region_id: RegionId,
+    poll_duration: Duration,
+    do_get_cost: Duration,
+    /// Total cost to scan the region.
+    total_cost: Duration,
+}
+
+/// Metrics for a partition of a MergeScanExec.
+#[derive(Debug, Clone)]
+struct PartitionMetrics {
+    partition: usize,
+    region_metrics: Vec<RegionMetrics>,
+    total_poll_duration: Duration,
+    total_do_get_cost: Duration,
+    total_regions: usize,
+    explain_verbose: bool,
+    finished: bool,
+}
+
+impl PartitionMetrics {
+    fn new(partition: usize, explain_verbose: bool) -> Self {
+        Self {
+            partition,
+            region_metrics: Vec::new(),
+            total_poll_duration: Duration::ZERO,
+            total_do_get_cost: Duration::ZERO,
+            total_regions: 0,
+            explain_verbose,
+            finished: false,
+        }
+    }
+
+    fn add_region_metrics(&mut self, region_metrics: RegionMetrics) {
+        self.total_poll_duration += region_metrics.poll_duration;
+        self.total_do_get_cost += region_metrics.do_get_cost;
+        self.total_regions += 1;
+        self.region_metrics.push(region_metrics);
+    }
+
+    /// Finish the partition metrics and log the results.
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.log_metrics();
+    }
+
+    /// Log partition metrics based on explain_verbose level.
+    fn log_metrics(&self) {
+        if self.explain_verbose {
+            common_telemetry::info!(
+                "MergeScan partition {} finished: {} regions, total_poll_duration: {:?}, total_do_get_cost: {:?}",
+                self.partition, self.total_regions, self.total_poll_duration, self.total_do_get_cost
+            );
+        } else {
+            common_telemetry::debug!(
+                "MergeScan partition {} finished: {} regions, total_poll_duration: {:?}, total_do_get_cost: {:?}",
+                self.partition, self.total_regions, self.total_poll_duration, self.total_do_get_cost
+            );
+        }
+    }
+}
+
+impl Drop for PartitionMetrics {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.log_metrics();
+        }
     }
 }
 
@@ -484,12 +613,42 @@ impl ExecutionPlan for MergeScanExec {
 }
 
 impl DisplayAs for MergeScanExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MergeScanExec: peers=[")?;
         for region_id in self.regions.iter() {
             write!(f, "{}, ", region_id)?;
         }
-        write!(f, "]")
+        write!(f, "]")?;
+
+        if matches!(t, DisplayFormatType::Verbose) {
+            let partition_metrics = self.partition_metrics();
+            if !partition_metrics.is_empty() {
+                write!(f, ", metrics={{")?;
+                for (i, pm) in partition_metrics.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"partition_{}\":{{\"regions\":{},\"total_poll_duration\":\"{:?}\",\"total_do_get_cost\":\"{:?}\",\"region_metrics\":[",
+                           pm.partition, pm.total_regions,
+                           pm.total_poll_duration,
+                           pm.total_do_get_cost)?;
+                    for (j, rm) in pm.region_metrics.iter().enumerate() {
+                        if j > 0 {
+                            write!(f, ",")?;
+                        }
+                        write!(f, "{{\"region_id\":\"{}\",\"poll_duration\":\"{:?}\",\"do_get_cost\":\"{:?}\",\"total_cost\":\"{:?}\"}}",
+                               rm.region_id,
+                               rm.poll_duration,
+                               rm.do_get_cost,
+                               rm.total_cost)?;
+                    }
+                    write!(f, "]}}")?;
+                }
+                write!(f, "}}")?;
+            }
+        }
+
+        Ok(())
     }
 }
 

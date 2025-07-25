@@ -28,6 +28,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
@@ -135,6 +136,7 @@ pub struct DummyTableProvider {
     metadata: RegionMetadataRef,
     /// Keeping a mutable request makes it possible to change in the optimize phase.
     scan_request: Arc<Mutex<ScanRequest>>,
+    query_ctx: Option<QueryContextRef>,
 }
 
 impl fmt::Debug for DummyTableProvider {
@@ -178,7 +180,11 @@ impl TableProvider for DummyTableProvider {
             .handle_query(self.region_id, request.clone())
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        Ok(Arc::new(RegionScanExec::new(scanner, request)?))
+        let mut scan_exec = RegionScanExec::new(scanner, request)?;
+        if let Some(query_ctx) = &self.query_ctx {
+            scan_exec.set_explain_verbose(query_ctx.explain_verbose());
+        }
+        Ok(Arc::new(scan_exec))
     }
 
     fn supports_filters_pushdown(
@@ -221,6 +227,7 @@ impl DummyTableProvider {
             engine,
             metadata,
             scan_request: Default::default(),
+            query_ctx: None,
         }
     }
 
@@ -261,7 +268,7 @@ impl DummyTableProviderFactory {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
-        ctx: Option<&session::context::QueryContext>,
+        query_ctx: Option<QueryContextRef>,
     ) -> Result<DummyTableProvider> {
         let metadata =
             engine
@@ -272,7 +279,8 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let scan_request = ctx
+        let scan_request = query_ctx
+            .as_ref()
             .map(|ctx| ScanRequest {
                 sequence: ctx.get_snapshot(region_id.as_u64()),
                 sst_min_sequence: ctx.sst_min_sequence(region_id.as_u64()),
@@ -285,6 +293,7 @@ impl DummyTableProviderFactory {
             engine,
             metadata,
             scan_request: Arc::new(Mutex::new(scan_request)),
+            query_ctx,
         })
     }
 }
@@ -295,7 +304,7 @@ impl TableProviderFactory for DummyTableProviderFactory {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
-        ctx: Option<&session::context::QueryContext>,
+        ctx: Option<QueryContextRef>,
     ) -> Result<Arc<dyn TableProvider>> {
         let provider = self.create_table_provider(region_id, engine, ctx).await?;
         Ok(Arc::new(provider))
@@ -308,7 +317,7 @@ pub trait TableProviderFactory: Send + Sync {
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
-        ctx: Option<&session::context::QueryContext>,
+        ctx: Option<QueryContextRef>,
     ) -> Result<Arc<dyn TableProvider>>;
 }
 

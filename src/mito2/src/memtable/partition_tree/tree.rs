@@ -230,6 +230,7 @@ impl PartitionTree {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
         sequence: Option<SequenceNumber>,
+        mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
     ) -> Result<BoxedBatchIterator> {
         let start = Instant::now();
         // Creates the projection set.
@@ -257,6 +258,7 @@ impl PartitionTree {
             partitions,
             current_reader: None,
             metrics: tree_iter_metric,
+            mem_scan_metrics,
         };
         let context = ReadPartitionContext::new(
             self.metadata.clone(),
@@ -467,10 +469,28 @@ struct TreeIter {
     partitions: VecDeque<PartitionRef>,
     current_reader: Option<PartitionReader>,
     metrics: TreeIterMetrics,
+    mem_scan_metrics: Option<crate::memtable::MemScanMetrics>,
+}
+
+impl TreeIter {
+    fn report_mem_scan_metrics(&mut self) {
+        if let Some(mem_scan_metrics) = self.mem_scan_metrics.take() {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 0, // This is unavailable.
+                num_rows: self.metrics.rows_fetched,
+                num_batches: self.metrics.batches_fetched,
+                scan_cost: self.metrics.iter_elapsed,
+            };
+            mem_scan_metrics.merge_inner(&inner);
+        }
+    }
 }
 
 impl Drop for TreeIter {
     fn drop(&mut self) {
+        // Report MemScanMetrics if not already reported
+        self.report_mem_scan_metrics();
+
         READ_ROWS_TOTAL
             .with_label_values(&["partition_tree_memtable"])
             .inc_by(self.metrics.rows_fetched as u64);
@@ -523,6 +543,8 @@ impl TreeIter {
     /// Fetches next batch.
     fn next_batch(&mut self) -> Result<Option<Batch>> {
         let Some(part_reader) = &mut self.current_reader else {
+            // Report MemScanMetrics before returning None
+            self.report_mem_scan_metrics();
             return Ok(None);
         };
 
