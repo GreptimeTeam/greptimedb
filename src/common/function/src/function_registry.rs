@@ -20,6 +20,7 @@ use datafusion_expr::AggregateUDF;
 use once_cell::sync::Lazy;
 
 use crate::admin::AdminFunction;
+use crate::aggrs::aggr_wrapper::StateMergeHelper;
 use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
@@ -105,6 +106,10 @@ impl FunctionRegistry {
             .cloned()
             .collect()
     }
+
+    pub fn is_aggr_func_exist(&self, name: &str) -> bool {
+        self.aggregate_functions.read().unwrap().contains_key(name)
+    }
 }
 
 pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
@@ -147,6 +152,9 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
 
     // CountHash function
     CountHash::register(&function_registry);
+
+    // state function of supported aggregate functions
+    StateMergeHelper::register(&function_registry);
 
     Arc::new(function_registry)
 });

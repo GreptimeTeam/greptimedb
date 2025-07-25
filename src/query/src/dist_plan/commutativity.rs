@@ -15,10 +15,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, StateMergeHelper};
 use common_function::aggrs::approximate::hll::{HllState, HLL_MERGE_NAME, HLL_NAME};
 use common_function::aggrs::approximate::uddsketch::{
     UddSketchState, UDDSKETCH_MERGE_NAME, UDDSKETCH_STATE_NAME,
 };
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_telemetry::debug;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion_common::Column;
@@ -31,6 +33,11 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{merge_sort_transformer, MergeSortLogicalPlan};
 use crate::dist_plan::MergeScanLogicalPlan;
 
+pub struct StepTransformAction {
+    extra_parent_plans: Vec<LogicalPlan>,
+    new_child_plan: Option<LogicalPlan>,
+}
+
 /// generate the upper aggregation plan that will execute on the frontend.
 /// Basically a logical plan resembling the following:
 /// Projection:
@@ -42,111 +49,27 @@ use crate::dist_plan::MergeScanLogicalPlan;
 /// of the upper aggregation plan.
 pub fn step_aggr_to_upper_aggr(
     aggr_plan: &LogicalPlan,
-) -> datafusion_common::Result<[LogicalPlan; 2]> {
+) -> datafusion_common::Result<StepTransformAction> {
     let LogicalPlan::Aggregate(input_aggr) = aggr_plan else {
         return Err(datafusion_common::DataFusionError::Plan(
             "step_aggr_to_upper_aggr only accepts Aggregate plan".to_string(),
         ));
     };
     if !is_all_aggr_exprs_steppable(&input_aggr.aggr_expr) {
-        return Err(datafusion_common::DataFusionError::NotImplemented(
-            "Some aggregate expressions are not steppable".to_string(),
-        ));
+        return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "Some aggregate expressions are not steppable in {:?}",
+            input_aggr.aggr_expr
+        )));
     }
-    let mut upper_aggr_expr = vec![];
-    for aggr_expr in &input_aggr.aggr_expr {
-        let Some(aggr_func) = get_aggr_func(aggr_expr) else {
-            return Err(datafusion_common::DataFusionError::NotImplemented(
-                "Aggregate function not found".to_string(),
-            ));
-        };
-        let col_name = aggr_expr.qualified_name();
-        let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
-        let upper_func = match aggr_func.func.name() {
-            "sum" | "min" | "max" | "last_value" | "first_value" => {
-                // aggr_calc(aggr_merge(input_column))) as col_name
-                let mut new_aggr_func = aggr_func.clone();
-                new_aggr_func.args = vec![input_column.clone()];
-                new_aggr_func
-            }
-            "count" => {
-                // sum(input_column) as col_name
-                let mut new_aggr_func = aggr_func.clone();
-                new_aggr_func.func = sum_udaf();
-                new_aggr_func.args = vec![input_column.clone()];
-                new_aggr_func
-            }
-            UDDSKETCH_STATE_NAME | UDDSKETCH_MERGE_NAME => {
-                // udd_merge(bucket_size, error_rate input_column) as col_name
-                let mut new_aggr_func = aggr_func.clone();
-                new_aggr_func.func = Arc::new(UddSketchState::merge_udf_impl());
-                new_aggr_func.args[2] = input_column.clone();
-                new_aggr_func
-            }
-            HLL_NAME | HLL_MERGE_NAME => {
-                // hll_merge(input_column) as col_name
-                let mut new_aggr_func = aggr_func.clone();
-                new_aggr_func.func = Arc::new(HllState::merge_udf_impl());
-                new_aggr_func.args = vec![input_column.clone()];
-                new_aggr_func
-            }
-            _ => {
-                return Err(datafusion_common::DataFusionError::NotImplemented(format!(
-                    "Aggregate function {} is not supported for Step aggregation",
-                    aggr_func.func.name()
-                )))
-            }
-        };
 
-        // deal with nested alias case
-        let mut new_aggr_expr = aggr_expr.clone();
-        {
-            let new_aggr_func = get_aggr_func_mut(&mut new_aggr_expr).unwrap();
-            *new_aggr_func = upper_func;
-        }
+    let step_aggr_plan = StateMergeHelper::split_aggr_node(input_aggr.clone())?;
 
-        upper_aggr_expr.push(new_aggr_expr);
-    }
-    let mut new_aggr = input_aggr.clone();
-    // use lower aggregate plan as input, this will be replace by merge scan plan later
-    new_aggr.input = Arc::new(LogicalPlan::Aggregate(input_aggr.clone()));
-
-    new_aggr.aggr_expr = upper_aggr_expr;
-
-    // group by expr also need to be all ref by column to avoid duplicated computing
-    let mut new_group_expr = new_aggr.group_expr.clone();
-    for expr in &mut new_group_expr {
-        if let Expr::Column(_) = expr {
-            // already a column, no need to change
-            continue;
-        }
-        let col_name = expr.qualified_name();
-        let input_column = Expr::Column(datafusion_common::Column::new(col_name.0, col_name.1));
-        *expr = input_column;
-    }
-    new_aggr.group_expr = new_group_expr.clone();
-
-    let mut new_projection_exprs = new_group_expr;
-    // the upper aggr expr need to be aliased to the input aggr expr's name,
-    // so that the parent plan can recognize it.
-    for (lower_aggr_expr, upper_aggr_expr) in
-        input_aggr.aggr_expr.iter().zip(new_aggr.aggr_expr.iter())
-    {
-        let lower_col_name = lower_aggr_expr.qualified_name();
-        let (table, col_name) = upper_aggr_expr.qualified_name();
-        let aggr_out_column = Column::new(table, col_name);
-        let aliased_output_aggr_expr =
-            Expr::Column(aggr_out_column).alias_qualified(lower_col_name.0, lower_col_name.1);
-        new_projection_exprs.push(aliased_output_aggr_expr);
-    }
-    let upper_aggr_plan = LogicalPlan::Aggregate(new_aggr);
-    let upper_aggr_plan = upper_aggr_plan.recompute_schema()?;
-    // create a projection on top of the new aggregate plan
-    let new_projection =
-        Projection::try_new(new_projection_exprs, Arc::new(upper_aggr_plan.clone()))?;
-    let projection = LogicalPlan::Projection(new_projection);
-    // return the new logical plan
-    Ok([projection, upper_aggr_plan])
+    // TODO(discord9): remove duplication
+    let ret = StepTransformAction {
+        extra_parent_plans: vec![step_aggr_plan.upper_merge.clone()],
+        new_child_plan: Some(step_aggr_plan.lower_state.clone()),
+    };
+    Ok(ret)
 }
 
 /// Check if the given aggregate expression is steppable.
@@ -154,25 +77,15 @@ pub fn step_aggr_to_upper_aggr(
 /// i.e. on datanode first call `state(input)` then
 /// on frontend call `calc(merge(state))` to get the final result.
 pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
-    let step_action = HashSet::from([
-        "sum",
-        "count",
-        "min",
-        "max",
-        "first_value",
-        "last_value",
-        UDDSKETCH_STATE_NAME,
-        UDDSKETCH_MERGE_NAME,
-        HLL_NAME,
-        HLL_MERGE_NAME,
-    ]);
     aggr_exprs.iter().all(|expr| {
         if let Some(aggr_func) = get_aggr_func(expr) {
             if aggr_func.distinct {
                 // Distinct aggregate functions are not steppable(yet).
                 return false;
             }
-            step_action.contains(aggr_func.func.name())
+
+            // whether the corrseponding state function exists in the registry
+            FUNCTION_REGISTRY.is_aggr_func_exist(&aggr_state_func_name(aggr_func.func.name()))
         } else {
             false
         }
@@ -247,8 +160,8 @@ impl Categorizer {
                             debug!("Before Step optimize: {plan}");
                             let ret = step_aggr_to_upper_aggr(plan);
                             ret.ok().map(|s| TransformerAction {
-                                extra_parent_plans: s.to_vec(),
-                                new_child_plan: None,
+                                extra_parent_plans: s.extra_parent_plans,
+                                new_child_plan: s.new_child_plan,
                             })
                         })),
                     };
