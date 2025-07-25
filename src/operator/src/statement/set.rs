@@ -230,6 +230,28 @@ fn try_parse_datestyle(expr: &Expr) -> Result<(Option<PGDateTimeStyle>, Option<P
     }
 }
 
+/// Set the allow query fallback configuration parameter to true or false based on the provided expressions.
+///
+pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let allow_fallback_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No allow query fallback value find in set variable statement",
+    })?;
+    match allow_fallback_expr {
+        Expr::Value(Value::Boolean(allow)) => {
+            ctx.configuration_parameter()
+                .set_allow_query_fallback(*allow);
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported allow query fallback expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
+    }
+}
+
 pub fn set_datestyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     // ORDER,
     // STYLE,

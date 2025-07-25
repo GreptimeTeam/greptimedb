@@ -197,6 +197,9 @@ metadata_cache_tti = "5m"
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
+## Whether to allow query fallback when push down optimize fails.
+## Default to false, meaning when push down optimize failed, return error msg
+allow_query_fallback = false
 
 ## Datanode options.
 [datanode]
