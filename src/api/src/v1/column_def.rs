@@ -24,7 +24,7 @@ use greptime_proto::v1::{
 };
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, ConvertColumnDefaultConstraintSnafu, Result};
 use crate::helper::ColumnDataTypeWrapper;
 use crate::v1::{ColumnDef, ColumnOptions, SemanticType};
 
@@ -75,6 +75,48 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         .context(error::InvalidColumnDefaultConstraintSnafu {
             column: &column_def.name,
         })
+}
+
+/// Tries to construct a `ColumnDef` from the given `ColumnSchema`.
+///
+/// TODO(weny): Add tests for this function.
+pub fn try_as_column_def(column_schema: &ColumnSchema, is_primary_key: bool) -> Result<ColumnDef> {
+    let column_datatype =
+        ColumnDataTypeWrapper::try_from(column_schema.data_type.clone()).map(|w| w.to_parts())?;
+
+    let semantic_type = if column_schema.is_time_index() {
+        SemanticType::Timestamp
+    } else if is_primary_key {
+        SemanticType::Tag
+    } else {
+        SemanticType::Field
+    } as i32;
+    let comment = column_schema
+        .metadata()
+        .get(COMMENT_KEY)
+        .cloned()
+        .unwrap_or_default();
+
+    let default_constraint = match column_schema.default_constraint() {
+        None => vec![],
+        Some(v) => v
+            .clone()
+            .try_into()
+            .context(ConvertColumnDefaultConstraintSnafu {
+                column: &column_schema.name,
+            })?,
+    };
+    let options = options_from_column_schema(column_schema);
+    Ok(ColumnDef {
+        name: column_schema.name.clone(),
+        data_type: column_datatype.0 as i32,
+        is_nullable: column_schema.is_nullable(),
+        default_constraint,
+        semantic_type,
+        comment,
+        datatype_extension: column_datatype.1,
+        options,
+    })
 }
 
 /// Constructs a `ColumnOptions` from the given `ColumnSchema`.

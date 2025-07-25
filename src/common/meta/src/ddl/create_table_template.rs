@@ -21,8 +21,7 @@ use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::wal_options_allocator::prepare_wal_options;
 
 pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
