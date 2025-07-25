@@ -3617,6 +3617,26 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    // check table options
+    // CREATE TABLE IF NOT EXISTS "gen" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     TIME INDEX ("greptime_timestamp")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"gen\",\"CREATE TABLE IF NOT EXISTS \\\"gen\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_table_options",
+        &client,
+        "show create table gen;",
+        expected,
+    )
+    .await;
+
     // select metrics data
     let expected = "[[1736489291872,0.0],[1736489291919,1.0]]";
     validate_data("otlp_metrics", &client, "select * from gen;", expected).await;

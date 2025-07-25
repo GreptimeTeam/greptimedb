@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use client::Output;
@@ -29,6 +31,7 @@ use servers::otlp;
 use servers::query_handler::{OpenTelemetryProtocolHandler, PipelineHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
@@ -64,6 +67,14 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
+
+        let ctx = if !is_legacy {
+            let mut c = (*ctx).clone();
+            c.set_extension(OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM.to_string());
+            Arc::new(c)
+        } else {
+            ctx
+        };
 
         let _guard = if let Some(limiter) = &self.limiter {
             let result = limiter.limit_row_inserts(&requests);
