@@ -57,6 +57,7 @@ use common_telemetry::{debug, error, info, tracing};
 use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
+use lazy_static::lazy_static;
 use log_store::raft_engine::RaftEngineBackend;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
@@ -100,6 +101,10 @@ use crate::error::{
 use crate::limiter::LimiterRef;
 use crate::slow_query_recorder::SlowQueryRecorder;
 use crate::stream_wrapper::CancellableStreamWrapper;
+
+lazy_static! {
+    static ref OTLP_LEGACY_DEFAULT_VALUE: String = "legacy".to_string();
+}
 
 /// The frontend instance contains necessary components, and implements many
 /// traits, like [`servers::query_handler::grpc::GrpcQueryHandler`],
@@ -361,15 +366,15 @@ impl Instance {
             .filter_map(|name| cache.get(*name))
             .collect::<Vec<_>>();
         if !hit_cache.is_empty() {
-            let hit_true = hit_cache.iter().any(|en| *en.value());
-            let hit_false = hit_cache.iter().any(|en| !*en.value());
+            let hit_legacy = hit_cache.iter().any(|en| *en.value());
+            let hit_prom = hit_cache.iter().any(|en| !*en.value());
 
             // hit but have true and false, means both legacy and new mode are used
             // we cannot handle this case, so return error
             // add doc links in err msg later
-            ensure!(!(hit_true && hit_false), OtlpMetricModeIncompatibleSnafu);
+            ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
-            let flag = hit_true;
+            let flag = hit_legacy;
             // set cache for all names
             names.iter().for_each(|name| {
                 if !cache.contains_key(*name) {
@@ -420,27 +425,34 @@ impl Instance {
             .context(CommonMetaSnafu)?;
         let options = table_infos
             .values()
-            .filter_map(|info| {
+            .map(|info| {
                 info.table_info
                     .meta
                     .options
                     .extra_options
                     .get(OTLP_METRIC_COMPAT_KEY)
+                    .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
             })
             .collect::<Vec<_>>();
-        // we're querying using the legacy normalized names
-        // so any found should be considered legacy
-        // check the table options just to make sure
-        let has_prom = options
-            .into_iter()
-            .any(|opt| opt == OTLP_METRIC_COMPAT_PROM);
-        // has_prom, not legacy, so return false
-        let flag = !has_prom;
-        names.iter().for_each(|name| {
-            cache.insert(name.to_string(), flag);
-        });
-
-        Ok(flag)
+        if !options.is_empty() {
+            // check value consistency
+            let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
+            let has_legacy = options
+                .iter()
+                .any(|opt| *opt == OTLP_LEGACY_DEFAULT_VALUE.as_str());
+            ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
+            let flag = has_legacy;
+            names.iter().for_each(|name| {
+                cache.insert(name.to_string(), flag);
+            });
+            Ok(flag)
+        } else {
+            // no table info, use new mode
+            names.iter().for_each(|name| {
+                cache.insert(name.to_string(), false);
+            });
+            Ok(false)
+        }
     }
 }
 
