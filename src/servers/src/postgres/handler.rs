@@ -24,7 +24,7 @@ use common_telemetry::{debug, error, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{stream, Sink, SinkExt, Stream, StreamExt};
+use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -175,7 +175,7 @@ where
                 rb.rows().map(Ok).collect::<Vec<_>>(),
             )
             .boxed(),
-            Err(e) => futures::stream::once(futures::future::err(convert_err(e))).boxed(),
+            Err(e) => stream::once(future::err(convert_err(e))).boxed(),
         })
         .flatten() // flatten into stream<result<row>>
         .map(move |row| {
