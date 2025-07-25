@@ -38,7 +38,9 @@ use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
-use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
+use mito_codec::row_converter::{
+    build_primary_key_codec, DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt,
+};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
@@ -292,7 +294,7 @@ impl BulkPartConverter {
             // For dense encoding, we need to encode the primary key columns
             self.key_buf.clear();
             self.primary_key_codec
-                .encode_key_value(&kv, &mut self.key_buf)
+                .encode_key_value(kv, &mut self.key_buf)
                 .context(EncodeSnafu)?;
             self.key_array_builder
                 .append(&self.key_buf)
@@ -1261,5 +1263,115 @@ mod tests {
             ])),
             1,
         );
+    }
+
+    #[test]
+    fn test_bulk_part_converter_append_and_convert() {
+        let metadata = metadata_for_test();
+        let capacity = 100;
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+
+        let key_values1 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "key1".to_string(),
+            1u32,
+            vec![1000, 2000].into_iter(),
+            vec![Some(1.0), Some(2.0)].into_iter(),
+            1,
+        );
+
+        let key_values2 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "key2".to_string(),
+            2u32,
+            vec![1500].into_iter(),
+            vec![Some(3.0)].into_iter(),
+            2,
+        );
+
+        converter.append_key_values(&key_values1).unwrap();
+        converter.append_key_values(&key_values2).unwrap();
+
+        let bulk_part = converter.convert().unwrap();
+
+        assert_eq!(bulk_part.num_rows(), 3);
+        assert_eq!(bulk_part.min_ts, 1000);
+        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.sequence, 2);
+        assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
+    }
+
+    #[test]
+    fn test_bulk_part_converter_sorting() {
+        let metadata = metadata_for_test();
+        let capacity = 100;
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+
+        let key_values1 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "z_key".to_string(),
+            3u32,
+            vec![3000].into_iter(),
+            vec![Some(3.0)].into_iter(),
+            3,
+        );
+
+        let key_values2 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "a_key".to_string(),
+            1u32,
+            vec![1000].into_iter(),
+            vec![Some(1.0)].into_iter(),
+            1,
+        );
+
+        let key_values3 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "m_key".to_string(),
+            2u32,
+            vec![2000].into_iter(),
+            vec![Some(2.0)].into_iter(),
+            2,
+        );
+
+        converter.append_key_values(&key_values1).unwrap();
+        converter.append_key_values(&key_values2).unwrap();
+        converter.append_key_values(&key_values3).unwrap();
+
+        let bulk_part = converter.convert().unwrap();
+
+        assert_eq!(bulk_part.num_rows(), 3);
+
+        let ts_column = bulk_part.batch.column(bulk_part.timestamp_index);
+        let seq_column = bulk_part.batch.column(bulk_part.batch.num_columns() - 2);
+
+        let ts_array = ts_column
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let seq_array = seq_column.as_any().downcast_ref::<UInt64Array>().unwrap();
+
+        assert_eq!(ts_array.values(), &[1000, 2000, 3000]);
+        assert_eq!(seq_array.values(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_bulk_part_converter_empty() {
+        let metadata = metadata_for_test();
+        let capacity = 10;
+        let primary_key_codec = build_primary_key_codec(&metadata);
+
+        let converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+
+        let bulk_part = converter.convert().unwrap();
+
+        assert_eq!(bulk_part.num_rows(), 0);
+        assert_eq!(bulk_part.min_ts, i64::MAX);
+        assert_eq!(bulk_part.max_ts, i64::MIN);
+        assert_eq!(bulk_part.sequence, SequenceNumber::MIN);
     }
 }
