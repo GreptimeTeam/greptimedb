@@ -22,6 +22,8 @@ CREATE DATABASE mydb WITH (
        'memtable.type'='partition_tree',
        'append_mode'='false',
        'merge_mode'='last_non_null',
+       'compaction.type' = 'twcs',
+       'compaction.twcs.time_window' = '1h',
        'skip_wal'='true');
 
 use mydb;

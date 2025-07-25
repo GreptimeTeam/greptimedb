@@ -33,7 +33,8 @@ use store_api::metric_engine_consts::{
     is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    is_mito_engine_option_key, APPEND_MODE_KEY, MEMTABLE_TYPE, MERGE_MODE_KEY,
+    is_mito_engine_option_key, APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
@@ -80,6 +81,11 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(APPEND_MODE_KEY);
     set.insert(MERGE_MODE_KEY);
     set.insert(SKIP_WAL_KEY);
+    set.insert(COMPACTION_TYPE);
+    set.insert(TWCS_FALLBACK_TO_LOCAL);
+    set.insert(TWCS_TIME_WINDOW);
+    set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set
 });
 
