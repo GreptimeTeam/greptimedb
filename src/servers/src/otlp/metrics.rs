@@ -122,7 +122,7 @@ pub fn to_grpc_insert_requests(
 
 // replace . with _
 // see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
-fn normalize_metric_name(name: &str) -> String {
+pub fn normalize_metric_name(name: &str) -> String {
     let name = INVALID_METRIC_NAME.replace_all(name, UNDERSCORE);
 
     if let Some((_, first)) = name.char_indices().next()
@@ -141,7 +141,7 @@ fn normalize_metric_name(name: &str) -> String {
 /// - since the name are case-insensitive, we transform them to lowercase for
 ///   better sql usability
 /// - replace `.` and `-` with `_`
-fn legacy_normalize_otlp_name(name: &str) -> String {
+pub fn legacy_normalize_otlp_name(name: &str) -> String {
     name.to_lowercase().replace(['.', '-'], "_")
 }
 

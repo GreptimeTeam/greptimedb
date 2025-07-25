@@ -23,7 +23,6 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, InFlightWriteBytesExceededSnafu, Result as ServerResult};
-use servers::http::otlp::OtlpMetricOptions;
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{OpenTelemetryProtocolInterceptor, OpenTelemetryProtocolInterceptorRef};
 use servers::otlp;
@@ -40,7 +39,7 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
-        metric_options: OtlpMetricOptions,
+        with_metric_engine: bool,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         self.plugins
@@ -54,8 +53,16 @@ impl OpenTelemetryProtocolHandler for Instance {
             .get::<OpenTelemetryProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_execute(ctx.clone())?;
 
-        let (requests, rows) =
-            otlp::metrics::to_grpc_insert_requests(request, metric_options.legacy_mode)?;
+        let input_names = request
+            .resource_metrics
+            .iter()
+            .flat_map(|r| r.scope_metrics.iter())
+            .flat_map(|s| s.metrics.iter().map(|m| &m.name))
+            .collect::<Vec<_>>();
+
+        let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
+
+        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let _guard = if let Some(limiter) = &self.limiter {
@@ -68,7 +75,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
-        if metric_options.legacy_mode || !metric_options.with_metric_engine {
+        if is_legacy || !with_metric_engine {
             self.handle_row_inserts(requests, ctx, false, false)
                 .await
                 .map_err(BoxedError::new)

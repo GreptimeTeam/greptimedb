@@ -24,7 +24,6 @@ use tonic::service::Interceptor;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
-use crate::http::otlp::OtlpMetricOptions;
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 
 pub struct OtelArrowServiceHandler<T>(pub T);
@@ -87,11 +86,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     }
                 };
                 // use metric engine by default
-                let opts = OtlpMetricOptions {
-                    legacy_mode: false,
-                    with_metric_engine: true,
-                };
-                if let Err(e) = handler.metrics(request, opts, query_context.clone()).await {
+                if let Err(e) = handler.metrics(request, true, query_context.clone()).await {
                     let _ = sender
                         .send(Err(Status::new(
                             status_to_tonic_code(e.status_code()),

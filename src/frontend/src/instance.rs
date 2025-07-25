@@ -42,6 +42,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
@@ -53,6 +54,7 @@ use common_query::Output;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::{debug, error, info, tracing};
+use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt};
 use log_store::raft_engine::RaftEngineBackend;
@@ -68,11 +70,14 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::QueryEngineRef;
-use servers::error as server_error;
-use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::error::{
+    self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
+    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu,
+};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
+use servers::otlp::metrics::legacy_normalize_otlp_name;
 use servers::prometheus_handler::PrometheusHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
@@ -85,6 +90,7 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
+use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
@@ -111,6 +117,12 @@ pub struct Instance {
     slow_query_recorder: Option<SlowQueryRecorder>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
+
+    // cache for otlp metrics
+    // first layer key: db-string
+    // key: direct input metric name
+    // value: if runs in legacy mode
+    otlp_metrics_table_legacy_cache: DashMap<String, DashMap<String, bool>>,
 }
 
 impl Instance {
@@ -330,6 +342,105 @@ impl Instance {
             .exec_plan(plan, query_ctx.clone())
             .await
             .context(TableOperationSnafu)
+    }
+
+    async fn check_otlp_legacy(
+        &self,
+        names: &Vec<&String>,
+        ctx: QueryContextRef,
+    ) -> server_error::Result<bool> {
+        let db_string = ctx.get_db_string();
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(db_string)
+            .or_insert_with(DashMap::new);
+
+        // check cache
+        let hit_cache = names
+            .iter()
+            .filter_map(|name| cache.get(*name))
+            .collect::<Vec<_>>();
+        if !hit_cache.is_empty() {
+            let hit_true = hit_cache.iter().any(|en| *en.value());
+            let hit_false = hit_cache.iter().any(|en| !*en.value());
+
+            // hit but have true and false, means both legacy and new mode are used
+            // we cannnot handle this case, so return error
+            // add doc links in err msg later
+            ensure!(!(hit_true && hit_false), OtlpMetricModeIncompatibleSnafu);
+
+            let flag = hit_true;
+            // set cache for all names
+            names.iter().for_each(|name| {
+                if !cache.contains_key(*name) {
+                    cache.insert(name.to_string(), flag);
+                }
+            });
+            return Ok(flag);
+        }
+
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+
+        // query legacy table names
+        let normalized_names = names
+            .iter()
+            .map(|n| legacy_normalize_otlp_name(n))
+            .collect::<Vec<_>>();
+        let table_names = normalized_names
+            .iter()
+            .map(|n| TableNameKey::new(catalog, &schema, n))
+            .collect::<Vec<_>>();
+        let table_values = self
+            .table_metadata_manager()
+            .table_name_manager()
+            .batch_get(table_names)
+            .await
+            .context(CommonMetaSnafu)?;
+        let table_ids = table_values
+            .into_iter()
+            .filter_map(|v| v.map(|vi| vi.table_id()))
+            .collect::<Vec<_>>();
+
+        // means no existing table is found, use new mode
+        if table_ids.is_empty() {
+            // set cache
+            names.iter().for_each(|name| {
+                cache.insert(name.to_string(), false);
+            });
+            return Ok(false);
+        }
+
+        // has existing table, check table options
+        let table_infos = self
+            .table_metadata_manager()
+            .table_info_manager()
+            .batch_get(&table_ids)
+            .await
+            .context(CommonMetaSnafu)?;
+        let options = table_infos
+            .values()
+            .filter_map(|info| {
+                info.table_info
+                    .meta
+                    .options
+                    .extra_options
+                    .get(OTLP_METRIC_COMPAT_KEY)
+            })
+            .collect::<Vec<_>>();
+        // we're querying using the legacy normalized names
+        // so any found should be considered legacy
+        // check the table options just to make sure
+        let has_prom = options
+            .into_iter()
+            .any(|opt| opt == OTLP_METRIC_COMPAT_PROM);
+        // has_prom, not legacy, so return false
+        let flag = !has_prom;
+        names.iter().for_each(|name| {
+            cache.insert(name.to_string(), flag);
+        });
+
+        Ok(flag)
     }
 }
 

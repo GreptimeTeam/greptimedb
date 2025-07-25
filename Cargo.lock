@@ -4805,6 +4805,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "dashmap",
  "datafusion",
  "datafusion-expr",
  "datanode",
