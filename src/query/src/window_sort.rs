@@ -387,6 +387,7 @@ impl WindowedSortStream {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
+        let mut rotate_count = 0;
         while let Some(merge_stream) = &mut self.merge_stream.front_mut() {
             match merge_stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
@@ -417,7 +418,14 @@ impl WindowedSortStream {
                     continue;
                 }
                 Poll::Pending => {
-                    return Poll::Pending;
+                    if rotate_count < self.merge_stream.len() {
+                        // try consume next stream first
+                        rotate_count += 1;
+                        self.merge_stream.rotate_left(1);
+                        continue;
+                    } else {
+                        return Poll::Pending;
+                    }
                 }
             }
         }
