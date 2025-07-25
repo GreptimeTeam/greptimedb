@@ -56,6 +56,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region = RegionOpener::new(
             region_id,
             &request.table_dir,
+            request.path_type,
             self.memtable_builder_provider.clone(),
             self.object_store_manager.clone(),
             self.purge_scheduler.clone(),
@@ -64,7 +65,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.time_provider.clone(),
         )
         .metadata_builder(builder)
-        .path_type(request.path_type)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
         .create_or_open(&self.config, &self.wal)

@@ -542,7 +542,7 @@ mod tests {
         Option<BitVec>,
     ) -> BoxFuture<'static, Option<BTreeSet<RowId>>> {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
-        let region_dir = "region0".to_string();
+        let table_dir = "table0".to_string();
         let sst_file_id = FileId::random();
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata(backend.clone());
@@ -565,7 +565,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
         let region_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
         let mut writer = puffin_manager.writer(&region_file_id).await.unwrap();
@@ -576,7 +576,7 @@ mod tests {
               terms_requests: Vec<(ColumnId, Vec<(bool, &str)>)>,
               coarse_mask: Option<BitVec>| {
             let _d = &d;
-            let region_dir = region_dir.clone();
+            let table_dir = table_dir.clone();
             let object_store = object_store.clone();
             let factory = factory.clone();
 
@@ -609,7 +609,7 @@ mod tests {
             }
 
             let applier = FulltextIndexApplier::new(
-                region_dir,
+                table_dir,
                 PathType::Bare,
                 object_store,
                 requests,

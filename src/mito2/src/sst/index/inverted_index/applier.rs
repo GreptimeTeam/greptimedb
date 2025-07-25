@@ -47,8 +47,8 @@ use crate::sst::index::TYPE_INVERTED_INDEX;
 /// `InvertedIndexApplier` is responsible for applying predicates to the provided SST files
 /// and returning the relevant row group ids for further scan.
 pub(crate) struct InvertedIndexApplier {
-    /// The root directory of the region.
-    region_dir: String,
+    /// The root directory of the table.
+    table_dir: String,
 
     /// Path type for generating file paths.
     path_type: PathType,
@@ -81,7 +81,7 @@ pub(crate) type InvertedIndexApplierRef = Arc<InvertedIndexApplier>;
 impl InvertedIndexApplier {
     /// Creates a new `InvertedIndexApplier`.
     pub fn new(
-        region_dir: String,
+        table_dir: String,
         path_type: PathType,
         store: ObjectStore,
         index_applier: Box<dyn IndexApplier>,
@@ -91,7 +91,7 @@ impl InvertedIndexApplier {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
         Self {
-            region_dir,
+            table_dir,
             path_type,
             store,
             file_cache: None,
@@ -215,7 +215,7 @@ impl InvertedIndexApplier {
             .puffin_manager_factory
             .build(
                 self.store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone(), self.path_type),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
@@ -261,11 +261,11 @@ mod tests {
             PuffinManagerFactory::new_for_test_async("test_index_applier_apply_basic_").await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = RegionFileId::new(0.into(), FileId::random());
-        let region_dir = "region_dir".to_string();
+        let table_dir = "table_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
@@ -290,7 +290,7 @@ mod tests {
         });
 
         let sst_index_applier = InvertedIndexApplier::new(
-            region_dir.clone(),
+            table_dir.clone(),
             PathType::Bare,
             object_store,
             Box::new(mock_index_applier),
@@ -315,11 +315,11 @@ mod tests {
                 .await;
         let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
         let file_id = RegionFileId::new(0.into(), FileId::random());
-        let region_dir = "region_dir".to_string();
+        let table_dir = "table_dir".to_string();
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
@@ -338,7 +338,7 @@ mod tests {
         mock_index_applier.expect_apply().never();
 
         let sst_index_applier = InvertedIndexApplier::new(
-            region_dir.clone(),
+            table_dir.clone(),
             PathType::Bare,
             object_store,
             Box::new(mock_index_applier),

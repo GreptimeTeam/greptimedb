@@ -419,13 +419,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to deserialize partition in meta to partition def"))]
-    DeserializePartition {
-        #[snafu(implicit)]
-        location: Location,
-        source: partition::error::Error,
-    },
-
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(implicit)]
@@ -851,6 +844,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert partition expression to protobuf"))]
+    PartitionExprToPb {
+        source: partition::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -891,6 +891,7 @@ impl ErrorExt for Error {
             | Error::InvalidPartition { .. }
             | Error::PhysicalExpr { .. }
             | Error::InvalidJsonFormat { .. }
+            | Error::PartitionExprToPb { .. }
             | Error::CursorNotFound { .. }
             | Error::CursorExists { .. }
             | Error::CreatePartitionRules { .. } => StatusCode::InvalidArguments,
@@ -947,8 +948,7 @@ impl ErrorExt for Error {
             | Error::DescribeStatement { source, .. } => source.status_code(),
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
-            Error::DeserializePartition { source, .. }
-            | Error::FindTablePartitionRule { source, .. }
+            Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
             | Error::FindRegionLeader { source, .. } => source.status_code(),
