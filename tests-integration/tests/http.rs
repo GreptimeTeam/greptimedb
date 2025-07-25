@@ -114,7 +114,7 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
 
-                test_otlp_metrics,
+                test_otlp_metrics_new,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -3587,10 +3587,11 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_otlp_metrics(store_type: StorageType) {
+pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_new").await;
 
     let content = r#"
 {"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
@@ -3616,8 +3617,28 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
+    // check table options
+    // CREATE TABLE IF NOT EXISTS "gen" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     TIME INDEX ("greptime_timestamp")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"gen\",\"CREATE TABLE IF NOT EXISTS \\\"gen\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_table_options",
+        &client,
+        "show create table gen;",
+        expected,
+    )
+    .await;
+
     // select metrics data
-    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
+    let expected = "[[1736489291872,0.0],[1736489291919,1.0]]";
     validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
 
     // drop table
