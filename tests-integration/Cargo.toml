@@ -27,6 +27,7 @@ common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-event-recorder.workspace = true
 common-grpc.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-procedure.workspace = true
@@ -59,8 +60,10 @@ object-store.workspace = true
 operator = { workspace = true, features = ["testing"] }
 prost.workspace = true
 query.workspace = true
+rand.workspace = true
 rstest.workspace = true
 rstest_reuse.workspace = true
+sea-query.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
