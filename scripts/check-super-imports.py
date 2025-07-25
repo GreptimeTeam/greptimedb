@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import os
-import re
 from multiprocessing import Pool
+from pathlib import Path
 
 
 def find_rust_files(directory):
@@ -22,6 +22,10 @@ def find_rust_files(directory):
     for root, _, files in os.walk(directory):
         # Skip files with "test" in the path
         if "test" in root.lower():
+            continue
+
+        # Skip the target directory
+        if "target" in Path(root).parts:
             continue
 
         for file in files:
