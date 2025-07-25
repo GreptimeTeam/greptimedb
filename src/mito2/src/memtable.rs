@@ -204,8 +204,9 @@ pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
 
-    /// Returns true if the memtable builder supports bulk insert.
-    fn supports_bulk_insert(&self) -> bool {
+    /// Returns true if the memtable supports bulk insert and benefits from it.
+    fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
+        let _metadata = metadata;
         false
     }
 }

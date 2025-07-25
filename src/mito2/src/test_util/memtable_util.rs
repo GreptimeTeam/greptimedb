@@ -127,7 +127,7 @@ impl MemtableBuilder for EmptyMemtableBuilder {
         Arc::new(EmptyMemtable::new(id))
     }
 
-    fn supports_bulk_insert(&self) -> bool {
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
         true
     }
 }

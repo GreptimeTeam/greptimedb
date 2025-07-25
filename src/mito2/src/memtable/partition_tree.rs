@@ -351,7 +351,7 @@ impl MemtableBuilder for PartitionTreeMemtableBuilder {
         ))
     }
 
-    fn supports_bulk_insert(&self) -> bool {
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
         false
     }
 }

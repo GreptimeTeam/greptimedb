@@ -113,8 +113,12 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
         }
     }
 
-    fn supports_bulk_insert(&self) -> bool {
-        true
+    fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
+        if metadata.primary_key.is_empty() {
+            true
+        } else {
+            false
+        }
     }
 }
 

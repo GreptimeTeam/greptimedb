@@ -30,13 +30,14 @@ use datatypes::arrow::array::{
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
 use mito_codec::key_values::KeyValue;
+use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
 use smallvec::{smallvec, SmallVec};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error;
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::memtable::bulk::part::BulkPart;
+use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 
@@ -208,6 +209,8 @@ pub struct TimePartitions {
     metadata: RegionMetadataRef,
     /// Builder of memtables.
     builder: MemtableBuilderRef,
+    /// Primary key encoder.
+    primary_key_codec: Arc<dyn PrimaryKeyCodec>,
 }
 
 pub type TimePartitionsRef = Arc<TimePartitions>;
@@ -221,11 +224,13 @@ impl TimePartitions {
         part_duration: Option<Duration>,
     ) -> Self {
         let inner = PartitionsInner::new(next_memtable_id);
+        let primary_key_codec = build_primary_key_codec(&metadata);
         Self {
             inner: Mutex::new(inner),
             part_duration: part_duration.unwrap_or(INITIAL_TIME_WINDOW),
             metadata,
             builder,
+            primary_key_codec,
         }
     }
 
@@ -233,6 +238,18 @@ impl TimePartitions {
     ///
     /// It creates new partitions if necessary.
     pub fn write(&self, kvs: &KeyValues) -> Result<()> {
+        if self.builder.use_bulk_insert(&self.metadata) {
+            let mut converter = BulkPartConverter::new(
+                &self.metadata,
+                kvs.num_rows(),
+                self.primary_key_codec.clone(),
+            );
+            converter.append_key_values(kvs)?;
+            let part = converter.convert()?;
+
+            return self.write_bulk(part);
+        }
+
         // Get all parts.
         let parts = self.list_partitions();
 
@@ -413,6 +430,7 @@ impl TimePartitions {
             part_duration,
             metadata: metadata.clone(),
             builder: self.builder.clone(),
+            primary_key_codec: self.primary_key_codec.clone(),
         }
     }
 
