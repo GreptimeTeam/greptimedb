@@ -43,16 +43,24 @@ use crate::error::{CatalogSnafu, Result, TableOperationSnafu};
 
 /// The name of the slow query table.
 pub const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
-
-const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
-const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
-const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
-const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
-const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
-const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
-const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
-const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
-const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
+/// The column name for the query execution cost (in milliseconds).
+pub const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
+/// The column name for the slow query threshold (in milliseconds).
+pub const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
+/// The column name for the query statement.
+pub const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
+/// The column name for the timestamp when the query was executed.
+pub const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+/// The column name indicating whether the query is a PromQL query.
+pub const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
+/// The column name for the PromQL query's start time.
+pub const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
+/// The column name for the PromQL query's end time.
+pub const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
+/// The column name for the PromQL query's range duration.
+pub const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
+/// The column name for the PromQL query's step interval.
+pub const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
 
 const DEFAULT_SLOW_QUERY_TABLE_TTL: &str = "30d";
 const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;

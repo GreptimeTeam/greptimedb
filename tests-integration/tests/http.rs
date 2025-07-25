@@ -1214,7 +1214,7 @@ write_interval = "30s"
 [slow_query]
 enable = true
 record_type = "system_table"
-threshold = "30s"
+threshold = "1s"
 sample_ratio = 1.0
 ttl = "30d"
 

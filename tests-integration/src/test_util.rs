@@ -634,6 +634,7 @@ pub async fn setup_mysql_server_with_user_provider(
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
     let fe_instance_ref = instance.fe_instance().clone();
+    let slow_query_recorder = fe_instance_ref.slow_query_recorder();
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
         ..Default::default()
@@ -654,7 +655,7 @@ pub async fn setup_mysql_server_with_user_provider(
             opts.reject_no_database.unwrap_or(false),
         )),
         None,
-        None,
+        slow_query_recorder,
     );
 
     mysql_server
