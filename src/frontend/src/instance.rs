@@ -365,7 +365,7 @@ impl Instance {
             let hit_false = hit_cache.iter().any(|en| !*en.value());
 
             // hit but have true and false, means both legacy and new mode are used
-            // we cannnot handle this case, so return error
+            // we cannot handle this case, so return error
             // add doc links in err msg later
             ensure!(!(hit_true && hit_false), OtlpMetricModeIncompatibleSnafu);
 
