@@ -16,14 +16,13 @@ use std::sync::Arc;
 
 use common_query::AddColumnLocation;
 use datatypes::types::cast;
-use partition::partition::PartitionDef;
 use rand::Rng;
 use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
 use crate::generator::Random;
 use crate::ir::alter_expr::{AlterTableOperation, AlterTableOption};
-use crate::ir::create_expr::ColumnOption;
+use crate::ir::create_expr::{ColumnOption, PartitionDef};
 use crate::ir::{AlterTableExpr, Column, CreateTableExpr, Ident};
 
 pub type TableContextRef = Arc<TableContext>;

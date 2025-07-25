@@ -261,6 +261,7 @@ impl Memtable for TimeSeriesMemtable {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
@@ -312,9 +313,10 @@ impl Memtable for TimeSeriesMemtable {
         });
         let context = Arc::new(MemtableRangeContext::new(self.id, builder, predicate));
 
+        let stats = self.stats();
         Ok(MemtableRanges {
-            ranges: [(0, MemtableRange::new(context))].into(),
-            stats: self.stats(),
+            ranges: [(0, MemtableRange::new(context, stats.num_rows))].into(),
+            stats,
         })
     }
 
@@ -679,26 +681,32 @@ fn prune_primary_key(
 }
 
 /// A `Series` holds a list of field values of some given primary key.
-pub(crate) struct Series {
+pub struct Series {
     pk_cache: Option<Vec<Value>>,
     active: ValueBuilder,
     frozen: Vec<Values>,
     region_metadata: RegionMetadataRef,
+    capacity: usize,
 }
 
 impl Series {
-    pub(crate) fn with_capacity(region_metadata: &RegionMetadataRef, builder_cap: usize) -> Self {
+    pub(crate) fn with_capacity(
+        region_metadata: &RegionMetadataRef,
+        init_capacity: usize,
+        capacity: usize,
+    ) -> Self {
         MEMTABLE_ACTIVE_SERIES_COUNT.inc();
         Self {
             pk_cache: None,
-            active: ValueBuilder::new(region_metadata, builder_cap),
+            active: ValueBuilder::new(region_metadata, init_capacity),
             frozen: vec![],
             region_metadata: region_metadata.clone(),
+            capacity,
         }
     }
 
     pub(crate) fn new(region_metadata: &RegionMetadataRef) -> Self {
-        Self::with_capacity(region_metadata, INITIAL_BUILDER_CAPACITY)
+        Self::with_capacity(region_metadata, INITIAL_BUILDER_CAPACITY, BUILDER_CAPACITY)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -714,7 +722,7 @@ impl Series {
         values: impl Iterator<Item = ValueRef<'a>>,
     ) -> usize {
         // + 10 to avoid potential reallocation.
-        if self.active.len() + 10 > BUILDER_CAPACITY {
+        if self.active.len() + 10 > self.capacity {
             let region_metadata = self.region_metadata.clone();
             self.freeze(&region_metadata);
         }
@@ -739,8 +747,12 @@ impl Series {
         ts_v: VectorRef,
         op_type_v: u8,
         sequence_v: u64,
-        fields: impl Iterator<Item = VectorRef>,
+        fields: Vec<VectorRef>,
     ) -> Result<()> {
+        if !self.active.can_accommodate(&fields)? {
+            let region_metadata = self.region_metadata.clone();
+            self.freeze(&region_metadata);
+        }
         self.active.extend(ts_v, op_type_v, sequence_v, fields)
     }
 
@@ -781,6 +793,13 @@ impl Series {
             self.frozen = vec![values];
         };
         Ok(&self.frozen[0])
+    }
+
+    pub fn read_to_values(&self) -> Vec<Values> {
+        let mut res = Vec::with_capacity(self.frozen.len() + 1);
+        res.extend(self.frozen.iter().cloned());
+        res.push(self.active.finish_cloned());
+        res
     }
 }
 
@@ -875,13 +894,42 @@ impl ValueBuilder {
         size
     }
 
+    /// Checks if current value builder have sufficient space to accommodate `fields`.
+    /// Returns false if there is no space to accommodate fields due to offset overflow.
+    pub(crate) fn can_accommodate(&self, fields: &[VectorRef]) -> Result<bool> {
+        for (field_src, field_dest) in fields.iter().zip(self.fields.iter()) {
+            let Some(builder) = field_dest else {
+                continue;
+            };
+            let FieldBuilder::String(builder) = builder else {
+                continue;
+            };
+            let array = field_src.to_arrow_array();
+            let string_array = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .with_context(|| error::InvalidBatchSnafu {
+                    reason: format!(
+                        "Field type mismatch, expecting String, given: {}",
+                        field_src.data_type()
+                    ),
+                })?;
+            let space_needed = string_array.value_data().len() as i32;
+            // offset may overflow
+            if builder.next_offset().checked_add(space_needed).is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn extend(
         &mut self,
         ts_v: VectorRef,
         op_type: u8,
         sequence: u64,
-        fields: impl Iterator<Item = VectorRef>,
-    ) -> error::Result<()> {
+        fields: Vec<VectorRef>,
+    ) -> Result<()> {
         let num_rows_before = self.timestamp.len();
         let num_rows_to_write = ts_v.len();
         self.timestamp.reserve(num_rows_to_write);
@@ -932,7 +980,9 @@ impl ValueBuilder {
         self.sequence
             .extend(iter::repeat_n(sequence, num_rows_to_write));
 
-        for (field_idx, (field_src, field_dest)) in fields.zip(self.fields.iter_mut()).enumerate() {
+        for (field_idx, (field_src, field_dest)) in
+            fields.into_iter().zip(self.fields.iter_mut()).enumerate()
+        {
             let builder = field_dest.get_or_insert_with(|| {
                 let mut field_builder =
                     FieldBuilder::create(&self.field_types[field_idx], INITIAL_BUILDER_CAPACITY);
@@ -972,11 +1022,63 @@ impl ValueBuilder {
         debug_assert_eq!(sequence_len, self.timestamp.len());
         sequence_len
     }
+
+    fn finish_cloned(&self) -> Values {
+        let num_rows = self.sequence.len();
+        let fields = self
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if let Some(v) = v {
+                    MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.dec();
+                    v.finish_cloned()
+                } else {
+                    let mut single_null = self.field_types[i].create_mutable_vector(num_rows);
+                    single_null.push_nulls(num_rows);
+                    single_null.to_vector()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let sequence = Arc::new(UInt64Vector::from_vec(self.sequence.clone()));
+        let op_type = Arc::new(UInt8Vector::from_vec(self.op_type.clone()));
+        let timestamp: VectorRef = match self.timestamp_type {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => {
+                Arc::new(TimestampSecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => {
+                Arc::new(TimestampMillisecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => {
+                Arc::new(TimestampMicrosecondVector::from_vec(self.timestamp.clone()))
+            }
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => {
+                Arc::new(TimestampNanosecondVector::from_vec(self.timestamp.clone()))
+            }
+            _ => unreachable!(),
+        };
+
+        if cfg!(debug_assertions) {
+            debug_assert_eq!(timestamp.len(), sequence.len());
+            debug_assert_eq!(timestamp.len(), op_type.len());
+            for field in &fields {
+                debug_assert_eq!(timestamp.len(), field.len());
+            }
+        }
+
+        Values {
+            timestamp,
+            sequence,
+            op_type,
+            fields,
+        }
+    }
 }
 
 /// [Values] holds an immutable vectors of field columns, including `sequence` and `op_type`.
 #[derive(Clone)]
-pub(crate) struct Values {
+pub struct Values {
     timestamp: VectorRef,
     sequence: Arc<UInt64Vector>,
     op_type: Arc<UInt8Vector>,

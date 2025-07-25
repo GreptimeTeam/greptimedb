@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -31,7 +31,7 @@ use crate::test_util::{
 async fn scan_in_parallel(
     env: &mut TestEnv,
     region_id: RegionId,
-    region_dir: &str,
+    table_dir: &str,
     parallelism: usize,
     channel_size: usize,
 ) {
@@ -47,9 +47,10 @@ async fn scan_in_parallel(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
-                region_dir: region_dir.to_string(),
+                table_dir: table_dir.to_string(),
                 options: HashMap::default(),
                 skip_wal_replay: false,
+                path_type: PathType::Bare,
             }),
         )
         .await
@@ -89,7 +90,7 @@ async fn test_parallel_scan() {
         .await;
 
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
 
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
@@ -132,15 +133,15 @@ async fn test_parallel_scan() {
 
     engine.stop().await.unwrap();
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 0, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 0, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 1, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 1, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 1).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 2, 1).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 2, 8).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 2, 8).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 4, 8).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 4, 8).await;
 
-    scan_in_parallel(&mut env, region_id, &region_dir, 8, 2).await;
+    scan_in_parallel(&mut env, region_id, &table_dir, 8, 2).await;
 }

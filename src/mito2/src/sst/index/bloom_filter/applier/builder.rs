@@ -28,6 +28,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
@@ -37,7 +38,8 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplier;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 pub struct BloomFilterIndexApplierBuilder<'a> {
-    region_dir: String,
+    table_dir: String,
+    path_type: PathType,
     object_store: ObjectStore,
     metadata: &'a RegionMetadata,
     puffin_manager_factory: PuffinManagerFactory,
@@ -49,13 +51,15 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
     pub fn new(
-        region_dir: String,
+        table_dir: String,
+        path_type: PathType,
         object_store: ObjectStore,
         metadata: &'a RegionMetadata,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
-            region_dir,
+            table_dir,
+            path_type,
             object_store,
             metadata,
             puffin_manager_factory,
@@ -98,8 +102,8 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         }
 
         let applier = BloomFilterIndexApplier::new(
-            self.region_dir,
-            self.metadata.region_id,
+            self.table_dir,
+            self.path_type,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,
@@ -391,6 +395,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,
@@ -427,6 +432,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,
@@ -454,6 +460,7 @@ mod tests {
         let builder = || {
             BloomFilterIndexApplierBuilder::new(
                 "test".to_string(),
+                PathType::Bare,
                 test_object_store(),
                 &metadata,
                 factory.clone(),
@@ -513,6 +520,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,
@@ -545,6 +553,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,
@@ -582,6 +591,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,
@@ -617,6 +627,7 @@ mod tests {
         let metadata = test_region_metadata();
         let builder = BloomFilterIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             factory,

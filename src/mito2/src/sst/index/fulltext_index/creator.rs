@@ -371,12 +371,13 @@ mod tests {
     use object_store::ObjectStore;
     use puffin::puffin_manager::{PuffinManager, PuffinWriter};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::region_request::PathType;
     use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
     use crate::access_layer::RegionFilePathFactory;
     use crate::read::{Batch, BatchColumn};
-    use crate::sst::file::FileId;
+    use crate::sst::file::{FileId, RegionFileId};
     use crate::sst::index::fulltext_index::applier::builder::{
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
@@ -541,7 +542,7 @@ mod tests {
         Option<BitVec>,
     ) -> BoxFuture<'static, Option<BTreeSet<RowId>>> {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
-        let region_dir = "region0".to_string();
+        let table_dir = "table0".to_string();
         let sst_file_id = FileId::random();
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata(backend.clone());
@@ -564,9 +565,10 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
-        let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
+        let region_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
+        let mut writer = puffin_manager.writer(&region_file_id).await.unwrap();
         let _ = indexer.finish(&mut writer).await.unwrap();
         writer.finish().await.unwrap();
 
@@ -574,7 +576,7 @@ mod tests {
               terms_requests: Vec<(ColumnId, Vec<(bool, &str)>)>,
               coarse_mask: Option<BitVec>| {
             let _d = &d;
-            let region_dir = region_dir.clone();
+            let table_dir = table_dir.clone();
             let object_store = object_store.clone();
             let factory = factory.clone();
 
@@ -607,8 +609,8 @@ mod tests {
             }
 
             let applier = FulltextIndexApplier::new(
-                region_dir,
-                region_metadata.region_id,
+                table_dir,
+                PathType::Bare,
                 object_store,
                 requests,
                 factory,
@@ -618,14 +620,14 @@ mod tests {
             async move {
                 match backend {
                     FulltextBackend::Tantivy => {
-                        applier.apply_fine(sst_file_id, None).await.unwrap()
+                        applier.apply_fine(region_file_id, None).await.unwrap()
                     }
                     FulltextBackend::Bloom => {
                         let coarse_mask = coarse_mask.unwrap_or_default();
                         let row_groups = (0..coarse_mask.len()).map(|i| (1, coarse_mask[i]));
                         // row group id == row id
                         let resp = applier
-                            .apply_coarse(sst_file_id, None, row_groups)
+                            .apply_coarse(region_file_id, None, row_groups)
                             .await
                             .unwrap();
                         resp.map(|r| {

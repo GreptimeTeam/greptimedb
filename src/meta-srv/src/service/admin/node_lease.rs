@@ -24,6 +24,7 @@ use crate::key::{DatanodeLeaseKey, LeaseValue};
 use crate::lease;
 use crate::service::admin::HttpHandler;
 
+#[derive(Clone)]
 pub struct NodeLeaseHandler {
     pub meta_peer_client: MetaPeerClientRef,
 }

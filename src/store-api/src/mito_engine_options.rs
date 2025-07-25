@@ -36,7 +36,7 @@ pub const TWCS_MAX_OUTPUT_FILE_SIZE: &str = "compaction.twcs.max_output_file_siz
 /// Option key for twcs time window.
 pub const TWCS_TIME_WINDOW: &str = "compaction.twcs.time_window";
 /// Option key for twcs remote compaction.
-pub const REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
+pub const TWCS_REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
 /// Option key for twcs fallback to local.
 pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
 /// Option key for memtable type.
@@ -65,7 +65,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         TWCS_TRIGGER_FILE_NUM,
         TWCS_MAX_OUTPUT_FILE_SIZE,
         TWCS_TIME_WINDOW,
-        REMOTE_COMPACTION,
+        TWCS_REMOTE_COMPACTION,
         TWCS_FALLBACK_TO_LOCAL,
         "storage",
         "index.inverted_index.ignore_column_ids",

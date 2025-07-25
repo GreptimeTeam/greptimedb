@@ -17,7 +17,7 @@ use std::fmt::Display;
 
 use datatypes::value::Value;
 use derive_builder::Builder;
-use partition::partition::PartitionDef;
+use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{Column, Ident};
@@ -68,6 +68,12 @@ pub struct CreateTableExpr {
     #[builder(default, setter(into))]
     pub options: HashMap<String, Value>,
     pub primary_keys: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionDef {
+    pub columns: Vec<String>,
+    pub exprs: Vec<PartitionExpr>,
 }
 
 #[derive(Debug, Builder, Clone, Serialize, Deserialize)]

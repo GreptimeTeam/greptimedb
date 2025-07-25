@@ -32,7 +32,10 @@ use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
     is_metric_engine_option_key, LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::is_mito_engine_option_key;
+use store_api::mito_engine_options::{
+    is_mito_engine_option_key, APPEND_MODE_KEY, COMPACTION_TYPE, MEMTABLE_TYPE, MERGE_MODE_KEY,
+    TWCS_FALLBACK_TO_LOCAL, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ParseTableOptionSnafu, Result};
@@ -46,6 +49,10 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
+
+use std::collections::HashSet;
+
+use once_cell::sync::Lazy;
 
 pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
     // common keys:
@@ -64,6 +71,28 @@ pub const VALID_TABLE_OPTION_KEYS: [&str; 11] = [
     // table model info
     TABLE_DATA_MODEL,
 ];
+
+// Valid option keys when creating a db.
+static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
+    let mut set = HashSet::new();
+    set.insert(TTL_KEY);
+    set.insert(STORAGE_KEY);
+    set.insert(MEMTABLE_TYPE);
+    set.insert(APPEND_MODE_KEY);
+    set.insert(MERGE_MODE_KEY);
+    set.insert(SKIP_WAL_KEY);
+    set.insert(COMPACTION_TYPE);
+    set.insert(TWCS_FALLBACK_TO_LOCAL);
+    set.insert(TWCS_TIME_WINDOW);
+    set.insert(TWCS_TRIGGER_FILE_NUM);
+    set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
+    set
+});
+
+/// Returns true if the `key` is a valid key for database.
+pub fn validate_database_option(key: &str) -> bool {
+    VALID_DB_OPT_KEYS.contains(&key)
+}
 
 /// Returns true if the `key` is a valid key for any engine or storage.
 pub fn validate_table_option(key: &str) -> bool {

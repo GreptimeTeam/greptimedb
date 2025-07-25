@@ -138,6 +138,7 @@ impl TableMetadataAllocator {
             })
             .collect::<Vec<_>>();
 
+        // If the table has no partitions, we need to create a default region.
         if region_routes.is_empty() {
             region_routes.push(RegionRoute {
                 region: Region {

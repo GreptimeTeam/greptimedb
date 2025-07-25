@@ -26,7 +26,8 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
-use store_api::storage::{ColumnId, RegionId};
+use store_api::region_request::PathType;
+use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -39,7 +40,7 @@ use crate::error::{
     Result,
 };
 use crate::metrics::INDEX_APPLY_ELAPSED;
-use crate::sst::file::FileId;
+use crate::sst::file::RegionFileId;
 pub use crate::sst::index::bloom_filter::applier::builder::BloomFilterIndexApplierBuilder;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
@@ -49,11 +50,11 @@ pub(crate) type BloomFilterIndexApplierRef = Arc<BloomFilterIndexApplier>;
 
 /// `BloomFilterIndexApplier` applies bloom filter predicates to the SST file.
 pub struct BloomFilterIndexApplier {
-    /// Directory of the region.
-    region_dir: String,
+    /// Directory of the table.
+    table_dir: String,
 
-    /// ID of the region.
-    region_id: RegionId,
+    /// Path type for generating file paths.
+    path_type: PathType,
 
     /// Object store to read the index file.
     object_store: ObjectStore,
@@ -83,16 +84,16 @@ impl BloomFilterIndexApplier {
     ///
     /// For each column, the value will be retained only if it contains __all__ predicates.
     pub fn new(
-        region_dir: String,
-        region_id: RegionId,
+        table_dir: String,
+        path_type: PathType,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
     ) -> Self {
         let predicates = Arc::new(predicates);
         Self {
-            region_dir,
-            region_id,
+            table_dir,
+            path_type,
             object_store,
             file_cache: None,
             puffin_manager_factory,
@@ -133,7 +134,7 @@ impl BloomFilterIndexApplier {
     /// Empty ranges means that the row group is searched but no rows are found.
     pub async fn apply(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         file_size_hint: Option<u64>,
         row_groups: impl Iterator<Item = (usize, bool)>,
     ) -> Result<Vec<(usize, Vec<Range<usize>>)>> {
@@ -172,7 +173,7 @@ impl BloomFilterIndexApplier {
             if let Some(bloom_filter_cache) = &self.bloom_filter_index_cache {
                 let blob_size = blob.metadata().await.context(MetadataSnafu)?.content_length;
                 let reader = CachedBloomFilterIndexBlobReader::new(
-                    file_id,
+                    file_id.file_id(),
                     *column_id,
                     Tag::Skipping,
                     blob_size,
@@ -207,7 +208,7 @@ impl BloomFilterIndexApplier {
     /// Returus `None` if the column does not have an index.
     async fn blob_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
@@ -245,7 +246,7 @@ impl BloomFilterIndexApplier {
     /// Creates a blob reader from the cached index file
     async fn cached_blob_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
@@ -253,14 +254,14 @@ impl BloomFilterIndexApplier {
             return Ok(None);
         };
 
-        let index_key = IndexKey::new(self.region_id, file_id, FileType::Puffin);
+        let index_key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Puffin);
         if file_cache.get(index_key).await.is_none() {
             return Ok(None);
         };
 
         let puffin_manager = self.puffin_manager_factory.build(
             file_cache.local_store(),
-            WriteCachePathProvider::new(self.region_id, file_cache.clone()),
+            WriteCachePathProvider::new(file_cache.clone()),
         );
         let reader = puffin_manager
             .reader(&file_id)
@@ -284,7 +285,7 @@ impl BloomFilterIndexApplier {
     /// Creates a blob reader from the remote index file
     async fn remote_blob_reader(
         &self,
-        file_id: FileId,
+        file_id: RegionFileId,
         column_id: ColumnId,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
@@ -292,7 +293,7 @@ impl BloomFilterIndexApplier {
             .puffin_manager_factory
             .build(
                 self.object_store.clone(),
-                RegionFilePathFactory::new(self.region_dir.clone()),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
@@ -354,6 +355,7 @@ mod tests {
     use store_api::metadata::RegionMetadata;
 
     use super::*;
+    use crate::sst::file::FileId;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
     };
@@ -361,23 +363,24 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn tester(
-        region_dir: String,
+        table_dir: String,
         object_store: ObjectStore,
         metadata: &RegionMetadata,
         puffin_manager_factory: PuffinManagerFactory,
-        file_id: FileId,
+        file_id: RegionFileId,
     ) -> impl Fn(&[Expr], Vec<(usize, bool)>) -> BoxFuture<'static, Vec<(usize, Vec<Range<usize>>)>>
            + use<'_> {
         move |exprs, row_groups| {
-            let region_dir = region_dir.clone();
-            let object_store = object_store.clone();
+            let table_dir = table_dir.clone();
+            let object_store: ObjectStore = object_store.clone();
             let metadata = metadata.clone();
             let puffin_manager_factory = puffin_manager_factory.clone();
             let exprs = exprs.to_vec();
 
             Box::pin(async move {
                 let builder = BloomFilterIndexApplierBuilder::new(
-                    region_dir,
+                    table_dir,
+                    PathType::Bare,
                     object_store,
                     &metadata,
                     puffin_manager_factory,
@@ -420,13 +423,17 @@ mod tests {
         let object_store = mock_object_store();
         let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
         let memory_usage_threshold = Some(1024);
-        let file_id = FileId::random();
-        let region_dir = "region_dir".to_string();
+        let file_id = RegionFileId::new(region_metadata.region_id, FileId::random());
+        let table_dir = "table_dir".to_string();
 
-        let mut indexer =
-            BloomFilterIndexer::new(file_id, &region_metadata, intm_mgr, memory_usage_threshold)
-                .unwrap()
-                .unwrap();
+        let mut indexer = BloomFilterIndexer::new(
+            file_id.file_id(),
+            &region_metadata,
+            intm_mgr,
+            memory_usage_threshold,
+        )
+        .unwrap()
+        .unwrap();
 
         // push 20 rows
         let mut batch = new_batch("tag1", 0..10);
@@ -436,7 +443,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
 
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
@@ -444,7 +451,7 @@ mod tests {
         puffin_writer.finish().await.unwrap();
 
         let tester = tester(
-            region_dir.clone(),
+            table_dir.clone(),
             object_store.clone(),
             &region_metadata,
             factory.clone(),

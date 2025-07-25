@@ -20,13 +20,12 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::rpc::router::{LegacyPartition, Region, RegionRoute};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use moka::future::CacheBuilder;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
-use partition::partition::{PartitionBound, PartitionDef};
 use store_api::storage::RegionNumber;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 
@@ -163,18 +162,10 @@ pub(crate) async fn create_partition_rule_manager(
                         id: 1.into(),
                         name: "r3".to_string(),
                         // Keep the old partition definition to test compatibility.
-                        partition: Some(
-                            PartitionDef::new(
-                                vec!["a".to_string()],
-                                vec![PartitionBound::Expr(PartitionExpr::new(
-                                    Operand::Column("a".to_string()),
-                                    RestrictedOp::GtEq,
-                                    Operand::Value(datatypes::value::Value::Int32(50)),
-                                ))],
-                            )
-                            .try_into()
-                            .unwrap(),
-                        ),
+                        partition: Some(LegacyPartition {
+                            column_list: vec![b"a".to_vec()],
+                            value_list: vec![b"{\"Expr\":{\"lhs\":{\"Column\":\"a\"},\"op\":\"GtEq\",\"rhs\":{\"Value\":{\"Int32\":50}}}}".to_vec()],
+                        }),
                         attrs: BTreeMap::new(),
                         partition_expr: Default::default(),
                     },

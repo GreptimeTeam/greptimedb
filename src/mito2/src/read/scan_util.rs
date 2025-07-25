@@ -524,7 +524,7 @@ pub(crate) fn scan_mem_ranges(
         part_metrics.inc_num_mem_ranges(ranges.len());
         for range in ranges {
             let build_reader_start = Instant::now();
-            let iter = range.build_iter(time_range)?;
+            let iter = range.build_prune_iter(time_range)?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             let mut source = Source::Iter(iter);
