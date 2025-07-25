@@ -32,6 +32,8 @@ use query::parser::{PromQuery, QueryLanguageParser};
 use rand::random;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use table::TableRef;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -39,7 +41,9 @@ use tokio::task::JoinHandle;
 
 use crate::error::{CatalogSnafu, Result, TableOperationSnafu};
 
-const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
+/// The name of the slow query table.
+pub const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
+
 const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
 const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
 const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
@@ -159,6 +163,15 @@ impl SlowQueryEventHandler {
     }
 
     async fn record_slow_query(&self, event: SlowQueryEvent) {
+        // Only capture the query statement.
+        if !self.is_sql_query_statement(&event.query, event.query_ctx.clone()) {
+            debug!(
+                "Skip the slow query event: {:?} because it's not a query statement",
+                event
+            );
+            return;
+        }
+
         match self.record_type {
             SlowQueriesRecordType::Log => {
                 // Record the slow query in a specific logs file.
@@ -450,6 +463,27 @@ impl SlowQueryEventHandler {
                 ..Default::default()
             },
         ]
+    }
+
+    fn is_sql_query_statement(&self, query: &str, query_ctx: QueryContextRef) -> bool {
+        match ParserContext::create_with_dialect(
+            query,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        ) {
+            Ok(stmt) => {
+                // Check the first statement is a query statement.
+                if let Some(Statement::Query(_)) = stmt.first() {
+                    return true;
+                }
+                false
+            }
+            Err(e) => {
+                // It's unlikely to happen.
+                error!(e; "Failed to parse query: {:?}", query);
+                false
+            }
+        }
     }
 }
 

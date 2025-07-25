@@ -18,6 +18,7 @@ query.workspace = true
 rand.workspace = true
 session.workspace = true
 snafu.workspace = true
+sql.workspace = true
 store-api.workspace = true
 table.workspace = true
 tokio.workspace = true
