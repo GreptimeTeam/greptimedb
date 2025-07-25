@@ -24,7 +24,6 @@ use common_telemetry::{debug, error, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::stream::BoxStream;
 use futures::{stream, Sink, SinkExt, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
@@ -129,14 +128,6 @@ fn convert_err(e: impl ErrorExt) -> PgWireError {
     ))
 }
 
-fn convert_error_future<E: ErrorExt>(
-    e: E,
-) -> BoxStream<'static, Result<Vec<datatypes::prelude::Value>, PgWireError>> {
-    let pgwire_error = convert_err(e);
-
-    futures::stream::once(futures::future::err(pgwire_error)).boxed()
-}
-
 pub(crate) fn output_to_query_response<'a>(
     query_ctx: QueryContextRef,
     output: Result<Output>,
@@ -184,7 +175,7 @@ where
                 rb.rows().map(Ok).collect::<Vec<_>>(),
             )
             .boxed(),
-            Err(e) => convert_error_future(e),
+            Err(e) => futures::stream::once(futures::future::err(convert_err(e))).boxed(),
         })
         .flatten() // flatten into stream<result<row>>
         .map(move |row| {
