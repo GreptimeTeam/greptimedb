@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["admin_axum_router","boxed","check_path","make_admin_service"],"mod":["health","heartbeat","leader","maintenance","node_lease","procedure","util"],"struct":["Admin","Router"],"trait":["HttpHandler"]};

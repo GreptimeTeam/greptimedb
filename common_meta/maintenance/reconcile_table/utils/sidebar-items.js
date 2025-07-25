@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_column_metadata_from_table_info","build_table_meta_from_column_metadatas","check_column_metadata_invariants","check_column_metadatas_consistent","resolve_column_metadatas_with_latest","resolve_column_metadatas_with_metasrv"],"struct":["ColumnMetadataDisplay","PartialRegionMetadata"]};

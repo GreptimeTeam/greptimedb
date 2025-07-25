@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_WRITE_BUFFER_SIZE","DEFAULT_WRITE_CONCURRENCY"],"fn":["internal_fields","plain_internal_fields","to_plain_sst_arrow_schema","to_sst_arrow_schema"],"mod":["file","file_purger","index","location","parquet","version"]};
