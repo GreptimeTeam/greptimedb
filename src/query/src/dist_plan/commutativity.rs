@@ -16,15 +16,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{aggr_state_func_name, StateMergeHelper};
-use common_function::aggrs::approximate::hll::{HllState, HLL_MERGE_NAME, HLL_NAME};
-use common_function::aggrs::approximate::uddsketch::{
-    UddSketchState, UDDSKETCH_MERGE_NAME, UDDSKETCH_STATE_NAME,
-};
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_telemetry::debug;
-use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion_common::Column;
-use datafusion_expr::{Expr, LogicalPlan, Projection, UserDefinedLogicalNode};
+use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
@@ -84,7 +78,7 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
                 return false;
             }
 
-            // whether the corrseponding state function exists in the registry
+            // whether the corresponding state function exists in the registry
             FUNCTION_REGISTRY.is_aggr_func_exist(&aggr_state_func_name(aggr_func.func.name()))
         } else {
             false
@@ -96,18 +90,6 @@ pub fn get_aggr_func(expr: &Expr) -> Option<&datafusion_expr::expr::AggregateFun
     let mut expr_ref = expr;
     while let Expr::Alias(alias) = expr_ref {
         expr_ref = &alias.expr;
-    }
-    if let Expr::AggregateFunction(aggr_func) = expr_ref {
-        Some(aggr_func)
-    } else {
-        None
-    }
-}
-
-pub fn get_aggr_func_mut(expr: &mut Expr) -> Option<&mut datafusion_expr::expr::AggregateFunction> {
-    let mut expr_ref = expr;
-    while let Expr::Alias(alias) = expr_ref {
-        expr_ref = &mut alias.expr;
     }
     if let Expr::AggregateFunction(aggr_func) = expr_ref {
         Some(aggr_func)

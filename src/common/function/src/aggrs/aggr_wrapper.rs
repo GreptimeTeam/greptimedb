@@ -96,7 +96,7 @@ impl StateMergeHelper {
     /// Note that can't register `merge` function here, as it needs to be created from the original aggregate function with given input types.
     pub fn register(registry: &FunctionRegistry) {
         // TODO(discord9): support more aggregate functions. and move
-        // this list to somewhere else. Or just iter over all exisiting aggr funciton and add state wrapper fn def to it.
+        // this list to somewhere else. Or just iter over all existing aggr function and add state wrapper fn def to it.
         let supported = vec![
             count_udaf(),
             sum_udaf(),
@@ -121,7 +121,7 @@ impl StateMergeHelper {
                         )
                     })
                     .ok()
-                    .map(|state_fn| AggregateUDF::new_from_impl(state_fn))
+                    .map(AggregateUDF::new_from_impl)
             })
             .collect::<Vec<_>>();
 
