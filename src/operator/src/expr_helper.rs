@@ -441,6 +441,7 @@ fn columns_to_column_schemas(
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
+// TODO(weny): refactor this function to use `try_as_column_def`
 pub fn column_schemas_to_defs(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],

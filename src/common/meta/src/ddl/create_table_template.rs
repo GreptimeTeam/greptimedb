@@ -14,16 +14,61 @@
 
 use std::collections::HashMap;
 
+use api::v1::column_def::try_as_column_def;
 use api::v1::region::{CreateRequest, RegionColumnDef};
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
-use snafu::OptionExt;
-use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
+use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::TableId;
+use table::metadata::{RawTableInfo, TableId};
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{self, ConvertColumnDefSnafu, Result};
 use crate::wal_options_allocator::prepare_wal_options;
+
+/// Builds a [CreateRequest] from a [RawTableInfo].
+///
+/// Note: **This method is only used for creating logical tables.**
+pub(crate) fn build_template_from_raw_table_info(
+    raw_table_info: &RawTableInfo,
+) -> Result<CreateRequest> {
+    let primary_key_indices = &raw_table_info.meta.primary_key_indices;
+    let mut primary_column_ids = Vec::with_capacity(primary_key_indices.len());
+    let column_defs = raw_table_info
+        .meta
+        .schema
+        .column_schemas
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let is_primary_key = primary_key_indices.contains(&i);
+            let column_def = try_as_column_def(c, is_primary_key)
+                .context(ConvertColumnDefSnafu { column: &c.name })?;
+
+            if is_primary_key {
+                primary_column_ids.push(i as u32);
+            }
+
+            Ok(RegionColumnDef {
+                column_def: Some(column_def),
+                // The column id will be overridden by the metric engine.
+                // So we just use the index as the column id.
+                column_id: i as u32,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let options = HashMap::from(&raw_table_info.meta.options);
+    let template = CreateRequest {
+        region_id: 0,
+        engine: METRIC_ENGINE_NAME.to_string(),
+        column_defs,
+        primary_key: primary_column_ids,
+        path: String::new(),
+        options,
+    };
+
+    Ok(template)
+}
 
 pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
     let column_defs = create_table_expr
