@@ -24,36 +24,39 @@ use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
-use datafusion::arrow::array::{TimestampNanosecondArray, UInt64Builder};
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryBuilder, DictionaryArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt8Array,
-    UInt8Builder,
+    Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt32Array, UInt64Array, UInt64Builder, UInt8Array, UInt8Builder,
 };
-use datatypes::arrow::compute::TakeOptions;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
+use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
-use mito_codec::key_values::{KeyValue, KeyValuesRef};
+use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt};
 use parquet::arrow::ArrowWriter;
 use parquet::data_type::AsBytes;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
 
 use crate::error::{
-    self, ComputeArrowSnafu, EncodeMemtableSnafu, EncodeSnafu, NewRecordBatchSnafu, Result,
+    self, ColumnNotFoundSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, EncodeMemtableSnafu,
+    EncodeSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::BulkPartIter;
+use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::BoxedBatchIterator;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
@@ -207,6 +210,181 @@ impl BulkPart {
     pub fn num_rows(&self) -> usize {
         self.batch.num_rows()
     }
+}
+
+/// Builder type for primary key dictionary array.
+type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
+
+/// Converter that converts structs into [BulkPart].
+pub struct BulkPartConverter {
+    /// Region metadata.
+    region_metadata: RegionMetadataRef,
+    /// Primary key codec for encoding keys
+    primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+    /// Buffer for encoding primary key.
+    key_buf: Vec<u8>,
+    /// Primary key array builder.
+    key_array_builder: PrimaryKeyArrayBuilder,
+    /// Builders for non-primary key columns.
+    value_builder: ValueBuilder,
+
+    /// Max timestamp value.
+    max_ts: i64,
+    /// Min timestamp value.
+    min_ts: i64,
+    /// Max sequence number.
+    max_sequence: SequenceNumber,
+}
+
+impl BulkPartConverter {
+    pub fn new(
+        region_metadata: &RegionMetadataRef,
+        capacity: usize,
+        primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+    ) -> Self {
+        Self {
+            region_metadata: region_metadata.clone(),
+            primary_key_codec,
+            key_buf: Vec::new(),
+            key_array_builder: PrimaryKeyArrayBuilder::new(),
+            value_builder: ValueBuilder::new(region_metadata, capacity),
+            min_ts: i64::MAX,
+            max_ts: i64::MIN,
+            max_sequence: SequenceNumber::MIN,
+        }
+    }
+
+    /// Appends a [KeyValues] into the converter.
+    pub fn append_key_values(&mut self, key_values: &KeyValues) -> Result<()> {
+        for kv in key_values.iter() {
+            self.append_key_value(&kv)?;
+        }
+
+        Ok(())
+    }
+
+    /// Appends a [KeyValue] to builders.
+    ///
+    /// If the primary key uses sparse encoding, callers must encoded the primary key in the [KeyValue].
+    fn append_key_value(&mut self, kv: &KeyValue) -> Result<()> {
+        // Handles primary key based on encoding type
+        if self.primary_key_codec.encoding() == PrimaryKeyEncoding::Sparse {
+            // For sparse encoding, the primary key is already encoded in the KeyValue
+            // Gets the first (and only) primary key value which contains the encoded key
+            let mut primary_keys = kv.primary_keys();
+            if let Some(encoded) = primary_keys
+                .next()
+                .context(ColumnNotFoundSnafu {
+                    column: PRIMARY_KEY_COLUMN_NAME,
+                })?
+                .as_binary()
+                .context(DataTypeMismatchSnafu)?
+            {
+                self.key_array_builder
+                    .append(encoded)
+                    .context(ComputeArrowSnafu)?;
+            } else {
+                self.key_array_builder
+                    .append("")
+                    .context(ComputeArrowSnafu)?;
+            }
+        } else {
+            // For dense encoding, we need to encode the primary key columns
+            self.key_buf.clear();
+            self.primary_key_codec
+                .encode_key_value(&kv, &mut self.key_buf)
+                .context(EncodeSnafu)?;
+            self.key_array_builder
+                .append(&self.key_buf)
+                .context(ComputeArrowSnafu)?;
+        };
+
+        // Pushes other columns.
+        self.value_builder.push(
+            kv.timestamp(),
+            kv.sequence(),
+            kv.op_type() as u8,
+            kv.fields(),
+        );
+
+        // Updates statistics
+        // Safety: timestamp of kv must be both present and a valid timestamp value.
+        let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+        self.min_ts = self.min_ts.min(ts);
+        self.max_ts = self.max_ts.max(ts);
+        self.max_sequence = self.max_sequence.max(kv.sequence());
+
+        Ok(())
+    }
+
+    /// Converts buffered content into a [BulkPart].
+    ///
+    /// It sorts the record batch by (primary key, timestamp, sequence desc).
+    pub fn convert(mut self) -> Result<BulkPart> {
+        let values = Values::from(self.value_builder);
+        let mut columns = Vec::with_capacity(4 + values.fields.len());
+        columns.extend(values.fields.iter().map(|field| field.to_arrow_array()));
+        let timestamp_index = columns.len();
+        columns.push(values.timestamp.to_arrow_array());
+        let pk_array = self.key_array_builder.finish();
+        columns.push(Arc::new(pk_array));
+        columns.push(values.sequence.to_arrow_array());
+        columns.push(values.op_type.to_arrow_array());
+
+        let schema = to_sst_arrow_schema(&self.region_metadata);
+
+        let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
+        // Sorts the record batch.
+        let batch = sort_primary_key_record_batch(&batch)?;
+
+        Ok(BulkPart {
+            batch,
+            max_ts: self.max_ts,
+            min_ts: self.min_ts,
+            sequence: self.max_sequence,
+            timestamp_index,
+            raw_data: None,
+        })
+    }
+}
+
+/// Sorts the record batch with primary key format.
+fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let total_columns = batch.num_columns();
+    let sort_columns = vec![
+        // Primary key column (ascending)
+        SortColumn {
+            values: batch.column(total_columns - 3).clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: true,
+            }),
+        },
+        // Time index column (ascending)
+        SortColumn {
+            values: batch.column(total_columns - 4).clone(),
+            options: Some(SortOptions {
+                descending: false,
+                nulls_first: true,
+            }),
+        },
+        // Sequence column (descending)
+        SortColumn {
+            values: batch.column(total_columns - 2).clone(),
+            options: Some(SortOptions {
+                descending: true,
+                nulls_first: true,
+            }),
+        },
+    ];
+
+    let indices = datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None)
+        .context(ComputeArrowSnafu)?;
+
+    let sorted_batch =
+        datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)?;
+
+    Ok(sorted_batch)
 }
 
 #[derive(Debug)]
