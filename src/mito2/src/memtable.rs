@@ -195,11 +195,6 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     ///
     /// A region must freeze the memtable before invoking this method.
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
-
-    /// Returns true if the memtable supports bulk insert.
-    fn supports_bulk_insert(&self) -> bool {
-        false
-    }
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -208,6 +203,11 @@ pub type MemtableRef = Arc<dyn Memtable>;
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
+
+    /// Returns true if the memtable builder supports bulk insert.
+    fn supports_bulk_insert(&self) -> bool {
+        false
+    }
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;

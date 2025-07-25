@@ -350,6 +350,10 @@ impl MemtableBuilder for PartitionTreeMemtableBuilder {
             &self.config,
         ))
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        false
+    }
 }
 
 struct PartitionTreeIterBuilder {

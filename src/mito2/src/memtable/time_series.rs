@@ -112,6 +112,10 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
             ))
         }
     }
+
+    fn supports_bulk_insert(&self) -> bool {
+        true
+    }
 }
 
 /// Memtable implementation that groups rows by their primary key.
@@ -373,10 +377,6 @@ impl Memtable for TimeSeriesMemtable {
             self.dedup,
             self.merge_mode,
         ))
-    }
-
-    fn supports_bulk_insert(&self) -> bool {
-        true
     }
 }
 
