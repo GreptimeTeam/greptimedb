@@ -482,21 +482,6 @@ where
     Ok(values)
 }
 
-impl From<LegacyPartition> for PbPartition {
-    fn from(p: LegacyPartition) -> Self {
-        let expression = if !p.value_list.is_empty() {
-            String::from_utf8_lossy(&p.value_list[0]).to_string()
-        } else {
-            "".to_string()
-        };
-
-        Self {
-            expression,
-            ..Default::default()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

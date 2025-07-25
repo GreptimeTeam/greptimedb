@@ -81,7 +81,7 @@ pub struct FulltextTerm {
 
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
 pub struct FulltextIndexApplierBuilder<'a> {
-    region_dir: String,
+    table_dir: String,
     path_type: PathType,
     store: ObjectStore,
     puffin_manager_factory: PuffinManagerFactory,
@@ -94,14 +94,15 @@ pub struct FulltextIndexApplierBuilder<'a> {
 impl<'a> FulltextIndexApplierBuilder<'a> {
     /// Creates a new `FulltextIndexApplierBuilder`.
     pub fn new(
-        region_dir: String,
+        table_dir: String,
+        path_type: PathType,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
         metadata: &'a RegionMetadata,
     ) -> Self {
         Self {
-            region_dir,
-            path_type: PathType::Bare, // Default to Bare
+            table_dir,
+            path_type,
             store,
             puffin_manager_factory,
             metadata,
@@ -109,12 +110,6 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             puffin_metadata_cache: None,
             bloom_filter_cache: None,
         }
-    }
-
-    /// Sets the path type to be used by the `FulltextIndexApplier`.
-    pub fn with_path_type(mut self, path_type: PathType) -> Self {
-        self.path_type = path_type;
-        self
     }
 
     /// Sets the file cache to be used by the `FulltextIndexApplier`.
@@ -155,7 +150,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
 
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
-                self.region_dir,
+                self.table_dir,
                 self.path_type,
                 self.store,
                 requests,

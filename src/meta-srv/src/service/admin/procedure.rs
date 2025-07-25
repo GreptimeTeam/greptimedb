@@ -31,7 +31,7 @@ pub struct ProcedureManagerHandler {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ProcedureManagerStatusResponse {
+pub(crate) struct ProcedureManagerStatusResponse {
     status: ProcedureManagerStatus,
 }
 
@@ -43,7 +43,9 @@ enum ProcedureManagerStatus {
 }
 
 impl ProcedureManagerHandler {
-    async fn pause_procedure_manager(&self) -> crate::Result<ProcedureManagerStatusResponse> {
+    pub(crate) async fn pause_procedure_manager(
+        &self,
+    ) -> crate::Result<ProcedureManagerStatusResponse> {
         self.manager
             .pasue_procedure()
             .await
@@ -55,7 +57,9 @@ impl ProcedureManagerHandler {
         })
     }
 
-    async fn resume_procedure_manager(&self) -> crate::Result<ProcedureManagerStatusResponse> {
+    pub(crate) async fn resume_procedure_manager(
+        &self,
+    ) -> crate::Result<ProcedureManagerStatusResponse> {
         self.manager
             .resume_procedure()
             .await
@@ -67,7 +71,9 @@ impl ProcedureManagerHandler {
         })
     }
 
-    async fn get_procedure_manager_status(&self) -> crate::Result<ProcedureManagerStatusResponse> {
+    pub(crate) async fn get_procedure_manager_status(
+        &self,
+    ) -> crate::Result<ProcedureManagerStatusResponse> {
         let is_paused = self
             .manager
             .is_procedure_paused()

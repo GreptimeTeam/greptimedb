@@ -750,6 +750,7 @@ mod tests {
         let build_inverted_index_applier = |exprs: &[Expr]| {
             InvertedIndexApplierBuilder::new(
                 FILE_DIR.to_string(),
+                PathType::Bare,
                 object_store.clone(),
                 &metadata,
                 HashSet::from_iter([0]),
@@ -765,6 +766,7 @@ mod tests {
         let build_bloom_filter_applier = |exprs: &[Expr]| {
             BloomFilterIndexApplierBuilder::new(
                 FILE_DIR.to_string(),
+                PathType::Bare,
                 object_store.clone(),
                 &metadata,
                 env.get_puffin_manager(),
