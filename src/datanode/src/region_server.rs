@@ -1311,7 +1311,9 @@ mod tests {
     use mito2::test_util::CreateRequestBuilder;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{RegionDropRequest, RegionOpenRequest, RegionTruncateRequest};
+    use store_api::region_request::{
+        PathType, RegionDropRequest, RegionOpenRequest, RegionTruncateRequest,
+    };
     use store_api::storage::RegionId;
 
     use super::*;
@@ -1356,7 +1358,8 @@ mod tests {
                 region_id,
                 RegionRequest::Open(RegionOpenRequest {
                     engine: engine_name.to_string(),
-                    region_dir: String::new(),
+                    table_dir: String::new(),
+                    path_type: PathType::Bare,
                     options: Default::default(),
                     skip_wal_replay: false,
                 }),

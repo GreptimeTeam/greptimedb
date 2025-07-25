@@ -629,7 +629,7 @@ pub(crate) fn scan_mem_ranges(
         for range in ranges {
             let build_reader_start = Instant::now();
             let mem_scan_metrics = Some(MemScanMetrics::default());
-            let iter = range.build_iter(time_range, mem_scan_metrics.clone())?;
+            let iter = range.build_prune_iter(time_range, mem_scan_metrics.clone())?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             let mut source = Source::Iter(iter);

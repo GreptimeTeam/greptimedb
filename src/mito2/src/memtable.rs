@@ -27,7 +27,6 @@ pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, SequenceNumber};
-use table::predicate::Predicate;
 
 use crate::config::MitoConfig;
 use crate::error::Result;
@@ -44,7 +43,7 @@ use crate::sst::file::FileTimeRange;
 mod builder;
 pub mod bulk;
 pub mod partition_tree;
-mod simple_bulk_memtable;
+pub mod simple_bulk_memtable;
 mod stats;
 pub mod time_partition;
 pub mod time_series;
@@ -74,7 +73,7 @@ impl Default for MemtableConfig {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MemtableStats {
     /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
@@ -82,9 +81,9 @@ pub struct MemtableStats {
     /// and only if the memtable is empty.
     time_range: Option<(Timestamp, Timestamp)>,
     /// Total rows in memtable
-    num_rows: usize,
+    pub num_rows: usize,
     /// Total number of ranges in the memtable.
-    num_ranges: usize,
+    pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
     max_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
@@ -164,10 +163,14 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
     /// `filters` are the predicates to be pushed down to memtable.
+    ///
+    /// # Note
+    /// This method should only be used for tests.
+    #[cfg(any(test, feature = "test"))]
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
+        predicate: Option<table::predicate::Predicate>,
         sequence: Option<SequenceNumber>,
     ) -> Result<BoxedBatchIterator>;
 
@@ -421,12 +424,15 @@ impl MemtableRangeContext {
 pub struct MemtableRange {
     /// Shared context.
     context: MemtableRangeContextRef,
+    /// Number of rows in current memtable range.
+    // todo(hl): use [MemtableRangeStats] instead.
+    num_rows: usize,
 }
 
 impl MemtableRange {
     /// Creates a new range from context.
-    pub fn new(context: MemtableRangeContextRef) -> Self {
-        Self { context }
+    pub fn new(context: MemtableRangeContextRef, num_rows: usize) -> Self {
+        Self { context, num_rows }
     }
 
     /// Returns the id of the memtable to read.
@@ -437,7 +443,7 @@ impl MemtableRange {
     /// Builds an iterator to read the range.
     /// Filters the result by the specific time range, this ensures memtable won't return
     /// rows out of the time range when new rows are inserted.
-    pub fn build_iter(
+    pub fn build_prune_iter(
         &self,
         time_range: FileTimeRange,
         metrics: Option<MemScanMetrics>,
@@ -449,6 +455,15 @@ impl MemtableRange {
             time_range,
             time_filters,
         )))
+    }
+
+    /// Builds an iterator to read all rows in range.
+    pub fn build_iter(&self) -> Result<BoxedBatchIterator> {
+        self.context.builder.build(None)
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
     }
 }
 

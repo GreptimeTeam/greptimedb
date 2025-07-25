@@ -26,6 +26,7 @@ use common_time::Timestamp;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use snafu::{ResultExt, Snafu};
+use store_api::region_request::PathType;
 use store_api::storage::RegionId;
 use uuid::Uuid;
 
@@ -57,16 +58,6 @@ impl FileId {
         Uuid::parse_str(input).map(FileId).context(ParseIdSnafu)
     }
 
-    /// Append `.parquet` to file id to make a complete file name
-    pub fn as_parquet(&self) -> String {
-        format!("{}{}", self, ".parquet")
-    }
-
-    /// Append `.puffin` to file id to make a complete file name
-    pub fn as_puffin(&self) -> String {
-        format!("{}{}", self, ".puffin")
-    }
-
     /// Converts [FileId] as byte slice.
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
@@ -93,6 +84,40 @@ impl FromStr for FileId {
     }
 }
 
+/// Cross-region file id.
+///
+/// It contains a region id and a file id. The string representation is `{region_id}/{file_id}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RegionFileId {
+    /// The region that creates the file.
+    region_id: RegionId,
+    /// The id of the file.
+    file_id: FileId,
+}
+
+impl RegionFileId {
+    /// Creates a new [RegionFileId] from `region_id` and `file_id`.
+    pub fn new(region_id: RegionId, file_id: FileId) -> Self {
+        Self { region_id, file_id }
+    }
+
+    /// Gets the region id.
+    pub fn region_id(&self) -> RegionId {
+        self.region_id
+    }
+
+    /// Gets the file id.
+    pub fn file_id(&self) -> FileId {
+        self.file_id
+    }
+}
+
+impl fmt::Display for RegionFileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.region_id, self.file_id)
+    }
+}
+
 /// Time range (min and max timestamps) of a SST file.
 /// Both min and max are inclusive.
 pub type FileTimeRange = (Timestamp, Timestamp);
@@ -110,7 +135,7 @@ pub(crate) fn overlaps(l: &FileTimeRange, r: &FileTimeRange) -> bool {
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FileMeta {
-    /// Region of file.
+    /// Region that created the file. The region id may not be the id of the current region.
     pub region_id: RegionId,
     /// Compared to normal file names, FileId ignore the extension
     pub file_id: FileId,
@@ -215,6 +240,11 @@ impl FileMeta {
     pub fn index_file_size(&self) -> u64 {
         self.index_file_size
     }
+
+    /// Returns the cross-region file id.
+    pub fn file_id(&self) -> RegionFileId {
+        RegionFileId::new(self.region_id, self.file_id)
+    }
 }
 
 /// Handle to a SST file.
@@ -245,14 +275,14 @@ impl FileHandle {
         self.inner.meta.region_id
     }
 
-    /// Returns the file id.
-    pub fn file_id(&self) -> FileId {
-        self.inner.meta.file_id
+    /// Returns the cross-region file id.
+    pub fn file_id(&self) -> RegionFileId {
+        RegionFileId::new(self.inner.meta.region_id, self.inner.meta.file_id)
     }
 
     /// Returns the complete file path of the file.
-    pub fn file_path(&self, file_dir: &str) -> String {
-        location::sst_file_path(file_dir, self.file_id())
+    pub fn file_path(&self, file_dir: &str, path_type: PathType) -> String {
+        location::sst_file_path(file_dir, self.file_id(), path_type)
     }
 
     /// Returns the time range of the file.
@@ -346,15 +376,6 @@ mod tests {
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
-    }
-
-    #[test]
-    fn test_file_id_as_parquet() {
-        let id = FileId::from_str("67e55044-10b1-426f-9247-bb680e5fe0c8").unwrap();
-        assert_eq!(
-            "67e55044-10b1-426f-9247-bb680e5fe0c8.parquet",
-            id.as_parquet()
-        );
     }
 
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {

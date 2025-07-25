@@ -406,15 +406,21 @@ mod tests {
         );
         assert_eq!(
             files[0],
-            windows.get(&0).unwrap().files().next().unwrap().files()[0].file_id()
+            windows.get(&0).unwrap().files().next().unwrap().files()[0]
+                .file_id()
+                .file_id()
         );
         assert_eq!(
             files[1],
-            windows.get(&3).unwrap().files().next().unwrap().files()[0].file_id()
+            windows.get(&3).unwrap().files().next().unwrap().files()[0]
+                .file_id()
+                .file_id()
         );
         assert_eq!(
             files[2],
-            windows.get(&12).unwrap().files().next().unwrap().files()[0].file_id()
+            windows.get(&12).unwrap().files().next().unwrap().files()[0]
+                .file_id()
+                .file_id()
         );
     }
 
@@ -444,7 +450,7 @@ mod tests {
                 .unwrap()
                 .files()
                 .iter()
-                .map(|f| f.file_id())
+                .map(|f| f.file_id().file_id())
                 .collect::<HashSet<_>>(),
             [files[0], files[1]].into_iter().collect()
         );
@@ -453,7 +459,7 @@ mod tests {
                 .unwrap()
                 .files()
                 .iter()
-                .map(|f| f.file_id())
+                .map(|f| f.file_id().file_id())
                 .collect::<HashSet<_>>(),
             [files[2], files[3]].into_iter().collect()
         );
@@ -477,14 +483,18 @@ mod tests {
             .files
             .into_values()
             .flat_map(|fg| fg.into_files())
-            .map(|f| f.file_id())
+            .map(|f| f.file_id().file_id())
             .collect::<HashSet<_>>();
         assert_eq!(candidates.len(), 3);
         assert_eq!(
             candidates,
-            [files[1].file_id(), files[3].file_id(), files[4].file_id()]
-                .into_iter()
-                .collect::<HashSet<_>>()
+            [
+                files[1].file_id().file_id(),
+                files[3].file_id().file_id(),
+                files[4].file_id().file_id()
+            ]
+            .into_iter()
+            .collect::<HashSet<_>>()
         );
     }
 

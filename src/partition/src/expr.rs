@@ -15,6 +15,7 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 
+use api::v1::meta::Partition;
 use datafusion_common::{ScalarValue, ToDFSchema};
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::Expr;
@@ -290,6 +291,14 @@ impl PartitionExpr {
             PartitionBound::Expr(expr) => Ok(Some(expr)),
             _ => Ok(None),
         }
+    }
+
+    /// Converts [Self] to [Partition].
+    pub fn as_pb_partition(&self) -> error::Result<Partition> {
+        Ok(Partition {
+            expression: self.as_json_str()?,
+            ..Default::default()
+        })
     }
 }
 

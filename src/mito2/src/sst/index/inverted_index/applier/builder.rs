@@ -33,6 +33,7 @@ use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
+use store_api::region_request::PathType;
 use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
@@ -45,8 +46,11 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
 /// Constructs an [`InvertedIndexApplier`] which applies predicates to SST files during scan.
 pub(crate) struct InvertedIndexApplierBuilder<'a> {
-    /// Directory of the region, required argument for constructing [`InvertedIndexApplier`].
-    region_dir: String,
+    /// Directory of the table, required argument for constructing [`InvertedIndexApplier`].
+    table_dir: String,
+
+    /// Path type for generating file paths.
+    path_type: PathType,
 
     /// Object store, required argument for constructing [`InvertedIndexApplier`].
     object_store: ObjectStore,
@@ -76,14 +80,16 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
 impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Creates a new [`InvertedIndexApplierBuilder`].
     pub fn new(
-        region_dir: String,
+        table_dir: String,
+        path_type: PathType,
         object_store: ObjectStore,
         metadata: &'a RegionMetadata,
         indexed_column_ids: HashSet<ColumnId>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         Self {
-            region_dir,
+            table_dir,
+            path_type,
             object_store,
             metadata,
             indexed_column_ids,
@@ -139,8 +145,8 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
 
         Ok(Some(
             InvertedIndexApplier::new(
-                self.region_dir,
-                self.metadata.region_id,
+                self.table_dir,
+                self.path_type,
                 self.object_store,
                 Box::new(applier.context(BuildIndexApplierSnafu)?),
                 self.puffin_manager_factory,
@@ -343,6 +349,7 @@ mod tests {
         let metadata = test_region_metadata();
         let mut builder = InvertedIndexApplierBuilder::new(
             "test".to_string(),
+            PathType::Bare,
             test_object_store(),
             &metadata,
             HashSet::from_iter([1, 2, 3]),

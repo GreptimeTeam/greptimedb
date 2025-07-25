@@ -29,7 +29,7 @@ use crate::read::{Batch, BatchColumn, BatchReader};
 
 /// A reader that dedup sorted batches from a source based on the
 /// dedup strategy.
-pub(crate) struct DedupReader<R, S> {
+pub struct DedupReader<R, S> {
     source: R,
     strategy: S,
     metrics: DedupMetrics,
@@ -37,7 +37,7 @@ pub(crate) struct DedupReader<R, S> {
 
 impl<R, S> DedupReader<R, S> {
     /// Creates a new dedup reader.
-    pub(crate) fn new(source: R, strategy: S) -> Self {
+    pub fn new(source: R, strategy: S) -> Self {
         Self {
             source,
             strategy,
@@ -87,7 +87,7 @@ impl<R, S> DedupReader<R, S> {
 }
 
 /// Strategy to remove duplicate rows from sorted batches.
-pub(crate) trait DedupStrategy: Send {
+pub trait DedupStrategy: Send {
     /// Pushes a batch to the dedup strategy.
     /// Returns the deduplicated batch.
     fn push_batch(&mut self, batch: Batch, metrics: &mut DedupMetrics) -> Result<Option<Batch>>;
@@ -114,7 +114,7 @@ struct BatchLastRow {
 /// different source.
 ///
 /// We might implement a new strategy if we need to process files with duplicate rows.
-pub(crate) struct LastRow {
+pub struct LastRow {
     /// Meta of the last row in the previous batch that has the same key
     /// as the batch to push.
     prev_batch: Option<BatchLastRow>,
@@ -124,7 +124,7 @@ pub(crate) struct LastRow {
 
 impl LastRow {
     /// Creates a new strategy with the given `filter_deleted` flag.
-    pub(crate) fn new(filter_deleted: bool) -> Self {
+    pub fn new(filter_deleted: bool) -> Self {
         Self {
             prev_batch: None,
             filter_deleted,
@@ -216,7 +216,7 @@ fn filter_deleted_from_batch(batch: &mut Batch, metrics: &mut DedupMetrics) -> R
 
 /// Metrics for deduplication.
 #[derive(Debug, Default)]
-pub(crate) struct DedupMetrics {
+pub struct DedupMetrics {
     /// Number of rows removed during deduplication.
     pub(crate) num_unselected_rows: usize,
     /// Number of deleted rows.

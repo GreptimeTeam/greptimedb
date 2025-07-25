@@ -342,6 +342,7 @@ mod tests {
     use puffin::puffin_manager::cache::PuffinMetadataCache;
     use puffin::puffin_manager::PuffinManager;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
     use super::*;
@@ -349,6 +350,7 @@ mod tests {
     use crate::cache::index::inverted_index::InvertedIndexCache;
     use crate::metrics::CACHE_BYTES;
     use crate::read::BatchColumn;
+    use crate::sst::file::RegionFileId;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
@@ -444,7 +446,7 @@ mod tests {
         rows: BTreeSet<(&'static str, i32, [u64; 2])>,
     ) -> impl Fn(DfExpr) -> BoxFuture<'static, Vec<usize>> {
         let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
-        let region_dir = "region0".to_string();
+        let table_dir = "table0".to_string();
         let sst_file_id = FileId::random();
         let object_store = mock_object_store();
         let region_metadata = mock_region_metadata();
@@ -469,8 +471,10 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(region_dir.clone()),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
+
+        let sst_file_id = RegionFileId::new(region_metadata.region_id, sst_file_id);
         let mut writer = puffin_manager.writer(&sst_file_id).await.unwrap();
         let (row_count, _) = creator.finish(&mut writer).await.unwrap();
         assert_eq!(row_count, rows.len() * segment_row_count);
@@ -481,7 +485,8 @@ mod tests {
             let cache = Arc::new(InvertedIndexCache::new(10, 10, 100));
             let puffin_metadata_cache = Arc::new(PuffinMetadataCache::new(10, &CACHE_BYTES));
             let applier = InvertedIndexApplierBuilder::new(
-                region_dir.clone(),
+                table_dir.clone(),
+                PathType::Bare,
                 object_store.clone(),
                 &region_metadata,
                 indexed_column_ids.clone(),

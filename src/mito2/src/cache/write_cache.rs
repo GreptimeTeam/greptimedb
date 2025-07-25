@@ -34,6 +34,7 @@ use crate::metrics::{
     FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
     WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
+use crate::sst::file::RegionFileId;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::index::IndexerBuilderImpl;
@@ -115,7 +116,7 @@ impl WriteCache {
         let region_id = write_request.metadata.region_id;
 
         let store = self.file_cache.local_store();
-        let path_provider = WriteCachePathProvider::new(region_id, self.file_cache.clone());
+        let path_provider = WriteCachePathProvider::new(self.file_cache.clone());
         let indexer = IndexerBuilderImpl {
             op_type: write_request.op_type,
             metadata: write_request.metadata.clone(),
@@ -159,7 +160,7 @@ impl WriteCache {
             let parquet_key = IndexKey::new(region_id, sst.file_id, FileType::Parquet);
             let parquet_path = upload_request
                 .dest_path_provider
-                .build_sst_file_path(sst.file_id);
+                .build_sst_file_path(RegionFileId::new(region_id, sst.file_id));
             if let Err(e) = self.upload(parquet_key, &parquet_path, remote_store).await {
                 err = Some(e);
                 break;
@@ -170,7 +171,7 @@ impl WriteCache {
                 let puffin_key = IndexKey::new(region_id, sst.file_id, FileType::Puffin);
                 let puffin_path = upload_request
                     .dest_path_provider
-                    .build_index_file_path(sst.file_id);
+                    .build_index_file_path(RegionFileId::new(region_id, sst.file_id));
                 if let Err(e) = self.upload(puffin_key, &puffin_path, remote_store).await {
                     err = Some(e);
                     break;
@@ -431,6 +432,7 @@ impl UploadTracker {
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
     use object_store::ATOMIC_WRITE_DIR;
+    use store_api::region_request::PathType;
 
     use super::*;
     use crate::access_layer::OperationType;
@@ -452,7 +454,7 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new().await;
         let mock_store = env.init_object_store_manager();
-        let path_provider = RegionFilePathFactory::new("test".to_string());
+        let path_provider = RegionFilePathFactory::new("test".to_string(), PathType::Bare);
 
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
@@ -501,8 +503,10 @@ mod tests {
             .remove(0); //todo(hl): we assume it only creates one file.
 
         let file_id = sst_info.file_id;
-        let sst_upload_path = path_provider.build_sst_file_path(file_id);
-        let index_upload_path = path_provider.build_index_file_path(file_id);
+        let sst_upload_path =
+            path_provider.build_sst_file_path(RegionFileId::new(region_id, file_id));
+        let index_upload_path =
+            path_provider.build_index_file_path(RegionFileId::new(region_id, file_id));
 
         // Check write cache contains the key
         let key = IndexKey::new(region_id, file_id, FileType::Parquet);
@@ -583,7 +587,7 @@ mod tests {
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
             remote_store: mock_store.clone(),
         };
 
@@ -596,8 +600,13 @@ mod tests {
 
         // Read metadata from write cache
         let handle = sst_file_handle_with_file_id(sst_info.file_id, 0, 1000);
-        let builder = ParquetReaderBuilder::new(data_home, handle.clone(), mock_store.clone())
-            .cache(CacheStrategy::EnableAll(cache_manager.clone()));
+        let builder = ParquetReaderBuilder::new(
+            data_home,
+            PathType::Bare,
+            handle.clone(),
+            mock_store.clone(),
+        )
+        .cache(CacheStrategy::EnableAll(cache_manager.clone()));
         let reader = builder.build().await.unwrap();
 
         // Check parquet metadata
@@ -657,7 +666,7 @@ mod tests {
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone()),
+            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
             remote_store: mock_store.clone(),
         };
 

@@ -20,6 +20,7 @@ use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayDataBuilder, BufferBuilder, GenericByteArray, NullBufferBuilder, UInt8BufferBuilder,
 };
+use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow_array::StringArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{ConcreteDataType, MutableVector, VectorRef};
@@ -76,6 +77,14 @@ impl FieldBuilder {
             FieldBuilder::Other(v) => v.to_vector(),
         }
     }
+
+    /// Finishes builder and builder a [VectorRef].
+    pub(crate) fn finish_cloned(&self) -> VectorRef {
+        match self {
+            FieldBuilder::String(s) => Arc::new(StringVector::from(s.build_cloned())) as _,
+            FieldBuilder::Other(v) => v.to_vector_cloned(),
+        }
+    }
 }
 
 /// [StringBuilder] serves as a workaround for lacking [`GenericStringBuilder::append_array`](https://docs.rs/arrow-array/latest/arrow_array/builder/type.GenericStringBuilder.html#method.append_array)
@@ -116,7 +125,7 @@ impl StringBuilder {
     }
 
     #[inline]
-    fn next_offset(&self) -> i32 {
+    pub fn next_offset(&self) -> i32 {
         i32::try_from(self.value_builder.len()).expect("byte array offset overflow")
     }
 
@@ -184,6 +193,18 @@ impl StringBuilder {
             .nulls(self.null_buffer_builder.finish());
 
         self.offsets_builder.append(self.next_offset());
+        let array_data = unsafe { array_builder.build_unchecked() };
+        GenericByteArray::from(array_data)
+    }
+
+    pub fn build_cloned(&self) -> StringArray {
+        let offset_buffer = Buffer::from_slice_ref(self.offsets_builder.as_slice());
+        let value_buffer = Buffer::from_slice_ref(self.value_builder.as_slice());
+        let array_builder = ArrayDataBuilder::new(arrow::datatypes::DataType::Utf8)
+            .len(self.len())
+            .add_buffer(offset_buffer)
+            .add_buffer(value_buffer)
+            .nulls(self.null_buffer_builder.finish_cloned());
         let array_data = unsafe { array_builder.build_unchecked() };
         GenericByteArray::from(array_data)
     }

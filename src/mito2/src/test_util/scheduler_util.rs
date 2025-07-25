@@ -22,6 +22,7 @@ use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
@@ -64,6 +65,7 @@ impl SchedulerEnv {
         let object_store = ObjectStore::new(builder).unwrap().finish();
         let access_layer = Arc::new(AccessLayer::new(
             "",
+            PathType::Bare,
             object_store.clone(),
             puffin_mgr,
             intm_mgr,

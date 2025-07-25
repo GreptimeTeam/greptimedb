@@ -43,7 +43,7 @@ use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCache
 use crate::cache::write_cache::WriteCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::read::Batch;
-use crate::sst::file::FileId;
+use crate::sst::file::{FileId, RegionFileId};
 
 /// Metrics type key for sst meta.
 const SST_META_TYPE: &str = "sst_meta";
@@ -75,19 +75,14 @@ impl CacheStrategy {
     /// Calls [CacheManager::get_parquet_meta_data()].
     pub async fn get_parquet_meta_data(
         &self,
-        region_id: RegionId,
-        file_id: FileId,
+        file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager
-                    .get_parquet_meta_data(region_id, file_id)
-                    .await
+                cache_manager.get_parquet_meta_data(file_id).await
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager
-                    .get_parquet_meta_data(region_id, file_id)
-                    .await
+                cache_manager.get_parquet_meta_data(file_id).await
             }
             CacheStrategy::Disabled => None,
         }
@@ -96,46 +91,40 @@ impl CacheStrategy {
     /// Calls [CacheManager::get_parquet_meta_data_from_mem_cache()].
     pub fn get_parquet_meta_data_from_mem_cache(
         &self,
-        region_id: RegionId,
-        file_id: FileId,
+        file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
+                cache_manager.get_parquet_meta_data_from_mem_cache(file_id)
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.get_parquet_meta_data_from_mem_cache(region_id, file_id)
+                cache_manager.get_parquet_meta_data_from_mem_cache(file_id)
             }
             CacheStrategy::Disabled => None,
         }
     }
 
     /// Calls [CacheManager::put_parquet_meta_data()].
-    pub fn put_parquet_meta_data(
-        &self,
-        region_id: RegionId,
-        file_id: FileId,
-        metadata: Arc<ParquetMetaData>,
-    ) {
+    pub fn put_parquet_meta_data(&self, file_id: RegionFileId, metadata: Arc<ParquetMetaData>) {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
+                cache_manager.put_parquet_meta_data(file_id, metadata);
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.put_parquet_meta_data(region_id, file_id, metadata);
+                cache_manager.put_parquet_meta_data(file_id, metadata);
             }
             CacheStrategy::Disabled => {}
         }
     }
 
     /// Calls [CacheManager::remove_parquet_meta_data()].
-    pub fn remove_parquet_meta_data(&self, region_id: RegionId, file_id: FileId) {
+    pub fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
-                cache_manager.remove_parquet_meta_data(region_id, file_id);
+                cache_manager.remove_parquet_meta_data(file_id);
             }
             CacheStrategy::Compaction(cache_manager) => {
-                cache_manager.remove_parquet_meta_data(region_id, file_id);
+                cache_manager.remove_parquet_meta_data(file_id);
             }
             CacheStrategy::Disabled => {}
         }
@@ -291,22 +280,21 @@ impl CacheManager {
     /// If not found, tries to get it from write cache and fill the in-memory cache.
     pub async fn get_parquet_meta_data(
         &self,
-        region_id: RegionId,
-        file_id: FileId,
+        file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
-        let metadata = self.get_parquet_meta_data_from_mem_cache(region_id, file_id);
+        let metadata = self.get_parquet_meta_data_from_mem_cache(file_id);
         if metadata.is_some() {
             return metadata;
         }
 
         // Try to get metadata from write cache
-        let key = IndexKey::new(region_id, file_id, FileType::Parquet);
+        let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
         if let Some(write_cache) = &self.write_cache {
             if let Some(metadata) = write_cache.file_cache().get_parquet_meta_data(key).await {
                 let metadata = Arc::new(metadata);
                 // Put metadata into sst meta cache
-                self.put_parquet_meta_data(region_id, file_id, metadata.clone());
+                self.put_parquet_meta_data(file_id, metadata.clone());
                 return Some(metadata);
             }
         };
@@ -318,25 +306,19 @@ impl CacheManager {
     /// This method does not perform I/O.
     pub fn get_parquet_meta_data_from_mem_cache(
         &self,
-        region_id: RegionId,
-        file_id: FileId,
+        file_id: RegionFileId,
     ) -> Option<Arc<ParquetMetaData>> {
         // Try to get metadata from sst meta cache
         self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
-            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
+            let value = sst_meta_cache.get(&SstMetaKey(file_id.region_id(), file_id.file_id()));
             update_hit_miss(value, SST_META_TYPE)
         })
     }
 
     /// Puts [ParquetMetaData] into the cache.
-    pub fn put_parquet_meta_data(
-        &self,
-        region_id: RegionId,
-        file_id: FileId,
-        metadata: Arc<ParquetMetaData>,
-    ) {
+    pub fn put_parquet_meta_data(&self, file_id: RegionFileId, metadata: Arc<ParquetMetaData>) {
         if let Some(cache) = &self.sst_meta_cache {
-            let key = SstMetaKey(region_id, file_id);
+            let key = SstMetaKey(file_id.region_id(), file_id.file_id());
             CACHE_BYTES
                 .with_label_values(&[SST_META_TYPE])
                 .add(meta_cache_weight(&key, &metadata).into());
@@ -345,9 +327,9 @@ impl CacheManager {
     }
 
     /// Removes [ParquetMetaData] from the cache.
-    pub fn remove_parquet_meta_data(&self, region_id: RegionId, file_id: FileId) {
+    pub fn remove_parquet_meta_data(&self, file_id: RegionFileId) {
         if let Some(cache) = &self.sst_meta_cache {
-            cache.remove(&SstMetaKey(region_id, file_id));
+            cache.remove(&SstMetaKey(file_id.region_id(), file_id.file_id()));
         }
     }
 
@@ -819,13 +801,10 @@ mod tests {
         assert!(cache.page_cache.is_none());
 
         let region_id = RegionId::new(1, 1);
-        let file_id = FileId::random();
+        let file_id = RegionFileId::new(region_id, FileId::random());
         let metadata = parquet_meta();
-        cache.put_parquet_meta_data(region_id, file_id, metadata);
-        assert!(cache
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-            .is_none());
+        cache.put_parquet_meta_data(file_id, metadata);
+        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
 
         let value = Value::Int64(10);
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
@@ -834,7 +813,7 @@ mod tests {
             .get_repeated_vector(&ConcreteDataType::int64_datatype(), &value)
             .is_none());
 
-        let key = PageKey::new_uncompressed(region_id, file_id, 0, 0);
+        let key = PageKey::new_uncompressed(region_id, file_id.file_id(), 0, 0);
         let pages = Arc::new(PageValue::default());
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
@@ -846,22 +825,13 @@ mod tests {
     async fn test_parquet_meta_cache() {
         let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
         let region_id = RegionId::new(1, 1);
-        let file_id = FileId::random();
-        assert!(cache
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-            .is_none());
+        let file_id = RegionFileId::new(region_id, FileId::random());
+        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
         let metadata = parquet_meta();
-        cache.put_parquet_meta_data(region_id, file_id, metadata);
-        assert!(cache
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-            .is_some());
-        cache.remove_parquet_meta_data(region_id, file_id);
-        assert!(cache
-            .get_parquet_meta_data(region_id, file_id)
-            .await
-            .is_none());
+        cache.put_parquet_meta_data(file_id, metadata);
+        assert!(cache.get_parquet_meta_data(file_id).await.is_some());
+        cache.remove_parquet_meta_data(file_id);
+        assert!(cache.get_parquet_meta_data(file_id).await.is_none());
     }
 
     #[test]

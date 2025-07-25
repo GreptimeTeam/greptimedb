@@ -13,8 +13,6 @@
 // limitations under the License.
 
 use datatypes::data_type::ConcreteDataType;
-use datatypes::value::Value;
-use partition::partition::PartitionBound;
 use sql::statements::concrete_data_type_to_sql_data_type;
 
 use crate::error::{Error, Result};
@@ -76,26 +74,15 @@ impl CreateTableExprTranslator {
         input.partition.as_ref().map(|partition| {
             format!(
                 "PARTITION ON COLUMNS({}) (\n{}\n)",
-                partition.partition_columns().join(", "),
+                partition.columns.join(", "),
                 partition
-                    .partition_bounds()
+                    .exprs
                     .iter()
-                    .map(Self::format_partition_bound)
+                    .map(|expr| expr.to_parser_expr().to_string())
                     .collect::<Vec<_>>()
                     .join(",\n")
             )
         })
-    }
-
-    fn format_partition_bound(bound: &PartitionBound) -> String {
-        match bound {
-            PartitionBound::Value(v) => match v {
-                Value::String(v) => format!("'{}'", v.as_utf8()),
-                _ => format!("{v}"),
-            },
-            PartitionBound::MaxValue => "MAXVALUE".to_string(),
-            PartitionBound::Expr(expr) => expr.to_parser_expr().to_string(),
-        }
     }
 
     fn format_column_type(column_type: &ConcreteDataType) -> String {
@@ -183,10 +170,9 @@ impl CreateDatabaseExprTranslator {
 #[cfg(test)]
 mod tests {
     use partition::expr::{Operand, PartitionExpr, RestrictedOp};
-    use partition::partition::{PartitionBound, PartitionDef};
 
     use super::CreateTableExprTranslator;
-    use crate::ir::create_expr::{CreateDatabaseExprBuilder, CreateTableExprBuilder};
+    use crate::ir::create_expr::{CreateDatabaseExprBuilder, CreateTableExprBuilder, PartitionDef};
     use crate::test_utils;
     use crate::translator::DslTranslator;
 
@@ -198,15 +184,15 @@ mod tests {
             .table_name("system_metrics")
             .engine("mito")
             .primary_keys(vec![0, 1])
-            .partition(PartitionDef::new(
-                vec!["idc".to_string()],
-                vec![
-                    PartitionBound::Expr(PartitionExpr::new(
+            .partition(PartitionDef {
+                columns: vec!["idc".to_string()],
+                exprs: vec![
+                    PartitionExpr::new(
                         Operand::Column("idc".to_string()),
                         RestrictedOp::Lt,
                         Operand::Value(datatypes::value::Value::Int32(10)),
-                    )),
-                    PartitionBound::Expr(PartitionExpr::new(
+                    ),
+                    PartitionExpr::new(
                         Operand::Expr(PartitionExpr::new(
                             Operand::Column("idc".to_string()),
                             RestrictedOp::GtEq,
@@ -218,14 +204,14 @@ mod tests {
                             RestrictedOp::Lt,
                             Operand::Value(datatypes::value::Value::Int32(50)),
                         )),
-                    )),
-                    PartitionBound::Expr(PartitionExpr::new(
+                    ),
+                    PartitionExpr::new(
                         Operand::Column("idc".to_string()),
                         RestrictedOp::GtEq,
                         Operand::Value(datatypes::value::Value::Int32(50)),
-                    )),
+                    ),
                 ],
-            ))
+            })
             .build()
             .unwrap();
 

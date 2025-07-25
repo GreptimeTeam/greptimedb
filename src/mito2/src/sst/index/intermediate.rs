@@ -327,7 +327,8 @@ mod tests {
         let temp_dir = temp_dir::create_temp_dir("intermediate");
         let path = temp_dir.path().display().to_string();
 
-        let location = IntermediateLocation::new(&RegionId::new(0, 0), &FileId::random());
+        let region_id = RegionId::new(0, 0);
+        let location = IntermediateLocation::new(&region_id, &FileId::random());
         let store = IntermediateManager::init_fs(path).await.unwrap();
         let provider = TempFileProvider::new(location.clone(), store);
 

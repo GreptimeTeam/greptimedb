@@ -34,7 +34,7 @@ pub struct MaintenanceHandler {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct MaintenanceResponse {
+pub(crate) struct MaintenanceResponse {
     enabled: bool,
 }
 
@@ -49,7 +49,7 @@ impl TryFrom<MaintenanceResponse> for String {
 }
 
 impl MaintenanceHandler {
-    async fn get_maintenance(&self) -> crate::Result<MaintenanceResponse> {
+    pub(crate) async fn get_maintenance(&self) -> crate::Result<MaintenanceResponse> {
         let enabled = self
             .manager
             .maintenance_mode()
@@ -58,7 +58,7 @@ impl MaintenanceHandler {
         Ok(MaintenanceResponse { enabled })
     }
 
-    async fn set_maintenance(&self) -> crate::Result<MaintenanceResponse> {
+    pub(crate) async fn set_maintenance(&self) -> crate::Result<MaintenanceResponse> {
         self.manager
             .set_maintenance_mode()
             .await
@@ -68,7 +68,7 @@ impl MaintenanceHandler {
         Ok(MaintenanceResponse { enabled: true })
     }
 
-    async fn unset_maintenance(&self) -> crate::Result<MaintenanceResponse> {
+    pub(crate) async fn unset_maintenance(&self) -> crate::Result<MaintenanceResponse> {
         self.manager
             .unset_maintenance_mode()
             .await

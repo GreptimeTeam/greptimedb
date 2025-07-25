@@ -117,7 +117,7 @@ impl Scanner {
     }
 
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         match self {
             Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
             Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
@@ -357,6 +357,13 @@ impl ScanRegion {
     async fn scan_input(mut self) -> Result<ScanInput> {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
+
+        // The mapper always computes projected column ids as the schema of SSTs may change.
+        let mapper = match &self.request.projection {
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
+            None => ProjectionMapper::all(&self.version.metadata)?,
+        };
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
@@ -385,18 +392,31 @@ impl ScanRegion {
 
         let memtables = self.version.memtables.list_memtables();
         // Skip empty memtables and memtables out of time range.
-        let memtables: Vec<_> = memtables
-            .into_iter()
-            .filter(|mem| {
-                // check if memtable is empty by reading stats.
-                let Some((start, end)) = mem.stats().time_range() else {
-                    return false;
-                };
-                // The time range of the memtable is inclusive.
-                let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
-                memtable_range.intersects(&time_range)
-            })
-            .collect();
+        let mut mem_range_builders = Vec::new();
+
+        for m in memtables {
+            // check if memtable is empty by reading stats.
+            let Some((start, end)) = m.stats().time_range() else {
+                continue;
+            };
+            // The time range of the memtable is inclusive.
+            let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
+            if !memtable_range.intersects(&time_range) {
+                continue;
+            }
+            let ranges_in_memtable = m.ranges(
+                Some(mapper.column_ids()),
+                predicate.clone(),
+                self.request.sequence,
+            )?;
+            mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
+                // todo: we should add stats to MemtableRange
+                let mut stats = ranges_in_memtable.stats.clone();
+                stats.num_ranges = 1;
+                stats.num_rows = v.num_rows();
+                MemRangeBuilder::new(v, stats)
+            }));
+        }
 
         let region_id = self.region_id();
         debug!(
@@ -404,7 +424,7 @@ impl ScanRegion {
             region_id,
             self.request,
             time_range,
-            memtables.len(),
+            mem_range_builders.len(),
             files.len(),
             self.version.options.append_mode,
         );
@@ -421,23 +441,11 @@ impl ScanRegion {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
-        // Get memtable ranges to scan.
-        let memtables = memtables
-            .into_iter()
-            .map(|mem| {
-                mem.ranges(
-                    Some(mapper.column_ids()),
-                    predicate.clone(),
-                    self.request.sequence,
-                )
-                .map(MemRangeBuilder::new)
-            })
-            .collect::<Result<Vec<_>>>()?;
 
         let input = ScanInput::new(self.access_layer, mapper)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
-            .with_memtables(memtables)
+            .with_memtables(mem_range_builders)
             .with_files(files)
             .with_cache(self.cache_strategy)
             .with_inverted_index_applier(inverted_index_applier)
@@ -523,7 +531,8 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         InvertedIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.version.metadata.inverted_indexed_column_ids(
@@ -557,7 +566,8 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
 
         BloomFilterIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
             self.access_layer.object_store().clone(),
             self.version.metadata.as_ref(),
             self.access_layer.puffin_manager_factory().clone(),
@@ -582,8 +592,8 @@ impl ScanRegion {
         let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
         let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
         FulltextIndexApplierBuilder::new(
-            self.access_layer.region_dir().to_string(),
-            self.region_id(),
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
             self.access_layer.object_store().clone(),
             self.access_layer.puffin_manager_factory().clone(),
             self.version.metadata.as_ref(),
@@ -974,7 +984,7 @@ impl ScanInput {
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
-    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
         self.files.iter().map(|file| file.file_id()).collect()
     }
 }

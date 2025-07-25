@@ -112,7 +112,7 @@ async fn test_append_mode_compaction() {
         .insert_option("compaction.type", "twcs")
         .insert_option("append_mode", "true")
         .build();
-    let region_dir = request.region_dir.clone();
+    let table_dir = request.table_dir.clone();
     let region_opts = request.options.clone();
 
     let column_schemas = rows_schema(&request);
@@ -195,7 +195,7 @@ async fn test_append_mode_compaction() {
         )
         .await;
     // Reopens the region.
-    reopen_region(&engine, region_id, region_dir, false, region_opts).await;
+    reopen_region(&engine, region_id, table_dir, false, region_opts).await;
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await

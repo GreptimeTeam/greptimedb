@@ -15,8 +15,8 @@
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_options_allocator::prepare_wal_options;
 use futures_util::future::BoxFuture;
-use store_api::path_utils::region_dir;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::path_utils::table_dir;
+use store_api::region_request::{PathType, RegionOpenRequest, RegionRequest};
 
 use crate::heartbeat::handler::HandlerContext;
 
@@ -36,7 +36,8 @@ impl HandlerContext {
             prepare_wal_options(&mut region_options, region_id, &region_wal_options);
             let request = RegionRequest::Open(RegionOpenRequest {
                 engine: region_ident.engine,
-                region_dir: region_dir(&region_storage_path, region_id),
+                table_dir: table_dir(&region_storage_path, region_id.table_id()),
+                path_type: PathType::Bare,
                 options: region_options,
                 skip_wal_replay,
             });

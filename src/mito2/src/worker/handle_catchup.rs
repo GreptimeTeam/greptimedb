@@ -143,7 +143,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let reopened_region = Arc::new(
             RegionOpener::new(
                 region_id,
-                region.region_dir(),
+                region.table_dir(),
+                region.access_layer.path_type(),
                 self.memtable_builder_provider.clone(),
                 self.object_store_manager.clone(),
                 self.purge_scheduler.clone(),

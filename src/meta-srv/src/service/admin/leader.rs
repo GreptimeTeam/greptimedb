@@ -21,6 +21,7 @@ use crate::error::{self, Result};
 use crate::metasrv::ElectionRef;
 use crate::service::admin::HttpHandler;
 
+#[derive(Clone)]
 pub struct LeaderHandler {
     pub election: Option<ElectionRef>,
 }

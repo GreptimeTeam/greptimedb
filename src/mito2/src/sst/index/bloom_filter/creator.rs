@@ -362,6 +362,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::access_layer::FilePathProvider;
     use crate::read::BatchColumn;
+    use crate::sst::file::RegionFileId;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
 
     pub fn mock_object_store() -> ObjectStore {
@@ -375,12 +376,12 @@ pub(crate) mod tests {
     pub struct TestPathProvider;
 
     impl FilePathProvider for TestPathProvider {
-        fn build_index_file_path(&self, file_id: FileId) -> String {
-            file_id.to_string()
+        fn build_index_file_path(&self, file_id: RegionFileId) -> String {
+            file_id.file_id().to_string()
         }
 
-        fn build_sst_file_path(&self, file_id: FileId) -> String {
-            file_id.to_string()
+        fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
+            file_id.file_id().to_string()
         }
     }
 
@@ -484,14 +485,11 @@ pub(crate) mod tests {
         let region_metadata = mock_region_metadata();
         let memory_usage_threshold = Some(1024);
 
-        let mut indexer = BloomFilterIndexer::new(
-            FileId::random(),
-            &region_metadata,
-            intm_mgr,
-            memory_usage_threshold,
-        )
-        .unwrap()
-        .unwrap();
+        let file_id = FileId::random();
+        let mut indexer =
+            BloomFilterIndexer::new(file_id, &region_metadata, intm_mgr, memory_usage_threshold)
+                .unwrap()
+                .unwrap();
 
         // push 20 rows
         let mut batch = new_batch("tag1", 0..10);
@@ -503,7 +501,7 @@ pub(crate) mod tests {
         let (_d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
         let puffin_manager = factory.build(object_store, TestPathProvider);
 
-        let file_id = FileId::random();
+        let file_id = RegionFileId::new(region_metadata.region_id, file_id);
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();
         let (row_count, byte_count) = indexer.finish(&mut puffin_writer).await.unwrap();
         assert_eq!(row_count, 20);
