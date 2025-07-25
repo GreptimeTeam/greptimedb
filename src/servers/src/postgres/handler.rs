@@ -24,7 +24,8 @@ use common_telemetry::{debug, error, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
-use futures::{future, stream, Sink, SinkExt, Stream, StreamExt};
+use futures::stream::BoxStream;
+use futures::{stream, Sink, SinkExt, Stream, StreamExt};
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{
@@ -111,11 +112,53 @@ where
     Ok(())
 }
 
+fn convert_err(e: impl ErrorExt) -> Response<'static> {
+    let status_code = e.status_code();
+    debug!(
+        "Failed to handle postgres query, code!!!!!!!!!!!!: {}",
+        status_code
+    );
+    println!(
+        "Failed to handle postgres queryfafafafafa, code!!!!!!!!!!!!: {}",
+        status_code
+    );
+    if status_code.should_log_error() {
+        let root_error = e.root_cause().unwrap_or(&e);
+        error!(e; "Failed to handle postgres query, code: {}, error: {}", status_code, root_error.to_string());
+    } else {
+        debug!(
+            "Failed to handle postgres query, code: {}, error: {:?}",
+            status_code, e
+        );
+    }
+    Response::Error(Box::new(
+        PgErrorCode::from(status_code).to_err_info(e.output_msg()),
+    ))
+}
+
+fn convert_error_future<E: ErrorExt>(
+    e: E,
+) -> BoxStream<'static, Result<Vec<datatypes::prelude::Value>, PgWireError>> {
+    let response = convert_err(e);
+    let pg_wire_error = if let Response::Error(err_info) = response {
+        PgWireError::ApiError(Box::<dyn std::error::Error + Send + Sync>::from(
+            err_info.to_string(),
+        ))
+    } else {
+        PgWireError::ApiError(Box::<dyn std::error::Error + Send + Sync>::from(
+            "An unexpected error occurred while processing the stream.".to_string(),
+        ))
+    };
+    futures::stream::once(futures::future::err(pg_wire_error)).boxed()
+}
+
 pub(crate) fn output_to_query_response<'a>(
     query_ctx: QueryContextRef,
     output: Result<Output>,
     field_format: &Format,
 ) -> PgWireResult<Response<'a>> {
+    debug!("output_to_query_response, output!!!!!!!!!: {:?}", output);
+    println!("output_to_query_response, output!!!!!!!!!: {:?}", output);
     match output {
         Ok(o) => match o.data {
             OutputData::AffectedRows(rows) => {
@@ -135,24 +178,7 @@ pub(crate) fn output_to_query_response<'a>(
                 )
             }
         },
-        Err(e) => {
-            let status_code = e.status_code();
-
-            if status_code.should_log_error() {
-                let root_error = e.root_cause().unwrap_or(&e);
-                error!(e; "Failed to handle postgres query, code: {}, db: {}, error: {}", status_code, query_ctx.get_db_string(), root_error.to_string());
-            } else {
-                debug!(
-                    "Failed to handle postgres query, code: {}, db: {}, error: {:?}",
-                    status_code,
-                    query_ctx.get_db_string(),
-                    e
-                );
-            };
-            Ok(Response::Error(Box::new(
-                PgErrorCode::from(status_code).to_err_info(e.output_msg()),
-            )))
-        }
+        Err(e) => Ok(convert_err(e)),
     }
 }
 
@@ -165,10 +191,18 @@ fn recordbatches_to_query_response<'a, S>(
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    let pg_schema = Arc::new(
-        schema_to_pg(schema.as_ref(), field_format)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
+    println!(
+        "recordbatches_to_query_response, schema!!!!!!!!!: {:?}",
+        schema
     );
+    debug!(
+        "recordbatches_to_query_response, schema!!!!!!!!!: {:?}",
+        schema
+    );
+    let pg_schema = match schema_to_pg(schema.as_ref(), field_format) {
+        Ok(s) => Arc::new(s),
+        Err(e) => return Ok(convert_err(e)),
+    };
     let pg_schema_ref = pg_schema.clone();
     let data_row_stream = recordbatches_stream
         .map(|record_batch_result| match record_batch_result {
@@ -178,7 +212,7 @@ where
                 rb.rows().map(Ok).collect::<Vec<_>>(),
             )
             .boxed(),
-            Err(e) => stream::once(future::err(PgWireError::ApiError(Box::new(e)))).boxed(),
+            Err(e) => convert_error_future(e),
         })
         .flatten() // flatten into stream<result<row>>
         .map(move |row| {
