@@ -3066,6 +3066,7 @@ dependencies = [
  "ciborium",
  "clap 3.2.25",
  "criterion-plot",
+ "futures",
  "itertools 0.10.5",
  "lazy_static",
  "num-traits",
@@ -3077,6 +3078,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -7480,6 +7482,7 @@ dependencies = [
  "prost 0.13.5",
  "puffin",
  "rand 0.9.0",
+ "rayon",
  "regex",
  "rskafka",
  "rstest",

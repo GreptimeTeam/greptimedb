@@ -922,7 +922,7 @@ impl WriteBufferManager for MockWriteBufferManager {
     }
 }
 
-pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::ColumnSchema {
+pub fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::ColumnSchema {
     let (datatype, datatype_extension) =
         ColumnDataTypeWrapper::try_from(metadata.column_schema.data_type.clone())
             .unwrap()

@@ -23,7 +23,7 @@ use store_api::storage::TimeSeriesDistribution;
 
 use crate::cache::CacheStrategy;
 use crate::error::Result;
-use crate::memtable::{MemtableRange, MemtableRanges, MemtableStats};
+use crate::memtable::{MemtableRange, MemtableStats};
 use crate::read::scan_region::ScanInput;
 use crate::sst::file::{overlaps, FileHandle, FileTimeRange};
 use crate::sst::parquet::file_range::{FileRange, FileRangeContextRef};
@@ -447,37 +447,30 @@ impl FileRangeBuilder {
 /// Builder to create mem ranges.
 pub(crate) struct MemRangeBuilder {
     /// Ranges of a memtable.
-    ranges: MemtableRanges,
+    range: MemtableRange,
+    /// Stats of a memtable.
+    stats: MemtableStats,
 }
 
 impl MemRangeBuilder {
     /// Builds a mem range builder from row groups.
-    pub(crate) fn new(ranges: MemtableRanges) -> Self {
-        Self { ranges }
+    pub(crate) fn new(range: MemtableRange, stats: MemtableStats) -> Self {
+        Self { range, stats }
     }
 
     /// Builds mem ranges to read in the memtable.
     /// Negative `row_group_index` indicates all row groups.
     pub(crate) fn build_ranges(
         &self,
-        row_group_index: i64,
+        _row_group_index: i64,
         ranges: &mut SmallVec<[MemtableRange; 2]>,
     ) {
-        if row_group_index >= 0 {
-            let row_group_index = row_group_index as usize;
-            // Scans one row group.
-            let Some(range) = self.ranges.ranges.get(&row_group_index) else {
-                return;
-            };
-            ranges.push(range.clone());
-        } else {
-            ranges.extend(self.ranges.ranges.values().cloned());
-        }
+        ranges.push(self.range.clone())
     }
 
     /// Returns the statistics of the memtable.
     pub(crate) fn stats(&self) -> &MemtableStats {
-        &self.ranges.stats
+        &self.stats
     }
 }
 
