@@ -81,11 +81,12 @@ mod test {
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+---------------------+----------------+
-| greptime_timestamp  | greptime_value |
-+---------------------+----------------+
-| 1970-01-01T00:00:00 | 105.0          |
-+---------------------+----------------+",
++----------------+---------------------+----------------+
+| container.name | greptime_timestamp  | greptime_value |
++----------------+---------------------+----------------+
+| testsevrer     | 1970-01-01T00:00:00 | 100.0          |
+| testserver     | 1970-01-01T00:00:00 | 105.0          |
++----------------+---------------------+----------------+",
         );
 
         let mut output = instance
@@ -151,13 +152,13 @@ mod test {
     fn build_request() -> ExportMetricsServiceRequest {
         let data_points = vec![
             NumberDataPoint {
-                attributes: vec![keyvalue("host", "testsevrer")],
+                attributes: vec![keyvalue("container.name", "testsevrer")],
                 time_unix_nano: 100,
                 value: Some(Value::AsInt(100)),
                 ..Default::default()
             },
             NumberDataPoint {
-                attributes: vec![keyvalue("host", "testserver")],
+                attributes: vec![keyvalue("container.name", "testserver")],
                 time_unix_nano: 105,
                 value: Some(Value::AsInt(105)),
                 ..Default::default()

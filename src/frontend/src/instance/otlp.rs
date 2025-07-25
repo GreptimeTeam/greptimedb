@@ -63,8 +63,11 @@ impl OpenTelemetryProtocolHandler for Instance {
             .flat_map(|s| s.metrics.iter().map(|m| &m.name))
             .collect::<Vec<_>>();
 
+        // If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
+        // So we call this path 'legacy'.
+        // After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
+        // The difference is how we convert the input data into the final table schema.
         let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
-
         let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
@@ -86,6 +89,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             None
         };
 
+        // If the user uses the legacy path, it is by default without metric engine.
         if is_legacy || !with_metric_engine {
             self.handle_row_inserts(requests, ctx, false, false)
                 .await
