@@ -122,7 +122,7 @@ fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
 
     let instance = Arc::new(DummyInstance { tx });
     let server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(instance.clone())
+        .with_sql_handler(instance.clone(), None)
         .with_prom_handler(instance, None, true, PromValidationMode::Unchecked)
         .build();
     server.build(server.make_app()).unwrap()

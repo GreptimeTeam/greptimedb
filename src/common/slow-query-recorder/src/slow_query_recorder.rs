@@ -28,10 +28,12 @@ use common_telemetry::{debug, error, info, slow};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use query::parser::QueryStatement;
+use query::parser::{PromQuery, QueryLanguageParser};
 use rand::random;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
+use sql::parser::{ParseOptions, ParserContext};
+use sql::statements::statement::Statement;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use table::TableRef;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -39,19 +41,32 @@ use tokio::task::JoinHandle;
 
 use crate::error::{CatalogSnafu, Result, TableOperationSnafu};
 
-const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
-const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
-const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
-const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
-const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
-const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
-const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
-const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
-const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
-const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
+/// The name of the slow query table.
+pub const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
+/// The column name for the query execution cost (in milliseconds).
+pub const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
+/// The column name for the slow query threshold (in milliseconds).
+pub const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
+/// The column name for the query statement.
+pub const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
+/// The column name for the timestamp when the query was executed.
+pub const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+/// The column name indicating whether the query is a PromQL query.
+pub const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
+/// The column name for the PromQL query's start time.
+pub const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
+/// The column name for the PromQL query's end time.
+pub const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
+/// The column name for the PromQL query's range duration.
+pub const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
+/// The column name for the PromQL query's step interval.
+pub const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
 
 const DEFAULT_SLOW_QUERY_TABLE_TTL: &str = "30d";
 const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;
+
+/// The reference of the slow query recorder.
+pub type SlowQueryRecorderRef = Arc<SlowQueryRecorder>;
 
 /// SlowQueryRecorder is responsible for recording slow queries.
 #[derive(Clone)]
@@ -61,6 +76,12 @@ pub struct SlowQueryRecorder {
     _handle: Arc<JoinHandle<()>>,
 }
 
+/// SlowQuery is the type of the slow query.
+#[derive(Debug)]
+pub enum SlowQuery {
+    Sql(String),
+    Promql(PromQuery),
+}
 #[derive(Debug)]
 struct SlowQueryEvent {
     cost: u64,
@@ -113,14 +134,10 @@ impl SlowQueryRecorder {
 
     /// Starts a new SlowQueryTimer. Returns `None` if `slow_query.enable` is false.
     /// The timer sets the start time when created and calculates the elapsed duration when dropped.
-    pub fn start(
-        &self,
-        stmt: QueryStatement,
-        query_ctx: QueryContextRef,
-    ) -> Option<SlowQueryTimer> {
+    pub fn start(&self, query: SlowQuery, query_ctx: QueryContextRef) -> Option<SlowQueryTimer> {
         if self.slow_query_opts.enable {
             Some(SlowQueryTimer {
-                stmt,
+                query,
                 query_ctx,
                 start: Instant::now(), // Set the initial start time.
                 threshold: self.slow_query_opts.threshold,
@@ -154,6 +171,15 @@ impl SlowQueryEventHandler {
     }
 
     async fn record_slow_query(&self, event: SlowQueryEvent) {
+        // Only capture the query statement.
+        if !self.is_sql_query_statement(&event.query, event.query_ctx.clone()) {
+            debug!(
+                "Skip the slow query event: {:?} because it's not a query statement",
+                event
+            );
+            return;
+        }
+
         match self.record_type {
             SlowQueriesRecordType::Log => {
                 // Record the slow query in a specific logs file.
@@ -446,13 +472,34 @@ impl SlowQueryEventHandler {
             },
         ]
     }
+
+    fn is_sql_query_statement(&self, query: &str, query_ctx: QueryContextRef) -> bool {
+        match ParserContext::create_with_dialect(
+            query,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        ) {
+            Ok(stmt) => {
+                // Check the first statement is a query statement.
+                if let Some(Statement::Query(_)) = stmt.first() {
+                    return true;
+                }
+                false
+            }
+            Err(e) => {
+                // It's unlikely to happen.
+                error!(e; "Failed to parse query: {:?}", query);
+                false
+            }
+        }
+    }
 }
 
 /// SlowQueryTimer is used to log slow query when it's dropped.
 /// In drop(), it will check if the query is slow and send the slow query event to the handler.
 pub struct SlowQueryTimer {
     start: Instant,
-    stmt: QueryStatement,
+    query: SlowQuery,
     query_ctx: QueryContextRef,
     threshold: Option<Duration>,
     sample_ratio: Option<f64>,
@@ -464,10 +511,8 @@ impl SlowQueryTimer {
         let mut slow_query_event = SlowQueryEvent {
             cost: elapsed.as_millis() as u64,
             threshold: threshold.as_millis() as u64,
-            query: "".to_string(),
             query_ctx: self.query_ctx.clone(),
-
-            // The following fields are only used for PromQL queries.
+            query: "".to_string(),
             is_promql: false,
             promql_range: None,
             promql_step: None,
@@ -475,30 +520,44 @@ impl SlowQueryTimer {
             promql_end: None,
         };
 
-        match &self.stmt {
-            QueryStatement::Promql(stmt) => {
+        match &self.query {
+            SlowQuery::Sql(query) => {
+                if query.is_empty() {
+                    return;
+                }
+                slow_query_event.query = query.to_string();
+            }
+            SlowQuery::Promql(query) => {
+                if query.query.is_empty() {
+                    return;
+                }
+
+                let start = QueryLanguageParser::parse_promql_timestamp(&query.start)
+                    .ok()
+                    .and_then(|s| s.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                let end = QueryLanguageParser::parse_promql_timestamp(&query.end)
+                    .ok()
+                    .and_then(|e| e.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+
+                let step = query
+                    .step
+                    .parse::<u64>()
+                    .map(Duration::from_secs)
+                    .or_else(|_| promql_parser::util::parse_duration(&query.step))
+                    .ok()
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+
                 slow_query_event.is_promql = true;
-                slow_query_event.query = stmt.expr.to_string();
-                slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
-
-                let start = stmt
-                    .start
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-
-                let end = stmt
-                    .end
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-
-                slow_query_event.promql_range = Some((end - start) as u64);
                 slow_query_event.promql_start = Some(start);
                 slow_query_event.promql_end = Some(end);
-            }
-            QueryStatement::Sql(stmt) => {
-                slow_query_event.query = stmt.to_string();
+                slow_query_event.promql_range = Some((end - start) as u64);
+                slow_query_event.promql_step = Some(step);
             }
         }
 

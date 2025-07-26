@@ -12,14 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-
 pub mod error;
-pub mod frontend;
-pub mod heartbeat;
-pub mod instance;
-pub(crate) mod limiter;
-pub(crate) mod metrics;
-pub mod server;
-pub mod service_config;
-mod stream_wrapper;
+pub mod slow_query_recorder;
+
+pub use slow_query_recorder::{SlowQuery, SlowQueryRecorder, SlowQueryRecorderRef};

@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use common_query::{Output, OutputData};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_slow_query_recorder::slow_query_recorder::SlowQuery;
 use common_telemetry::{debug, tracing};
 use datafusion_common::ParamValues;
 use datatypes::prelude::ConcreteDataType;
@@ -30,8 +31,11 @@ use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, ErrorHandler, Type};
+use pgwire::api::store::PortalStore;
+use pgwire::api::{ClientInfo, ClientPortalStore, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::extendedquery::Execute;
+use pgwire::messages::simplequery::Query;
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
@@ -49,6 +53,25 @@ use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
+    #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
+    async fn on_query<C>(&self, client: &mut C, query: Query) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(
+                SlowQuery::Sql(query.query.clone()),
+                self.session.new_query_context(),
+            )
+        } else {
+            None
+        };
+
+        self._on_query(client, query).await
+    }
+
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response<'a>>>
     where
@@ -259,6 +282,16 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
         self.query_parser.clone()
+    }
+
+    async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
+    where
+        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::PortalStore: PortalStore<Statement = Self::Statement>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        self._on_execute(client, message).await
     }
 
     async fn do_query<'a, C>(

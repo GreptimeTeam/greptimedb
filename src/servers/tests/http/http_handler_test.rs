@@ -37,7 +37,10 @@ async fn test_sql_not_provided() {
     let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState { sql_handler };
+    let api_state = ApiState {
+        sql_handler,
+        slow_query_recorder: None,
+    };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
         let query = http_handler::SqlQuery {
@@ -68,7 +71,10 @@ async fn test_sql_output_rows() {
 
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState { sql_handler };
+    let api_state = ApiState {
+        sql_handler,
+        slow_query_recorder: None,
+    };
 
     let query_sql = "select sum(uint32s) from numbers limit 20";
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table"] {
@@ -173,7 +179,10 @@ async fn test_dashboard_sql_limit() {
     let sql_handler = create_testing_sql_query_handler(MemTable::specified_numbers_table(2000));
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState { sql_handler };
+    let api_state = ApiState {
+        sql_handler,
+        slow_query_recorder: None,
+    };
     for format in ["greptimedb_v1", "csv", "table"] {
         let query = create_query(format, "select * from numbers", Some(1000));
         let sql_response = http_handler::sql(
@@ -216,7 +225,10 @@ async fn test_sql_form() {
 
     let ctx = QueryContext::with_db_name(None);
     ctx.set_current_user(auth::userinfo_by_name(None));
-    let api_state = ApiState { sql_handler };
+    let api_state = ApiState {
+        sql_handler,
+        slow_query_recorder: None,
+    };
 
     for format in ["greptimedb_v1", "influxdb_v1", "csv", "table", "null"] {
         let form = create_form(format);
