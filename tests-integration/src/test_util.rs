@@ -452,10 +452,11 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let mut http_server = HttpServerBuilder::new(http_opts);
 
+    let slow_query_recorder = instance.fe_instance().slow_query_recorder();
     http_server = http_server
         .with_sql_handler(
             ServerSqlQueryHandlerAdapter::arc(instance.fe_instance().clone()),
-            None,
+            slow_query_recorder,
         )
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())

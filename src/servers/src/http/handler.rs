@@ -101,6 +101,7 @@ pub async fn sql(
         .start_timer();
 
     let sql = query_params.sql.or(form_params.sql);
+
     let _slow_query_timer = if let Some(recorder) = &state.slow_query_recorder {
         recorder.start(
             SlowQuery::Sql(sql.clone().unwrap_or_default()),
@@ -109,6 +110,7 @@ pub async fn sql(
     } else {
         None
     };
+
     let format = query_params
         .format
         .or(form_params.format)
