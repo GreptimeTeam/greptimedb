@@ -30,13 +30,13 @@ use crate::sst::parquet::stats::RowGroupPruningStats;
 
 pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
 
-pub(crate) struct BulkIterContext {
+pub struct BulkIterContext {
     pub(crate) base: RangeBase,
     pub(crate) predicate: Option<Predicate>,
 }
 
 impl BulkIterContext {
-    pub(crate) fn new(
+    pub fn new(
         region_metadata: RegionMetadataRef,
         projection: &Option<&[ColumnId]>,
         predicate: Option<Predicate>,

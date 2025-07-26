@@ -21,7 +21,9 @@ use datafusion_common::Column;
 use datafusion_expr::{lit, Expr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
+use mito2::memtable::bulk::part_reader::RecordBatchIter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
@@ -421,11 +423,61 @@ fn bulk_part_converter(c: &mut Criterion) {
     }
 }
 
+fn record_batch_iter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("record_batch_iter");
+
+    // Benchmark with 4096 rows and 4096 hosts as requested
+    group.bench_function("4096_rows_4096_hosts", |b| {
+        b.iter(|| {
+            // Generate 4096 hosts for 4096 rows
+            let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+            let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+            let schema = to_flat_sst_arrow_schema(
+                &metadata,
+                &FlatSchemaOptions {
+                    raw_pk_columns: false,
+                    string_pk_use_dict: false,
+                },
+            );
+            let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, false);
+
+            // Generate one KeyValues with 4096 rows (one per host)
+            for kvs in generator.iter() {
+                converter.append_key_values(&kvs).unwrap();
+                break; // Only need one iteration since we have 4096 hosts
+            }
+
+            // Convert to BulkPart and extract RecordBatch
+            let bulk_part = converter.convert().unwrap();
+            let record_batch = bulk_part.batch;
+
+            // Create context for RecordBatchIter
+            let context = Arc::new(BulkIterContext::new(
+                metadata.clone(),
+                &None, // No projection
+                None,  // No predicate
+            ));
+
+            // Create and iterate over RecordBatchIter
+            let mut iter = RecordBatchIter::new(record_batch, context, None);
+
+            // Consume all batches
+            while let Some(batch_result) = iter.next() {
+                let _batch = batch_result.unwrap();
+            }
+        });
+    });
+}
+
 criterion_group!(
     benches,
     write_rows,
     full_scan,
     filter_1_host,
     bulk_part_converter,
+    record_batch_iter
 );
 criterion_main!(benches);
