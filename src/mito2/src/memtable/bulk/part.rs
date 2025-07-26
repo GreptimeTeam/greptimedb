@@ -58,7 +58,7 @@ use crate::error::{
     EncodeSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
-use crate::memtable::bulk::part_reader::BulkPartIter;
+use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::BoxedBatchIterator;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
@@ -520,7 +520,7 @@ impl EncodedBulkPart {
             return Ok(None);
         }
 
-        let iter = BulkPartIter::try_new(
+        let iter = EncodedBulkPartIter::try_new(
             context,
             row_groups_to_read,
             self.metadata.parquet_metadata.clone(),

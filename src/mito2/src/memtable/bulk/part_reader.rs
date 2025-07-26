@@ -30,14 +30,14 @@ use crate::memtable::bulk::row_group_reader::{
 use crate::read::Batch;
 
 /// Iterator for reading data inside a bulk part.
-pub struct BulkPartIter {
+pub struct EncodedBulkPartIter {
     row_groups_to_read: VecDeque<usize>,
     current_reader: Option<PruneReader>,
     builder: MemtableRowGroupReaderBuilder,
     sequence: Option<SequenceNumber>,
 }
 
-impl BulkPartIter {
+impl EncodedBulkPartIter {
     /// Creates a new [BulkPartIter].
     pub(crate) fn try_new(
         context: BulkIterContextRef,
@@ -94,7 +94,7 @@ impl BulkPartIter {
     }
 }
 
-impl Iterator for BulkPartIter {
+impl Iterator for EncodedBulkPartIter {
     type Item = error::Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
