@@ -18,4 +18,6 @@ ENV PATH /greptime/bin/:$PATH
 
 ENV TARGET_BIN=$TARGET_BIN
 
+ENV MALLOC_CONF="prof:true,prof_active:false"
+
 ENTRYPOINT ["sh", "-c", "exec $TARGET_BIN \"$@\"", "--"]
