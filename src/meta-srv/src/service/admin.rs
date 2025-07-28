@@ -18,6 +18,7 @@ pub(crate) mod leader;
 pub(crate) mod maintenance;
 pub(crate) mod node_lease;
 pub(crate) mod procedure;
+pub(crate) mod recovery;
 mod util;
 
 use std::collections::HashMap;
@@ -41,6 +42,9 @@ use crate::service::admin::leader::LeaderHandler;
 use crate::service::admin::maintenance::MaintenanceHandler;
 use crate::service::admin::node_lease::NodeLeaseHandler;
 use crate::service::admin::procedure::ProcedureManagerHandler;
+use crate::service::admin::recovery::{
+    get_recovery_mode, set_recovery_mode, unset_recovery_mode, RecoveryHandler,
+};
 use crate::service::admin::util::{to_axum_json_response, to_axum_not_found_response};
 
 pub fn make_admin_service(metasrv: Arc<Metasrv>) -> Admin {
@@ -250,6 +254,9 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
     let procedure_handler = Arc::new(ProcedureManagerHandler {
         manager: metasrv.runtime_switch_manager().clone(),
     });
+    let recovery_handler = Arc::new(RecoveryHandler {
+        manager: metasrv.runtime_switch_manager().clone(),
+    });
 
     let health_router = AxumRouter::new().route(
         "/",
@@ -457,13 +464,20 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
             }),
         );
 
+    let recovery_router = AxumRouter::new()
+        .route("/enable", routing::post(set_recovery_mode))
+        .route("/disable", routing::post(unset_recovery_mode))
+        .route("/status", routing::get(get_recovery_mode))
+        .with_state(recovery_handler);
+
     let admin_router = AxumRouter::new()
         .nest("/health", health_router)
         .nest("/node-lease", node_lease_router)
         .nest("/leader", leader_router)
         .nest("/heartbeat", heartbeat_router)
         .nest("/maintenance", maintenance_router)
-        .nest("/procedure-manager", procedure_router);
+        .nest("/procedure-manager", procedure_router)
+        .nest("/recovery", recovery_router);
 
     AxumRouter::new().nest("/admin", admin_router)
 }
@@ -1028,5 +1042,86 @@ mod axum_admin_tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = get_body_string(response).await;
         assert!(body.contains("running"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_recovery() {
+        let app = setup_axum_app().await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/recovery/status")
+                    .method(Method::GET)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("false"));
+
+        // Enable recovery
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/recovery/enable")
+                    .method(Method::POST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("true"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/recovery/status")
+                    .method(Method::GET)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("true"));
+
+        // Disable recovery
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/recovery/disable")
+                    .method(Method::POST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("false"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/recovery/status")
+                    .method(Method::GET)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = get_body_string(response).await;
+        assert!(body.contains("false"));
     }
 }
