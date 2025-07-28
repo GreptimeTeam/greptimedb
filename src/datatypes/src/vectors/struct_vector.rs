@@ -30,7 +30,7 @@ use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
 #[derive(Debug, PartialEq)]
 pub struct StructVector {
     array: StructArray,
-    data_type: StructFields,
+    data_type: ConcreteDataType,
 }
 
 #[allow(unused)]
@@ -49,6 +49,7 @@ impl StructVector {
                 })
                 .collect::<Result<Vec<StructField>>>()?,
         );
+        let data_type = ConcreteDataType::Struct(data_type);
         Ok(StructVector { array, data_type })
     }
 
@@ -63,7 +64,7 @@ impl StructVector {
 
 impl Vector for StructVector {
     fn data_type(&self) -> ConcreteDataType {
-        todo!()
+        self.data_type.clone()
     }
 
     fn vector_type_name(&self) -> String {

@@ -64,7 +64,7 @@ impl DataType for StructFields {
     }
 
     fn default_value(&self) -> Value {
-        todo!()
+        Value::Null
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
@@ -81,7 +81,8 @@ impl DataType for StructFields {
     }
 
     fn try_cast(&self, _from: Value) -> Option<Value> {
-        todo!("How to cast from Value to StructFields?")
+        // TODO(discord9): what is the meaning of casting from Value to StructFields?
+        None
     }
 }
 
