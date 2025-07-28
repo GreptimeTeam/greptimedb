@@ -40,6 +40,8 @@ impl<'a> ParserContext<'a> {
     ///         | ADD ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
     ///         | MODIFY ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
     ///         | DROP ANNOTATIONS (<annotation_name1>, <annotation_name2>, ...)
+    ///         | [SET] NOTIFY
+    ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter>=<value>, ...)], ...
     ///         | ADD NOTIFY
     ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter>=<value>, ...)], ...
     ///         | DROP NOTIFY (<notify_name1>, <notify_name2>)
