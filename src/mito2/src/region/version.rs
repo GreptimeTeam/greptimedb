@@ -31,7 +31,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
@@ -196,8 +196,7 @@ impl VersionControl {
     /// Truncate current version.
     pub(crate) fn truncate(
         &self,
-        truncated_entry_id: EntryId,
-        truncated_sequence: SequenceNumber,
+        truncate_kind: TruncateKind,
         memtable_builder: &MemtableBuilderRef,
     ) {
         let version = self.current().version;
@@ -210,13 +209,24 @@ impl VersionControl {
             next_memtable_id,
             Some(part_duration),
         ));
-        let new_version = Arc::new(
-            VersionBuilder::new(version.metadata.clone(), new_mutable)
-                .flushed_entry_id(truncated_entry_id)
-                .flushed_sequence(truncated_sequence)
-                .truncated_entry_id(Some(truncated_entry_id))
-                .build(),
-        );
+        let new_version = match truncate_kind {
+            TruncateKind::All {
+                truncated_entry_id,
+                truncated_sequence,
+            } => Arc::new(
+                VersionBuilder::new(version.metadata.clone(), new_mutable)
+                    .flushed_entry_id(truncated_entry_id)
+                    .flushed_sequence(truncated_sequence)
+                    .truncated_entry_id(Some(truncated_entry_id))
+                    .build(),
+            ),
+            TruncateKind::Partial { files_to_remove } => Arc::new(
+                VersionBuilder::from_version(version)
+                    .memtables(MemtableVersion::new(new_mutable))
+                    .remove_files(files_to_remove.into_iter())
+                    .build(),
+            ),
+        };
 
         let mut version_data = self.data.write().unwrap();
         version_data.version.ssts.mark_all_deleted();
@@ -411,6 +421,14 @@ impl VersionBuilder {
     ) -> Self {
         let mut ssts = (*self.ssts).clone();
         ssts.add_files(file_purger, files);
+        self.ssts = Arc::new(ssts);
+
+        self
+    }
+
+    pub(crate) fn remove_files(mut self, files: impl Iterator<Item = FileMeta>) -> Self {
+        let mut ssts = (*self.ssts).clone();
+        ssts.remove_files(files);
         self.ssts = Arc::new(ssts);
 
         self

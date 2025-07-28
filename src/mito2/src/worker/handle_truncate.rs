@@ -19,7 +19,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
-use crate::manifest::action::RegionTruncate;
+use crate::manifest::action::{RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
 use crate::request::{OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
@@ -43,8 +43,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Write region truncated to manifest.
         let truncate = RegionTruncate {
             region_id,
-            truncated_entry_id,
-            truncated_sequence,
+            kind: TruncateKind::All {
+                truncated_entry_id,
+                truncated_sequence,
+            },
         };
         self.handle_manifest_truncate_action(region, truncate, sender);
     }
@@ -68,11 +70,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         match truncate_result.result {
             Ok(()) => {
                 // Applies the truncate action to the region.
-                region.version_control.truncate(
-                    truncate_result.truncated_entry_id,
-                    truncate_result.truncated_sequence,
-                    &region.memtable_builder,
-                );
+                region
+                    .version_control
+                    .truncate(truncate_result.kind.clone(), &region.memtable_builder);
             }
             Err(e) => {
                 // Unable to truncate the region.
@@ -86,23 +86,25 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Notifies compaction scheduler.
         self.compaction_scheduler.on_region_truncated(region_id);
 
-        // Make all data obsolete.
-        if let Err(e) = self
-            .wal
-            .obsolete(
-                region_id,
-                truncate_result.truncated_entry_id,
-                &region.provider,
-            )
-            .await
+        if let TruncateKind::All {
+            truncated_entry_id,
+            truncated_sequence: _,
+        } = &truncate_result.kind
         {
-            truncate_result.sender.send(Err(e));
-            return;
+            // Make all data obsolete.
+            if let Err(e) = self
+                .wal
+                .obsolete(region_id, *truncated_entry_id, &region.provider)
+                .await
+            {
+                truncate_result.sender.send(Err(e));
+                return;
+            }
         }
 
         info!(
-            "Complete truncating region: {}, entry id: {} and sequence: {}.",
-            region_id, truncate_result.truncated_entry_id, truncate_result.truncated_sequence
+            "Complete truncating region: {}, kind: {:?}.",
+            region_id, truncate_result.kind
         );
 
         truncate_result.sender.send(Ok(0));
