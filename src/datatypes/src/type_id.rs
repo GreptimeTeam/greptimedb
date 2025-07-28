@@ -65,6 +65,7 @@ pub enum LogicalTypeId {
 
     List,
     Dictionary,
+    Struct,
 
     Json,
 
@@ -108,6 +109,7 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
+            LogicalTypeId::Struct => ConcreteDataType::struct_datatype(vec![].into()),
             LogicalTypeId::Dictionary => ConcreteDataType::dictionary_datatype(
                 ConcreteDataType::null_datatype(),
                 ConcreteDataType::null_datatype(),

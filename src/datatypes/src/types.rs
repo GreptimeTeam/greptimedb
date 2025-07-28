@@ -25,6 +25,7 @@ mod list_type;
 mod null_type;
 mod primitive_type;
 mod string_type;
+mod struct_type;
 mod time_type;
 mod timestamp_type;
 mod vector_type;
@@ -52,6 +53,7 @@ pub use primitive_type::{
     OrdPrimitive, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };
 pub use string_type::StringType;
+pub use struct_type::{StructField, StructFields};
 pub use time_type::{
     TimeMicrosecondType, TimeMillisecondType, TimeNanosecondType, TimeSecondType, TimeType,
 };

@@ -469,7 +469,8 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL_ARRAY),
             &ConcreteDataType::Dictionary(_)
             | &ConcreteDataType::Vector(_)
-            | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
+            | &ConcreteDataType::List(_)
+            | &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
                 data_type: origin,
                 reason: "not implemented",
             }
@@ -481,6 +482,11 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         }
         .fail(),
         &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL),
+        &ConcreteDataType::Struct(_) => server_error::UnsupportedDataTypeSnafu {
+            data_type: origin,
+            reason: "not implemented",
+        }
+        .fail(),
     }
 }
 

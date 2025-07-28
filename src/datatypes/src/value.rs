@@ -28,6 +28,7 @@ use common_time::interval::IntervalUnit;
 use common_time::time::Time;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timezone};
+use datafusion_common::scalar::ScalarStructBuilder;
 use datafusion_common::ScalarValue;
 use greptime_proto::v1::value::ValueData;
 pub use ordered_float::OrderedFloat;
@@ -540,6 +541,15 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
             Arc::new(new_item_field(output_type.as_arrow_type())),
             0,
         ))),
+        ConcreteDataType::Struct(fields) => {
+            let fields = fields
+                .fields()
+                .iter()
+                .map(|f| f.to_df_field())
+                .collect::<Vec<_>>();
+            let s = ScalarStructBuilder::new_null(fields);
+            s
+        }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
             Box::new(to_null_scalar_value(dict.value_type())?),

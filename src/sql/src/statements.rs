@@ -308,6 +308,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
+        | ConcreteDataType::Struct(_)
         | ConcreteDataType::Dictionary(_) => error::ConcreteTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
