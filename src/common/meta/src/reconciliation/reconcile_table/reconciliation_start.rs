@@ -23,7 +23,6 @@ use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
 use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
-use crate::reconciliation::utils::validate_table_id_and_name;
 
 /// The start state of the reconciliation procedure.
 ///
@@ -45,13 +44,6 @@ impl State for ReconciliationStart {
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
-
-        validate_table_id_and_name(
-            ctx.table_metadata_manager.table_name_manager(),
-            table_id,
-            table_name,
-        )
-        .await?;
 
         let (physical_table_id, physical_table_route) = ctx
             .table_metadata_manager

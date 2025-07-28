@@ -776,7 +776,7 @@ impl AlterKind {
                     let primary_key =
                         new_primary_keys
                             .get(name)
-                            .context(InvalidRegionRequestSnafu {
+                            .with_context(|| InvalidRegionRequestSnafu {
                                 region_id: metadata.region_id,
                                 err: format!("column {} is not a primary key", name),
                             })?;
