@@ -59,6 +59,35 @@ FROM
     integers;
 
 SELECT
+    avg(i)
+FROM
+    integers;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT
+    avg(i)
+FROM
+    integers;
+
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- might write to different partitions
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+EXPLAIN ANALYZE SELECT
+    avg(i)
+FROM
+    integers;
+
+SELECT
     ts,
     count(i),
     sum(i),
