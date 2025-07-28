@@ -780,5 +780,4 @@ mod tests {
             panic!("Expected PartialChanges, got {:?}", ops);
         }
     }
-
 }
