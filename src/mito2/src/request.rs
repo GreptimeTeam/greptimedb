@@ -38,7 +38,7 @@ use store_api::region_request::{
     RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionFlushRequest,
     RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::RegionId;
 use store_api::ManifestVersion;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
@@ -46,7 +46,7 @@ use crate::error::{
     CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
     FlushRegionSnafu, InvalidRequestSnafu, Result, UnexpectedSnafu,
 };
-use crate::manifest::action::RegionEdit;
+use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -886,10 +886,7 @@ pub(crate) struct TruncateResult {
     pub(crate) sender: OptionOutputTx,
     /// Truncate result.
     pub(crate) result: Result<()>,
-    /// Truncated entry id.
-    pub(crate) truncated_entry_id: EntryId,
-    /// Truncated sequence.
-    pub(crate) truncated_sequence: SequenceNumber,
+    pub(crate) kind: TruncateKind,
 }
 
 /// Notifies the region the result of writing region change action.
