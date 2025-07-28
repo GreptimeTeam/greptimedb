@@ -18,7 +18,7 @@ use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
 use regex::Regex;
 
@@ -69,6 +69,10 @@ lazy_static! {
     static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
 
+const OTEL_SCOPE_NAME: &str = "otel_scope_name";
+const OTEL_SCOPE_VERSION: &str = "otel_scope_version";
+const OTEL_SCOPE_SCHEMA_URL: &str = "otel_scope_schema_url";
+
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
 /// See
@@ -104,13 +108,39 @@ pub fn to_grpc_insert_requests(
         });
 
         for scope in &resource.scope_metrics {
-            let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
+            // let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
+
+            let scope_attrs = scope.scope.as_ref().map(|s| {
+                let mut attrs = s.attributes.clone();
+                if !legacy_mode {
+                    attrs.push(KeyValue {
+                        key: OTEL_SCOPE_NAME.to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(s.name.clone())),
+                        }),
+                    });
+                    attrs.push(KeyValue {
+                        key: OTEL_SCOPE_VERSION.to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(s.version.clone())),
+                        }),
+                    });
+                    attrs.push(KeyValue {
+                        key: OTEL_SCOPE_SCHEMA_URL.to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
+                        }),
+                    });
+                }
+                attrs
+            });
+
             for metric in &scope.metrics {
                 encode_metrics(
                     &mut table_writer,
                     metric,
                     resource_attrs.as_ref(),
-                    scope_attrs,
+                    scope_attrs.as_ref(),
                     legacy_mode,
                 )?;
             }
@@ -210,11 +240,19 @@ fn encode_metrics(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeType {
+    Resource,
+    Scope,
+    DataPoint,
+    Legacy,
+}
+
 fn write_attributes(
     writer: &mut TableData,
     row: &mut Vec<Value>,
     attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    attribute_type: AttributeType,
 ) -> Result<()> {
     let Some(attrs) = attrs else {
         return Ok(());
@@ -222,18 +260,19 @@ fn write_attributes(
 
     let tags = attrs
         .iter()
-        // only keep promoted attributes
-        // TODO(shuiyisong): we need to allow user to configure the wanted attributes
-        .filter(|attr| legacy_mode || DEFAULT_ATTRS_HASHSET.contains(&attr.key))
+        .filter(|attr| match attribute_type {
+            AttributeType::Resource => DEFAULT_ATTRS_HASHSET.contains(&attr.key),
+            _ => true,
+        })
         .filter_map(|attr| {
             attr.value
                 .as_ref()
                 .and_then(|v| v.value.as_ref())
                 .and_then(|val| {
-                    let key = if legacy_mode {
-                        legacy_normalize_otlp_name(&attr.key)
-                    } else {
-                        attr.key.clone()
+                    let key = match attribute_type {
+                        AttributeType::Resource | AttributeType::DataPoint => attr.key.clone(),
+                        AttributeType::Scope => format!("otel_scope_{}", attr.key),
+                        AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
                     };
                     match val {
                         any_value::Value::StringValue(s) => Some((key, s.clone())),
@@ -301,9 +340,16 @@ fn write_tags_and_timestamp(
     timestamp_nanos: i64,
     legacy_mode: bool,
 ) -> Result<()> {
-    write_attributes(table, row, resource_attrs, legacy_mode)?;
-    write_attributes(table, row, scope_attrs, legacy_mode)?;
-    write_attributes(table, row, data_point_attrs, legacy_mode)?;
+    if legacy_mode {
+        write_attributes(table, row, resource_attrs, AttributeType::Legacy)?;
+        write_attributes(table, row, scope_attrs, AttributeType::Legacy)?;
+        write_attributes(table, row, data_point_attrs, AttributeType::Legacy)?;
+    } else {
+        // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
+        write_attributes(table, row, resource_attrs, AttributeType::Resource)?;
+        write_attributes(table, row, scope_attrs, AttributeType::Scope)?;
+        write_attributes(table, row, data_point_attrs, AttributeType::DataPoint)?;
+    }
 
     write_timestamp(table, row, timestamp_nanos, legacy_mode)?;
 
