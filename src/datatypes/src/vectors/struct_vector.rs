@@ -14,14 +14,14 @@
 
 use std::sync::Arc;
 
+use arrow::compute::TakeOptions;
 use arrow_array::{Array, ArrayRef, StructArray};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
-use crate::error::{self, Result, UnsupportedOperationSnafu};
+use crate::error::{self, ArrowComputeSnafu, Result, UnsupportedOperationSnafu};
 use crate::prelude::ConcreteDataType;
 use crate::serialize::Serializable;
-use crate::types::{StructField, StructFields};
 use crate::value::{Value, ValueRef};
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
@@ -37,19 +37,7 @@ pub struct StructVector {
 impl StructVector {
     pub fn new(array: StructArray) -> Result<Self> {
         let fields = array.fields();
-        let data_type = StructFields::new(
-            fields
-                .iter()
-                .map(|field| {
-                    Ok(StructField::new(
-                        field.name().to_string(),
-                        ConcreteDataType::try_from(field.data_type())?,
-                        field.is_nullable(),
-                    ))
-                })
-                .collect::<Result<Vec<StructField>>>()?,
-        );
-        let data_type = ConcreteDataType::Struct(data_type);
+        let data_type = ConcreteDataType::Struct(fields.try_into()?);
         Ok(StructVector { array, data_type })
     }
 
@@ -86,6 +74,7 @@ impl Vector for StructVector {
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
         Box::new(self.array.clone())
     }
+
     fn validity(&self) -> Validity {
         vectors::impl_validity_for_vector!(self.array)
     }
@@ -110,11 +99,11 @@ impl Vector for StructVector {
     }
 
     fn get(&self, _: usize) -> Value {
-        todo!("Support StructValue")
+        unimplemented!("StructValue not supported yet")
     }
 
     fn get_ref(&self, _: usize) -> ValueRef {
-        todo!("Support StructValue")
+        unimplemented!("StructValue not supported yet")
     }
 }
 
@@ -149,41 +138,22 @@ impl VectorOp for StructVector {
     }
 
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {
-        let column_arrays = self
-            .array
-            .columns()
-            .iter()
-            .map(|col| {
-                Helper::try_into_vector(col)
-                    .and_then(|v| v.filter(filter))
-                    .map(|v| v.to_arrow_array())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let replicated_array = StructArray::new(
-            self.array.fields().clone(),
-            column_arrays,
-            self.array.nulls().cloned(),
-        );
-        Ok(Arc::new(StructVector::new(replicated_array)?))
+        let filtered =
+            datafusion_common::arrow::compute::filter(&self.array, filter.as_boolean_array())
+                .context(ArrowComputeSnafu)
+                .and_then(Helper::try_into_vector)?;
+        Ok(filtered)
     }
 
     fn take(&self, indices: &vectors::UInt32Vector) -> Result<VectorRef> {
-        let column_arrays = self
-            .array
-            .columns()
-            .iter()
-            .map(|col| {
-                Helper::try_into_vector(col)
-                    .and_then(|v| v.take(indices))
-                    .map(|v| v.to_arrow_array())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let replicated_array = StructArray::new(
-            self.array.fields().clone(),
-            column_arrays,
-            self.array.nulls().cloned(),
-        );
-        Ok(Arc::new(StructVector::new(replicated_array)?))
+        let take_result = datafusion_common::arrow::compute::take(
+            &self.array,
+            indices.as_arrow(),
+            Some(TakeOptions { check_bounds: true }),
+        )
+        .context(ArrowComputeSnafu)
+        .and_then(Helper::try_into_vector)?;
+        Ok(take_result)
     }
 }
 
@@ -192,10 +162,8 @@ impl Serializable for StructVector {
         let mut result = serde_json::Map::new();
         for (field, value) in self.array.fields().iter().zip(self.array.columns().iter()) {
             let value_vector = Helper::try_into_vector(value)?;
-            let field_value = (0..value_vector.len())
-                .map(|i| value_vector.get(i))
-                .map(|v| serde_json::to_value(v).context(error::SerializeSnafu))
-                .collect::<Result<Vec<_>>>()?;
+
+            let field_value = value_vector.serialize_to_json()?;
             result.insert(field.name().clone(), JsonValue::Array(field_value));
         }
         let fields = JsonValue::Object(result);

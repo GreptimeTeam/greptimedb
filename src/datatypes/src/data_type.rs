@@ -34,7 +34,7 @@ use crate::types::{
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType,
     IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
-    StringType, StructFields, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt16Type, UInt32Type, UInt64Type, UInt8Type, VectorType,
 };
@@ -80,7 +80,7 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
-    Struct(StructFields),
+    Struct(StructType),
 
     // JSON type:
     Json(JsonType),
@@ -631,7 +631,7 @@ impl ConcreteDataType {
         ConcreteDataType::List(ListType::new(item_type))
     }
 
-    pub fn struct_datatype(fields: StructFields) -> ConcreteDataType {
+    pub fn struct_datatype(fields: StructType) -> ConcreteDataType {
         ConcreteDataType::Struct(fields)
     }
 

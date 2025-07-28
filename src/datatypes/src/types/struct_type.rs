@@ -20,11 +20,11 @@ use crate::prelude::{ConcreteDataType, DataType, LogicalTypeId};
 use crate::value::Value;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct StructFields {
+pub struct StructType {
     fields: Vec<StructField>,
 }
 
-impl TryFrom<&Fields> for StructFields {
+impl TryFrom<&Fields> for StructType {
     type Error = crate::error::Error;
     fn try_from(value: &Fields) -> Result<Self, Self::Error> {
         let fields = value
@@ -37,17 +37,17 @@ impl TryFrom<&Fields> for StructFields {
                 ))
             })
             .collect::<Result<Vec<StructField>, Self::Error>>()?;
-        Ok(StructFields { fields })
+        Ok(StructType { fields })
     }
 }
 
-impl From<Vec<StructField>> for StructFields {
+impl From<Vec<StructField>> for StructType {
     fn from(fields: Vec<StructField>) -> Self {
-        StructFields { fields }
+        StructType { fields }
     }
 }
 
-impl DataType for StructFields {
+impl DataType for StructType {
     fn name(&self) -> String {
         format!(
             "Struct<{}>",
@@ -77,7 +77,7 @@ impl DataType for StructFields {
     }
 
     fn create_mutable_vector(&self, _capacity: usize) -> Box<dyn crate::prelude::MutableVector> {
-        todo!("What is the mutable vector for StructVector?");
+        unimplemented!("What is the mutable vector for StructVector?");
     }
 
     fn try_cast(&self, _from: Value) -> Option<Value> {
@@ -86,9 +86,9 @@ impl DataType for StructFields {
     }
 }
 
-impl StructFields {
+impl StructType {
     pub fn new(fields: Vec<StructField>) -> Self {
-        StructFields { fields }
+        StructType { fields }
     }
 
     pub fn fields(&self) -> &[StructField] {
