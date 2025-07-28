@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::error::{InvalidInputTypeSnafu, Result};
+use api::v1::meta::ResolveStrategy;
+use common_query::error::{InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::cast::cast;
 use datatypes::value::ValueRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 /// Create a function signature with oneof signatures of interleaving two arguments.
 pub fn one_of_sigs2(args1: Vec<ConcreteDataType>, args2: Vec<ConcreteDataType>) -> Signature {
@@ -42,4 +43,46 @@ pub fn cast_u64(value: &ValueRef) -> Result<Option<u64>> {
             ),
         })
         .map(|v| v.as_u64())
+}
+
+/// Cast a [`ValueRef`] to u32, returns `None` if fails
+pub fn cast_u32(value: &ValueRef) -> Result<Option<u32>> {
+    cast((*value).into(), &ConcreteDataType::uint32_datatype())
+        .context(InvalidInputTypeSnafu {
+            err_msg: format!(
+                "Failed to cast input into uint32, actual type: {:#?}",
+                value.data_type(),
+            ),
+        })
+        .map(|v| v.as_u64().map(|v| v as u32))
+}
+
+/// Parse a resolve strategy from a string.
+pub fn parse_resolve_strategy(strategy: &str) -> Result<ResolveStrategy> {
+    ResolveStrategy::from_str_name(strategy).context(InvalidFuncArgsSnafu {
+        err_msg: format!("Invalid resolve strategy: {}", strategy),
+    })
+}
+
+/// Default parallelism for reconcile operations.
+pub fn default_parallelism() -> u32 {
+    64
+}
+
+/// Default resolve strategy for reconcile operations.
+pub fn default_resolve_strategy() -> ResolveStrategy {
+    ResolveStrategy::UseLatest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_resolve_strategy() {
+        assert_eq!(
+            parse_resolve_strategy("UseLatest").unwrap(),
+            ResolveStrategy::UseLatest
+        );
+    }
 }
