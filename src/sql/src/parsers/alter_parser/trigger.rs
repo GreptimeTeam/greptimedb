@@ -40,10 +40,14 @@ impl<'a> ParserContext<'a> {
     ///         | ADD ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
     ///         | MODIFY ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
     ///         | DROP ANNOTATIONS (<annotation_name1>, <annotation_name2>, ...)
-    ///         | [SET] NOTIFY
-    ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter>=<value>, ...)], ...
-    ///         | ADD NOTIFY
-    ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter>=<value>, ...)], ...
+    ///         | [SET] NOTIFY(
+    ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter1>=<value1>, ...)],
+    ///                 WEBHOOK <notify_name2> URL '<url2>' [WITH (<parameter2>=<value2>, ...)]
+    ///         )
+    ///         | ADD NOTIFY(
+    ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter1>=<value1>, ...)],
+    ///                 WEBHOOK <notify_name2> URL '<url2>' [WITH (<parameter2>=<value2>, ...)]
+    ///         )
     ///         | DROP NOTIFY (<notify_name1>, <notify_name2>)
     /// }
     /// ```
@@ -53,9 +57,9 @@ impl<'a> ParserContext<'a> {
         let mut new_trigger_name = None;
         let mut new_query = None;
         let mut new_interval = None;
-        let mut label_ops: Option<LabelOperations> = None;
-        let mut annotation_ops: Option<AnnotationOperations> = None;
-        let mut notify_ops: Option<NotifyChannelOperations> = None;
+        let mut label_ops = None;
+        let mut annotation_ops = None;
+        let mut notify_ops = None;
 
         loop {
             let next_token = self.parser.peek_token();
@@ -235,16 +239,18 @@ impl<'a> ParserContext<'a> {
             return self.expected("alter option", self.parser.peek_token());
         }
 
+        let operation = AlterTriggerOperation {
+            rename: new_trigger_name,
+            new_query,
+            new_interval,
+            label_operations: label_ops,
+            annotation_operations: annotation_ops,
+            notify_channel_operations: notify_ops,
+        };
+
         let alter_trigger = AlterTrigger {
             trigger_name,
-            operation: AlterTriggerOperation {
-                rename: new_trigger_name,
-                new_query,
-                new_interval,
-                label_operations: label_ops,
-                annotation_operations: annotation_ops,
-                notify_channel_operations: notify_ops,
-            },
+            operation,
         };
         Ok(Statement::AlterTrigger(alter_trigger))
     }

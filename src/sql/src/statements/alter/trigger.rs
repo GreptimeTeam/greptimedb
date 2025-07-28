@@ -35,17 +35,12 @@ impl Display for AlterTrigger {
             write!(f, "RENAME TO {}", new_name)?;
         }
 
-        if operation.new_query.is_some() && operation.new_interval.is_some() {
+        if let Some((new_query, new_interval)) =
+            operation.new_query.as_ref().zip(operation.new_interval)
+        {
             writeln!(f)?;
-            write!(f, "ON")?;
-        }
-
-        if let Some(query) = &operation.new_query {
-            write!(f, " {}", query)?;
-        }
-
-        if let Some(interval) = operation.new_interval {
-            write!(f, " EVERY {} SECONDS", interval)?;
+            write!(f, "ON {}", new_query)?;
+            write!(f, " EVERY {} SECONDS", new_interval)?;
         }
 
         if let Some(label_ops) = &operation.label_operations {
@@ -103,41 +98,23 @@ impl Display for AlterTrigger {
 }
 
 /// The operations which describe how to update labels.
-///
-/// Note: replace all is mutually exclusive with partial changes.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum LabelOperations {
     ReplaceAll(OptionMap),
     PartialChanges(Vec<LabelChange>),
 }
 
-impl LabelOperations {
-    /// Insert a partial change into the label operations.
-    ///
-    /// Returns `true` if the change was inserted, `false` if the operation is
-    /// `ReplaceAll`.
-    pub fn insert_partial_change(&mut self, change: LabelChange) -> bool {
-        match self {
-            LabelOperations::ReplaceAll(_) => false,
-            LabelOperations::PartialChanges(changes) => {
-                changes.push(change);
-                true
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum LabelChange {
-    /// Add operation will add new labels.
+    /// Add new labels.
     ///
     /// Note: if the labels to add already exists, an error will be reported.
     Add(OptionMap),
-    /// Modify operation will update existing labels.
+    /// Modify existing labels.
     ///
     /// Note: if the labels to update does not exist, an error will be reported.
     Modify(OptionMap),
-    /// Drop operation will remove specified labels.
+    /// Drop specified labels.
     ///
     /// Note: if the labels to drop does not exist, an error will be reported.
     Drop(Vec<String>),
@@ -169,8 +146,6 @@ impl Display for LabelChange {
 }
 
 /// The operations which describe how to update annotations.
-///
-/// Note: replace all is mutually exclusive with partial changes.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AnnotationOperations {
     ReplaceAll(OptionMap),
@@ -179,18 +154,19 @@ pub enum AnnotationOperations {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum AnnotationChange {
-    /// Add operation will add new annotations.
+    /// Add new annotations.
     ///
     /// Note: if the annotations to add already exists, an error will be reported.
     Add(OptionMap),
-    /// Modify operation will update existing annotations.
+    /// Modify existing annotations.
     ///
     /// Note: if the annotations to update does not exist, an error will be
     /// reported.
     Modify(OptionMap),
-    /// Drop operation will remove specified annotations.
+    /// Drop specified annotations.
     ///
-    /// Note: if the annotations to drop does not exist, an error will be reported.
+    /// Note: if the annotations to drop does not exist, an error will be
+    /// reported.
     Drop(Vec<String>),
 }
 
@@ -220,8 +196,6 @@ impl Display for AnnotationChange {
 }
 
 /// The operations which describe how to update notify channels.
-///
-/// Note: replace all is mutually exclusive with partial changes.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum NotifyChannelOperations {
     ReplaceAll(Vec<NotifyChannel>),
@@ -230,12 +204,12 @@ pub enum NotifyChannelOperations {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub enum NotifyChannelChange {
-    /// Add operation will add new NotifyChannel's.
+    /// Add new NotifyChannel's.
     ///
     /// Note: if the NotifyChannel to add already exists, an error will be
     /// reported.
     Add(Vec<NotifyChannel>),
-    /// Drop operation will remove specified NotifyChannel's.
+    /// Drop specified NotifyChannel's.
     ///
     /// Note: if the NotifyChannel to drop does not exist, an error will be
     /// reported.
