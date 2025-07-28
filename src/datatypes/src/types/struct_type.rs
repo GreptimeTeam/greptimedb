@@ -18,15 +18,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::prelude::{ConcreteDataType, DataType, LogicalTypeId};
 use crate::value::Value;
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct StructFields {
     fields: Vec<StructField>,
-}
-
-impl Default for StructFields {
-    fn default() -> Self {
-        StructFields { fields: vec![] }
-    }
 }
 
 impl TryFrom<&Fields> for StructFields {

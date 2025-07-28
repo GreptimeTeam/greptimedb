@@ -547,8 +547,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
                 .iter()
                 .map(|f| f.to_df_field())
                 .collect::<Vec<_>>();
-            let s = ScalarStructBuilder::new_null(fields);
-            s
+            ScalarStructBuilder::new_null(fields)
         }
         ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
             Box::new(dict.key_type().as_arrow_type()),
