@@ -69,9 +69,9 @@ lazy_static! {
     static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
 
-const OTEL_SCOPE_NAME: &str = "otel_scope_name";
-const OTEL_SCOPE_VERSION: &str = "otel_scope_version";
-const OTEL_SCOPE_SCHEMA_URL: &str = "otel_scope_schema_url";
+const OTEL_SCOPE_NAME: &str = "name";
+const OTEL_SCOPE_VERSION: &str = "version";
+const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -108,8 +108,6 @@ pub fn to_grpc_insert_requests(
         });
 
         for scope in &resource.scope_metrics {
-            // let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
-
             let scope_attrs = scope.scope.as_ref().map(|s| {
                 let mut attrs = s.attributes.clone();
                 if !legacy_mode {
@@ -270,8 +268,12 @@ fn write_attributes(
                 .and_then(|v| v.value.as_ref())
                 .and_then(|val| {
                     let key = match attribute_type {
-                        AttributeType::Resource | AttributeType::DataPoint => attr.key.clone(),
-                        AttributeType::Scope => format!("otel_scope_{}", attr.key),
+                        AttributeType::Resource | AttributeType::DataPoint => {
+                            normalize_metric_name(&attr.key)
+                        }
+                        AttributeType::Scope => {
+                            format!("otel_scope_{}", normalize_metric_name(&attr.key))
+                        }
                         AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
                     };
                     match val {
@@ -757,14 +759,19 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 2);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
     }
 
@@ -802,14 +809,19 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 2);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value"]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
     }
 
@@ -847,38 +859,54 @@ mod tests {
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 3);
+        assert_eq!(table.num_columns(), 5);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "quantile", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "quantile",
+                "greptime_value"
+            ]
         );
 
         let table = tables.get_or_default_table_data("datamon_count", 0, 0);
         assert_eq!(table.num_rows(), 1);
-        assert_eq!(table.num_columns(), 2);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
 
         let table = tables.get_or_default_table_data("datamon_sum", 0, 0);
         assert_eq!(table.num_rows(), 1);
-        assert_eq!(table.num_columns(), 2);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
     }
 
@@ -918,38 +946,54 @@ mod tests {
         // bucket table
         let bucket_table = tables.get_or_default_table_data("histo_bucket", 0, 0);
         assert_eq!(bucket_table.num_rows(), 5);
-        assert_eq!(bucket_table.num_columns(), 3);
+        assert_eq!(bucket_table.num_columns(), 5);
         assert_eq!(
             bucket_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "le", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "le",
+                "greptime_value",
+            ]
         );
 
         let sum_table = tables.get_or_default_table_data("histo_sum", 0, 0);
         assert_eq!(sum_table.num_rows(), 1);
-        assert_eq!(sum_table.num_columns(), 2);
+        assert_eq!(sum_table.num_columns(), 4);
         assert_eq!(
             sum_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
 
         let count_table = tables.get_or_default_table_data("histo_count", 0, 0);
         assert_eq!(count_table.num_rows(), 1);
-        assert_eq!(count_table.num_columns(), 2);
+        assert_eq!(count_table.num_columns(), 4);
         assert_eq!(
             count_table
                 .columns()
                 .iter()
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
-            vec!["greptime_timestamp", "greptime_value",]
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
         );
     }
 
