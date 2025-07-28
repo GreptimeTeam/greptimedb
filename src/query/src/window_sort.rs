@@ -564,8 +564,18 @@ impl WindowedSortStream {
                     last_remaining = Some((sorted_rb, run_info));
                 }
             }
+
+            // poll result stream again to see if we can emit more results
+            match self.poll_result_stream(cx) {
+                Poll::Ready(None) => {
+                    if self.is_terminated {
+                        return Poll::Ready(None);
+                    }
+                }
+                x => return x,
+            };
         }
-        // emit the merge result
+        // emit the merge result after terminated(all input stream is done)
         self.poll_result_stream(cx)
     }
 
