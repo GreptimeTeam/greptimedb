@@ -26,11 +26,8 @@ use std::sync::Arc;
 
 use arrow::array::StructArray;
 use arrow_schema::Fields;
-use datafusion::functions_aggregate::average::avg_udaf;
-use datafusion::functions_aggregate::count::count_udaf;
-use datafusion::functions_aggregate::first_last::{first_value_udaf, last_value_udaf};
-use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
-use datafusion::functions_aggregate::sum::sum_udaf;
+use common_telemetry::debug;
+use datafusion::functions_aggregate::all_default_aggregate_functions;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
@@ -44,8 +41,6 @@ use datafusion_expr::{
 use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use datatypes::arrow::datatypes::{DataType, Field};
 
-use crate::aggrs::approximate::hll::HllState;
-use crate::aggrs::approximate::uddsketch::UddSketchState;
 use crate::function_registry::FunctionRegistry;
 
 /// Returns the name of the state function for the given aggregate function name.
@@ -95,35 +90,30 @@ impl StateMergeHelper {
     /// Register all the `state` function of supported aggregate functions.
     /// Note that can't register `merge` function here, as it needs to be created from the original aggregate function with given input types.
     pub fn register(registry: &FunctionRegistry) {
-        // TODO(discord9): support more aggregate functions. and move
-        // this list to somewhere else. Or just iter over all existing aggr function and add state wrapper fn def to it.
-        let supported = vec![
-            count_udaf(),
-            sum_udaf(),
-            avg_udaf(),
-            min_udaf(),
-            max_udaf(),
-            first_value_udaf(),
-            last_value_udaf(),
-            Arc::new(UddSketchState::state_udf_impl()),
-            Arc::new(UddSketchState::merge_udf_impl()),
-            Arc::new(HllState::state_udf_impl()),
-            Arc::new(HllState::merge_udf_impl()),
-        ];
-        let state_func = supported
+        let all_default = all_default_aggregate_functions();
+        let greptime_custom_aggr_functions = registry.aggregate_functions();
+
+        // if our custom aggregate function have the same name as the default aggregate function, we will override it.
+        let supported = all_default
             .into_iter()
-            .filter_map(|f| {
-                StateWrapper::new((*f).clone())
-                    .inspect_err(|e| {
-                        common_telemetry::error!(
-                            "Failed to register state function for {:?} with error={e:?}",
-                            f
-                        )
-                    })
-                    .ok()
-                    .map(AggregateUDF::new_from_impl)
-            })
+            .chain(greptime_custom_aggr_functions.into_iter().map(Arc::new))
             .collect::<Vec<_>>();
+        debug!(
+            "Registering state functions for supported: {:?}",
+            supported.iter().map(|f| f.name()).collect::<Vec<_>>()
+        );
+
+        let state_func = supported.into_iter().filter_map(|f| {
+            StateWrapper::new((*f).clone())
+                .inspect_err(|e| {
+                    common_telemetry::error!(
+                        "Failed to register state function for {:?} with error={e:?}",
+                        f
+                    )
+                })
+                .ok()
+                .map(AggregateUDF::new_from_impl)
+        });
 
         for func in state_func {
             registry.register_aggr(func);
