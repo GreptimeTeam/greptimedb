@@ -454,15 +454,18 @@ impl AggregateUDFImpl for MergeWrapper {
         &'a self,
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
-        if acc_args.schema.fields().len() != 1
-            || !matches!(acc_args.schema.field(0).data_type(), DataType::Struct(_))
+        if acc_args.exprs.len() != 1
+            || !matches!(
+                acc_args.exprs[0].data_type(acc_args.schema)?,
+                DataType::Struct(_)
+            )
         {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "Expected one struct type as input, got: {:?}",
                 acc_args.schema
             )));
         }
-        let input_type = acc_args.schema.field(0).data_type();
+        let input_type = acc_args.exprs[0].data_type(acc_args.schema)?;
         let DataType::Struct(fields) = input_type else {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "Expected a struct type for input, got: {:?}",
@@ -471,7 +474,7 @@ impl AggregateUDFImpl for MergeWrapper {
         };
 
         let inner_accum = self.original_phy_expr.create_accumulator()?;
-        Ok(Box::new(MergeAccum::new(inner_accum, fields)))
+        Ok(Box::new(MergeAccum::new(inner_accum, &fields)))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
