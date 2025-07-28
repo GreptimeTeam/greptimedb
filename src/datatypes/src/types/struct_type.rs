@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
+use arrow_schema::Fields;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::{ConcreteDataType, DataType, LogicalTypeId};
@@ -25,6 +26,23 @@ pub struct StructFields {
 impl Default for StructFields {
     fn default() -> Self {
         StructFields { fields: vec![] }
+    }
+}
+
+impl TryFrom<&Fields> for StructFields {
+    type Error = crate::error::Error;
+    fn try_from(value: &Fields) -> Result<Self, Self::Error> {
+        let fields = value
+            .iter()
+            .map(|field| {
+                Ok(StructField::new(
+                    field.name().to_string(),
+                    ConcreteDataType::try_from(field.data_type())?,
+                    field.is_nullable(),
+                ))
+            })
+            .collect::<Result<Vec<StructField>, Self::Error>>()?;
+        Ok(StructFields { fields })
     }
 }
 

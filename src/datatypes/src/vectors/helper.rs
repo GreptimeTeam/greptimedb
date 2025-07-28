@@ -21,7 +21,7 @@ use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::compute;
 use arrow::compute::kernels::comparison;
 use arrow::datatypes::{DataType as ArrowDataType, Int64Type, TimeUnit};
-use arrow_array::DictionaryArray;
+use arrow_array::{DictionaryArray, StructArray};
 use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
@@ -31,6 +31,7 @@ use crate::error::{self, ConvertArrowArrayToScalarsSnafu, Result};
 use crate::prelude::DataType;
 use crate::scalars::{Scalar, ScalarVectorBuilder};
 use crate::value::{ListValue, ListValueRef, Value};
+use crate::vectors::struct_vector::StructVector;
 use crate::vectors::{
     BinaryVector, BooleanVector, ConstantVector, DateVector, Decimal128Vector, DictionaryVector,
     DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
@@ -359,10 +360,18 @@ impl Helper {
                     ConcreteDataType::try_from(value.as_ref())?,
                 )?)
             }
+
+            ArrowDataType::Struct(_fields) => {
+                let array = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .unwrap();
+                Arc::new(StructVector::new(array.clone())?)
+            }
             ArrowDataType::Float16
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
-            | ArrowDataType::Struct(_)
             | ArrowDataType::Union(_, _)
             | ArrowDataType::Dictionary(_, _)
             | ArrowDataType::Decimal256(_, _)

@@ -462,7 +462,20 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Decimal128(precision, scale) => {
                 ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
-            _ => {
+            ArrowDataType::Struct(fields) => ConcreteDataType::Struct(fields.try_into()?),
+            ArrowDataType::Float16
+            | ArrowDataType::Date64
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::BinaryView
+            | ArrowDataType::Utf8View
+            | ArrowDataType::ListView(_)
+            | ArrowDataType::FixedSizeList(_, _)
+            | ArrowDataType::LargeList(_)
+            | ArrowDataType::LargeListView(_)
+            | ArrowDataType::Union(_, _)
+            | ArrowDataType::Decimal256(_, _)
+            | ArrowDataType::Map(_, _)
+            | ArrowDataType::RunEndEncoded(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }

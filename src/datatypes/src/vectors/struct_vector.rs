@@ -139,7 +139,7 @@ impl VectorOp for StructVector {
         )
     }
 
-    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+    fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
         UnsupportedOperationSnafu {
             op: "cast",
             vector_type: self.vector_type_name(),
