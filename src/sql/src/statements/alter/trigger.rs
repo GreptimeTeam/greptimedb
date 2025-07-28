@@ -250,7 +250,7 @@ impl Display for NotifyChannelChange {
                     return Ok(());
                 }
                 write!(f, "ADD NOTIFY(")?;
-                for (idx, channel) in channels.into_iter().enumerate() {
+                for (idx, channel) in channels.iter().enumerate() {
                     writeln!(f)?;
                     write!(f, "    {}", channel)?;
                     if idx < channels.len() - 1 {

@@ -731,7 +731,7 @@ impl<'a> ParserContext<'a> {
                     })?;
 
             let options = OptionMap::from([(VECTOR_OPT_DIM.to_string(), dimension.to_string())]);
-            column_extensions.vector_options = Some(options.into());
+            column_extensions.vector_options = Some(options);
         }
 
         // parse index options in column definition

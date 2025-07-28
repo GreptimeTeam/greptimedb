@@ -27,22 +27,22 @@ impl<'a> ParserContext<'a> {
     ///
     /// ```sql
     /// ALTER TRIGGER <trigger_name>
-    ///   		[alter_option [alter_option] ...]
+    ///         [alter_option [alter_option] ...]
     ///
     /// alter_option: {
-    ///     	RENAME TO <new_trigger_name>
-    ///     	| ON (<query_expression>) EVERY <interval_expression>
-    /// 		| [SET] LABELS (<label_name>=<label_val>, ...)
-    /// 		| ADD LABELS (<label_name>=<label_val>, ...)
-    /// 		| MODIFY LABELS (<label_name>=<label_val>, ...)
-    /// 		| DROP LABELS (<label_name1>, <label_name2>, ...)
-    /// 		| [SET] ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
-    ///     	| ADD ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
-    ///     	| MODIFY ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
-    /// 		| DROP ANNOTATIONS (<annotation_name1>, <annotation_name2>, ...)
+    ///         RENAME TO <new_trigger_name>
+    ///         | ON (<query_expression>) EVERY <interval_expression>
+    ///         | [SET] LABELS (<label_name>=<label_val>, ...)
+    ///         | ADD LABELS (<label_name>=<label_val>, ...)
+    ///         | MODIFY LABELS (<label_name>=<label_val>, ...)
+    ///         | DROP LABELS (<label_name1>, <label_name2>, ...)
+    ///         | [SET] ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
+    ///         | ADD ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
+    ///         | MODIFY ANNOTATIONS (<annotation_name>=<annotation_val>, ...)
+    ///         | DROP ANNOTATIONS (<annotation_name1>, <annotation_name2>, ...)
     ///         | ADD NOTIFY
     ///                 WEBHOOK <notify_name1> URL '<url1>' [WITH (<parameter>=<value>, ...)], ...
-    /// 		| DROP NOTIFY (<notify_name1>, <notify_name2>)
+    ///         | DROP NOTIFY (<notify_name1>, <notify_name2>)
     /// }
     /// ```
     pub(super) fn parse_alter_trigger(&mut self) -> Result<Statement> {
@@ -747,7 +747,7 @@ mod tests {
         labels.insert("key2".to_string(), "value2".to_string());
 
         apply_label_replacement(&mut label_ops, labels.clone()).unwrap();
-        assert!(matches!(label_ops, Some(_)));
+        assert!(label_ops.is_some());
 
         // Set operations are mutually exclusive.
         let result = apply_label_replacement(&mut label_ops, labels.clone());
