@@ -154,9 +154,10 @@ impl RegionServer {
         &self,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         self.inner
-            .handle_batch_open_requests(parallelism, requests)
+            .handle_batch_open_requests(parallelism, requests, ignore_nonexistent_region)
             .await
     }
 
@@ -799,6 +800,7 @@ impl RegionServerInner {
         engine: RegionEngineRef,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         let region_changes = requests
             .iter()
@@ -836,8 +838,14 @@ impl RegionServerInner {
                         }
                         Err(e) => {
                             self.unset_region_status(region_id, &engine, *region_change);
-                            error!(e; "Failed to open region: {}", region_id);
-                            errors.push(e);
+                            if e.status_code() == StatusCode::RegionNotFound
+                                && ignore_nonexistent_region
+                            {
+                                warn!("Region {} not found, ignore it, source: {:?}", region_id, e);
+                            } else {
+                                error!(e; "Failed to open region: {}", region_id);
+                                errors.push(e);
+                            }
                         }
                     }
                 }
@@ -866,6 +874,7 @@ impl RegionServerInner {
         &self,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         let mut engine_grouped_requests: HashMap<String, Vec<_>> =
             HashMap::with_capacity(requests.len());
@@ -888,8 +897,13 @@ impl RegionServerInner {
                 .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
                 .clone();
             results.push(
-                self.handle_batch_open_requests_inner(engine, parallelism, requests)
-                    .await,
+                self.handle_batch_open_requests_inner(
+                    engine,
+                    parallelism,
+                    requests,
+                    ignore_nonexistent_region,
+                )
+                .await,
             )
         }
 
@@ -1487,6 +1501,85 @@ mod tests {
 
         let status = mock_region_server.inner.region_map.get(&region_id);
         assert!(status.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_batch_open_region_ignore_nonexistent_regions() {
+        common_telemetry::init_default_ut_logging();
+        let mut mock_region_server = mock_region_server();
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(|region_id, _request| {
+                if region_id == RegionId::new(1, 1) {
+                    error::RegionNotFoundSnafu { region_id }.fail()
+                } else {
+                    Ok(0)
+                }
+            }),
+        );
+        mock_region_server.register_engine(engine.clone());
+
+        let region_ids = mock_region_server
+            .handle_batch_open_requests(
+                8,
+                vec![
+                    (
+                        RegionId::new(1, 1),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            table_dir: String::new(),
+                            path_type: PathType::Bare,
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                    (
+                        RegionId::new(1, 2),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            table_dir: String::new(),
+                            path_type: PathType::Bare,
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                ],
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(region_ids, vec![RegionId::new(1, 2)]);
+
+        let err = mock_region_server
+            .handle_batch_open_requests(
+                8,
+                vec![
+                    (
+                        RegionId::new(1, 1),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            table_dir: String::new(),
+                            path_type: PathType::Bare,
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                    (
+                        RegionId::new(1, 2),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            table_dir: String::new(),
+                            path_type: PathType::Bare,
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                ],
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unexpected);
     }
 
     struct CurrentEngineTest {

@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
+use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::wal_options_allocator::prepare_wal_options;
@@ -230,6 +231,12 @@ impl DatanodeBuilder {
             .new_region_server(schema_metadata_manager, region_event_listener)
             .await?;
 
+        // TODO(weny): Considering introducing a readonly kv_backend trait.
+        let runtime_switch_manager = RuntimeSwitchManager::new(self.kv_backend.clone());
+        let is_recovery_mode = runtime_switch_manager
+            .recovery_mode()
+            .await
+            .context(GetMetadataSnafu)?;
         let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
         let table_values = datanode_table_manager
             .tables(node_id)
@@ -242,6 +249,8 @@ impl DatanodeBuilder {
             table_values,
             !controlled_by_metasrv,
             self.opts.init_regions_parallelism,
+            // Ignore nonexistent regions in recovery mode.
+            is_recovery_mode,
         );
 
         if self.opts.init_regions_in_background {
@@ -323,6 +332,12 @@ impl DatanodeBuilder {
     ) -> Result<()> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
+        let runtime_switch_manager = RuntimeSwitchManager::new(kv_backend.clone());
+        let is_recovery_mode = runtime_switch_manager
+            .recovery_mode()
+            .await
+            .context(GetMetadataSnafu)?;
+
         let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let table_values = datanode_table_manager
             .tables(node_id)
@@ -335,6 +350,7 @@ impl DatanodeBuilder {
             table_values,
             open_with_writable,
             self.opts.init_regions_parallelism,
+            is_recovery_mode,
         )
         .await
     }
@@ -558,6 +574,7 @@ async fn open_all_regions(
     table_values: Vec<DatanodeTableValue>,
     open_with_writable: bool,
     init_regions_parallelism: usize,
+    ignore_nonexistent_region: bool,
 ) -> Result<()> {
     let mut regions = vec![];
     #[cfg(feature = "enterprise")]
@@ -616,7 +633,11 @@ async fn open_all_regions(
     }
 
     let open_regions = region_server
-        .handle_batch_open_requests(init_regions_parallelism, region_requests)
+        .handle_batch_open_requests(
+            init_regions_parallelism,
+            region_requests,
+            ignore_nonexistent_region,
+        )
         .await?;
     ensure!(
         open_regions.len() == num_regions,
@@ -660,7 +681,11 @@ async fn open_all_regions(
         }
 
         let open_regions = region_server
-            .handle_batch_open_requests(init_regions_parallelism, region_requests)
+            .handle_batch_open_requests(
+                init_regions_parallelism,
+                region_requests,
+                ignore_nonexistent_region,
+            )
             .await?;
 
         ensure!(
