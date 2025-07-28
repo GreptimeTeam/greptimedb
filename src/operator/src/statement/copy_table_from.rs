@@ -41,7 +41,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::{Constraints, Statistics};
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
-use datatypes::arrow::datatypes::{Schema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
 use object_store::{Entry, EntryMode, ObjectStore};
@@ -532,6 +532,19 @@ async fn batch_insert(
     Ok(result)
 }
 
+/// Custom type compatibility check for GreptimeDB that handles Map -> Binary (JSON) conversion
+fn can_cast_types_for_greptime(from: &ArrowDataType, to: &ArrowDataType) -> bool {
+    // Handle Map -> Binary conversion for JSON types
+    if let ArrowDataType::Map(_, _) = from {
+        if let ArrowDataType::Binary = to {
+            return true;
+        }
+    }
+
+    // For all other cases, use Arrow's built-in can_cast_types
+    can_cast_types(from, to)
+}
+
 fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     let not_match = from
         .fields
@@ -539,7 +552,7 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
         .zip(to.fields.iter())
         .map(|(l, r)| (l.data_type(), r.data_type()))
         .enumerate()
-        .find(|(_, (l, r))| !can_cast_types(l, r));
+        .find(|(_, (l, r))| !can_cast_types_for_greptime(l, r));
 
     if let Some((index, _)) = not_match {
         error::InvalidSchemaSnafu {
@@ -717,6 +730,30 @@ mod tests {
             (DataType::Utf8, true),
             true,
         );
+    }
+
+    #[test]
+    fn test_map_to_binary_json_compatibility() {
+        // Test Map -> Binary conversion for JSON types
+        let map_type = DataType::Map(
+            Arc::new(Field::new(
+                "key_value",
+                DataType::Struct(
+                    vec![
+                        Field::new("key", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, false),
+                    ]
+                    .into(),
+                ),
+                false,
+            )),
+            false,
+        );
+
+        test_schema_matches((map_type, false), (DataType::Binary, true), true);
+
+        test_schema_matches((DataType::Int8, true), (DataType::Int16, true), true);
+        test_schema_matches((DataType::Utf8, true), (DataType::Binary, true), true);
     }
 
     fn make_test_schema(v: &[Field]) -> Arc<Schema> {

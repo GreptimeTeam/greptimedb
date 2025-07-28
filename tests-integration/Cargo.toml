@@ -90,6 +90,7 @@ datafusion-expr.workspace = true
 hex.workspace = true
 http.workspace = true
 itertools.workspace = true
+jsonb.workspace = true
 opentelemetry-proto.workspace = true
 partition.workspace = true
 paste.workspace = true
