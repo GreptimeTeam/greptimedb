@@ -40,9 +40,7 @@ const UNDERSCORE: &str = "_";
 
 // see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
 // instance and job alias to service.instance.id and service.name that we need to keep
-const DEFAULT_ATTRS: [&str; 21] = [
-    "instance",
-    "job",
+const DEFAULT_ATTRS: [&str; 19] = [
     "service.instance.id",
     "service.name",
     "service.namespace",
@@ -90,55 +88,12 @@ pub fn to_grpc_insert_requests(
     for resource in &request.resource_metrics {
         let resource_attrs = resource.resource.as_ref().map(|r| {
             let mut attrs = r.attributes.clone();
-            if !metric_ctx.is_legacy {
-                for kv in &r.attributes {
-                    if kv.key == KEY_SERVICE_NAME {
-                        attrs.push(KeyValue {
-                            key: JOB_KEY.to_string(),
-                            value: kv.value.clone(),
-                        });
-                    } else if kv.key == KEY_SERVICE_INSTANCE_ID {
-                        attrs.push(KeyValue {
-                            key: INSTANCE_KEY.to_string(),
-                            value: kv.value.clone(),
-                        });
-                    }
-                }
-            }
+            process_resource_attrs(&mut attrs, metric_ctx);
             attrs
         });
 
         for scope in &resource.scope_metrics {
-            let scope_attrs = if metric_ctx.promote_scope_attrs {
-                scope.scope.as_ref().map(|s| {
-                    let mut attrs = s.attributes.clone();
-                    if !metric_ctx.is_legacy {
-                        attrs.push(KeyValue {
-                            key: OTEL_SCOPE_NAME.to_string(),
-                            value: Some(AnyValue {
-                                value: Some(any_value::Value::StringValue(s.name.clone())),
-                            }),
-                        });
-                        attrs.push(KeyValue {
-                            key: OTEL_SCOPE_VERSION.to_string(),
-                            value: Some(AnyValue {
-                                value: Some(any_value::Value::StringValue(s.version.clone())),
-                            }),
-                        });
-                        attrs.push(KeyValue {
-                            key: OTEL_SCOPE_SCHEMA_URL.to_string(),
-                            value: Some(AnyValue {
-                                value: Some(any_value::Value::StringValue(
-                                    scope.schema_url.clone(),
-                                )),
-                            }),
-                        });
-                    }
-                    attrs
-                })
-            } else {
-                None
-            };
+            let scope_attrs = process_scope_attrs(scope, metric_ctx);
 
             for metric in &scope.metrics {
                 encode_metrics(
@@ -153,6 +108,72 @@ pub fn to_grpc_insert_requests(
     }
 
     Ok(table_writer.into_row_insert_requests())
+}
+
+fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx) {
+    if metric_ctx.is_legacy {
+        return;
+    }
+
+    // check if promote all
+    if !metric_ctx.promote_all_resource_attrs {
+        attrs.retain(|kv| DEFAULT_ATTRS_HASHSET.contains(&kv.key));
+    }
+
+    // remap service.name and service.instance.id to job and instance
+    let mut tmp = Vec::with_capacity(2);
+    for kv in attrs.iter() {
+        match &kv.key as &str {
+            KEY_SERVICE_NAME => {
+                tmp.push(KeyValue {
+                    key: JOB_KEY.to_string(),
+                    value: kv.value.clone(),
+                });
+            }
+            KEY_SERVICE_INSTANCE_ID => {
+                tmp.push(KeyValue {
+                    key: INSTANCE_KEY.to_string(),
+                    value: kv.value.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    attrs.extend(tmp);
+}
+
+fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Option<Vec<KeyValue>> {
+    if metric_ctx.is_legacy {
+        return scope.scope.as_ref().map(|s| s.attributes.clone());
+    };
+
+    if !metric_ctx.promote_scope_attrs {
+        return None;
+    }
+
+    // persist scope attrs with name, version and schema_url
+    scope.scope.as_ref().map(|s| {
+        let mut attrs = s.attributes.clone();
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_NAME.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(s.name.clone())),
+            }),
+        });
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_VERSION.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(s.version.clone())),
+            }),
+        });
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_SCHEMA_URL.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
+            }),
+        });
+        attrs
+    })
 }
 
 // replace . with _
@@ -247,8 +268,7 @@ fn encode_metrics(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttributeType {
-    PromoteResource,
-    AllResource,
+    Resource,
     Scope,
     DataPoint,
     Legacy,
@@ -264,34 +284,28 @@ fn write_attributes(
         return Ok(());
     };
 
-    let tags = attrs
-        .iter()
-        .filter(|attr| match attribute_type {
-            AttributeType::PromoteResource => DEFAULT_ATTRS_HASHSET.contains(&attr.key),
-            _ => true,
-        })
-        .filter_map(|attr| {
-            attr.value
-                .as_ref()
-                .and_then(|v| v.value.as_ref())
-                .and_then(|val| {
-                    let key = match attribute_type {
-                        AttributeType::PromoteResource
-                        | AttributeType::AllResource
-                        | AttributeType::DataPoint => normalize_metric_name(&attr.key),
-                        AttributeType::Scope => {
-                            format!("otel_scope_{}", normalize_metric_name(&attr.key))
-                        }
-                        AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
-                    };
-                    match val {
-                        any_value::Value::StringValue(s) => Some((key, s.clone())),
-                        any_value::Value::IntValue(v) => Some((key, v.to_string())),
-                        any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
-                        _ => None, // TODO(sunng87): allow different type of values
+    let tags = attrs.iter().filter_map(|attr| {
+        attr.value
+            .as_ref()
+            .and_then(|v| v.value.as_ref())
+            .and_then(|val| {
+                let key = match attribute_type {
+                    AttributeType::Resource | AttributeType::DataPoint => {
+                        normalize_metric_name(&attr.key)
                     }
-                })
-        });
+                    AttributeType::Scope => {
+                        format!("otel_scope_{}", normalize_metric_name(&attr.key))
+                    }
+                    AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
+                };
+                match val {
+                    any_value::Value::StringValue(s) => Some((key, s.clone())),
+                    any_value::Value::IntValue(v) => Some((key, v.to_string())),
+                    any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
+                    _ => None, // TODO(sunng87): allow different type of values
+                }
+            })
+    });
     row_writer::write_tags(writer, tags, row)?;
 
     Ok(())
@@ -356,13 +370,7 @@ fn write_tags_and_timestamp(
         write_attributes(table, row, data_point_attrs, AttributeType::Legacy)?;
     } else {
         // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
-        let promote_re = if metric_ctx.promote_all_resource_attrs {
-            AttributeType::AllResource
-        } else {
-            AttributeType::PromoteResource
-        };
-        write_attributes(table, row, resource_attrs, promote_re)?;
-        // scope check in done before
+        write_attributes(table, row, resource_attrs, AttributeType::Resource)?;
         write_attributes(table, row, scope_attrs, AttributeType::Scope)?;
         write_attributes(table, row, data_point_attrs, AttributeType::DataPoint)?;
     }
@@ -765,7 +773,7 @@ mod tests {
             &mut tables,
             "datamon",
             &gauge,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
         )
@@ -815,7 +823,7 @@ mod tests {
             &mut tables,
             "datamon",
             &sum,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
         )
@@ -865,7 +873,7 @@ mod tests {
             &mut tables,
             "datamon",
             &summary,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
         )
@@ -949,7 +957,7 @@ mod tests {
             &mut tables,
             "histo",
             &histogram,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
         )
