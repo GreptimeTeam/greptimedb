@@ -270,7 +270,7 @@ fn build_new_table_info(
     let catalog_name = &table_info.catalog_name;
     let table_name = &table_info.name;
     let table_id = table_info.ident.table_id;
-    let request = alter_expr_to_request(table_id, alter_table_expr)
+    let request = alter_expr_to_request(table_id, alter_table_expr, Some(&table_info.meta))
         .context(error::ConvertAlterTableRequestSnafu)?;
 
     let new_meta = table_info
@@ -302,6 +302,7 @@ fn build_new_table_info(
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
         | AlterKind::DropDefaults { .. } => {}
+        AlterKind::SetDefaults { .. } => {}
     }
 
     info!(

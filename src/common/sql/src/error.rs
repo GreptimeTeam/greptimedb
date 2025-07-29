@@ -55,7 +55,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Unsupported expr in default constraint: {:?} for column: {}",
+        "Unsupported expr in default constraint: {} for column: {}",
         expr,
         column_name
     ))]
@@ -131,6 +131,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to deserialize data, json: {}", json))]
+    Deserialize {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+        json: String,
+    },
 }
 
 impl ErrorExt for Error {
@@ -147,6 +156,8 @@ impl ErrorExt for Error {
             | InvalidCast { .. }
             | ConvertStr { .. }
             | TimestampOverflow { .. } => StatusCode::InvalidArguments,
+            Deserialize { .. } => StatusCode::Unexpected,
+
             Datatype { source, .. } => source.status_code(),
             ConvertSqlValue { .. } => StatusCode::Unsupported,
         }

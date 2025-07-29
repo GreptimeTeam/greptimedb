@@ -562,6 +562,16 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
+    /// Set column default value.
+    SetDefaults {
+        /// Columns to change.
+        columns: Vec<SetDefault>,
+    },
+}
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SetDefault {
+    pub name: String,
+    pub default_constraint: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -738,7 +748,12 @@ impl AlterKind {
             AlterKind::DropDefaults { names } => {
                 names
                     .iter()
-                    .try_for_each(|name| Self::validate_column_to_drop(name, metadata))?;
+                    .try_for_each(|name| Self::validate_column_existence(name, metadata))?;
+            }
+            AlterKind::SetDefaults { columns } => {
+                columns
+                    .iter()
+                    .try_for_each(|col| Self::validate_column_existence(&col.name, metadata))?;
             }
         }
         Ok(())
@@ -772,6 +787,9 @@ impl AlterKind {
             AlterKind::DropDefaults { names } => names
                 .iter()
                 .any(|name| metadata.column_by_name(name).is_some()),
+            AlterKind::SetDefaults { columns } => columns
+                .iter()
+                .any(|x| metadata.column_by_name(&x.name).is_some()),
         }
     }
 
@@ -815,6 +833,18 @@ impl AlterKind {
                 }
             );
         }
+
+        Ok(())
+    }
+
+    /// Returns an error if the column isn't exist.
+    fn validate_column_existence(column_name: &String, metadata: &RegionMetadata) -> Result<()> {
+        metadata
+            .column_by_name(column_name)
+            .context(InvalidRegionRequestSnafu {
+                region_id: metadata.region_id,
+                err: format!("column {} not found", column_name),
+            })?;
 
         Ok(())
     }
@@ -881,6 +911,18 @@ impl TryFrom<alter_request::Kind> for AlterKind {
             },
             alter_request::Kind::DropDefaults(x) => AlterKind::DropDefaults {
                 names: x.drop_defaults.into_iter().map(|x| x.column_name).collect(),
+            },
+            alter_request::Kind::SetDefaults(x) => AlterKind::SetDefaults {
+                columns: x
+                    .set_defaults
+                    .into_iter()
+                    .map(|x| {
+                        Ok(SetDefault {
+                            name: x.column_name,
+                            default_constraint: x.default_constraint.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
             },
         };
 

@@ -26,7 +26,9 @@ use common_time::range::TimestampRange;
 use common_time::TimeToLive;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextOptions, SkippingIndexOptions,
+};
 use greptime_proto::v1::region::compact_request;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
@@ -289,6 +291,15 @@ pub enum AlterKind {
     DropDefaults {
         names: Vec<String>,
     },
+    SetDefaults {
+        defaults: Vec<SetDefaultRequest>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetDefaultRequest {
+    pub column_name: String,
+    pub default_constraint: Option<ColumnDefaultConstraint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
