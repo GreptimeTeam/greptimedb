@@ -23,7 +23,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::memtable::bulk::context::BulkIterContext;
 use mito2::memtable::bulk::part::BulkPartConverter;
-use mito2::memtable::bulk::part_reader::RecordBatchIter;
+use mito2::memtable::bulk::part_reader::{BulkPartRecordBatchIter, RecordBatchIter};
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
@@ -425,36 +425,61 @@ fn bulk_part_converter(c: &mut Criterion) {
 
 fn record_batch_iter(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
+    let schema = to_flat_sst_arrow_schema(
+        &metadata,
+        &FlatSchemaOptions {
+            raw_pk_columns: false,
+            string_pk_use_dict: false,
+        },
+    );
     let start_sec = 1710043200;
 
     let mut group = c.benchmark_group("record_batch_iter");
 
-    // Benchmark with 4096 rows and 4096 hosts as requested
-    group.bench_function("4096_rows_4096_hosts", |b| {
+    // Pre-create RecordBatch for filtering benchmark
+    let (record_batch_with_filter, record_batch_no_filter) = {
+        let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, false);
+
+        for kvs in generator.iter() {
+            converter.append_key_values(&kvs).unwrap();
+            break;
+        }
+
+        let bulk_part = converter.convert().unwrap();
+        let record_batch = bulk_part.batch;
+        (record_batch.clone(), record_batch)
+    };
+
+    // Pre-create predicate
+    let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+    let predicate = generator.random_host_filter();
+
+    // Benchmark with hostname filter
+    group.bench_function("4096_rows_with_hostname_filter", |b| {
         b.iter(|| {
-            // Generate 4096 hosts for 4096 rows
-            let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
-            let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
-            let schema = to_flat_sst_arrow_schema(
-                &metadata,
-                &FlatSchemaOptions {
-                    raw_pk_columns: false,
-                    string_pk_use_dict: false,
-                },
-            );
-            let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, false);
+            // Create context for RecordBatchIter with predicate
+            let context = Arc::new(BulkIterContext::new(
+                metadata.clone(),
+                &None,                   // No projection
+                Some(predicate.clone()), // With hostname filter
+            ));
 
-            // Generate one KeyValues with 4096 rows (one per host)
-            for kvs in generator.iter() {
-                converter.append_key_values(&kvs).unwrap();
-                break; // Only need one iteration since we have 4096 hosts
+            // Create and iterate over RecordBatchIter with filter
+            let mut iter = RecordBatchIter::new(record_batch_with_filter.clone(), context, None);
+
+            // Consume all batches
+            while let Some(batch_result) = iter.next() {
+                let _batch = batch_result.unwrap();
             }
+        });
+    });
 
-            // Convert to BulkPart and extract RecordBatch
-            let bulk_part = converter.convert().unwrap();
-            let record_batch = bulk_part.batch;
-
-            // Create context for RecordBatchIter
+    // Benchmark without filter for comparison
+    group.bench_function("4096_rows_no_filter", |b| {
+        b.iter(|| {
+            // Create context for RecordBatchIter without predicate
             let context = Arc::new(BulkIterContext::new(
                 metadata.clone(),
                 &None, // No projection
@@ -462,7 +487,78 @@ fn record_batch_iter(c: &mut Criterion) {
             ));
 
             // Create and iterate over RecordBatchIter
-            let mut iter = RecordBatchIter::new(record_batch, context, None);
+            let mut iter = RecordBatchIter::new(record_batch_no_filter.clone(), context, None);
+
+            // Consume all batches
+            while let Some(batch_result) = iter.next() {
+                let _batch = batch_result.unwrap();
+            }
+        });
+    });
+}
+
+fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_record_batch_iter_filter");
+
+    // Pre-create RecordBatch and primary key arrays
+    let (record_batch_with_filter, record_batch_no_filter) = {
+        let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+        let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, true);
+
+        for kvs in generator.iter() {
+            converter.append_key_values(&kvs).unwrap();
+            break;
+        }
+
+        let bulk_part = converter.convert().unwrap();
+        let record_batch = bulk_part.batch;
+
+        (record_batch.clone(), record_batch)
+    };
+
+    // Pre-create predicate
+    let generator = CpuDataGenerator::new(metadata.clone(), 4096, start_sec, start_sec + 1);
+    let predicate = generator.random_host_filter();
+
+    // Benchmark with hostname filter using non-encoded primary keys
+    group.bench_function("4096_rows_with_hostname_filter", |b| {
+        b.iter(|| {
+            // Create context for BulkPartRecordBatchIter with predicate
+            let context = Arc::new(BulkIterContext::new(
+                metadata.clone(),
+                &None,                   // No projection
+                Some(predicate.clone()), // With hostname filter
+            ));
+
+            // Create and iterate over BulkPartRecordBatchIter with filter
+            let mut iter =
+                BulkPartRecordBatchIter::new(record_batch_with_filter.clone(), context, None);
+
+            // Consume all batches
+            while let Some(batch_result) = iter.next() {
+                let _batch = batch_result.unwrap();
+            }
+        });
+    });
+
+    // Benchmark without filter for comparison
+    group.bench_function("4096_rows_no_filter", |b| {
+        b.iter(|| {
+            // Create context for BulkPartRecordBatchIter without predicate
+            let context = Arc::new(BulkIterContext::new(
+                metadata.clone(),
+                &None, // No projection
+                None,  // No predicate
+            ));
+
+            // Create and iterate over BulkPartRecordBatchIter
+            let mut iter =
+                BulkPartRecordBatchIter::new(record_batch_no_filter.clone(), context, None);
 
             // Consume all batches
             while let Some(batch_result) = iter.next() {
@@ -478,6 +574,7 @@ criterion_group!(
     full_scan,
     filter_1_host,
     bulk_part_converter,
-    record_batch_iter
+    record_batch_iter,
+    bulk_part_record_batch_iter_filter
 );
 criterion_main!(benches);
