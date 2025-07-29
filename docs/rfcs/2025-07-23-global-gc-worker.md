@@ -62,6 +62,7 @@ To prevent the GC worker from inadvertently deleting files that are actively bei
 - **Dependency on Compaction Frequency**: The integration of the GC worker with major compaction means that GC cycles are directly tied to the frequency of compactions. In environments with infrequent compaction operations, obsolete files may accumulate for extended periods before being reclaimed, potentially leading to increased storage consumption.
 - **Race Condition with Long-Running Queries**: A potential race condition exists if a long-running query initiates but haven't write its temporary manifest in time, while a compaction process simultaneously begins and marks files used by that query as obsolete. This scenario could lead to the premature deletion of files still required by the active query. To mitigate this, the threshold time for writing a temporary manifest should be significantly shorter than the lingering time configured for obsolete files, ensuring that next GC worker runs do not delete files that are now referenced by a temporary manifest if the query is still running.
 Also the read replica shouldn't be later in manifest version for more than the lingering time of obsolete files, otherwise it might ref to files that are already deleted by the GC worker.
+- need to upload tmp manifest to object storage, which may introduce additional complexity and potential performance overhead. But since long-running queries are typically rare, the performance impact is expected to be minimal.
 
 
 ## Conclusion and Rationale
