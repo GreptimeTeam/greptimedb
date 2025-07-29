@@ -500,6 +500,9 @@ impl QueryEngine for DatafusionQueryEngine {
                 );
             }
         }
+
+        // usually it's impossible to have both `set variable` set by sql client and
+        // hint in header by grpc client, so only need to deal with them separately
         if query_ctx.configuration_parameter().allow_query_fallback() {
             state
                 .config_mut()
