@@ -222,7 +222,6 @@ impl VersionControl {
             ),
             TruncateKind::Partial { files_to_remove } => Arc::new(
                 VersionBuilder::from_version(version)
-                    .memtables(MemtableVersion::new(new_mutable))
                     .remove_files(files_to_remove.into_iter())
                     .build(),
             ),
