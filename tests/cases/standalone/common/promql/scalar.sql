@@ -107,6 +107,12 @@ TQL EVAL (0, 15, '5s') scalar(scalar(host{host="host1"}) + scalar(host{host="hos
 TQL EVAL (0, 15, '5s') clamp(host, 0, 12);
 
 -- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host, 6 - 6, 6 + 6);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') clamp(host, 12, 0);
+
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') clamp(host{host="host1"}, -1, 6);
 
 -- SQLNESS SORT_RESULT 3 1

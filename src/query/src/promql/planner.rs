@@ -3171,7 +3171,7 @@ struct FunctionArgs {
 /// Each variant defines how the function should be processed and what arguments it expects.
 #[derive(Debug, Clone)]
 enum ScalarFunc {
-    /// DataFusion's built-in scalar functions (e.g., abs, sqrt, round, clamp).
+    /// DataFusion's registered(including built-in) scalar functions (e.g., abs, sqrt, round, clamp).
     /// These are passed through directly to DataFusion's execution engine.
     /// Processing: Simple argument insertion at the specified position.
     DataFusionBuiltin(Arc<ScalarUdfDef>),
