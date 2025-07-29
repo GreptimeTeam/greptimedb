@@ -21,6 +21,7 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
 use regex::Regex;
+use session::protocol_ctx::OtlpMetricCtx;
 
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
@@ -82,14 +83,14 @@ const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<(RowInsertRequests, usize)> {
     let mut table_writer = MultiTableData::default();
 
     for resource in &request.resource_metrics {
         let resource_attrs = resource.resource.as_ref().map(|r| {
             let mut attrs = r.attributes.clone();
-            if !legacy_mode {
+            if !metric_ctx.is_legacy {
                 for kv in &r.attributes {
                     if kv.key == KEY_SERVICE_NAME {
                         attrs.push(KeyValue {
@@ -108,30 +109,36 @@ pub fn to_grpc_insert_requests(
         });
 
         for scope in &resource.scope_metrics {
-            let scope_attrs = scope.scope.as_ref().map(|s| {
-                let mut attrs = s.attributes.clone();
-                if !legacy_mode {
-                    attrs.push(KeyValue {
-                        key: OTEL_SCOPE_NAME.to_string(),
-                        value: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue(s.name.clone())),
-                        }),
-                    });
-                    attrs.push(KeyValue {
-                        key: OTEL_SCOPE_VERSION.to_string(),
-                        value: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue(s.version.clone())),
-                        }),
-                    });
-                    attrs.push(KeyValue {
-                        key: OTEL_SCOPE_SCHEMA_URL.to_string(),
-                        value: Some(AnyValue {
-                            value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
-                        }),
-                    });
-                }
-                attrs
-            });
+            let scope_attrs = if metric_ctx.promote_scope_attrs {
+                scope.scope.as_ref().map(|s| {
+                    let mut attrs = s.attributes.clone();
+                    if !metric_ctx.is_legacy {
+                        attrs.push(KeyValue {
+                            key: OTEL_SCOPE_NAME.to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(s.name.clone())),
+                            }),
+                        });
+                        attrs.push(KeyValue {
+                            key: OTEL_SCOPE_VERSION.to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(s.version.clone())),
+                            }),
+                        });
+                        attrs.push(KeyValue {
+                            key: OTEL_SCOPE_SCHEMA_URL.to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    scope.schema_url.clone(),
+                                )),
+                            }),
+                        });
+                    }
+                    attrs
+                })
+            } else {
+                None
+            };
 
             for metric in &scope.metrics {
                 encode_metrics(
@@ -139,7 +146,7 @@ pub fn to_grpc_insert_requests(
                     metric,
                     resource_attrs.as_ref(),
                     scope_attrs.as_ref(),
-                    legacy_mode,
+                    metric_ctx,
                 )?;
             }
         }
@@ -178,9 +185,9 @@ fn encode_metrics(
     metric: &Metric,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    let name = if legacy_mode {
+    let name = if metric_ctx.is_legacy {
         legacy_normalize_otlp_name(&metric.name)
     } else {
         normalize_metric_name(&metric.name)
@@ -197,7 +204,7 @@ fn encode_metrics(
                     gauge,
                     resource_attrs,
                     scope_attrs,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
             }
             metric::Data::Sum(sum) => {
@@ -207,7 +214,7 @@ fn encode_metrics(
                     sum,
                     resource_attrs,
                     scope_attrs,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
             }
             metric::Data::Summary(summary) => {
@@ -217,7 +224,7 @@ fn encode_metrics(
                     summary,
                     resource_attrs,
                     scope_attrs,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
             }
             metric::Data::Histogram(hist) => {
@@ -227,7 +234,7 @@ fn encode_metrics(
                     hist,
                     resource_attrs,
                     scope_attrs,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
@@ -240,7 +247,8 @@ fn encode_metrics(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttributeType {
-    Resource,
+    PromoteResource,
+    AllResource,
     Scope,
     DataPoint,
     Legacy,
@@ -259,7 +267,7 @@ fn write_attributes(
     let tags = attrs
         .iter()
         .filter(|attr| match attribute_type {
-            AttributeType::Resource => DEFAULT_ATTRS_HASHSET.contains(&attr.key),
+            AttributeType::PromoteResource => DEFAULT_ATTRS_HASHSET.contains(&attr.key),
             _ => true,
         })
         .filter_map(|attr| {
@@ -268,9 +276,9 @@ fn write_attributes(
                 .and_then(|v| v.value.as_ref())
                 .and_then(|val| {
                     let key = match attribute_type {
-                        AttributeType::Resource | AttributeType::DataPoint => {
-                            normalize_metric_name(&attr.key)
-                        }
+                        AttributeType::PromoteResource
+                        | AttributeType::AllResource
+                        | AttributeType::DataPoint => normalize_metric_name(&attr.key),
                         AttributeType::Scope => {
                             format!("otel_scope_{}", normalize_metric_name(&attr.key))
                         }
@@ -340,20 +348,26 @@ fn write_tags_and_timestamp(
     scope_attrs: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
     timestamp_nanos: i64,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    if legacy_mode {
+    if metric_ctx.is_legacy {
         write_attributes(table, row, resource_attrs, AttributeType::Legacy)?;
         write_attributes(table, row, scope_attrs, AttributeType::Legacy)?;
         write_attributes(table, row, data_point_attrs, AttributeType::Legacy)?;
     } else {
         // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
-        write_attributes(table, row, resource_attrs, AttributeType::Resource)?;
+        let promote_re = if metric_ctx.promote_all_resource_attrs {
+            AttributeType::AllResource
+        } else {
+            AttributeType::PromoteResource
+        };
+        write_attributes(table, row, resource_attrs, promote_re)?;
+        // scope check in done before
         write_attributes(table, row, scope_attrs, AttributeType::Scope)?;
         write_attributes(table, row, data_point_attrs, AttributeType::DataPoint)?;
     }
 
-    write_timestamp(table, row, timestamp_nanos, legacy_mode)?;
+    write_timestamp(table, row, timestamp_nanos, metric_ctx.is_legacy)?;
 
     Ok(())
 }
@@ -368,7 +382,7 @@ fn encode_gauge(
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -385,7 +399,7 @@ fn encode_gauge(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
-            legacy_mode,
+            metric_ctx,
         )?;
 
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
@@ -404,7 +418,7 @@ fn encode_sum(
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -421,7 +435,7 @@ fn encode_sum(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
-            legacy_mode,
+            metric_ctx,
         )?;
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
         table.add_row(row);
@@ -449,7 +463,7 @@ fn encode_histogram(
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -474,7 +488,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
-                legacy_mode,
+                metric_ctx,
             )?;
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
@@ -514,7 +528,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
-                legacy_mode,
+                metric_ctx,
             )?;
 
             row_writer::write_f64(&mut sum_table, GREPTIME_VALUE, sum, &mut sum_row)?;
@@ -529,7 +543,7 @@ fn encode_histogram(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
-            legacy_mode,
+            metric_ctx,
         )?;
 
         row_writer::write_f64(
@@ -560,9 +574,9 @@ fn encode_summary(
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    if legacy_mode {
+    if metric_ctx.is_legacy {
         let table = table_writer.get_or_default_table_data(
             name,
             APPROXIMATE_COLUMN_COUNT,
@@ -578,7 +592,7 @@ fn encode_summary(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
-                legacy_mode,
+                metric_ctx,
             )?;
 
             for quantile in &data_point.quantile_values {
@@ -619,7 +633,7 @@ fn encode_summary(
                         scope_attrs,
                         Some(data_point.attributes.as_ref()),
                         data_point.time_unix_nano as i64,
-                        legacy_mode,
+                        metric_ctx,
                     )?;
                     row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
                     row_writer::write_f64(
@@ -645,7 +659,7 @@ fn encode_summary(
                     scope_attrs,
                     Some(data_point.attributes.as_ref()),
                     data_point.time_unix_nano as i64,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
 
                 row_writer::write_f64(
@@ -672,7 +686,7 @@ fn encode_summary(
                     scope_attrs,
                     Some(data_point.attributes.as_ref()),
                     data_point.time_unix_nano as i64,
-                    legacy_mode,
+                    metric_ctx,
                 )?;
 
                 row_writer::write_f64(sum_table, GREPTIME_VALUE, data_point.sum, &mut row)?;
@@ -753,7 +767,7 @@ mod tests {
             &gauge,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            false,
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
@@ -803,7 +817,7 @@ mod tests {
             &sum,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            false,
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
@@ -853,7 +867,7 @@ mod tests {
             &summary,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            false,
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
@@ -937,7 +951,7 @@ mod tests {
             &histogram,
             Some(&vec![keyvalue("resource", "app")]),
             Some(&vec![keyvalue("scope", "otel")]),
-            false,
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 

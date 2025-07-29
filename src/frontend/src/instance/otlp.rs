@@ -42,7 +42,6 @@ impl OpenTelemetryProtocolHandler for Instance {
     async fn metrics(
         &self,
         request: ExportMetricsServiceRequest,
-        with_metric_engine: bool,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
         self.plugins
@@ -68,7 +67,15 @@ impl OpenTelemetryProtocolHandler for Instance {
         // After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
         // The difference is how we convert the input data into the final table schema.
         let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
-        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, is_legacy)?;
+
+        let mut metric_ctx = ctx
+            .protocol_ctx()
+            .get_otlp_metric_ctx()
+            .cloned()
+            .unwrap_or_default();
+        metric_ctx.is_legacy = is_legacy;
+
+        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &metric_ctx)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = if !is_legacy {
@@ -90,7 +97,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
 
         // If the user uses the legacy path, it is by default without metric engine.
-        if is_legacy || !with_metric_engine {
+        if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx, false, false)
                 .await
                 .map_err(BoxedError::new)

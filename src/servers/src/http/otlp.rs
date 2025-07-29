@@ -33,10 +33,13 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 use pipeline::PipelineWay;
 use prost::Message;
 use session::context::{Channel, QueryContext};
+use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 use snafu::prelude::*;
 
 use crate::error::{self, PipelineSnafu, Result};
-use crate::http::extractor::{LogTableName, PipelineInfo, SelectInfoWrapper, TraceTableName};
+use crate::http::extractor::{
+    LogTableName, OtlpMetricOptions, PipelineInfo, SelectInfoWrapper, TraceTableName,
+};
 // use crate::http::header::constants::GREPTIME_METRICS_LEGACY_MODE_HEADER_NAME;
 use crate::http::header::{write_cost_header_map, CONTENT_TYPE_PROTOBUF};
 use crate::metrics::METRIC_HTTP_OPENTELEMETRY_LOGS_ELAPSED;
@@ -53,11 +56,12 @@ pub struct OtlpState {
 pub async fn metrics(
     State(state): State<OtlpState>,
     Extension(mut query_ctx): Extension<QueryContext>,
+    http_opts: OtlpMetricOptions,
     bytes: Bytes,
 ) -> Result<OtlpResponse<ExportMetricsServiceResponse>> {
     let db = query_ctx.get_db_string();
     query_ctx.set_channel(Channel::Otlp);
-    let query_ctx = Arc::new(query_ctx);
+
     let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
@@ -69,8 +73,17 @@ pub async fn metrics(
         handler,
     } = state;
 
+    query_ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+        promote_all_resource_attrs: http_opts.promote_all_resource_attrs,
+        promote_scope_attrs: http_opts.promote_scope_attrs,
+        with_metric_engine,
+        // set is_legacy later
+        is_legacy: false,
+    }));
+    let query_ctx = Arc::new(query_ctx);
+
     handler
-        .metrics(request, with_metric_engine, query_ctx)
+        .metrics(request, query_ctx)
         .await
         .map(|o| OtlpResponse {
             resp_body: ExportMetricsServiceResponse {

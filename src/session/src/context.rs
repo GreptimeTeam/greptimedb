@@ -31,6 +31,7 @@ use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::protocol_ctx::ProtocolCtx;
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle};
 use crate::{MutableInner, ReadPreference};
 
@@ -70,6 +71,9 @@ pub struct QueryContext {
     /// Connection information
     #[builder(default)]
     conn_info: ConnInfo,
+    /// Protocol specific context
+    #[builder(default)]
+    protocol_ctx: ProtocolCtx,
 }
 
 /// This fields hold data that is only valid to current query context
@@ -447,6 +451,14 @@ impl QueryContext {
     pub fn conn_info(&self) -> &ConnInfo {
         &self.conn_info
     }
+
+    pub fn protocol_ctx(&self) -> &ProtocolCtx {
+        &self.protocol_ctx
+    }
+
+    pub fn set_protocol_ctx(&mut self, protocol_ctx: ProtocolCtx) {
+        self.protocol_ctx = protocol_ctx;
+    }
 }
 
 impl QueryContextBuilder {
@@ -470,6 +482,7 @@ impl QueryContextBuilder {
             channel,
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
+            protocol_ctx: self.protocol_ctx.unwrap_or_default(),
         }
     }
 

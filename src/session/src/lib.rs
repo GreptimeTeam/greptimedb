@@ -14,6 +14,7 @@
 
 pub mod context;
 pub mod hints;
+pub mod protocol_ctx;
 pub mod session_config;
 pub mod table_name;
 

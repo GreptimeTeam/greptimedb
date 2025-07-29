@@ -45,7 +45,7 @@ use crate::etl::field::{Field, Fields};
 use crate::etl::transform::index::Index;
 use crate::etl::transform::{Transform, Transforms};
 use crate::etl::PipelineDocVersion;
-use crate::{unwrap_or_continue_if_err, PipelineContext};
+use crate::{truthy, unwrap_or_continue_if_err, PipelineContext};
 
 const DEFAULT_GREPTIME_TIMESTAMP_COLUMN: &str = "greptime_timestamp";
 const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
@@ -56,11 +56,6 @@ const DEFAULT_MAX_NESTED_LEVELS_FOR_JSON_FLATTENING: usize = 10;
 pub struct GreptimeTransformer {
     transforms: Transforms,
     schema: Vec<ColumnSchema>,
-}
-
-fn truthy<V: AsRef<str>>(v: V) -> bool {
-    let v = v.as_ref().to_lowercase();
-    v == "true" || v == "1" || v == "yes" || v == "on" || v == "t"
 }
 
 /// Parameters that can be used to configure the greptime pipelines.
