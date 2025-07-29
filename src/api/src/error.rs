@@ -66,12 +66,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid time unit: {time_unit}"))]
+    InvalidTimeUnit {
+        time_unit: i32,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UnknownColumnDataType { .. } => StatusCode::InvalidArguments,
+            Error::UnknownColumnDataType { .. } | Error::InvalidTimeUnit { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
                 StatusCode::Unexpected
             }

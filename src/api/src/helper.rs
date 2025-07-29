@@ -46,7 +46,7 @@ use greptime_proto::v1::{
 use paste::paste;
 use snafu::prelude::*;
 
-use crate::error::{self, Result};
+use crate::error::{self, InvalidTimeUnitSnafu, Result};
 use crate::v1::column::Values;
 use crate::v1::{Column, ColumnDataType, Value as GrpcValue};
 
@@ -1077,6 +1077,44 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
             Value::List(_) | Value::Duration(_) => unreachable!(),
         },
     }
+}
+
+pub fn from_pb_time_unit(unit: v1::TimeUnit) -> TimeUnit {
+    match unit {
+        v1::TimeUnit::Second => TimeUnit::Second,
+        v1::TimeUnit::Millisecond => TimeUnit::Millisecond,
+        v1::TimeUnit::Microsecond => TimeUnit::Microsecond,
+        v1::TimeUnit::Nanosecond => TimeUnit::Nanosecond,
+    }
+}
+
+pub fn to_pb_time_unit(unit: TimeUnit) -> v1::TimeUnit {
+    match unit {
+        TimeUnit::Second => v1::TimeUnit::Second,
+        TimeUnit::Millisecond => v1::TimeUnit::Millisecond,
+        TimeUnit::Microsecond => v1::TimeUnit::Microsecond,
+        TimeUnit::Nanosecond => v1::TimeUnit::Nanosecond,
+    }
+}
+
+pub fn from_pb_time_ranges(time_ranges: v1::TimeRanges) -> Result<Vec<(Timestamp, Timestamp)>> {
+    let proto_time_unit = v1::TimeUnit::try_from(time_ranges.time_unit).map_err(|_| {
+        InvalidTimeUnitSnafu {
+            time_unit: time_ranges.time_unit,
+        }
+        .build()
+    })?;
+    let time_unit = from_pb_time_unit(proto_time_unit);
+    Ok(time_ranges
+        .time_ranges
+        .into_iter()
+        .map(|r| {
+            (
+                Timestamp::new(r.start, time_unit),
+                Timestamp::new(r.end, time_unit),
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::ColumnDataTypeWrapper;
+use api::helper::{from_pb_time_ranges, from_pb_time_unit, ColumnDataTypeWrapper};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
@@ -43,9 +43,10 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidIndexOptionSnafu,
-    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, ConvertTimeRangesSnafu, DecodeProtoSnafu, FlightCodecSnafu,
+    InvalidIndexOptionSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
+    RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -351,32 +352,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
             RegionRequest::Truncate(RegionTruncateRequest::All),
         )]),
         Some(truncate_request::Kind::TimeRanges(time_ranges)) => {
-            let proto_time_unit =
-                api::v1::TimeUnit::try_from(time_ranges.time_unit).map_err(|_| {
-                    InvalidRawRegionRequestSnafu {
-                        err: format!(
-                            "invalid time unit={:?} in TruncateRequest",
-                            time_ranges.time_unit
-                        ),
-                    }
-                    .build()
-                })?;
-            let time_unit = match proto_time_unit {
-                api::v1::TimeUnit::Nanosecond => TimeUnit::Nanosecond,
-                api::v1::TimeUnit::Microsecond => TimeUnit::Microsecond,
-                api::v1::TimeUnit::Millisecond => TimeUnit::Millisecond,
-                api::v1::TimeUnit::Second => TimeUnit::Second,
-            };
-
-            let time_ranges = time_ranges
-                .time_ranges
-                .into_iter()
-                .map(|time_range| {
-                    let start = Timestamp::new(time_range.start, time_unit);
-                    let end = Timestamp::new(time_range.end, time_unit);
-                    (start, end)
-                })
-                .collect();
+            let time_ranges = from_pb_time_ranges(time_ranges).context(ConvertTimeRangesSnafu)?;
 
             Ok(vec![(
                 region_id,
