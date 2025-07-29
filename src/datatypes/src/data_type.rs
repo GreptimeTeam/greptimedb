@@ -34,9 +34,9 @@ use crate::types::{
     DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
     Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType,
     IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, JsonType, ListType, NullType,
-    StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, TimestampType, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type, VectorType,
+    StringType, StructType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type, VectorType,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -80,6 +80,7 @@ pub enum ConcreteDataType {
     // Compound types:
     List(ListType),
     Dictionary(DictionaryType),
+    Struct(StructType),
 
     // JSON type:
     Json(JsonType),
@@ -131,6 +132,7 @@ impl fmt::Display for ConcreteDataType {
             },
             ConcreteDataType::Decimal128(v) => write!(f, "{}", v.name()),
             ConcreteDataType::List(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Struct(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Json(v) => write!(f, "{}", v.name()),
             ConcreteDataType::Vector(v) => write!(f, "{}", v.name()),
@@ -406,9 +408,12 @@ impl ConcreteDataType {
                 &ConcreteDataType::Duration(_)
                 | &ConcreteDataType::Dictionary(_)
                 | &ConcreteDataType::Vector(_)
-                | &ConcreteDataType::List(_) => "UNKNOWN",
+                | &ConcreteDataType::List(_)
+                | &ConcreteDataType::Struct(_) => "UNKNOWN",
             },
-            &ConcreteDataType::Duration(_) | &ConcreteDataType::Dictionary(_) => "UNKNOWN",
+            &ConcreteDataType::Duration(_)
+            | &ConcreteDataType::Dictionary(_)
+            | &ConcreteDataType::Struct(_) => "UNKNOWN",
         }
     }
 }
@@ -457,7 +462,20 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Decimal128(precision, scale) => {
                 ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
-            _ => {
+            ArrowDataType::Struct(fields) => ConcreteDataType::Struct(fields.try_into()?),
+            ArrowDataType::Float16
+            | ArrowDataType::Date64
+            | ArrowDataType::FixedSizeBinary(_)
+            | ArrowDataType::BinaryView
+            | ArrowDataType::Utf8View
+            | ArrowDataType::ListView(_)
+            | ArrowDataType::FixedSizeList(_, _)
+            | ArrowDataType::LargeList(_)
+            | ArrowDataType::LargeListView(_)
+            | ArrowDataType::Union(_, _)
+            | ArrowDataType::Decimal256(_, _)
+            | ArrowDataType::Map(_, _)
+            | ArrowDataType::RunEndEncoded(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }
@@ -611,6 +629,10 @@ impl ConcreteDataType {
 
     pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
         ConcreteDataType::List(ListType::new(item_type))
+    }
+
+    pub fn struct_datatype(fields: StructType) -> ConcreteDataType {
+        ConcreteDataType::Struct(fields)
     }
 
     pub fn dictionary_datatype(

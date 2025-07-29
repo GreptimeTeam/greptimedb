@@ -291,6 +291,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::Vector(_) => ColumnDataType::Vector,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_)
             | ConcreteDataType::Duration(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
@@ -703,6 +704,7 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         ConcreteDataType::Vector(_) => Arc::new(BinaryVector::from_vec(values.binary_values)),
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
+        | ConcreteDataType::Struct(_)
         | ConcreteDataType::Dictionary(_)
         | ConcreteDataType::Duration(_)
         | ConcreteDataType::Json(_) => {
@@ -864,6 +866,7 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
         ConcreteDataType::Vector(_) => values.binary_values.into_iter().map(|v| v.into()).collect(),
         ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
+        | ConcreteDataType::Struct(_)
         | ConcreteDataType::Dictionary(_)
         | ConcreteDataType::Duration(_)
         | ConcreteDataType::Json(_) => {
