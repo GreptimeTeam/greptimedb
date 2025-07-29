@@ -387,7 +387,8 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         .iter()
         .max()
         .map(|max| max + 1)
-        .unwrap_or(*next_column_id);
+        .unwrap_or(*next_column_id)
+        .max(*next_column_id);
 
     if let Some(time_index) = *time_index {
         new_raw_table_meta.schema.column_schemas[time_index].set_time_index();
@@ -515,6 +516,30 @@ mod tests {
     }
 
     #[test]
+    fn test_build_table_info_from_column_metadatas_identical() {
+        let column_metadatas = new_test_column_metadatas();
+        let table_id = 1;
+        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
+        let mut table_meta = new_test_raw_table_info();
+        table_meta.column_ids = vec![0, 1, 2];
+        let name_to_ids = HashMap::from([
+            ("col1".to_string(), 0),
+            ("ts".to_string(), 1),
+            ("col2".to_string(), 2),
+        ]);
+
+        let new_table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(name_to_ids),
+            &column_metadatas,
+        )
+        .unwrap();
+        assert_eq!(new_table_meta, table_meta);
+    }
+
+    #[test]
     fn test_build_table_info_from_column_metadatas() {
         let mut column_metadatas = new_test_column_metadatas();
         column_metadatas.push(ColumnMetadata {
@@ -546,6 +571,7 @@ mod tests {
         assert_eq!(new_table_meta.value_indices, vec![1, 2]);
         assert_eq!(new_table_meta.schema.timestamp_index, Some(1));
         assert_eq!(new_table_meta.column_ids, vec![0, 1, 2, 3]);
+        assert_eq!(new_table_meta.next_column_id, 4);
     }
 
     #[test]
