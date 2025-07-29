@@ -82,24 +82,28 @@ pub struct Sequence {
 }
 
 impl Sequence {
+    /// Returns the next value and increments the sequence.
     pub async fn next(&self) -> Result<u64> {
         let mut inner = self.inner.lock().await;
         inner.next().await
     }
 
+    /// Returns the range of available sequences.
     pub async fn min_max(&self) -> Range<u64> {
         let inner = self.inner.lock().await;
         inner.initial..inner.max
     }
 
+    /// Returns the next value without incrementing the sequence.
     pub async fn peek(&self) -> u64 {
         let inner = self.inner.lock().await;
         inner.next
     }
 
-    pub async fn set(&self, next: u64) -> Result<()> {
+    /// Jumps to the given value.
+    pub async fn jump_to(&self, next: u64) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        inner.set(next).await
+        inner.jump_to(next).await
     }
 }
 
@@ -214,7 +218,9 @@ impl Inner {
         .fail()
     }
 
-    pub async fn set(&mut self, next: u64) -> Result<()> {
+    /// Jumps to the given value.
+    /// The next value must be greater than the current next value.
+    pub async fn jump_to(&mut self, next: u64) -> Result<()> {
         ensure!(
             next > self.next,
             error::UnexpectedSnafu {
@@ -365,13 +371,13 @@ mod tests {
             .initial(1024)
             .step(10)
             .build();
-        seq.set(1025).await.unwrap();
+        seq.jump_to(1025).await.unwrap();
         assert_eq!(seq.next().await.unwrap(), 1025);
-        let err = seq.set(1025).await.unwrap_err();
+        let err = seq.jump_to(1025).await.unwrap_err();
         assert_matches!(err, Error::Unexpected { .. });
         assert_eq!(seq.next().await.unwrap(), 1026);
 
-        seq.set(1048).await.unwrap();
+        seq.jump_to(1048).await.unwrap();
         // Recreate the sequence to test the sequence is reset correctly.
         let seq = SequenceBuilder::new("test_seq", kv_backend)
             .initial(1024)

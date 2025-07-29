@@ -47,7 +47,7 @@ impl TableIdSequenceHandler {
         );
 
         self.table_id_sequence
-            .set(next_table_id as u64)
+            .jump_to(next_table_id as u64)
             .await
             .context(SetNextSequenceSnafu)
     }
