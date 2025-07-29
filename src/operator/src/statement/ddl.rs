@@ -1591,7 +1591,8 @@ pub fn verify_alter(
     expr: AlterTableExpr,
 ) -> Result<bool> {
     let request: AlterTableRequest =
-        common_grpc_expr::alter_expr_to_request(table_id, expr).context(AlterExprToRequestSnafu)?;
+        common_grpc_expr::alter_expr_to_request(table_id, expr, Some(&table_info.meta))
+            .context(AlterExprToRequestSnafu)?;
 
     let AlterTableRequest {
         table_name,

@@ -35,8 +35,8 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, Re
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOption, TableOptions,
-    UnsetIndexOption,
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetDefaultRequest, SetIndexOption,
+    TableOptions, UnsetIndexOption,
 };
 use crate::table_reference::TableReference;
 
@@ -246,6 +246,7 @@ impl TableMeta {
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
+            AlterKind::SetDefaults { defaults } => self.set_defaults(table_name, defaults),
         }
     }
 
@@ -985,6 +986,49 @@ impl TableMeta {
         }
         let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
             msg: format!("Table {table_name} cannot drop default values"),
+        })?;
+
+        let _ = meta_builder.schema(Arc::new(new_schema));
+
+        Ok(meta_builder)
+    }
+
+    fn set_defaults(
+        &self,
+        table_name: &str,
+        set_defaults: &[SetDefaultRequest],
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let mut meta_builder = self.new_meta_builder();
+        let mut columns = Vec::with_capacity(table_schema.num_columns());
+        for column_schema in table_schema.column_schemas() {
+            if let Some(set_default) = set_defaults
+                .iter()
+                .find(|s| s.column_name == column_schema.name)
+            {
+                let new_column_schema = column_schema.clone();
+                let new_column_schema = new_column_schema
+                    .with_default_constraint(set_default.default_constraint.clone())
+                    .with_context(|_| error::SchemaBuildSnafu {
+                        msg: format!("Table {table_name} cannot set default values"),
+                    })?;
+                columns.push(new_column_schema);
+            } else {
+                columns.push(column_schema.clone());
+            }
+        }
+
+        let mut builder = SchemaBuilder::try_from_columns(columns)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            // Also bump the schema version.
+            .version(table_schema.version() + 1);
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!("Table {table_name} cannot set default values"),
         })?;
 
         let _ = meta_builder.schema(Arc::new(new_schema));

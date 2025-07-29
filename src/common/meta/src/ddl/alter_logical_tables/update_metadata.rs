@@ -94,9 +94,12 @@ impl AlterLogicalTablesProcedure {
         let table_info = TableInfo::try_from(table.table_info.clone())
             .context(error::ConvertRawTableInfoSnafu)?;
         let table_ref = task.table_ref();
-        let request =
-            alter_expr_to_request(table.table_info.ident.table_id, task.alter_table.clone())
-                .context(ConvertAlterTableRequestSnafu)?;
+        let request = alter_expr_to_request(
+            table.table_info.ident.table_id,
+            task.alter_table.clone(),
+            Some(&table_info.meta),
+        )
+        .context(ConvertAlterTableRequestSnafu)?;
         let new_meta = table_info
             .meta
             .builder_with_alter_kind(table_ref.table, &request.alter_kind)
