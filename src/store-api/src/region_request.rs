@@ -22,9 +22,9 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
-    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
-    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, truncate_request, AlterRequest, AlterRequests,
+    BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests,
+    DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -33,7 +33,8 @@ use api::v1::{
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
-use common_time::TimeToLive;
+use common_time::timestamp::TimeUnit;
+use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
@@ -340,10 +341,60 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
 
 fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = truncate.region_id.into();
-    Ok(vec![(
-        region_id,
-        RegionRequest::Truncate(RegionTruncateRequest {}),
-    )])
+    match truncate.kind {
+        None => {
+            return InvalidRawRegionRequestSnafu {
+                err: "missing kind in TruncateRequest".to_string(),
+            }
+            .fail();
+        }
+        Some(truncate_request::Kind::All(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )]),
+        Some(truncate_request::Kind::TimeRanges(time_ranges)) => {
+            let proto_time_unit =
+                api::v1::TimeUnit::try_from(time_ranges.time_unit).map_err(|_| {
+                    InvalidRawRegionRequestSnafu {
+                        err: format!(
+                            "invalid time unit={:?} in TruncateRequest",
+                            time_ranges.time_unit
+                        ),
+                    }
+                    .build()
+                })?;
+            let time_unit = match proto_time_unit {
+                api::v1::TimeUnit::Nanosecond => TimeUnit::Nanosecond,
+                api::v1::TimeUnit::Microsecond => TimeUnit::Microsecond,
+                api::v1::TimeUnit::Millisecond => TimeUnit::Millisecond,
+                api::v1::TimeUnit::Second => TimeUnit::Second,
+            };
+
+            ensure!(
+                time_ranges.starts.len() == time_ranges.ends.len(),
+                InvalidRawRegionRequestSnafu {
+                    err: format!("starts and ends must have the same length in TruncateRequest, get starts={}, ends={}",
+                                 time_ranges.starts.len(), time_ranges.ends.len()),
+                }
+            );
+
+            let time_ranges = time_ranges
+                .starts
+                .into_iter()
+                .zip(time_ranges.ends.into_iter())
+                .map(|(start, end)| {
+                    let start = Timestamp::new(start, time_unit);
+                    let end = Timestamp::new(end, time_unit);
+                    (start, end)
+                })
+                .collect();
+
+            Ok(vec![(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
+            )])
+        }
+    }
 }
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
@@ -1312,7 +1363,16 @@ impl Default for RegionCompactRequest {
 
 /// Truncate region request.
 #[derive(Debug)]
-pub struct RegionTruncateRequest {}
+pub enum RegionTruncateRequest {
+    /// Truncate all data in the region.
+    All,
+    ByTimeRanges {
+        /// Time ranges to truncate. Both bound are inclusive.
+        /// only files that are fully contained in the time range will be truncated.
+        /// so no guarantee that all data in the time range will be truncated.
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+    },
+}
 
 /// Catchup region request.
 ///

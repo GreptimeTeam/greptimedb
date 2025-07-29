@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use api::v1::region::{
-    region_request, RegionRequest, RegionRequestHeader, TruncateRequest as PbTruncateRegionRequest,
+    region_request, truncate_request, RegionRequest, RegionRequestHeader,
+    TruncateRequest as PbTruncateRegionRequest,
 };
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
@@ -160,6 +161,7 @@ impl TruncateTableProcedure {
                     }),
                     body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
                         region_id: region_id.as_u64(),
+                        kind: Some(truncate_request::Kind::All(api::v1::region::All {})),
                     })),
                 };
 
