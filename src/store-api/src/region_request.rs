@@ -342,12 +342,10 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
 fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = truncate.region_id.into();
     match truncate.kind {
-        None => {
-            return InvalidRawRegionRequestSnafu {
-                err: "missing kind in TruncateRequest".to_string(),
-            }
-            .fail();
+        None => InvalidRawRegionRequestSnafu {
+            err: "missing kind in TruncateRequest".to_string(),
         }
+        .fail(),
         Some(truncate_request::Kind::All(_)) => Ok(vec![(
             region_id,
             RegionRequest::Truncate(RegionTruncateRequest::All),
@@ -381,7 +379,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
             let time_ranges = time_ranges
                 .starts
                 .into_iter()
-                .zip(time_ranges.ends.into_iter())
+                .zip(time_ranges.ends)
                 .map(|(start, end)| {
                     let start = Timestamp::new(start, time_unit);
                     let end = Timestamp::new(end, time_unit);
