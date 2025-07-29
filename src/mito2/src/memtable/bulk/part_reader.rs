@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::ParquetMetaData;
@@ -169,6 +170,21 @@ pub struct RecordBatchIter {
     sequence: Option<SequenceNumber>,
 }
 
+/// Iterator similar to RecordBatchIter but returns RecordBatch directly instead of Batch.
+/// Uses non-encoded primary key columns for filtering instead of encoded ones.
+pub struct NonEncodedRecordBatchIter {
+    /// The RecordBatch to read from
+    record_batch: Option<RecordBatch>,
+    /// Non-encoded primary key columns returned by BulkPartConverter::convert
+    primary_key_columns: Option<Vec<ArrayRef>>,
+    /// Iterator context for filtering
+    context: BulkIterContextRef,
+    /// Sequence number filter
+    sequence: Option<SequenceNumber>,
+    /// Whether the batch has been processed
+    processed: bool,
+}
+
 impl RecordBatchIter {
     /// Creates a new RecordBatchIter from a single RecordBatch.
     ///
@@ -282,6 +298,269 @@ impl Iterator for RecordBatchIter {
 
         // No more batches available
         None
+    }
+}
+
+impl NonEncodedRecordBatchIter {
+    /// Creates a new NonEncodedRecordBatchIter from a RecordBatch and non-encoded primary key columns.
+    ///
+    /// # Arguments
+    /// * `record_batch` - The RecordBatch to iterate over
+    /// * `primary_key_columns` - Non-encoded primary key columns from BulkPartConverter::convert
+    /// * `context` - Context for filtering
+    /// * `sequence` - Optional sequence filter
+    pub fn new(
+        record_batch: RecordBatch,
+        primary_key_columns: Option<Vec<ArrayRef>>,
+        context: BulkIterContextRef,
+        sequence: Option<SequenceNumber>,
+    ) -> Self {
+        Self {
+            record_batch: Some(record_batch),
+            primary_key_columns,
+            context,
+            sequence,
+            processed: false,
+        }
+    }
+
+    /// Applies projection to the RecordBatch if needed.
+    fn apply_projection(&self, record_batch: RecordBatch) -> error::Result<RecordBatch> {
+        let projection_indices = self.context.read_format().projection_indices();
+        if projection_indices.len() == record_batch.num_columns() {
+            return Ok(record_batch);
+        }
+
+        record_batch
+            .project(projection_indices)
+            .context(ComputeArrowSnafu)
+    }
+
+    /// Applies both predicate filtering and sequence filtering in a single pass.
+    /// Combines filters to avoid taking the record batch multiple times.
+    fn apply_combined_filters(
+        &self,
+        record_batch: RecordBatch,
+    ) -> error::Result<Option<RecordBatch>> {
+        let num_rows = record_batch.num_rows();
+        let mut combined_filter: Option<datatypes::arrow::array::BooleanArray> = None;
+
+        // First, apply predicate filters using non-encoded primary key columns
+        if !self.context.base.filters.is_empty() {
+            if let Some(predicate_filter) =
+                self.evaluate_filter_expression(&record_batch, self.primary_key_columns.as_ref())?
+            {
+                combined_filter = Some(predicate_filter);
+            }
+        }
+
+        // Then, apply sequence filtering
+        if let Some(sequence_threshold) = self.sequence {
+            let sequence_pos = record_batch.num_columns() - 2;
+            let sequence_column = record_batch.column(sequence_pos);
+
+            let sequence_array = sequence_column
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::UInt64Array>()
+                .unwrap();
+
+            let sequence_filter_values: Vec<bool> = sequence_array
+                .iter()
+                .map(|seq| seq.map(|s| s <= sequence_threshold).unwrap_or(false))
+                .collect();
+            let sequence_filter = datatypes::arrow::array::BooleanArray::from(sequence_filter_values);
+
+            // Combine with existing filter using AND operation
+            combined_filter = match combined_filter {
+                None => Some(sequence_filter),
+                Some(existing_filter) => {
+                    let and_result = datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
+                        .context(ComputeArrowSnafu)?;
+                    Some(and_result)
+                }
+            };
+        }
+
+        // Apply the combined filter if any filters were applied
+        if let Some(filter_array) = combined_filter {
+            if filter_array.true_count() == 0 {
+                return Ok(None);
+            }
+
+            if filter_array.true_count() == num_rows {
+                return Ok(Some(record_batch));
+            }
+
+            let filtered_batch =
+                datatypes::arrow::compute::filter_record_batch(&record_batch, &filter_array)
+                    .context(ComputeArrowSnafu)?;
+
+            Ok(Some(filtered_batch))
+        } else {
+            // No filters applied, return original batch
+            Ok(Some(record_batch))
+        }
+    }
+
+    /// Evaluates filters using RangeBase approach with non-encoded primary key columns.
+    /// For primary key columns, uses non-encoded arrays. For others, uses record batch arrays.
+    fn evaluate_filter_expression(
+        &self,
+        record_batch: &RecordBatch,
+        pk_columns: Option<&Vec<ArrayRef>>,
+    ) -> error::Result<Option<datatypes::arrow::array::BooleanArray>> {
+        use std::ops::BitAnd;
+
+        use api::v1::SemanticType;
+        use datatypes::arrow::buffer::BooleanBuffer;
+
+        use crate::sst::parquet::reader::MaybeFilter;
+
+        let num_rows = record_batch.num_rows();
+        let mut mask = BooleanBuffer::new_set(num_rows);
+
+        // Run filter one by one and combine them result, similar to RangeBase::precise_filter
+        for filter_ctx in &self.context.base.filters {
+            let filter = match filter_ctx.filter() {
+                MaybeFilter::Filter(f) => f,
+                // Column matches.
+                MaybeFilter::Matched => continue,
+                // Column doesn't match, filter the entire batch.
+                MaybeFilter::Pruned => return Ok(None),
+            };
+
+            let result = match filter_ctx.semantic_type() {
+                SemanticType::Tag => {
+                    // For primary key columns, use non-encoded primary key arrays
+                    let pk_index = self
+                        .context
+                        .read_format()
+                        .metadata()
+                        .primary_key_index(filter_ctx.column_id());
+
+                    if let (Some(pk_index), Some(pk_arrays)) = (pk_index, pk_columns) {
+                        if pk_index < pk_arrays.len() {
+                            let pk_array = &pk_arrays[pk_index];
+                            // Convert the array to a vector for evaluation
+                            let pk_vector = datatypes::vectors::Helper::try_into_vector(pk_array)
+                                .context(crate::error::ComputeVectorSnafu)?;
+
+                            filter
+                                .evaluate_vector(&pk_vector)
+                                .context(crate::error::RecordBatchSnafu)?
+                        } else {
+                            // Primary key index out of bounds, skip this filter
+                            continue;
+                        }
+                    } else {
+                        // Primary key arrays not provided or index not found, skip this filter
+                        continue;
+                    }
+                }
+                SemanticType::Field => {
+                    // For field columns, use record batch arrays
+                    let field_index = self
+                        .context
+                        .read_format()
+                        .field_index_by_id(filter_ctx.column_id());
+
+                    if let Some(field_index) = field_index {
+                        // Field columns are at the beginning of the record batch
+                        if field_index < record_batch.num_columns() {
+                            let field_array = record_batch.column(field_index);
+                            // Convert the array to a vector for evaluation
+                            let field_vector =
+                                datatypes::vectors::Helper::try_into_vector(field_array)
+                                    .context(crate::error::ComputeVectorSnafu)?;
+
+                            filter
+                                .evaluate_vector(&field_vector)
+                                .context(crate::error::RecordBatchSnafu)?
+                        } else {
+                            // Field index out of bounds, skip this filter
+                            continue;
+                        }
+                    } else {
+                        // Field index not found, skip this filter
+                        continue;
+                    }
+                }
+                SemanticType::Timestamp => {
+                    // For timestamp column, the position is fixed
+                    // Based on BulkPart::convert, timestamp is at timestamp_index position
+                    // From the schema structure, timestamp is typically at num_columns - 4
+                    let timestamp_pos = record_batch.num_columns() - 4;
+                    if timestamp_pos < record_batch.num_columns() {
+                        let timestamp_array = record_batch.column(timestamp_pos);
+                        // Convert the array to a vector for evaluation
+                        let timestamp_vector =
+                            datatypes::vectors::Helper::try_into_vector(timestamp_array)
+                                .context(crate::error::ComputeVectorSnafu)?;
+
+                        filter
+                            .evaluate_vector(&timestamp_vector)
+                            .context(crate::error::RecordBatchSnafu)?
+                    } else {
+                        // Timestamp position out of bounds, skip this filter
+                        continue;
+                    }
+                }
+            };
+
+            mask = mask.bitand(&result);
+        }
+
+        // Convert the mask to BooleanArray
+        let boolean_array = datatypes::arrow::array::BooleanArray::from(mask);
+
+        // If all rows are filtered out, return None
+        if boolean_array.true_count() == 0 {
+            return Ok(None);
+        }
+
+        // If no rows are filtered, return None to indicate no filtering needed
+        if boolean_array.true_count() == num_rows {
+            return Ok(None);
+        }
+
+        Ok(Some(boolean_array))
+    }
+}
+
+impl Iterator for NonEncodedRecordBatchIter {
+    type Item = error::Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.processed {
+            return None;
+        }
+
+        self.processed = true;
+
+        let record_batch = self.record_batch.take()?;
+
+        if record_batch.num_rows() == 0 {
+            return None;
+        }
+
+        let result = (|| {
+            // Apply combined filtering (both predicate and sequence filters)
+            let filtered_batch = self.apply_combined_filters(record_batch)?;
+            let Some(filtered_batch) = filtered_batch else {
+                return Ok(None);
+            };
+
+            // Apply projection last
+            let projected_batch = self.apply_projection(filtered_batch)?;
+
+            Ok(Some(projected_batch))
+        })();
+
+        match result {
+            Ok(Some(batch)) if batch.num_rows() > 0 => Some(Ok(batch)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        }
     }
 }
 
@@ -567,6 +846,209 @@ mod tests {
             total_rows < 3,
             "Should filter out some rows based on predicate, got {} rows",
             total_rows
+        );
+    }
+
+    #[test]
+    fn test_non_encoded_record_batch_iter_basic() {
+        // Create a simple schema
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Create test data
+        let field1 = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let timestamp = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![1000, 2000, 3000],
+        ));
+
+        // Create primary key dictionary array
+        use datatypes::arrow::array::{BinaryArray, DictionaryArray, UInt32Array};
+        let values = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2", b"key3"]));
+        let keys = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key = Arc::new(DictionaryArray::new(keys, values));
+
+        let sequence = Arc::new(UInt64Array::from(vec![1, 2, 3]));
+        let op_type = Arc::new(UInt8Array::from(vec![1, 1, 1])); // PUT operations
+
+        let record_batch = RecordBatch::try_new(
+            schema,
+            vec![field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap();
+
+        // Create non-encoded primary key columns (simulating BulkPartConverter output)
+        let pk_col1 = Arc::new(datatypes::arrow::array::StringArray::from(vec![
+            "key1", "key2", "key3",
+        ])) as ArrayRef;
+        let primary_key_columns = Some(vec![pk_col1]);
+
+        // Create a minimal region metadata for testing
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "pk_col",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+
+        let region_metadata = builder.build().unwrap();
+
+        // Create context
+        let context = Arc::new(BulkIterContext::new(
+            Arc::new(region_metadata),
+            &None, // No projection
+            None,  // No predicate
+        ));
+
+        // Create iterator
+        let mut iter =
+            NonEncodedRecordBatchIter::new(record_batch, primary_key_columns, context, None);
+
+        // Test iteration
+        let result = iter.next();
+        assert!(result.is_some(), "Should return at least one batch");
+
+        let batch = result.unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 3, "Batch should have 3 rows");
+        assert_eq!(batch.num_columns(), 5, "Batch should have 5 columns");
+    }
+
+    #[test]
+    fn test_non_encoded_record_batch_iter_with_sequence_filter() {
+        // Create a simple schema
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        // Create test data with different sequence numbers
+        let field1 = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let timestamp = Arc::new(datatypes::arrow::array::TimestampMillisecondArray::from(
+            vec![1000, 2000, 3000],
+        ));
+
+        // Create primary key dictionary array
+        use datatypes::arrow::array::{BinaryArray, DictionaryArray, UInt32Array};
+        let values = Arc::new(BinaryArray::from_iter_values([b"key1", b"key2", b"key3"]));
+        let keys = UInt32Array::from(vec![0, 1, 2]);
+        let primary_key = Arc::new(DictionaryArray::new(keys, values));
+
+        let sequence = Arc::new(UInt64Array::from(vec![1, 5, 10])); // Different sequences
+        let op_type = Arc::new(UInt8Array::from(vec![1, 1, 1])); // PUT operations
+
+        let record_batch = RecordBatch::try_new(
+            schema,
+            vec![field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap();
+
+        // Create non-encoded primary key columns
+        let pk_col1 = Arc::new(datatypes::arrow::array::StringArray::from(vec![
+            "key1", "key2", "key3",
+        ])) as ArrayRef;
+        let primary_key_columns = Some(vec![pk_col1]);
+
+        // Create a minimal region metadata for testing
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "pk_col",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .primary_key(vec![0]);
+
+        let region_metadata = builder.build().unwrap();
+
+        // Create context
+        let context = Arc::new(BulkIterContext::new(
+            Arc::new(region_metadata),
+            &None, // No projection
+            None,  // No predicate
+        ));
+
+        // Create iterator with sequence filter (only include sequences <= 5)
+        let mut iter =
+            NonEncodedRecordBatchIter::new(record_batch, primary_key_columns, context, Some(5));
+
+        // Test iteration - should filter out sequence 10
+        let result = iter.next();
+        assert!(result.is_some(), "Should return at least one batch");
+
+        let batch = result.unwrap().unwrap();
+        assert!(
+            batch.num_rows() <= 2,
+            "Should filter out some rows based on sequence, got {} rows",
+            batch.num_rows()
         );
     }
 }
