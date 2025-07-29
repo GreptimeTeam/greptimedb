@@ -20,7 +20,7 @@ use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use meta_srv::bootstrap::create_etcd_client;
-use meta_srv::metasrv::BackendImpl;
+use meta_srv::metasrv::{BackendImpl, EtcdTlsOptions};
 
 use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
 
@@ -51,6 +51,18 @@ pub(crate) struct StoreConfig {
     #[clap(long, default_value = "")]
     store_key_prefix: String,
 
+    /// Path to the CA certificate for etcd TLS connection
+    #[clap(long, default_value = "")]
+    etcd_ca_cert_path: String,
+
+    /// Path to the client certificate for etcd TLS connection
+    #[clap(long, default_value = "")]
+    etcd_client_cert_path: String,
+
+    /// Path to the client key for etcd TLS connection
+    #[clap(long, default_value = "")]
+    etcd_client_key_path: String,
+
     /// The table name in RDS to store metadata. Only used when using [postgres-store] or [mysql-store].
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
@@ -67,7 +79,16 @@ impl StoreConfig {
         } else {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
-                    let etcd_client = create_etcd_client(store_addrs)
+                    let tls_option = if !self.etcd_ca_cert_path.is_empty() {
+                        Some(EtcdTlsOptions {
+                            ca_cert_path: self.etcd_ca_cert_path.clone(),
+                            client_cert_path: self.etcd_client_cert_path.clone(),
+                            client_key_path: self.etcd_client_key_path.clone(),
+                        })
+                    } else {
+                        None
+                    };
+                    let etcd_client = create_etcd_client(store_addrs, tls_option.as_ref())
                         .await
                         .map_err(BoxedError::new)?;
                     Ok(EtcdStore::with_etcd_client(etcd_client, max_txn_ops))
