@@ -125,14 +125,6 @@ pub async fn remote_write(
 
     let mut processor = PromSeriesProcessor::default_processor();
 
-    // Decode the request first to extract schema information
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
-
-    // Extract schema from special labels and set it in query context
-    if let Some(schema) = extract_schema_from_tables_builder(&req) {
-        query_ctx.set_current_schema(&schema);
-    }
-
     // Set up pipeline if needed (this requires query_ctx to be Arc)
     let query_ctx = Arc::new(query_ctx);
     if let Some(pipeline_name) = pipeline_info.pipeline_name {
@@ -153,6 +145,14 @@ pub async fn remote_write(
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
+
+    // Decode the request first to extract schema information
+    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+
+    // Extract schema from special labels and set it in query context
+    if let Some(schema) = extract_schema_from_tables_builder(&req) {
+        query_ctx.set_current_schema(&schema);
+    }
 
     let req = if processor.use_pipeline {
         processor.exec_pipeline().await?
