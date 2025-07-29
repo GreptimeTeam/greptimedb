@@ -49,7 +49,7 @@ deadpool = { workspace = true, optional = true }
 deadpool-postgres = { workspace = true, optional = true }
 derive_builder.workspace = true
 either.workspace = true
-etcd-client ={ workspace = true, features = ["tls"] }
+etcd-client = { workspace = true, features = ["tls"] }
 futures.workspace = true
 h2 = "0.3"
 http-body-util = "0.1"
