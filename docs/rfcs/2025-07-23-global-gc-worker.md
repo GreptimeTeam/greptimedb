@@ -9,90 +9,104 @@ Author: "discord9 <discord9@163.com>"
 
 ## Summary
 
-This RFC proposes a background worker for globally garbage collecting stale files that are no longer in use by any component of the system.
+This RFC proposes the integration of a garbage collection (GC) mechanism within the major compaction process. This mechanism aims to manage and remove stale files that are no longer actively used by any system component, thereby reclaiming storage space.
 
 ## Motivation
 
-With the introduction of features like table repartitioning, a significant number of Parquet files can become obsolete. Additionally, failures during manifest updates can lead to orphaned files that are never referenced. A periodic garbage collection mechanism is required to reclaim storage space by removing these unused files.
+With the introduction of features such as table repartitioning, a substantial number of Parquet files can become obsolete. Furthermore, failures during manifest updates may result in orphaned files that are never referenced by the system. Therefore, a periodic garbage collection mechanism is essential to reclaim storage space by systematically removing these unused files.
 
 ## Details
 
 ### Overview
 
-The Global GC Worker will run periodically. In each run, it scans the table manifests to identify all currently used file IDs. Subsequently, it traverses the storage directory and deletes files that are not in the set of used file IDs.
+The garbage collection process will be integrated directly into the major compaction process. Upon the completion of a major compaction for a given region, the GC worker will be automatically triggered. Its primary function will be to identify and subsequently delete obsolete files that have persisted beyond their designated retention period. This integration ensures that garbage collection is performed in close conjunction with data lifecycle management, effectively leveraging the compaction process's inherent knowledge of file states.
 
-This design prioritizes simplicity of implementation, which implies that correctness might not be guaranteed under certain rare edge cases. In such cases, the system might delete files that are still being read by long-running queries on read replicas, causing those queries to fail. However, this is considered an acceptable trade-off for the simplicity of the implementation.
+This design prioritizes correctness and safety by explicitly linking GC execution to a well-defined operational boundary: the successful completion of a compaction cycle.
 
 ### Terminology
 
-- **Unused File**: A file that exists in the storage directory but has never been recorded in any manifest. This can occur, for example, when an SST file is successfully written, but the subsequent manifest update fails.
-- **Obsolete File**: A file that was once recorded in a manifest but has since been explicitly marked for removal, for instance, after a repartition or compaction operation.
+- **Unused File**: Refers to a file present in the storage directory that has never been formally recorded in any manifest. A common scenario for this includes cases where a new SST file is successfully written to storage, but the subsequent update to the manifest fails, leaving the file unreferenced.
+- **Obsolete File**: Denotes a file that was previously recorded in a manifest but has since been explicitly marked for removal. This typically occurs following operations such as data repartitioning or compaction.
 
 ### GC Worker Process
 
-The Global GC Worker operates with a long interval, ranging from tens of minutes to several hours, and can also be triggered manually. To execute a GC cycle, `metasrv` will select a `datanode` with a low current workload to run the worker. The execution on a `datanode` is preferred to avoid the overhead of passing object storage configurations to the `metasrv`.
+The GC worker operates as an integral part of the major compaction process. Once a major compaction for a specific region is completed, the GC worker is automatically triggered. Executing this process on a `datanode` is preferred to eliminate the overhead associated with having to set object storage configurations in the `metasrv`.
 
-The process is as follows:
+The detailed process is as follows:
 
-1.  A separate GC task is initiated for each table. If any compaction or other action that should prevent GC is happening on this table, the GC worker will skip it and wait for the next cycle.
-2.  The worker reads the table's manifest to get a list of all obsolete files (Note: for now, it only checks regions that have undergone repartition).
-3.  It performs a streaming scan of the object storage directory to identify all unused files. Caching might be considered, but its benefit is limited given the long execution interval.
+1.  **Invocation**: Upon the successful completion of a major compaction for a region, the GC worker is invoked.
+2.  **Manifest Reading**: The worker reads the region's primary manifest to obtain a comprehensive list of all files marked as obsolete. Concurrently, it reads any temporary manifests generated by long-running queries to identify files that are currently in active use, thereby preventing their premature deletion.
+3.  **Lingering Time Check (Obsolete Files)**: For each identified obsolete file, the GC worker evaluates its "lingering time." Which is the time passed after it had been removed from manifest.
+4.  **Deletion Marking (Obsolete Files)**: Files that have exceeded their maximum configurable lingering time and are not referenced by any active temporary manifests are marked for deletion.
+5.  **Lingering Time (Unused Files)**: Unused files (those never recorded in any manifest) are also subject to a configurable maximum lingering time before they are eligible for deletion.
 
 #### Handling Obsolete Files
 
-An obsolete file is permanently deleted if the time since its removal from the manifest (its obsolescence timestamp) exceeds a configurable threshold.
+An obsolete file is permanently deleted only if two conditions are met:
+1. The time elapsed since its removal from the manifest (its obsolescence timestamp) exceeds a configurable threshold.
+2. It is not currently referenced by any active temporary manifests.
+
 
 #### Handling Unused Files
 
-An unused file is permanently deleted if its creation time exceeds a configurable threshold.
+With the integration of the GC worker into the major compaction process, the risk of accidentally deleting newly created SST files that have not yet been recorded in the manifest is significantly mitigated. Consequently, the concept of "Unused Files" as a distinct category primarily susceptible to accidental deletion is largely resolved. Any files that are genuinely "unused" (i.e., never referenced by any manifest, including temporary ones) can be safely deleted after a configurable maximum lingering time.
 
-A list of recently deleted files can be maintained for debugging purposes.
+For debugging and auditing purposes, a comprehensive list of recently deleted files can be maintained.
 
 ### Ensuring Read Consistency
 
-To prevent the GC worker from deleting files that are actively being used by long-running analytical queries on read replicas, a protection mechanism is introduced. When a read replica initiates a query (or after a query runs for a certain duration), it will write a temporary, "fake" manifest. This manifest will reference all the files required for the query, along with the manifest version, effectively placing a hold on them and preventing their deletion by the GC worker.
+To prevent the GC worker from inadvertently deleting files that are actively being utilized by long-running analytical queries, particularly on read replicas, a robust protection mechanism is introduced. Upon detection of a long-running query (e.g., by the dedicated slow query recorder after a query have been running for a while), a temporary manifest will be written to the region's manifest directory. This temporary manifest will explicitly reference all files necessary for the ongoing query, along with the relevant manifest version. This action effectively places a hold on these files, preventing their deletion by the GC worker. The lifecycle of this temporary manifest, including its creation and eventual deletion upon query completion or cancellation, will be managed by the slow query recorder.
 
 ## Drawbacks
 
-- The long interval between GC cycles means that frequent repartitioning could lead to a temporary accumulation of obsolete files.
-- There is a small but non-zero probability of incorrect deletion. For example, if a compaction operation takes an unusually long time, some of its newly created SST files might be uploaded while one SST is still pending. The uploaded SSTs will be treated as "Unused files" because they don't show up in the manifest, and if the compaction takes longer than the deletion threshold to update the manifest, it might mistakenly identify the uploaded SSTs as unused and delete them. However, the likelihood of such an event is extremely low and would require a combination of a very long-running query on a read replica and an exceptionally long compaction process.
+- **Dependency on Compaction Frequency**: The integration of the GC worker with major compaction means that GC cycles are directly tied to the frequency of compactions. In environments with infrequent compaction operations, obsolete files may accumulate for extended periods before being reclaimed, potentially leading to increased storage consumption.
+- **Race Condition with Long-Running Queries**: A potential race condition exists if a long-running query initiates but haven't write its temporary manifest in time, while a compaction process simultaneously begins and marks files used by that query as obsolete. This scenario could lead to the premature deletion of files still required by the active query. To mitigate this, the threshold time for writing a temporary manifest should be significantly shorter than the lingering time configured for obsolete files, ensuring that next GC worker runs do not delete files that are now referenced by a temporary manifest if the query is still running.
+Also the read replica shouldn't be later in manifest version for more than the lingering time of obsolete files, otherwise it might ref to files that are already deleted by the GC worker.
+
+
+## Conclusion and Rationale
+
+This section summarizes the key aspects and trade-offs of the proposed integrated GC worker, highlighting its advantages and potential challenges.
+
+| Aspect | Current Proposal (Integrated GC) |
+| :--- | :--- |
+| **Implementation Complexity** | **Medium**. Requires careful integration with the compaction process and the slow query recorder for temporary manifest management. |
+| **Reliability** | **High**. Integration with compaction and leveraging temporary manifests from long-running queries significantly mitigates the risk of incorrect deletion. Accurate management of lingering times for obsolete files and prevention of accidental deletion of newly created SSTs enhance data safety. |
+| **Performance Overhead** | **Low to Medium**. The GC worker runs post-compaction, minimizing direct impact on write paths. Overhead from temporary manifest management by the slow query recorder is expected to be acceptable for long-running queries. |
+| **Impact on Other Components** | **Moderate**. Requires modifications to the compaction process to trigger GC and the slow query recorder to manage temporary manifests. This introduces some coupling but enhances overall data safety. |
+| **Deletion Strategy** | **State- and Time-Based**. Obsolete files are deleted based on a configurable lingering time, which is paused if the file is referenced by a temporary manifest. Unused files (never in a manifest) are also subject to a lingering time. |
+
+## Unresolved Questions and Future Work
+
+This section outlines key areas requiring further discussion and defines potential avenues for future development.
+
+*   **Slow Query Recorder Implementation**: Detailed specifications for the slow query recorder's implementation and its precise interaction mechanisms with temporary manifests are needed.
+*   **Configurable Lingering Times**: Establish and make configurable the specific lingering times for both obsolete and unused files to optimize storage reclamation and data availability.
 
 ## Alternatives
 
-A more complex alternative implementation would require the GC worker to have greater awareness of the table state and the cluster of read replicas. This would ensure that a file is truly unused before deletion, but at the cost of significantly higher implementation complexity.
+### 1. Standalone GC Service
 
-### Alternative GC Process Details
+Instead of integrating the GC worker directly into the major compaction process, a standalone GC service could be implemented. This service would operate independently, periodically scanning the storage for obsolete and unused files based on manifest information and predefined retention policies.
 
-1.  **Handling Leaked Files from Failed Manifest Updates**: These are files that never appeared in the manifest. Their growth rate is slow. The system could wait for a much longer time to confirm that any associated flush/compaction has completed or failed before deleting them. Alternatively, they could be marked with metrics instead of being deleted immediately.
+**Pros:**
+*   **Decoupling**: Separates GC logic from compaction, allowing independent scaling and deployment.
+*   **Flexibility**: Can be configured to run at different frequencies and with different strategies than compaction.
 
-2.  **Handling Files from Repartitioning**: These files are explicitly removed from the manifest via a `RegionEdit` after a repartition completes. They can be deleted quickly. However, if a read replica is still accessing these files, a synchronization mechanism is needed. The read replica would need to expose an interface allowing the GC worker to query whether specific files are in use. This would allow the worker to extend the "lease" on these files instead of deleting them.
+**Cons:**
+*   **Increased Complexity**: Requires a separate service to manage, monitor, and coordinate with other components.
+*   **Potential for Redundancy**: May duplicate some file scanning logic already present in compaction.
+*   **Consistency Challenges**: Ensuring read consistency would require more complex coordination mechanisms between the standalone GC service and active queries, potentially involving a distributed lock manager or a more sophisticated temporary manifest system.
 
-### Detailed Alternative Workflow
+### 2. Manifest-Driven Deletion (No Lingering Time)
 
-1.  After the distributed cluster starts, `metasrv` designates a `datanode` to start the Global GC Worker. The `datanode`'s heartbeat can include the status of the worker.
+This alternative would involve immediate deletion of files once they are removed from the manifest, without a lingering time.
 
-2.  The Global GC Worker runs periodically (with a configurable interval). Its process is as follows:
-    - For each region in object storage:
-        - Read the manifest to get all active file IDs and all obsolete file IDs.
-        - Scan the file list in storage. Files present in storage but marked as removed in the manifest are labeled as `ObsoleteFile`. Files present in storage but never in any manifest are labeled as `UnusedFile`.
-    - For new `ObsoleteFile`s, grant a lease (e.g., 30 seconds). When enough leased files expire or after a certain time, query the read replicas to check if any of these files are still in use. If not, delete them. If they are in use, renew the lease (e.g., double the lease time, up to a max of 5 minutes) to accommodate long-running queries.
-    - For new `UnusedFile`s, two scenarios must be distinguished:
-        1.  A compaction/flush is in progress. The SST is created, but the manifest is not yet updated. The GC worker should be paused for this table until the operation completes. An interface would be needed to signal whether GC is permissible on a table.
-        2.  A manifest update has failed, leading to a permanently leaked SST. In this case, the `UnusedFile` can be safely deleted during the next GC run.
+**Pros:**
+*   **Simplicity**: Simplifies the GC logic by removing the need for lingering time management.
+*   **Immediate Space Reclamation**: Storage space is reclaimed as soon as files are marked for deletion.
 
-In summary, an `UnusedFile` can be deleted when the GC worker is permitted to run on its corresponding table.
-
-## Comparison
-
-| Aspect | Primary Proposal (Simplicity-First) | Alternative Proposal (Safety-First) |
-| :--- | :--- | :--- |
-| **Implementation Complexity** | **Low**. The core logic relies on a fixed time threshold, avoiding complex state synchronization between components. | **High**. Requires implementing a lease mechanism, a status query interface for communication with read replicas, and table-level signals to pause GC, leading to tighter component coupling. |
-| **Reliability** | **Lower**. There is a very low probability of incorrectly deleting files being read by long-running queries, which would cause those queries to fail. This risk is accepted for the sake of simplicity. | **High**. The lease and active query mechanism ensures a file is no longer in use by any component before deletion, significantly mitigating the risk of accidental deletion. |
-| **Performance Overhead** | **Low**. The GC Worker runs independently and does not impose direct polling or request overhead on other components like read replicas. | **Medium**. The GC Worker needs to periodically communicate with read replicas to check file leases, introducing additional network and processing overhead. |
-| **Impact on Other Components** | **Minor**. Primarily relies on read replicas to protect themselves by writing a "fake manifest" during long-running queries. | **Significant**. Requires read replicas to expose an interface for querying file usage status and demands that operations like compaction can signal to pause GC on specific tables. |
-| **Deletion Strategy** | **Time-Based**. Both unused and obsolete files are deleted based on a configurable time threshold. | **State- and Lease-Based**. Employs a more granular strategy: sets leases for obsolete files and confirms their status upon expiration; distinguishes between ongoing operations and genuine leaks for unused files. |
-
-## Unresolved Questions
-
-- The exact conditions for a read replica to write a "fake" manifest need further discussion.
-- The strategy for handling leaked files in the primary proposal (delete after a threshold) versus the alternative (mark with metrics) needs to be decided.
+**Cons:**
+*   **Increased Risk of Data Loss**: Higher risk of deleting files still in use by long-running queries or other processes if not perfectly synchronized.
+*   **Complex Read Consistency**: Requires extremely robust and immediate mechanisms to ensure that no active queries are referencing files marked for deletion, potentially leading to performance bottlenecks or complex error handling.
+*   **Debugging Challenges**: Difficult to debug issues related to premature file deletion due to the immediate nature of the operation.
