@@ -70,6 +70,11 @@ impl DfTableSourceProvider {
         }
     }
 
+    /// Returns the query context.
+    pub fn query_ctx(&self) -> &QueryContextRef {
+        &self.query_ctx
+    }
+
     pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {
         if self.disallow_cross_catalog_query {
             match &table_ref {

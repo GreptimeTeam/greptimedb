@@ -172,7 +172,7 @@ impl DfLogicalPlanner {
                 .sql_parser
                 .enable_ident_normalization,
         );
-        PromPlanner::stmt_to_plan(table_provider, stmt, &self.session_state)
+        PromPlanner::stmt_to_plan(table_provider, stmt, &self.engine_state)
             .await
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
