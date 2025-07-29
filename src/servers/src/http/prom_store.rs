@@ -39,7 +39,7 @@ use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::http::PromValidationMode;
 use crate::prom_row_builder::TablesBuilder;
-use crate::prom_store::{snappy_decompress, zstd_decompress};
+use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -52,6 +52,16 @@ lazy_static! {
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
+
+/// Extract schema from TablesBuilder. Returns the first schema found from any PromCtx.
+/// Prioritizes non-None schemas.
+fn extract_schema_from_tables_builder(tables_builder: &TablesBuilder) -> Option<String> {
+    tables_builder
+        .tables
+        .keys()
+        .find_map(|prom_ctx| prom_ctx.schema.as_ref())
+        .cloned()
+}
 
 #[derive(Clone)]
 pub struct PromStoreState {
@@ -110,14 +120,21 @@ pub async fn remote_write(
     if let Some(physical_table) = params.physical_table {
         query_ctx.set_extension(PHYSICAL_TABLE_PARAM, physical_table);
     }
-    let query_ctx = Arc::new(query_ctx);
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
 
     let is_zstd = content_encoding.contains(VM_ENCODING);
 
     let mut processor = PromSeriesProcessor::default_processor();
+
+    // Decode the request first to extract schema information
+    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+
+    // Extract schema from special labels and set it in query context
+    if let Some(schema) = extract_schema_from_tables_builder(&req) {
+        query_ctx.set_current_schema(&schema);
+    }
+
+    // Set up pipeline if needed (this requires query_ctx to be Arc)
+    let query_ctx = Arc::new(query_ctx);
     if let Some(pipeline_name) = pipeline_info.pipeline_name {
         let pipeline_def = PipelineDefinition::from_name(
             &pipeline_name,
@@ -133,7 +150,9 @@ pub async fn remote_write(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
 
     let req = if processor.use_pipeline {
         processor.exec_pipeline().await?
@@ -192,12 +211,18 @@ pub async fn remote_read(
 ) -> Result<PromStoreResponse> {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
+
+    let request = decode_remote_read_request(body).await?;
+
+    // Extract schema from special labels and set it in query context
+    if let Some(schema) = extract_schema_from_read_request(&request) {
+        query_ctx.set_current_schema(&schema);
+    }
+
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-
-    let request = decode_remote_read_request(body).await?;
 
     state.prom_store_handler.read(request, query_ctx).await
 }

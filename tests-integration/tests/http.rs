@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
 
-use api::prom_store::remote::WriteRequest;
+use api::prom_store::remote::label_matcher::Type as MatcherType;
+use api::prom_store::remote::{
+    Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
+};
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use chrono::Utc;
@@ -94,6 +97,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_prometheus_remote_write,
                 test_prometheus_remote_special_labels,
+                test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
@@ -1492,6 +1496,188 @@ pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType)
         table_val,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_schema_labels").await;
+    let client = TestClient::new(app).await;
+
+    // Create test schemas
+    let res = client
+        .post("/v1/sql?sql=create database test_schema_1")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .post("/v1/sql?sql=create database test_schema_2")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Write data with __schema__ label
+    let schema_series = TimeSeries {
+        labels: vec![
+            Label {
+                name: "__name__".to_string(),
+                value: "metric_with_schema".to_string(),
+            },
+            Label {
+                name: "__schema__".to_string(),
+                value: "test_schema_1".to_string(),
+            },
+            Label {
+                name: "instance".to_string(),
+                value: "host1".to_string(),
+            },
+        ],
+        samples: vec![Sample {
+            value: 100.0,
+            timestamp: 1000,
+        }],
+        ..Default::default()
+    };
+
+    let write_request = WriteRequest {
+        timeseries: vec![schema_series],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Read data from test_schema_1 using __schema__ matcher
+    let read_request = ReadRequest {
+        queries: vec![Query {
+            start_timestamp_ms: 500,
+            end_timestamp_ms: 1500,
+            matchers: vec![
+                LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: "metric_with_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+                LabelMatcher {
+                    name: "__schema__".to_string(),
+                    value: "test_schema_1".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let serialized_read_request = read_request.encode_to_vec();
+    let compressed_read_request =
+        prom_store::snappy_compress(&serialized_read_request).expect("failed to encode snappy");
+
+    let mut result = client
+        .post("/v1/prometheus/read")
+        .body(compressed_read_request)
+        .send()
+        .await;
+    assert_eq!(result.status(), StatusCode::OK);
+
+    let response_body = result.chunk().await.unwrap();
+    let decompressed_response = prom_store::snappy_decompress(&response_body).unwrap();
+    let read_response = ReadResponse::decode(&decompressed_response[..]).unwrap();
+
+    assert_eq!(read_response.results.len(), 1);
+    assert_eq!(read_response.results[0].timeseries.len(), 1);
+
+    let timeseries = &read_response.results[0].timeseries[0];
+    assert_eq!(timeseries.samples.len(), 1);
+    assert_eq!(timeseries.samples[0].value, 100.0);
+    assert_eq!(timeseries.samples[0].timestamp, 1000);
+
+    // write data to unknown schema
+    let unknown_schema_series = TimeSeries {
+        labels: vec![
+            Label {
+                name: "__name__".to_string(),
+                value: "metric_unknown_schema".to_string(),
+            },
+            Label {
+                name: "__schema__".to_string(),
+                value: "unknown_schema".to_string(),
+            },
+            Label {
+                name: "instance".to_string(),
+                value: "host2".to_string(),
+            },
+        ],
+        samples: vec![Sample {
+            value: 200.0,
+            timestamp: 2000,
+        }],
+        ..Default::default()
+    };
+
+    let unknown_write_request = WriteRequest {
+        timeseries: vec![unknown_schema_series],
+        ..Default::default()
+    };
+    let serialized_unknown_request = unknown_write_request.encode_to_vec();
+    let compressed_unknown_request =
+        prom_store::snappy_compress(&serialized_unknown_request).expect("failed to encode snappy");
+
+    // Write data to unknown schema
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_unknown_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Read data from unknown schema
+    let unknown_read_request = ReadRequest {
+        queries: vec![Query {
+            start_timestamp_ms: 1500,
+            end_timestamp_ms: 2500,
+            matchers: vec![
+                LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: "metric_unknown_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+                LabelMatcher {
+                    name: "__schema__".to_string(),
+                    value: "unknown_schema".to_string(),
+                    r#type: MatcherType::Eq as i32,
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let serialized_unknown_read_request = unknown_read_request.encode_to_vec();
+    let compressed_unknown_read_request =
+        prom_store::snappy_compress(&serialized_unknown_read_request)
+            .expect("failed to encode snappy");
+
+    let unknown_result = client
+        .post("/v1/prometheus/read")
+        .body(compressed_unknown_read_request)
+        .send()
+        .await;
+    assert_eq!(unknown_result.status(), StatusCode::BAD_REQUEST);
 
     guard.remove_all().await;
 }

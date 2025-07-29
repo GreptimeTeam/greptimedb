@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
-use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -43,6 +43,9 @@ pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
 pub const DATABASE_LABEL: &str = "__database__";
 pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
+
+pub const SCHEMA_LABEL: &str = "__schema__";
+pub const SCHEMA_LABEL_BYTES: &[u8] = b"__schema__";
 
 pub const PHYSICAL_TABLE_LABEL: &str = "__physical_table__";
 pub const PHYSICAL_TABLE_LABEL_BYTES: &[u8] = b"__physical_table__";
@@ -73,6 +76,29 @@ pub fn table_name(q: &Query) -> Result<String> {
         })
 }
 
+/// Extract schema from remote read request. Returns the first schema found from any query's matchers.
+/// Prioritizes __schema__ over __database__ labels.
+pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String> {
+    for query in &request.queries {
+        for matcher in &query.matchers {
+            if matcher.name == SCHEMA_LABEL {
+                return Some(matcher.value.clone());
+            }
+        }
+    }
+
+    // If no __schema__ found, look for __database__
+    for query in &request.queries {
+        for matcher in &query.matchers {
+            if matcher.name == DATABASE_LABEL {
+                return Some(matcher.value.clone());
+            }
+        }
+    }
+
+    None
+}
+
 /// Create a DataFrame from a remote Query
 #[tracing::instrument(skip_all)]
 pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
@@ -91,7 +117,7 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
     for m in label_matches {
         let name = &m.name;
 
-        if name == METRIC_NAME_LABEL {
+        if name == METRIC_NAME_LABEL || name == SCHEMA_LABEL || name == DATABASE_LABEL {
             continue;
         }
 
