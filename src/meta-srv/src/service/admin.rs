@@ -267,7 +267,7 @@ pub fn admin_axum_router(metasrv: Arc<Metasrv>) -> AxumRouter {
         "/table",
         AxumRouter::new()
             .route("/next-id", routing::get(sequencer::get_next_table_id))
-            .route("/next-id", routing::post(sequencer::set_next_table_id))
+            .route("/set-next-id", routing::post(sequencer::set_next_table_id))
             .with_state(table_id_sequence_handler),
     );
 
@@ -1183,7 +1183,7 @@ mod axum_admin_tests {
                 Request::builder()
                     .method(Method::POST)
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .uri("/admin/sequence/table/next-id")
+                    .uri("/admin/sequence/table/set-next-id")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1198,7 +1198,7 @@ mod axum_admin_tests {
                 Request::builder()
                     .method(Method::POST)
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .uri("/admin/sequence/table/next-id")
+                    .uri("/admin/sequence/table/set-next-id")
                     .body(Body::from(r#"{"next_table_id": 0}"#))
                     .unwrap(),
             )
@@ -1215,7 +1215,7 @@ mod axum_admin_tests {
                 Request::builder()
                     .method(Method::POST)
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .uri("/admin/sequence/table/next-id")
+                    .uri("/admin/sequence/table/set-next-id")
                     .body(Body::from(r#"{"next_table_id": 2048}"#))
                     .unwrap(),
             )
@@ -1249,7 +1249,7 @@ mod axum_admin_tests {
                 Request::builder()
                     .method(Method::POST)
                     .header(http::header::CONTENT_TYPE, "application/json")
-                    .uri("/admin/sequence/table/next-id")
+                    .uri("/admin/sequence/table/set-next-id")
                     .body(Body::from(r#"{"next_table_id": 2049}"#))
                     .unwrap(),
             )

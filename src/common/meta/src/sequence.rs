@@ -15,6 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use snafu::ensure;
 use tokio::sync::Mutex;
 
@@ -251,7 +252,7 @@ impl Inner {
                 err_msg: format!("Failed to reset sequence {} to {}", self.name, next),
             }
         );
-
+        warn!("Sequence {} jumped to {}", self.name, next);
         // Reset the sequence to the initial value.
         self.initial = next;
         self.next = next;
