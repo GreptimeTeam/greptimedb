@@ -26,9 +26,10 @@ use common_recordbatch::DfRecordBatch as RecordBatch;
 use common_time::timestamp::TimeUnit;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt32Array, UInt64Array, UInt64Builder, UInt8Array, UInt8Builder,
+    Array, ArrayRef, BinaryBuilder, BinaryDictionaryBuilder, DictionaryArray, StringBuilder,
+    StringDictionaryBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array, UInt64Builder,
+    UInt8Array, UInt8Builder,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, TakeOptions};
 use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
@@ -217,6 +218,41 @@ impl BulkPart {
 /// Builder type for primary key dictionary array.
 type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
 
+/// Primary key column builder trait for handling different data types.
+enum PrimaryKeyColumnBuilder {
+    /// String dictionary builder for string types.
+    StringDict(StringDictionaryBuilder<UInt32Type>),
+    /// Generic mutable vector for other types.
+    Vector(Box<dyn MutableVector>),
+}
+
+impl PrimaryKeyColumnBuilder {
+    /// Appends a value to the builder.
+    fn push_value_ref(&mut self, value: datatypes::value::ValueRef) -> Result<()> {
+        match self {
+            PrimaryKeyColumnBuilder::StringDict(builder) => {
+                if let Ok(Some(s)) = value.as_string() {
+                    builder.append_value(s);
+                } else {
+                    builder.append_null();
+                }
+            }
+            PrimaryKeyColumnBuilder::Vector(builder) => {
+                builder.push_value_ref(value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Converts the builder to an ArrayRef.
+    fn into_arrow_array(self) -> ArrayRef {
+        match self {
+            PrimaryKeyColumnBuilder::StringDict(mut builder) => Arc::new(builder.finish()),
+            PrimaryKeyColumnBuilder::Vector(mut builder) => builder.to_vector().to_arrow_array(),
+        }
+    }
+}
+
 /// Converter that converts structs into [BulkPart].
 pub struct BulkPartConverter {
     /// Region metadata.
@@ -229,6 +265,10 @@ pub struct BulkPartConverter {
     key_array_builder: PrimaryKeyArrayBuilder,
     /// Builders for non-primary key columns.
     value_builder: ValueBuilder,
+    /// Flag to control whether to store primary key columns in arrays.
+    store_primary_key_columns: bool,
+    /// Builders for individual primary key columns.
+    primary_key_column_builders: Vec<PrimaryKeyColumnBuilder>,
 
     /// Max timestamp value.
     max_ts: i64,
@@ -243,13 +283,33 @@ impl BulkPartConverter {
         region_metadata: &RegionMetadataRef,
         capacity: usize,
         primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+        store_primary_key_columns: bool,
     ) -> Self {
+        let primary_key_column_builders = if store_primary_key_columns {
+            region_metadata
+                .primary_key_columns()
+                .map(|col| {
+                    if col.column_schema.data_type.is_string() {
+                        PrimaryKeyColumnBuilder::StringDict(StringDictionaryBuilder::new())
+                    } else {
+                        PrimaryKeyColumnBuilder::Vector(
+                            col.column_schema.data_type.create_mutable_vector(capacity),
+                        )
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Self {
             region_metadata: region_metadata.clone(),
             primary_key_codec,
             key_buf: Vec::new(),
             key_array_builder: PrimaryKeyArrayBuilder::new(),
             value_builder: ValueBuilder::new(region_metadata, capacity),
+            store_primary_key_columns,
+            primary_key_column_builders,
             min_ts: i64::MAX,
             max_ts: i64::MIN,
             max_sequence: SequenceNumber::MIN,
@@ -301,6 +361,17 @@ impl BulkPartConverter {
                 .context(ComputeArrowSnafu)?;
         };
 
+        // If storing primary key columns, append values to individual builders
+        if self.store_primary_key_columns {
+            for (builder, pk_value) in self
+                .primary_key_column_builders
+                .iter_mut()
+                .zip(kv.primary_keys())
+            {
+                builder.push_value_ref(pk_value)?;
+            }
+        }
+
         // Pushes other columns.
         self.value_builder.push(
             kv.timestamp(),
@@ -325,6 +396,20 @@ impl BulkPartConverter {
     pub fn convert(mut self) -> Result<BulkPart> {
         let values = Values::from(self.value_builder);
         let mut columns = Vec::with_capacity(4 + values.fields.len());
+
+        // Build primary key column arrays if enabled
+        let primary_key_arrays = if self.store_primary_key_columns {
+            let pk_arrays: Vec<ArrayRef> = self
+                .primary_key_column_builders
+                .into_iter()
+                .map(|builder| builder.into_arrow_array())
+                .collect();
+
+            Some(pk_arrays)
+        } else {
+            None
+        };
+
         columns.extend(values.fields.iter().map(|field| field.to_arrow_array()));
         let timestamp_index = columns.len();
         columns.push(values.timestamp.to_arrow_array());
@@ -337,7 +422,8 @@ impl BulkPartConverter {
 
         let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
         // Sorts the record batch.
-        let batch = sort_primary_key_record_batch(&batch)?;
+        let (batch, _sorted_primary_key_arrays) =
+            sort_primary_key_record_batch(&batch, primary_key_arrays)?;
 
         Ok(BulkPart {
             batch,
@@ -351,7 +437,10 @@ impl BulkPartConverter {
 }
 
 /// Sorts the record batch with primary key format.
-fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+fn sort_primary_key_record_batch(
+    batch: &RecordBatch,
+    primary_key_arrays: Option<Vec<ArrayRef>>,
+) -> Result<(RecordBatch, Option<Vec<ArrayRef>>)> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
@@ -386,7 +475,27 @@ fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let sorted_batch =
         datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)?;
 
-    Ok(sorted_batch)
+    // Sort the primary key arrays using the same indices
+    let sorted_primary_key_arrays = if let Some(pk_arrays) = primary_key_arrays {
+        let sorted_pk_arrays: Result<Vec<ArrayRef>> = pk_arrays
+            .into_iter()
+            .map(|pk_array| {
+                datatypes::arrow::compute::take(
+                    &pk_array,
+                    &indices,
+                    Some(TakeOptions {
+                        check_bounds: false,
+                    }),
+                )
+                .context(ComputeArrowSnafu)
+            })
+            .collect();
+        Some(sorted_pk_arrays?)
+    } else {
+        None
+    };
+
+    Ok((sorted_batch, sorted_primary_key_arrays))
 }
 
 #[derive(Debug)]
@@ -1271,7 +1380,7 @@ mod tests {
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
 
-        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
 
         let key_values1 = build_key_values_with_ts_seq_values(
             &metadata,
@@ -1309,7 +1418,7 @@ mod tests {
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
 
-        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
 
         let key_values1 = build_key_values_with_ts_seq_values(
             &metadata,
@@ -1365,7 +1474,7 @@ mod tests {
         let capacity = 10;
         let primary_key_codec = build_primary_key_codec(&metadata);
 
-        let converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec);
+        let converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
 
         let bulk_part = converter.convert().unwrap();
 

@@ -243,6 +243,7 @@ impl TimePartitions {
                 &self.metadata,
                 kvs.num_rows(),
                 self.primary_key_codec.clone(),
+                false,
             );
             converter.append_key_values(kvs)?;
             let part = converter.convert()?;

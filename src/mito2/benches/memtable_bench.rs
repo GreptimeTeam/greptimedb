@@ -373,7 +373,7 @@ fn bulk_part_converter(c: &mut Criterion) {
                 let generator =
                     CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
                 let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
-                let mut converter = BulkPartConverter::new(&metadata, rows, codec);
+                let mut converter = BulkPartConverter::new(&metadata, rows, codec, false);
 
                 // Each iteration generates one KeyValues with N rows (one per host)
                 for kvs in generator.iter() {
@@ -388,11 +388,59 @@ fn bulk_part_converter(c: &mut Criterion) {
     }
 }
 
+fn bulk_part_converter_with_pk_columns(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_converter_pk_columns");
+
+    for &rows in &[1024, 2048, 4096, 8192] {
+        // Benchmark without storing primary key columns (baseline)
+        group.bench_with_input(format!("{}_rows_no_pk_columns", rows), &rows, |b, &rows| {
+            b.iter(|| {
+                let generator =
+                    CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                let mut converter = BulkPartConverter::new(&metadata, rows, codec, false);
+
+                for kvs in generator.iter() {
+                    converter.append_key_values(&kvs).unwrap();
+                    break;
+                }
+
+                let _bulk_part = converter.convert().unwrap();
+            });
+        });
+
+        // Benchmark with storing primary key columns
+        group.bench_with_input(
+            format!("{}_rows_with_pk_columns", rows),
+            &rows,
+            |b, &rows| {
+                b.iter(|| {
+                    let generator =
+                        CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                    let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                    let mut converter = BulkPartConverter::new(&metadata, rows, codec, true);
+
+                    for kvs in generator.iter() {
+                        converter.append_key_values(&kvs).unwrap();
+                        break;
+                    }
+
+                    let _bulk_part = converter.convert().unwrap();
+                });
+            },
+        );
+    }
+}
+
 criterion_group!(
     benches,
     write_rows,
     full_scan,
     filter_1_host,
-    bulk_part_converter
+    bulk_part_converter,
+    bulk_part_converter_with_pk_columns
 );
 criterion_main!(benches);
