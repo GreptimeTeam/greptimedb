@@ -64,7 +64,9 @@ use crate::election::rds::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,EtcdTlsOptions};
+use crate::metasrv::{
+    BackendImpl, EtcdTlsOptions, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,
+};
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -428,7 +430,10 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-pub async fn create_etcd_client(store_addrs: &[String], tls_options: Option<&EtcdTlsOption>) -> Result<Client> {
+pub async fn create_etcd_client(
+    store_addrs: &[String],
+    tls_options: Option<&EtcdTlsOptions>,
+) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
@@ -438,26 +443,35 @@ pub async fn create_etcd_client(store_addrs: &[String], tls_options: Option<&Etc
     let connect_options = if let Some(tls_option) = tls_options {
         if !tls_option.ca_cert_path.is_empty() {
             let mut options = etcd_client::ConnectOptions::default();
-            
+
             // Configure TLS
             let mut tls_config = etcd_client::TlsOptions::new();
-            
+
             // Load CA certificate
-            let ca_cert = std::fs::read_to_string(&tls_option.ca_cert_path)
-                .context(error::CannotReadTlsFileSnafu { file: &tls_option.ca_cert_path })?;
+            let ca_cert = std::fs::read_to_string(&tls_option.ca_cert_path).context(
+                error::CannotReadTlsFileSnafu {
+                    file: &tls_option.ca_cert_path,
+                },
+            )?;
             let ca_cert = etcd_client::Certificate::from_pem(ca_cert);
             tls_config = tls_config.ca_certificate(ca_cert);
 
             // Load client certificate and key if provided
             if !tls_option.client_cert_path.is_empty() && !tls_option.client_key_path.is_empty() {
-                let client_cert = std::fs::read_to_string(&tls_option.client_cert_path)
-                    .context(error::CannotReadTlsFileSnafu { file: &tls_option.client_cert_path })?;
-                let client_key = std::fs::read_to_string(&tls_option.client_key_path)
-                    .context(error::CannotReadTlsFileSnafu { file: &tls_option.client_key_path })?;
+                let client_cert = std::fs::read_to_string(&tls_option.client_cert_path).context(
+                    error::CannotReadTlsFileSnafu {
+                        file: &tls_option.client_cert_path,
+                    },
+                )?;
+                let client_key = std::fs::read_to_string(&tls_option.client_key_path).context(
+                    error::CannotReadTlsFileSnafu {
+                        file: &tls_option.client_key_path,
+                    },
+                )?;
                 let identity = etcd_client::Identity::from_pem(client_cert, client_key);
                 tls_config = tls_config.identity(identity);
             }
-            
+
             options = options.with_tls(tls_config);
             Some(options)
         } else {
