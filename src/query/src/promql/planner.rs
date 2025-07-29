@@ -4856,7 +4856,8 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
 
         // Should return empty result instead of error
         let result =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_session_state()).await;
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await;
 
         // This should succeed now (returning empty result) instead of failing with "Cannot find column le"
         assert!(
