@@ -336,6 +336,14 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Duplicate clauses `{}` in a statement", clause))]
+    DuplicateClause {
+        clause: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -357,7 +365,9 @@ impl ErrorExt for Error {
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
             #[cfg(feature = "enterprise")]
-            MissingClause { .. } | MissingNotifyChannel { .. } => StatusCode::InvalidSyntax,
+            MissingClause { .. } | MissingNotifyChannel { .. } | DuplicateClause { .. } => {
+                StatusCode::InvalidSyntax
+            }
 
             InvalidColumnOption { .. }
             | InvalidTableOptionValue { .. }

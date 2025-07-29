@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "enterprise")]
+pub mod trigger;
+
 use std::collections::HashMap;
 
 use common_query::AddColumnLocation;
@@ -43,6 +46,11 @@ impl ParserContext<'_> {
             Token::Word(w) => match w.keyword {
                 Keyword::DATABASE => self.parse_alter_database().map(Statement::AlterDatabase),
                 Keyword::TABLE => self.parse_alter_table().map(Statement::AlterTable),
+                #[cfg(feature = "enterprise")]
+                Keyword::TRIGGER => {
+                    self.parser.next_token();
+                    self.parse_alter_trigger()
+                }
                 _ => self.expected("DATABASE or TABLE after ALTER", self.parser.peek_token()),
             },
             unexpected => self.unsupported(unexpected.to_string()),

@@ -318,8 +318,6 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use api::v1::ColumnDataType;
     use datatypes::schema::{
         FulltextAnalyzer, COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
@@ -674,19 +672,16 @@ mod tests {
                 options: vec![],
             },
             extensions: ColumnExtensions {
-                fulltext_index_options: Some(
-                    HashMap::from_iter([
-                        (
-                            COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
-                            "English".to_string(),
-                        ),
-                        (
-                            COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
-                            "true".to_string(),
-                        ),
-                    ])
-                    .into(),
-                ),
+                fulltext_index_options: Some(OptionMap::from([
+                    (
+                        COLUMN_FULLTEXT_OPT_KEY_ANALYZER.to_string(),
+                        "English".to_string(),
+                    ),
+                    (
+                        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE.to_string(),
+                        "true".to_string(),
+                    ),
+                ])),
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
