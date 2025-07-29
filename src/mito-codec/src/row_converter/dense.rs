@@ -78,6 +78,7 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_) => 0,
         }
     }
@@ -134,6 +135,7 @@ impl SortField {
                             .context(SerializeFieldSnafu)?;
                     }
                     ConcreteDataType::List(_) |
+                    ConcreteDataType::Struct(_) |
                     ConcreteDataType::Dictionary(_) |
                     ConcreteDataType::Null(_) => {
                         return error::NotSupportedFieldSnafu {
@@ -216,6 +218,10 @@ impl SortField {
                     }
                     ConcreteDataType::List(l) => NotSupportedFieldSnafu {
                         data_type: ConcreteDataType::List(l.clone()),
+                    }
+                    .fail(),
+                    ConcreteDataType::Struct(f) => NotSupportedFieldSnafu {
+                        data_type: ConcreteDataType::Struct(f.clone()),
                     }
                     .fail(),
                     ConcreteDataType::Dictionary(d) => NotSupportedFieldSnafu {
@@ -301,6 +307,7 @@ impl SortField {
             ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
             | ConcreteDataType::Dictionary(_) => 0,
         };
         deserializer.advance(to_skip);

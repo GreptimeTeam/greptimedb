@@ -40,6 +40,7 @@ mod null;
 pub(crate) mod operations;
 mod primitive;
 mod string;
+mod struct_vector;
 mod time;
 mod timestamp;
 mod validity;
