@@ -18,7 +18,7 @@ pub mod trigger;
 use std::collections::{HashMap, HashSet};
 use std::result;
 
-use api::helper::{from_pb_time_ranges, from_pb_time_unit, to_pb_time_unit};
+use api::helper::{from_pb_time_ranges, to_pb_time_unit};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
@@ -51,7 +51,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    self, ExternalSnafu, InvalidProtoMsgSnafu, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu,
+    self, ExternalSnafu, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu,
     InvalidUnsetDatabaseOptionSnafu, Result,
 };
 use crate::key::FlowId;
