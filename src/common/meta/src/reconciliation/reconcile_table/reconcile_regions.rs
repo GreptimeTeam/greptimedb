@@ -90,7 +90,7 @@ impl State for ReconcileRegions {
             .collect::<Result<Vec<_>>>()?;
 
         // Sends sync column metadatas to datanode.
-        // Safety: must exists.
+        // Safety: The physical table route is set in `ReconciliationStart` state.
         let region_routes = &ctx
             .persistent_ctx
             .physical_table_route
@@ -107,7 +107,7 @@ impl State for ReconcileRegions {
             if region_role_set.leader_regions.is_empty() {
                 continue;
             }
-            // Safety: must exists.
+            // Safety: It contains all leaders in the region routes.
             let peer = leaders.get(&datanode_id).unwrap();
             for region_id in region_role_set.leader_regions {
                 let region_id = RegionId::new(ctx.persistent_ctx.table_id, region_id);

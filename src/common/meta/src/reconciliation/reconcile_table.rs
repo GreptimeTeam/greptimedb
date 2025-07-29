@@ -114,6 +114,7 @@ impl ReconcileTableContext {
         &self,
         column_metadatas: &[ColumnMetadata],
     ) -> Result<RawTableMeta> {
+        // Safety: The table info value is set in `ReconciliationStart` state.
         let table_info_value = self.persistent_ctx.table_info_value.as_ref().unwrap();
         let table_id = self.table_id();
         let table_ref = self.table_name().table_ref();
