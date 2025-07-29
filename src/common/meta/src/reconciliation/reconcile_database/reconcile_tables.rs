@@ -131,6 +131,7 @@ impl ReconcileTables {
                 table_id,
                 table_name,
                 ctx.persistent_ctx.resolve_strategy,
+                true,
             );
             procedures.push(ProcedureWithId::with_random_id(Box::new(procedure)));
         }

@@ -212,6 +212,7 @@ impl ReconcileLogicalTables {
             physical_table_id,
             physical_table_name,
             logical_tables,
+            true,
         );
 
         Ok(ProcedureWithId::with_random_id(Box::new(procedure)))

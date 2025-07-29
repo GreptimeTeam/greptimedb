@@ -207,7 +207,7 @@ impl Procedure for ReconcileDatabaseProcedure {
 
         LockKey::new(vec![
             CatalogLock::Read(catalog).into(),
-            SchemaLock::read(catalog, schema).into(),
+            SchemaLock::write(catalog, schema).into(),
         ])
     }
 }
