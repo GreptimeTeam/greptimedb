@@ -263,11 +263,11 @@ mod tests {
         assert!(divide_string_range("a", "b", 0, &[]).is_err());
         assert!(divide_string_range("a", "b", 1, &[]).is_err());
 
-        let stops = divide_string_range("a", "z", 10, &[]).expect("failed to devide string range");
+        let stops = divide_string_range("a", "z", 10, &[]).expect("failed to divide string range");
         assert_eq!(stops, vec!["c", "e", "g", "i", "k", "m", "o", "q", "s"]);
 
         let stops = divide_string_range("ap-southeast-1", "us-west-2", 4, &[])
-            .expect("failed to devide string range");
+            .expect("failed to divide string range");
         assert_eq!(stops, vec!["fp", "kq", "prmvg"]);
 
         let stops = divide_string_range(
@@ -276,7 +276,7 @@ mod tests {
             10,
             &["eu-central-1", "us-east-1"],
         )
-        .expect("failed to devide string range");
+        .expect("failed to divide string range");
         assert_eq!(
             stops,
             vec![
@@ -302,7 +302,7 @@ mod tests {
             10,
             &["eu-central-1", "us-east-1"],
         )
-        .expect("failed to devide string range");
+        .expect("failed to divide string range");
         assert_eq!(
             rules.iter().map(|e| e.to_string()).collect::<Vec<String>>(),
             vec![
