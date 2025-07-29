@@ -298,6 +298,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid partition range, start: {start}, end: {end}"))]
+    InvalidPartitionRange {
+        start: String,
+        end: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Missing `{}` clause", name))]
     MissingClause {
@@ -371,7 +379,8 @@ impl ErrorExt for Error {
             | ConvertToLogicalExpression { .. }
             | Simplification { .. }
             | InvalidInterval { .. }
-            | InvalidPartitionNumber { .. } => StatusCode::InvalidArguments,
+            | InvalidPartitionNumber { .. }
+            | InvalidPartitionRange { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             InvalidTriggerName { .. } => StatusCode::InvalidArguments,

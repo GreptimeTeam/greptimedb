@@ -18,12 +18,15 @@ use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 use crate::error::{InvalidPartitionNumberSnafu, Result};
 use crate::statements::create::Partitions;
 
+mod gen;
+
 /// The default number of partitions for OpenTelemetry traces.
 const DEFAULT_PARTITION_NUM_FOR_TRACES: u32 = 16;
 
 /// The maximum number of partitions for OpenTelemetry traces.
 const MAX_PARTITION_NUM_FOR_TRACES: u32 = 65536;
 
+#[macro_export]
 macro_rules! between_string {
     ($col: expr, $left_incl: expr, $right_excl: expr) => {
         Expr::BinaryOp {
@@ -31,16 +34,12 @@ macro_rules! between_string {
             left: Box::new(Expr::BinaryOp {
                 op: BinaryOperator::GtEq,
                 left: Box::new($col.clone()),
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    $left_incl.to_string(),
-                ))),
+                right: Box::new(Expr::Value(Value::SingleQuotedString($left_incl))),
             }),
             right: Box::new(Expr::BinaryOp {
                 op: BinaryOperator::Lt,
                 left: Box::new($col.clone()),
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    $right_excl.to_string(),
-                ))),
+                right: Box::new(Expr::Value(Value::SingleQuotedString($right_excl))),
             }),
         }
     };
