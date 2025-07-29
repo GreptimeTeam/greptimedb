@@ -271,7 +271,7 @@ fn expand_sort_alias_limit() {
 }
 
 /// FIXME(discord9): alias to same name with col req makes it ambiguous
-#[should_panic(expected = "AmbiguousReference")]
+/// for now since it bugged, will use fallback plan rewriter to only push down table scan node
 #[test]
 fn expand_sort_alias_conflict_limit() {
     // use logging for better debugging
@@ -292,17 +292,22 @@ fn expand_sort_alias_conflict_limit() {
         .unwrap();
 
     let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan.clone(), &config);
+    assert!(result.is_err(), "Expected error for ambiguous alias");
+    assert!(format!("{result:?}").contains("AmbiguousReference"));
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        allow_query_fallback: true,
+    });
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 
     let expected = [
-        "Projection: something",
-        "  Limit: skip=0, fetch=10",
-        "    MergeSort: t.pk1 ASC NULLS LAST",
-        "      MergeScan [is_placeholder=false, remote_input=[",
         "Limit: skip=0, fetch=10",
-        "  Projection: t.pk2 AS pk1, t.pk1",
+        "  Projection: t.pk2 AS pk1",
         "    Sort: t.pk1 ASC NULLS LAST",
-        "      TableScan: t",
+        "      MergeScan [is_placeholder=false, remote_input=[",
+        "TableScan: t",
         "]]",
     ]
     .join("\n");

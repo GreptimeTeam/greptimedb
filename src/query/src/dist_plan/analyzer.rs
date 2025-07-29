@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use common_telemetry::debug;
+use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
@@ -35,15 +36,54 @@ use crate::dist_plan::commutativity::{
     partial_commutative_transformer, Categorizer, Commutativity,
 };
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
+use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
 #[cfg(test)]
 mod test;
 
+mod fallback;
 mod utils;
 
 pub(crate) use utils::{AliasMapping, AliasTracker};
+
+#[derive(Debug, Clone)]
+pub struct DistPlannerOptions {
+    pub allow_query_fallback: bool,
+}
+
+impl ConfigExtension for DistPlannerOptions {
+    const PREFIX: &'static str = "dist_planner";
+}
+
+impl ExtensionOptions for DistPlannerOptions {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> DfResult<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "DistPlannerOptions does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
+        vec![datafusion::config::ConfigEntry {
+            key: "allow_query_fallback".to_string(),
+            value: Some(self.allow_query_fallback.to_string()),
+            description: "Allow query fallback to fallback plan rewriter",
+        }]
+    }
+}
 
 #[derive(Debug)]
 pub struct DistPlannerAnalyzer;
@@ -56,7 +96,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     fn analyze(
         &self,
         plan: LogicalPlan,
-        _config: &ConfigOptions,
+        config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
         // preprocess the input plan
         let optimizer_context = OptimizerContext::new();
@@ -64,15 +104,43 @@ impl AnalyzerRule for DistPlannerAnalyzer {
             .rewrite(plan, &optimizer_context)?
             .data;
 
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::default();
-        let result = plan.data.rewrite(&mut rewriter)?.data;
+        let opt = config.extensions.get::<DistPlannerOptions>();
+        let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
+
+        let result = match self.try_push_down(plan.clone()) {
+            Ok(plan) => plan,
+            Err(err) => {
+                if allow_fallback {
+                    common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
+                    // if push down failed, use fallback plan rewriter
+                    PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
+                    self.use_fallback(plan)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         Ok(result)
     }
 }
 
 impl DistPlannerAnalyzer {
+    /// Try push down as many nodes as possible
+    fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
+        let mut rewriter = PlanRewriter::default();
+        let result = plan.data.rewrite(&mut rewriter)?.data;
+        Ok(result)
+    }
+
+    /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
+    fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        let mut rewriter = fallback::FallbackPlanRewriter;
+        let result = plan.rewrite(&mut rewriter)?.data;
+        Ok(result)
+    }
+
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         // Workaround for https://github.com/GreptimeTeam/greptimedb/issues/5469 and https://github.com/GreptimeTeam/greptimedb/issues/5799
         // FIXME(yingwen): Remove the `Limit` plan once we update DataFusion.

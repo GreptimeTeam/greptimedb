@@ -225,7 +225,10 @@ fn test_load_flownode_example_config() {
             heartbeat: Default::default(),
             // flownode deliberately use a slower query parallelism
             // to avoid overwhelming the frontend with too many queries
-            query: QueryOptions { parallelism: 1 },
+            query: QueryOptions {
+                parallelism: 1,
+                allow_query_fallback: false,
+            },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
                 timeout: Duration::from_secs(3),

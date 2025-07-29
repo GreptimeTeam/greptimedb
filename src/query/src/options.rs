@@ -20,11 +20,16 @@ use serde::{Deserialize, Serialize};
 pub struct QueryOptions {
     /// Parallelism of query engine. Default to 0, which implies the number of logical CPUs.
     pub parallelism: usize,
+    /// Whether to allow query fallback when push down fails.
+    pub allow_query_fallback: bool,
 }
 
 #[allow(clippy::derivable_impls)]
 impl Default for QueryOptions {
     fn default() -> Self {
-        Self { parallelism: 0 }
+        Self {
+            parallelism: 0,
+            allow_query_fallback: false,
+        }
     }
 }

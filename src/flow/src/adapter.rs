@@ -126,7 +126,10 @@ impl Default for FlownodeOptions {
             heartbeat: HeartbeatOptions::default(),
             // flownode's query option is set to 1 to throttle flow's query so
             // that it won't use too much cpu or memory
-            query: QueryOptions { parallelism: 1 },
+            query: QueryOptions {
+                parallelism: 1,
+                allow_query_fallback: false,
+            },
             user_provider: None,
         }
     }
