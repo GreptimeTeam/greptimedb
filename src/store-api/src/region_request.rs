@@ -567,7 +567,7 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<SetDefault>,
     },
-
+    /// Sync column metadatas.
     SyncColumns {
         column_metadatas: Vec<ColumnMetadata>,
     },
