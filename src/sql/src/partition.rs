@@ -46,7 +46,7 @@ macro_rules! between_string {
     };
 }
 
-pub fn partition_rule_for_hexstring(ident: &str) -> Result<Partitions> {
+pub fn partition_rule_for_traceid(ident: &str) -> Result<Partitions> {
     Ok(Partitions {
         column_list: vec![Ident::new(ident)],
         exprs: partition_rules_for_uuid(DEFAULT_PARTITION_NUM_FOR_TRACES, ident)?,
@@ -177,7 +177,7 @@ mod tests {
 
         assert_eq!(
             results,
-            partition_rule_for_hexstring("trace_id").unwrap().exprs
+            partition_rule_for_traceid("trace_id").unwrap().exprs
         );
     }
 
