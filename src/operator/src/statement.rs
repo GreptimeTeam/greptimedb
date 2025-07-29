@@ -306,7 +306,8 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name, query_ctx).await
+                // TODO(discord9): add truncate table stmt
+                self.truncate_table(table_name, todo!(), query_ctx).await
             }
             Statement::CreateDatabase(stmt) => {
                 self.create_database(

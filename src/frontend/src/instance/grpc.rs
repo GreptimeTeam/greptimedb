@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::helper::from_pb_time_ranges;
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -24,6 +25,7 @@ use api::v1::{
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_base::AffectedRows;
+use common_error::ext::BoxedError;
 use common_grpc::flight::FlightDecoder;
 use common_grpc::FlightData;
 use common_query::logical_plan::add_insert_to_logical_plan;
@@ -39,7 +41,7 @@ use table::table_name::TableName;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, Error, InFlightWriteBytesExceededSnafu,
+    CatalogSnafu, DataFusionSnafu, Error, ExternalSnafu, InFlightWriteBytesExceededSnafu,
     IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
@@ -195,8 +197,11 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::TruncateTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        let time_ranges = from_pb_time_ranges(expr.time_ranges.unwrap_or_default())
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?;
                         self.statement_executor
-                            .truncate_table(table_name, ctx.clone())
+                            .truncate_table(table_name, time_ranges, ctx.clone())
                             .await?
                     }
                     DdlExpr::CreateFlow(expr) => {

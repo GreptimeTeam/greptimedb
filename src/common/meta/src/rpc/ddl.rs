@@ -18,6 +18,7 @@ pub mod trigger;
 use std::collections::{HashMap, HashSet};
 use std::result;
 
+use api::helper::{from_pb_time_ranges, from_pb_time_unit, to_pb_time_unit};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
@@ -38,7 +39,8 @@ use api::v1::{
 };
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use common_time::{DatabaseTimeToLive, Timezone};
+use common_error::ext::BoxedError;
+use common_time::{DatabaseTimeToLive, Timestamp, Timezone};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DefaultOnNull};
@@ -49,8 +51,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    self, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu,
-    Result,
+    self, ExternalSnafu, InvalidProtoMsgSnafu, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu,
+    InvalidUnsetDatabaseOptionSnafu, Result,
 };
 use crate::key::FlowId;
 
@@ -179,12 +181,14 @@ impl DdlTask {
         schema: String,
         table: String,
         table_id: TableId,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
     ) -> Self {
         DdlTask::TruncateTable(TruncateTableTask {
             catalog,
             schema,
             table,
             table_id,
+            time_ranges,
         })
     }
 
@@ -826,6 +830,7 @@ pub struct TruncateTableTask {
     pub schema: String,
     pub table: String,
     pub table_id: TableId,
+    pub time_ranges: Vec<(Timestamp, Timestamp)>,
 }
 
 impl TruncateTableTask {
@@ -864,6 +869,13 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+            time_ranges: truncate_table
+                .time_ranges
+                .map(from_pb_time_ranges)
+                .transpose()
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .unwrap_or_default(),
         })
     }
 }
@@ -878,6 +890,29 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
                 schema_name: task.schema,
                 table_name: task.table,
                 table_id: Some(api::v1::TableId { id: task.table_id }),
+                time_ranges: {
+                    if task.time_ranges.is_empty() {
+                        None
+                    } else {
+                        let time_unit = task
+                            .time_ranges
+                            .first()
+                            .map(|r| r.0.unit())
+                            .unwrap_or_default();
+                        let time_ranges = task
+                            .time_ranges
+                            .into_iter()
+                            .map(|(start, end)| api::v1::TimeRange {
+                                start: start.value(),
+                                end: end.value(),
+                            })
+                            .collect();
+                        Some(api::v1::TimeRanges {
+                            time_unit: to_pb_time_unit(time_unit) as i32,
+                            time_ranges,
+                        })
+                    }
+                },
             }),
         })
     }
