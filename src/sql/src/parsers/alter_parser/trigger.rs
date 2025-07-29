@@ -263,7 +263,7 @@ impl<'a> ParserContext<'a> {
     ///
     /// ## Parameters
     ///
-    /// - `is_first_keyword_matched`: indicates whether the first keyword `ON`
+    /// - `is_first_keyword_matched`: indicates whether the first keyword `RENAME`
     ///     has been matched.
     fn parse_rename_to(&mut self, is_first_keyword_matched: bool) -> Result<Ident> {
         if !is_first_keyword_matched {
