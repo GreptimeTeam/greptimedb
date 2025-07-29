@@ -12,16 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
 
-use crate::error::{self, InvalidTableNameSnafu, Result};
+use crate::error::{self, InvalidTableNameSnafu, Result, SqlCommonSnafu};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
 /// `TRUNCATE [TABLE] table_name;`
 impl ParserContext<'_> {
+    pub(crate) fn parse_timestamp(&mut self) -> Result<Timestamp> {
+        let val = self
+            .parser
+            .parse_value()
+            .with_context(|_| error::UnexpectedSnafu {
+                expected: "a timestamp",
+                actual: self.peek_token_as_string(),
+            })
+            .and_then(|v| {
+                common_sql::convert::sql_value_to_value(
+                    "dummy_column",
+                    &ConcreteDataType::timestamp_millisecond_datatype(),
+                    &v,
+                    None,
+                    None,
+                    false,
+                )
+                .context(SqlCommonSnafu)
+            })?;
+        if let datatypes::value::Value::Timestamp(t) = val {
+            Ok(t)
+        } else {
+            error::InvalidSqlSnafu {
+                msg: "Expected a timestamp value".to_string(),
+            }
+            .fail()
+        }
+    }
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let _ = self.parser.parse_keyword(Keyword::TABLE);
@@ -40,6 +70,50 @@ impl ParserContext<'_> {
                 name: table_ident.to_string()
             }
         );
+
+        let _ = self.parser.parse_keyword(Keyword::RANGE);
+        // parse a list of time ranges consist of (Timestamp, Timestamp),?
+        let mut time_ranges = vec![];
+        loop {
+            let _ = self
+                .parser
+                .expect_token(&sqlparser::tokenizer::Token::LParen)
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a left parenthesis",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+            // TODO(discord9): parse timestamp here
+            let start = self.parse_timestamp()?;
+
+            let _ = self
+                .parser
+                .expect_token(&sqlparser::tokenizer::Token::Comma)
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a comma",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+            let end = self.parse_timestamp()?;
+
+            let _ = self
+                .parser
+                .expect_token(&sqlparser::tokenizer::Token::RParen)
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a right parenthesis",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+            time_ranges.push((start, end));
+
+            let is_end = self
+                .parser
+                .expect_token(&sqlparser::tokenizer::Token::Comma)
+                .is_err();
+            if is_end {
+                break;
+            }
+        }
 
         Ok(Statement::TruncateTable(TruncateTable::new(table_ident)))
     }
