@@ -93,6 +93,18 @@ pub enum BackendImpl {
     MysqlStore,
 }
 
+/// TLS options for etcd client
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct EtcdTlsOptions {
+    /// Path to the CA certificate file
+    pub ca_cert_path: String,
+    /// Path to the client certificate file
+    pub client_cert_path: String,
+    /// Path to the client key file
+    pub client_key_path: String,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetasrvOptions {
@@ -161,6 +173,8 @@ pub struct MetasrvOptions {
     pub tracing: TracingOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
+    /// Etcd TLS configuration options
+    pub etcd_tls: Option<EtcdTlsOptions>,
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
     /// Table name of rds kv backend.
     pub meta_table_name: String,
@@ -197,7 +211,8 @@ impl fmt::Debug for MetasrvOptions {
             .field("max_txn_ops", &self.max_txn_ops)
             .field("flush_stats_factor", &self.flush_stats_factor)
             .field("tracing", &self.tracing)
-            .field("backend", &self.backend);
+            .field("backend", &self.backend)
+            .field("etcd_tls", &self.etcd_tls);
 
         #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
         debug_struct.field("meta_table_name", &self.meta_table_name);
@@ -251,6 +266,7 @@ impl Default for MetasrvOptions {
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
             backend: BackendImpl::EtcdStore,
+            etcd_tls: None,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             meta_table_name: common_meta::kv_backend::DEFAULT_META_TABLE_NAME.to_string(),
             #[cfg(feature = "pg_kvbackend")]

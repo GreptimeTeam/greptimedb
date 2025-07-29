@@ -64,7 +64,7 @@ use crate::election::rds::postgres::PgElection;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use crate::election::CANDIDATE_LEASE_SECS;
 use crate::metasrv::builder::MetasrvBuilder;
-use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef};
+use crate::metasrv::{BackendImpl, Metasrv, MetasrvOptions, SelectTarget, SelectorRef,EtcdTlsOptions};
 use crate::node_excluder::NodeExcluderRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -281,7 +281,7 @@ pub async fn metasrv_builder(
         (Some(kv_backend), _) => (kv_backend, None),
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
-            let etcd_client = create_etcd_client(&opts.store_addrs).await?;
+            let etcd_client = create_etcd_client(&opts.store_addrs, opts.etcd_tls.as_ref()).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -428,15 +428,54 @@ pub async fn metasrv_builder(
         .plugins(plugins))
 }
 
-pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+pub async fn create_etcd_client(store_addrs: &[String], tls_options: Option<&EtcdTlsOption>) -> Result<Client> {
     let etcd_endpoints = store_addrs
         .iter()
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .collect::<Vec<_>>();
-    Client::connect(&etcd_endpoints, None)
-        .await
-        .context(error::ConnectEtcdSnafu)
+
+    let connect_options = if let Some(tls_option) = tls_options {
+        if !tls_option.ca_cert_path.is_empty() {
+            let mut options = etcd_client::ConnectOptions::default();
+            
+            // Configure TLS
+            let mut tls_config = etcd_client::TlsOptions::new();
+            
+            // Load CA certificate
+            let ca_cert = std::fs::read_to_string(&tls_option.ca_cert_path)
+                .context(error::CannotReadTlsFileSnafu { file: &tls_option.ca_cert_path })?;
+            let ca_cert = etcd_client::Certificate::from_pem(ca_cert);
+            tls_config = tls_config.ca_certificate(ca_cert);
+
+            // Load client certificate and key if provided
+            if !tls_option.client_cert_path.is_empty() && !tls_option.client_key_path.is_empty() {
+                let client_cert = std::fs::read_to_string(&tls_option.client_cert_path)
+                    .context(error::CannotReadTlsFileSnafu { file: &tls_option.client_cert_path })?;
+                let client_key = std::fs::read_to_string(&tls_option.client_key_path)
+                    .context(error::CannotReadTlsFileSnafu { file: &tls_option.client_key_path })?;
+                let identity = etcd_client::Identity::from_pem(client_cert, client_key);
+                tls_config = tls_config.identity(identity);
+            }
+            
+            options = options.with_tls(tls_config);
+            Some(options)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(connect_options) = connect_options {
+        Client::connect(&etcd_endpoints, Some(connect_options))
+            .await
+            .context(error::ConnectEtcdSnafu)
+    } else {
+        Client::connect(&etcd_endpoints, None)
+            .await
+            .context(error::ConnectEtcdSnafu)
+    }
 }
 
 #[cfg(feature = "pg_kvbackend")]
