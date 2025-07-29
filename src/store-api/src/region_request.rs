@@ -368,21 +368,12 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
                 api::v1::TimeUnit::Second => TimeUnit::Second,
             };
 
-            ensure!(
-                time_ranges.starts.len() == time_ranges.ends.len(),
-                InvalidRawRegionRequestSnafu {
-                    err: format!("starts and ends must have the same length in TruncateRequest, get starts={}, ends={}",
-                                 time_ranges.starts.len(), time_ranges.ends.len()),
-                }
-            );
-
             let time_ranges = time_ranges
-                .starts
+                .time_ranges
                 .into_iter()
-                .zip(time_ranges.ends)
-                .map(|(start, end)| {
-                    let start = Timestamp::new(start, time_unit);
-                    let end = Timestamp::new(end, time_unit);
+                .map(|time_range| {
+                    let start = Timestamp::new(time_range.start, time_unit);
+                    let end = Timestamp::new(time_range.end, time_unit);
                     (start, end)
                 })
                 .collect();
