@@ -717,6 +717,32 @@ pub enum Error {
         operation: String,
     },
 
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to setup PostgreSQL TLS configuration: {}", reason))]
+    PostgresTlsConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Failed to load TLS certificate from path: {}", path))]
+    LoadTlsCertificate {
+        path: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "pg_kvbackend")]
+    #[snafu(display("Invalid TLS configuration: {}", reason))]
+    InvalidTlsConfig {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to execute via MySql, sql: {}", sql))]
     MySqlExecution {
@@ -1027,7 +1053,10 @@ impl ErrorExt for Error {
             PostgresExecution { .. }
             | CreatePostgresPool { .. }
             | GetPostgresConnection { .. }
-            | PostgresTransaction { .. } => StatusCode::Internal,
+            | PostgresTransaction { .. }
+            | PostgresTlsConfig { .. }
+            | LoadTlsCertificate { .. }
+            | InvalidTlsConfig { .. } => StatusCode::Internal,
             #[cfg(feature = "mysql_kvbackend")]
             MySqlExecution { .. } | CreateMySqlPool { .. } | MySqlTransaction { .. } => {
                 StatusCode::Internal
