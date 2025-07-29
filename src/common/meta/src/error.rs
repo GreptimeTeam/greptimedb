@@ -921,6 +921,16 @@ pub enum Error {
         location: Location,
         source: api::error::Error,
     },
+
+    #[snafu(display(
+        "Column metadata inconsistencies found in table: {}, table_id: {}",
+        table_name,
+        table_id
+    ))]
+    ColumnMetadataConflicts {
+        table_name: String,
+        table_id: TableId,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -944,7 +954,8 @@ impl ErrorExt for Error {
             | ProcedurePoisonConflict { .. }
             | MissingColumnIds { .. }
             | MissingColumnInColumnMetadata { .. }
-            | MismatchColumnId { .. } => StatusCode::Unexpected,
+            | MismatchColumnId { .. }
+            | ColumnMetadataConflicts { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,

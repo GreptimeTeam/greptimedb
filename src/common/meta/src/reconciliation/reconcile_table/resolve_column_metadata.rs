@@ -89,44 +89,43 @@ impl State for ResolveColumnMetadata {
             );
             return Ok((
                 Box::new(UpdateTableInfo::new(table_info_value, column_metadatas)),
-                Status::executing(true),
+                Status::executing(false),
             ));
         };
 
         match self.strategy {
             ResolveStrategy::UseMetasrv => {
                 let table_info_value = ctx.persistent_ctx.table_info_value.as_ref().unwrap();
-                let name_to_ids = table_info_value.table_info
-                .name_to_ids()
-                .context(MissingColumnIdsSnafu)?;
+                let name_to_ids = table_info_value
+                    .table_info
+                    .name_to_ids()
+                    .context(MissingColumnIdsSnafu)?;
                 let column_metadata = build_column_metadata_from_table_info(
                     &table_info_value.table_info.meta.schema.column_schemas,
                     &table_info_value.table_info.meta.primary_key_indices,
                     &name_to_ids,
                 )?;
 
-                let region_ids = resolve_column_metadatas_with_metasrv(&column_metadata, &self.region_metadata)?;
+                let region_ids =
+                    resolve_column_metadatas_with_metasrv(&column_metadata, &self.region_metadata)?;
                 Ok((
                     Box::new(ReconcileRegions::new(column_metadata, region_ids)),
                     Status::executing(true),
                 ))
             }
             ResolveStrategy::UseLatest => {
-                let (column_metadatas, region_ids) = resolve_column_metadatas_with_latest(&self.region_metadata)?;
+                let (column_metadatas, region_ids) =
+                    resolve_column_metadatas_with_latest(&self.region_metadata)?;
                 Ok((
                     Box::new(ReconcileRegions::new(column_metadatas, region_ids)),
                     Status::executing(true),
                 ))
             }
-            ResolveStrategy::AbortOnConflict => {
-                error::UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column metadata inconsistencies found in table: {}, table_id: {}. Resolve strategy is set to 'AbortOnConflict'; aborting the resolution process.",
-                        table_name,
-                        table_id
-                    ),
-                }.fail()
+            ResolveStrategy::AbortOnConflict => error::ColumnMetadataConflictsSnafu {
+                table_name: table_name.to_string(),
+                table_id,
             }
+            .fail(),
         }
     }
 

@@ -80,7 +80,6 @@ impl State for ReconciliationStart {
 
         // If some regions are not opened, we should try to open them.
         if region_metadatas.iter().any(|r| r.is_none()) {
-            // TODO(weny): Try our best to open regions before reconciliation.
             return UnexpectedSnafu {
                 err_msg: format!(
                     "Some regions are not opened, table: {}, table_id: {}",

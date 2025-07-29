@@ -75,6 +75,15 @@ impl State for UpdateTableInfo {
             new_table_info
         };
 
+        if new_table_info.meta == current_table_info_value.table_info.meta {
+            info!(
+                "Table info is already up to date for table: {}, table_id: {}",
+                ctx.table_name(),
+                ctx.table_id()
+            );
+            return Ok((Box::new(ReconciliationEnd), Status::executing(true)));
+        }
+
         info!(
             "Updating table info for table: {}, table_id: {}. new table meta: {:?}, current table meta: {:?}",
             ctx.table_name(),
