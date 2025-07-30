@@ -557,28 +557,24 @@ impl StatementExecutor {
             .context(UnexpectedSnafu {
                 violated: "Table must have a timestamp column",
             })?;
-        ensure!(
-            time_index_dt.data_type.is_timestamp(),
-            UnexpectedSnafu {
-                violated: format!(
-                    "Table {}'s time index column must be a timestamp type, found: {:?}",
-                    table_name.to_string(),
-                    time_index_dt
-                )
-            }
-        );
+
         let time_unit = time_index_dt
             .data_type
             .as_timestamp()
-            .unwrap()
-            .unit()
-            .clone();
+            .with_context(|| UnexpectedSnafu {
+                violated: format!(
+                    "Table {}'s time index column must be a timestamp type, found: {:?}",
+                    table_name, time_index_dt
+                ),
+            })?
+            .unit();
+
         let mut time_ranges = vec![];
         for (start, end) in sql_values_time_range {
             let start = common_sql::convert::sql_value_to_value(
                 "range_start",
                 &ConcreteDataType::timestamp_datatype(time_unit),
-                &start,
+                start,
                 Some(&query_ctx.timezone()),
                 None,
                 false,
@@ -598,7 +594,7 @@ impl StatementExecutor {
             let end = common_sql::convert::sql_value_to_value(
                 "range_end",
                 &ConcreteDataType::timestamp_datatype(time_unit),
-                &end,
+                end,
                 Some(&query_ctx.timezone()),
                 None,
                 false,
