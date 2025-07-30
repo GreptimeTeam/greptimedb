@@ -33,6 +33,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DFSchema;
 use datafusion_expr::EmptyRelation;
+use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -277,7 +278,7 @@ impl ExecutionPlan for AbsentExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<datafusion::physical_expr::LexRequirement>> {
+    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
         vec![Some(LexRequirement::new(vec![PhysicalSortRequirement {
             expr: Arc::new(
                 ColumnExpr::new_with_schema(&self.time_index_column, &self.input.schema()).unwrap(),
@@ -331,7 +332,7 @@ impl ExecutionPlan for AbsentExec {
                 .input
                 .schema()
                 .column_with_name(&self.time_index_column)
-                .unwrap()
+                .unwrap() // Safety: we have checked the column name in `try_new`
                 .0,
             output_schema: self.output_schema.clone(),
             fake_labels: self.fake_labels.clone(),
@@ -440,8 +441,12 @@ impl Stream for AbsentStream {
 impl AbsentStream {
     fn process_input_batch(&mut self, batch: &RecordBatch) -> DataFusionResult<()> {
         // Extract timestamps from this batch
-        let timestamp_array = batch
-            .column(self.time_index_column_index)
+        let timestamp_array = batch.column(self.time_index_column_index);
+        let milli_ts_array = arrow::compute::cast(
+            timestamp_array,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )?;
+        let timestamp_array = milli_ts_array
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
