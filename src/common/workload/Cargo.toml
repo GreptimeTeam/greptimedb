@@ -8,6 +8,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-api.workspace = true
 common-telemetry.workspace = true
 serde.workspace = true
