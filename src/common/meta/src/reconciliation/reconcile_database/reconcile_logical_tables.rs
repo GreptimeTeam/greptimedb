@@ -28,6 +28,7 @@ use crate::error::{Result, TableInfoNotFoundSnafu};
 use crate::key::table_route::TableRouteValue;
 use crate::reconciliation::reconcile_database::end::ReconcileDatabaseEnd;
 use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
+use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
 use crate::reconciliation::utils::Context;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,7 +202,7 @@ impl ReconcileLogicalTables {
     async fn build_reconcile_logical_tables_procedure(
         ctx: &Context,
         physical_table_id: TableId,
-        _logical_tables: Vec<(TableId, TableName)>,
+        logical_tables: Vec<(TableId, TableName)>,
     ) -> Result<ProcedureWithId> {
         let table_info = ctx
             .table_metadata_manager
@@ -212,8 +213,16 @@ impl ReconcileLogicalTables {
                 table: format!("table_id: {}", physical_table_id),
             })?;
 
-        let _physical_table_name = table_info.table_name();
-        todo!()
+        let physical_table_name = table_info.table_name();
+        let procedure = ReconcileLogicalTablesProcedure::new(
+            ctx.clone(),
+            physical_table_id,
+            physical_table_name,
+            logical_tables,
+            true,
+        );
+
+        Ok(ProcedureWithId::with_random_id(Box::new(procedure)))
     }
 
     fn enqueue_logical_table(
