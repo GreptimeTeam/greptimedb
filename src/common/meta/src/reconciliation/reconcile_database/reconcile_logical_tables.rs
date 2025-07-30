@@ -61,7 +61,7 @@ impl State for ReconcileLogicalTables {
             table_metadata_manager: ctx.table_metadata_manager.clone(),
             cache_invalidator: ctx.cache_invalidator.clone(),
         };
-        // Safety: must exists.
+        // Safety: initialized above.
         while let Some((table_name, table_name_value)) =
             ctx.volatile_ctx.tables.as_mut().unwrap().try_next().await?
         {
@@ -154,7 +154,7 @@ impl ReconcileLogicalTables {
         }
 
         if let Some(physical_table_id) = physical_table_id {
-            // Safety: The key  exists.
+            // Safety: Checked above.
             let tables = pending_logical_tables.remove(&physical_table_id).unwrap();
             return Ok(Some(
                 Self::build_reconcile_logical_tables_procedure(ctx, physical_table_id, tables)
@@ -180,7 +180,7 @@ impl ReconcileLogicalTables {
                 return Ok(());
             }
 
-            // Safety: must exist.
+            // Safety: Checked above.
             let tables = pending_logical_tables.remove(&physical_table_id).unwrap();
             pending_procedures.push(
                 Self::build_reconcile_logical_tables_procedure(ctx, physical_table_id, tables)
