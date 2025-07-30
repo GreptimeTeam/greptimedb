@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use deadpool_postgres::{Manager, Pool};
@@ -28,7 +29,6 @@ use tokio_postgres::Row;
 use crate::election::rds::{parse_value_and_expire_time, Lease, RdsLeaderKey, LEASE_SEP};
 use crate::election::{
     listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
-    CANDIDATES_ROOT, ELECTION_KEY,
 };
 use crate::error::{
     DeserializeFromJsonSnafu, GetPostgresClientSnafu, NoLeaderSnafu, PostgresExecutionSnafu,

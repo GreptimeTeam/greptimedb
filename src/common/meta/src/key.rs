@@ -182,6 +182,11 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
 
+/// The election key.
+pub const ELECTION_KEY: &str = "__metasrv_election";
+/// The root key of metasrv election candidates.
+pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
+
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [
     TABLE_NAME_KEY_PREFIX,
