@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use common_telemetry::info;
 use file::{Metadata, MetadataContent};
-use futures::TryStreamExt;
+use futures::{future, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use strum::Display;
@@ -30,6 +30,7 @@ use crate::error::{
     Error, InvalidFileExtensionSnafu, InvalidFileNameSnafu, InvalidFilePathSnafu, ReadObjectSnafu,
     Result, WriteObjectSnafu,
 };
+use crate::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::{BatchPutRequest, RangeRequest};
@@ -162,6 +163,11 @@ pub struct MetadataSnapshotManager {
 /// The maximum size of the request to put metadata, use 1MiB by default.
 const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
+/// Returns true if the key is an internal key.
+fn is_internal_key(kv: &FileKeyValue) -> bool {
+    kv.key == ELECTION_KEY.as_bytes() || kv.key == CANDIDATES_ROOT.as_bytes()
+}
+
 impl MetadataSnapshotManager {
     pub fn new(kv_backend: KvBackendRef, object_store: ObjectStore) -> Self {
         Self {
@@ -250,7 +256,10 @@ impl MetadataSnapshotManager {
             })
         })
         .into_stream();
-        let keyvalues = stream.try_collect::<Vec<_>>().await?;
+        let keyvalues = stream
+            .try_filter(|f| future::ready(!is_internal_key(f)))
+            .try_collect::<Vec<_>>()
+            .await?;
         let num_keyvalues = keyvalues.len();
         let document = Document::new(
             Metadata::new(),
