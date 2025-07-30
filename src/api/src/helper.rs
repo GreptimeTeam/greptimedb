@@ -1117,6 +1117,24 @@ pub fn from_pb_time_ranges(time_ranges: v1::TimeRanges) -> Result<Vec<(Timestamp
         .collect())
 }
 
+pub fn to_pb_time_ranges(time_ranges: &[(Timestamp, Timestamp)]) -> v1::TimeRanges {
+    let mut pb_time_ranges = v1::TimeRanges {
+        // default time unit is Millisecond
+        time_unit: v1::TimeUnit::Millisecond as i32,
+        time_ranges: vec![],
+    };
+    if let Some((start, _end)) = time_ranges.first() {
+        pb_time_ranges.time_unit = to_pb_time_unit(start.unit()) as i32;
+    }
+    for (start, end) in time_ranges {
+        pb_time_ranges.time_ranges.push(v1::TimeRange {
+            start: start.value(),
+            end: end.value(),
+        });
+    }
+    pb_time_ranges
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

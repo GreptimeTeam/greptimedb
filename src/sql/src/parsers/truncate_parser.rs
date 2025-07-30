@@ -12,46 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
+use sqlparser::parser::ParserError;
+use sqlparser::tokenizer::Token;
 
-use crate::error::{self, InvalidTableNameSnafu, Result, SqlCommonSnafu};
+use crate::error::{self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedSnafu};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
 /// `TRUNCATE [TABLE] table_name;`
 impl ParserContext<'_> {
-    pub(crate) fn parse_timestamp(&mut self) -> Result<Timestamp> {
-        let val = self
-            .parser
-            .parse_value()
-            .with_context(|_| error::UnexpectedSnafu {
-                expected: "a timestamp",
-                actual: self.peek_token_as_string(),
-            })
-            .and_then(|v| {
-                common_sql::convert::sql_value_to_value(
-                    "dummy_column",
-                    &ConcreteDataType::timestamp_millisecond_datatype(),
-                    &v,
-                    None,
-                    None,
-                    false,
-                )
-                .context(SqlCommonSnafu)
-            })?;
-        if let datatypes::value::Value::Timestamp(t) = val {
-            Ok(t)
-        } else {
-            error::InvalidSqlSnafu {
-                msg: "Expected a timestamp value".to_string(),
-            }
-            .fail()
-        }
-    }
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         let _ = self.parser.parse_keyword(Keyword::TABLE);
@@ -71,7 +43,12 @@ impl ParserContext<'_> {
             }
         );
 
-        let _ = self.parser.parse_keyword(Keyword::RANGE);
+        let have_range = self.parser.parse_keyword(Keyword::RANGE);
+        // if no range is specified, we just truncate the table
+        if !have_range {
+            return Ok(Statement::TruncateTable(TruncateTable::new(table_ident)));
+        }
+
         // parse a list of time ranges consist of (Timestamp, Timestamp),?
         let mut time_ranges = vec![];
         loop {
@@ -83,8 +60,14 @@ impl ParserContext<'_> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-            // TODO(discord9): parse timestamp here
-            let start = self.parse_timestamp()?;
+            // parse to values here, no need to valid in parser
+            let start = self
+                .parser
+                .parse_value()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a timestamp value",
+                    actual: self.peek_token_as_string(),
+                })?;
 
             let _ = self
                 .parser
@@ -94,7 +77,13 @@ impl ParserContext<'_> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-            let end = self.parse_timestamp()?;
+            let end = self
+                .parser
+                .parse_value()
+                .with_context(|_| error::UnexpectedSnafu {
+                    expected: "a timestamp",
+                    actual: self.peek_token_as_string(),
+                })?;
 
             let _ = self
                 .parser
@@ -106,16 +95,41 @@ impl ParserContext<'_> {
 
             time_ranges.push((start, end));
 
-            let is_end = self
-                .parser
-                .expect_token(&sqlparser::tokenizer::Token::Comma)
-                .is_err();
-            if is_end {
-                break;
+            let peek = self.parser.peek_token().token;
+
+            match peek {
+                sqlparser::tokenizer::Token::EOF | Token::SemiColon => {
+                    if time_ranges.is_empty() {
+                        return Err(InvalidSqlSnafu {
+                            msg: "TRUNCATE TABLE RANGE must have at least one range".to_string(),
+                        }
+                        .build());
+                    }
+                    break;
+                }
+                Token::Comma => {
+                    self.parser.next_token(); // Consume the comma
+                    let next_peek = self.parser.peek_token().token; // Peek the token after the comma
+                    if matches!(next_peek, Token::EOF | Token::SemiColon) {
+                        break; // Trailing comma, end of statement
+                    }
+                    // Otherwise, continue to parse next range
+                    continue;
+                }
+                _ => Err(ParserError::ParserError(
+                    "Expected a comma or end of statement".to_string(),
+                ))
+                .context(UnexpectedSnafu {
+                    expected: "a comma or end of statement",
+                    actual: self.peek_token_as_string(),
+                })?,
             }
         }
 
-        Ok(Statement::TruncateTable(TruncateTable::new(table_ident)))
+        Ok(Statement::TruncateTable(TruncateTable::new_with_ranges(
+            table_ident,
+            time_ranges,
+        )))
     }
 }
 
@@ -126,6 +140,145 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+
+    #[test]
+    pub fn test_parse_truncate_with_ranges() {
+        let sql = r#"TRUNCATE foo RANGE (0, 20)"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::new("foo")]),
+                vec![(
+                    sqlparser::ast::Value::Number("0".to_string(), false),
+                    sqlparser::ast::Value::Number("20".to_string(), false)
+                )]
+            ))
+        );
+
+        let sql = r#"TRUNCATE TABLE foo RANGE ("2000-01-01 00:00:00+00:00", "2000-01-01 00:00:00+00:00"), (2,33)"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::new("foo")]),
+                vec![
+                    (
+                        sqlparser::ast::Value::DoubleQuotedString(
+                            "2000-01-01 00:00:00+00:00".to_string()
+                        ),
+                        sqlparser::ast::Value::DoubleQuotedString(
+                            "2000-01-01 00:00:00+00:00".to_string()
+                        )
+                    ),
+                    (
+                        sqlparser::ast::Value::Number("2".to_string(), false),
+                        sqlparser::ast::Value::Number("33".to_string(), false)
+                    )
+                ]
+            ))
+        );
+
+        let sql = "TRUNCATE TABLE my_schema.foo RANGE (1, 2), (3, 4)";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                vec![
+                    (
+                        sqlparser::ast::Value::Number("1".to_string(), false),
+                        sqlparser::ast::Value::Number("2".to_string(), false)
+                    ),
+                    (
+                        sqlparser::ast::Value::Number("3".to_string(), false),
+                        sqlparser::ast::Value::Number("4".to_string(), false)
+                    )
+                ]
+            ))
+        );
+
+        let sql = "TRUNCATE my_schema.foo RANGE (1,2),";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                vec![(
+                    sqlparser::ast::Value::Number("1".to_string(), false),
+                    sqlparser::ast::Value::Number("2".to_string(), false)
+                )]
+            ))
+        );
+
+        let sql = "TRUNCATE TABLE my_catalog.my_schema.foo RANGE (1,2);";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![
+                    Ident::new("my_catalog"),
+                    Ident::new("my_schema"),
+                    Ident::new("foo")
+                ]),
+                vec![(
+                    sqlparser::ast::Value::Number("1".to_string(), false),
+                    sqlparser::ast::Value::Number("2".to_string(), false)
+                )]
+            ))
+        );
+
+        let sql = "TRUNCATE drop RANGE (1,2)";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::new("drop")]),
+                vec![(
+                    sqlparser::ast::Value::Number("1".to_string(), false),
+                    sqlparser::ast::Value::Number("2".to_string(), false)
+                )]
+            ))
+        );
+
+        let sql = "TRUNCATE `drop`";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new(ObjectName(vec![Ident::with_quote(
+                '`', "drop"
+            ),])))
+        );
+
+        let sql = "TRUNCATE \"drop\" RANGE (\"1\", \"2\")";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::TruncateTable(TruncateTable::new_with_ranges(
+                ObjectName(vec![Ident::with_quote('"', "drop")]),
+                vec![(
+                    sqlparser::ast::Value::DoubleQuotedString("1".to_string()),
+                    sqlparser::ast::Value::DoubleQuotedString("2".to_string())
+                )]
+            ))
+        );
+    }
 
     #[test]
     pub fn test_parse_truncate() {
@@ -227,5 +380,29 @@ mod tests {
         let result =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(result.is_err(), "result is: {result:?}");
+
+        let sql = "TRUNCATE TABLE foo RANGE";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err() && format!("{result:?}").contains("expected: 'a left parenthesis'"),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo RANGE (";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err() && format!("{result:?}").contains("expected: 'a timestamp value'"),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo RANGE ()";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err() && format!("{result:?}").contains("expected: 'a timestamp value'"),
+            "result is: {result:?}"
+        );
     }
 }

@@ -47,6 +47,7 @@ use common_telemetry::tracing;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datafusion_expr::LogicalPlan;
+use datatypes::prelude::ConcreteDataType;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::QueryEngineRef;
@@ -73,8 +74,8 @@ use self::set::{
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    PlanStatementSnafu, Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    UpgradeCatalogManagerRefSnafu,
+    PlanStatementSnafu, Result, SchemaNotFoundSnafu, SqlCommonSnafu, TableMetadataManagerSnafu,
+    TableNotFoundSnafu, UnexpectedSnafu, UpgradeCatalogManagerRefSnafu,
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
@@ -306,8 +307,12 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
+                let time_ranges = self
+                    .convert_truncate_time_ranges(&table_name, stmt.time_ranges(), &query_ctx)
+                    .await?;
                 // TODO(discord9): add truncate table stmt
-                self.truncate_table(table_name, todo!(), query_ctx).await
+                self.truncate_table(table_name, time_ranges, query_ctx)
+                    .await
             }
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
@@ -530,6 +535,88 @@ impl StatementExecutor {
 
     pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
         &self.cache_invalidator
+    }
+
+    /// Convert truncate time ranges for the given table from sql values to timestamps
+    ///
+    pub async fn convert_truncate_time_ranges(
+        &self,
+        table_name: &TableName,
+        sql_values_time_range: &[(sqlparser::ast::Value, sqlparser::ast::Value)],
+        query_ctx: &QueryContextRef,
+    ) -> Result<Vec<(Timestamp, Timestamp)>> {
+        if sql_values_time_range.is_empty() {
+            return Ok(vec![]);
+        }
+        let table = self.get_table(&table_name.table_ref()).await?;
+        let info = table.table_info();
+        let time_index_dt = info
+            .meta
+            .schema
+            .timestamp_column()
+            .context(UnexpectedSnafu {
+                violated: "Table must have a timestamp column",
+            })?;
+        ensure!(
+            time_index_dt.data_type.is_timestamp(),
+            UnexpectedSnafu {
+                violated: format!(
+                    "Table {}'s time index column must be a timestamp type, found: {:?}",
+                    table_name.to_string(),
+                    time_index_dt
+                )
+            }
+        );
+        let time_unit = time_index_dt
+            .data_type
+            .as_timestamp()
+            .unwrap()
+            .unit()
+            .clone();
+        let mut time_ranges = vec![];
+        for (start, end) in sql_values_time_range {
+            let start = common_sql::convert::sql_value_to_value(
+                "range_start",
+                &ConcreteDataType::timestamp_datatype(time_unit),
+                &start,
+                Some(&query_ctx.timezone()),
+                None,
+                false,
+            )
+            .context(SqlCommonSnafu)
+            .and_then(|v| {
+                if let datatypes::value::Value::Timestamp(t) = v {
+                    Ok(t)
+                } else {
+                    error::InvalidSqlSnafu {
+                        err_msg: format!("Expected a timestamp value, found {v:?}"),
+                    }
+                    .fail()
+                }
+            })?;
+
+            let end = common_sql::convert::sql_value_to_value(
+                "range_end",
+                &ConcreteDataType::timestamp_datatype(time_unit),
+                &end,
+                Some(&query_ctx.timezone()),
+                None,
+                false,
+            )
+            .context(SqlCommonSnafu)
+            .and_then(|v| {
+                if let datatypes::value::Value::Timestamp(t) = v {
+                    Ok(t)
+                } else {
+                    error::InvalidSqlSnafu {
+                        err_msg: format!("Expected a timestamp value, found {v:?}"),
+                    }
+                    .fail()
+                }
+            })?;
+            time_ranges.push((start, end));
+        }
+        Ok(time_ranges)
     }
 }
 
