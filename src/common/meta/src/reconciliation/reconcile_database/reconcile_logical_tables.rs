@@ -16,6 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
+use common_telemetry::info;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -40,6 +41,12 @@ impl State for ReconcileLogicalTables {
         ctx: &mut ReconcileDatabaseContext,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        info!(
+            "Reconcile logical tables in database: {}, catalog: {}, inflight_subprocedures: {}",
+            ctx.persistent_ctx.schema,
+            ctx.persistent_ctx.catalog,
+            ctx.volatile_ctx.inflight_subprocedures.len()
+        );
         // Waits for inflight subprocedures first.
         ctx.wait_for_inflight_subprocedures(procedure_ctx).await?;
 

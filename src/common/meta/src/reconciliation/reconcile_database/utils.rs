@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_procedure::{watcher, Context as ProcedureContext, ProcedureId};
-use common_telemetry::error;
+use common_telemetry::{error, info, warn};
 use futures::future::{join_all, try_join_all};
 use snafu::{OptionExt, ResultExt};
 
@@ -54,10 +54,24 @@ pub(crate) async fn wait_for_inflight_subprocedures(
     if fail_fast {
         try_join_all(tasks).await.context(WaitProcedureSnafu)?;
     } else {
+        let mut failed = 0;
+        let total = tasks.len();
         for result in join_all(tasks).await {
             if let Err(e) = result {
-                error!(e; "inflight subprocedure failed: {}, procedure_id: {}", e, procedure_ctx.procedure_id);
+                error!(e; "inflight subprocedure, procedure_id: {}", procedure_ctx.procedure_id);
+                failed += 1;
             }
+        }
+        if failed > 0 {
+            warn!(
+                "{} inflight subprocedures failed, total: {}, procedure_id: {}",
+                failed, total, procedure_ctx.procedure_id
+            );
+        } else {
+            info!(
+                "{} inflight subprocedures completed, procedure_id: {}",
+                total, procedure_ctx.procedure_id
+            );
         }
     }
 

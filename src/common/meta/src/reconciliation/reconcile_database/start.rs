@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
@@ -49,7 +50,10 @@ impl State for ReconcileDatabaseStart {
                 table_schema: &ctx.persistent_ctx.schema,
             },
         );
-
+        info!(
+            "Reconcile database: {}, catalog: {}",
+            ctx.persistent_ctx.schema, ctx.persistent_ctx.catalog
+        );
         Ok((Box::new(ReconcileTables), Status::executing(true)))
     }
 

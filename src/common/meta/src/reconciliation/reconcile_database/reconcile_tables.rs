@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
+use common_telemetry::info;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use store_api::storage::TableId;
@@ -39,6 +40,12 @@ impl State for ReconcileTables {
         ctx: &mut ReconcileDatabaseContext,
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        info!(
+            "Reconcile tables in database: {}, catalog: {}, inflight_subprocedures: {}",
+            ctx.persistent_ctx.schema,
+            ctx.persistent_ctx.catalog,
+            ctx.volatile_ctx.inflight_subprocedures.len()
+        );
         // Waits for inflight subprocedures first.
         ctx.wait_for_inflight_subprocedures(procedure_ctx).await?;
 
@@ -129,11 +136,16 @@ impl ReconcileTables {
             let procedure = ReconcileTableProcedure::new(
                 context,
                 table_id,
-                table_name,
+                table_name.clone(),
                 ctx.persistent_ctx.resolve_strategy,
                 true,
             );
-            procedures.push(ProcedureWithId::with_random_id(Box::new(procedure)));
+            let procedure = ProcedureWithId::with_random_id(Box::new(procedure));
+            info!(
+                "Reconcile table: {}, table_id: {}, procedure_id: {}",
+                table_name, table_id, procedure.id
+            );
+            procedures.push(procedure)
         }
 
         procedures
