@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use datatypes::vectors::Helper;
@@ -33,8 +34,8 @@ use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::time_series::Series;
 use crate::memtable::{
-    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, Memtable, MemtableId, MemtableRange,
-    MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
+    AllocTracker, BoxedBatchIterator, IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableId,
+    MemtableRange, MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats,
 };
 use crate::metrics::MEMTABLE_ACTIVE_SERIES_COUNT;
 use crate::read::dedup::LastNonNullIter;
@@ -219,7 +220,7 @@ impl Memtable for SimpleBulkMemtable {
         _predicate: Option<table::predicate::Predicate>,
         sequence: Option<SequenceNumber>,
     ) -> error::Result<BoxedBatchIterator> {
-        let iter = self.create_iter(projection, sequence)?.build()?;
+        let iter = self.create_iter(projection, sequence)?.build(None)?;
 
         if self.merge_mode == MergeMode::LastNonNull {
             let iter = LastNonNullIter::new(iter);
@@ -235,6 +236,7 @@ impl Memtable for SimpleBulkMemtable {
         predicate: PredicateGroup,
         sequence: Option<SequenceNumber>,
     ) -> error::Result<MemtableRanges> {
+        let start_time = Instant::now();
         let projection = Arc::new(self.build_projection(projection));
         let values = self.series.read().unwrap().read_to_values();
         let contexts = values
@@ -263,6 +265,7 @@ impl Memtable for SimpleBulkMemtable {
                     let builder = BatchRangeBuilder {
                         batch,
                         merge_mode: self.merge_mode,
+                        scan_cost: start_time.elapsed(),
                     };
                     (
                         num_rows,
@@ -346,11 +349,22 @@ impl Memtable for SimpleBulkMemtable {
 pub struct BatchRangeBuilder {
     pub batch: Batch,
     pub merge_mode: MergeMode,
+    scan_cost: Duration,
 }
 
 impl IterBuilder for BatchRangeBuilder {
-    fn build(&self) -> error::Result<BoxedBatchIterator> {
+    fn build(&self, metrics: Option<MemScanMetrics>) -> error::Result<BoxedBatchIterator> {
         let batch = self.batch.clone();
+        if let Some(metrics) = metrics {
+            let inner = crate::memtable::MemScanMetricsData {
+                total_series: 1,
+                num_rows: batch.num_rows(),
+                num_batches: 1,
+                scan_cost: self.scan_cost,
+            };
+            metrics.merge_inner(&inner);
+        }
+
         let iter = Iter {
             batch: Some(Ok(batch)),
         };
@@ -684,7 +698,7 @@ mod tests {
             .unwrap();
         assert_eq!(ranges.ranges.len(), 1);
         let range = ranges.ranges.into_values().next().unwrap();
-        let mut reader = range.context.builder.build().unwrap();
+        let mut reader = range.context.builder.build(None).unwrap();
 
         let mut num_rows = 0;
         while let Some(b) = reader.next().transpose().unwrap() {

@@ -40,7 +40,9 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScannerRef};
+use store_api::region_engine::{
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+};
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -59,6 +61,7 @@ pub struct RegionScanExec {
     is_partition_set: bool,
     // TODO(ruihang): handle TimeWindowed dist via this parameter
     distribution: Option<TimeSeriesDistribution>,
+    explain_verbose: bool,
 }
 
 impl RegionScanExec {
@@ -165,6 +168,7 @@ impl RegionScanExec {
             total_rows,
             is_partition_set: false,
             distribution: request.distribution,
+            explain_verbose: false,
         })
     }
 
@@ -231,6 +235,7 @@ impl RegionScanExec {
             total_rows: self.total_rows,
             is_partition_set: true,
             distribution: self.distribution,
+            explain_verbose: self.explain_verbose,
         })
     }
 
@@ -265,6 +270,10 @@ impl RegionScanExec {
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect()
+    }
+
+    pub fn set_explain_verbose(&mut self, explain_verbose: bool) {
+        self.explain_verbose = explain_verbose;
     }
 }
 
@@ -301,11 +310,14 @@ impl ExecutionPlan for RegionScanExec {
         let span =
             tracing_context.attach(common_telemetry::tracing::info_span!("read_from_region"));
 
+        let ctx = QueryScanContext {
+            explain_verbose: self.explain_verbose,
+        };
         let stream = self
             .scanner
             .lock()
             .unwrap()
-            .scan_partition(&self.metric, partition)
+            .scan_partition(&ctx, &self.metric, partition)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let stream_metrics = StreamMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {

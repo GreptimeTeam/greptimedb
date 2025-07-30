@@ -539,6 +539,12 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<SendableRecordBatchStream> {
+        let explain_verbose = ctx.query_ctx().explain_verbose();
+        let output_partitions = plan.properties().output_partitioning().partition_count();
+        if explain_verbose {
+            common_telemetry::info!("Executing query plan, output_partitions: {output_partitions}");
+        }
+
         let exec_timer = metrics::EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 
@@ -562,9 +568,15 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
-                stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
+                stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute 1 stream, cost: {:?}s",
+                            exec_cost,
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }
@@ -591,7 +603,13 @@ impl QueryExecutor for DatafusionQueryEngine {
                 stream.set_metrics2(plan.clone());
                 stream.set_explain_verbose(ctx.query_ctx().explain_verbose());
                 let stream = OnDone::new(Box::pin(stream), move || {
-                    exec_timer.observe_duration();
+                    let exec_cost = exec_timer.stop_and_record();
+                    if explain_verbose {
+                        common_telemetry::info!(
+                            "DatafusionQueryEngine execute {output_partitions} stream, cost: {:?}s",
+                            exec_cost
+                        );
+                    }
                 });
                 Ok(Box::pin(stream))
             }

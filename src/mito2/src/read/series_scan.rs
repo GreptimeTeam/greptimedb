@@ -29,7 +29,9 @@ use futures::StreamExt;
 use smallvec::{smallvec, SmallVec};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PartitionRange, PrepareRequest, RegionScanner, ScannerProperties};
+use store_api::region_engine::{
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+};
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Semaphore;
@@ -87,13 +89,20 @@ impl SeriesScan {
 
     fn scan_partition_impl(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
-        let metrics =
-            new_partition_metrics(&self.stream_ctx, metrics_set, partition, &self.metrics_list);
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            partition,
+            &self.metrics_list,
+        );
 
-        let batch_stream = self.scan_batch_in_partition(partition, metrics.clone(), metrics_set)?;
+        let batch_stream =
+            self.scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)?;
 
         let input = &self.stream_ctx.input;
         let record_batch_stream = ConvertBatchStream::new(
@@ -111,10 +120,19 @@ impl SeriesScan {
 
     fn scan_batch_in_partition(
         &self,
+        ctx: &QueryScanContext,
         partition: usize,
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
     ) -> Result<ScanBatchStream> {
+        if ctx.explain_verbose {
+            common_telemetry::info!(
+                "SeriesScan partition {}, region_id: {}",
+                partition,
+                self.stream_ctx.input.region_metadata().region_id
+            );
+        }
+
         ensure!(
             partition < self.properties.num_partitions(),
             PartitionOutOfRangeSnafu {
@@ -146,6 +164,8 @@ impl SeriesScan {
 
                 part_metrics.merge_metrics(&metrics);
             }
+
+            part_metrics.on_finish();
         };
         Ok(Box::pin(stream))
     }
@@ -190,7 +210,7 @@ impl SeriesScan {
         let part_num = self.properties.num_partitions();
         let metrics_set = ExecutionPlanMetricsSet::default();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(&metrics_set, i))
+            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let chained_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
         Ok(Box::pin(chained_stream))
@@ -204,12 +224,18 @@ impl SeriesScan {
             .map(|partition| {
                 let metrics = new_partition_metrics(
                     &self.stream_ctx,
+                    false,
                     &metrics_set,
                     partition,
                     &self.metrics_list,
                 );
 
-                self.scan_batch_in_partition(partition, metrics, &metrics_set)
+                self.scan_batch_in_partition(
+                    &QueryScanContext::default(),
+                    partition,
+                    metrics,
+                    &metrics_set,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -242,10 +268,11 @@ impl RegionScanner for SeriesScan {
 
     fn scan_partition(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_impl(metrics_set, partition)
+        self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
     }
 
@@ -328,6 +355,7 @@ impl SeriesDistributor {
     async fn scan_partitions(&mut self) -> Result<()> {
         let part_metrics = new_partition_metrics(
             &self.stream_ctx,
+            false,
             &self.metrics_set,
             self.partitions.len(),
             &self.metrics_list,
@@ -399,6 +427,7 @@ impl SeriesDistributor {
 
         metrics.scan_cost += fetch_start.elapsed();
         metrics.num_series_send_timeout = self.senders.num_timeout;
+        metrics.num_series_send_full = self.senders.num_full;
         part_metrics.set_distributor_metrics(&metrics);
 
         part_metrics.on_finish();
@@ -444,6 +473,8 @@ struct SenderList {
     sender_idx: usize,
     /// Number of timeout.
     num_timeout: usize,
+    /// Number of full senders.
+    num_full: usize,
 }
 
 impl SenderList {
@@ -454,6 +485,7 @@ impl SenderList {
             num_nones,
             sender_idx: 0,
             num_timeout: 0,
+            num_full: 0,
         }
     }
 
@@ -471,6 +503,7 @@ impl SenderList {
             match sender.try_send(Ok(batch)) {
                 Ok(()) => return Ok(None),
                 Err(TrySendError::Full(res)) => {
+                    self.num_full += 1;
                     // Safety: we send Ok.
                     batch = res.unwrap();
                 }
@@ -546,6 +579,7 @@ impl SenderList {
 
 fn new_partition_metrics(
     stream_ctx: &StreamContext,
+    explain_verbose: bool,
     metrics_set: &ExecutionPlanMetricsSet,
     partition: usize,
     metrics_list: &PartitionMetricsList,
@@ -555,6 +589,7 @@ fn new_partition_metrics(
         partition,
         "SeriesScan",
         stream_ctx.query_start,
+        explain_verbose,
         metrics_set,
     );
 
