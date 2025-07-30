@@ -32,7 +32,6 @@ pub(crate) fn build_template_from_raw_table_info(
     raw_table_info: &RawTableInfo,
 ) -> Result<CreateRequest> {
     let primary_key_indices = &raw_table_info.meta.primary_key_indices;
-    let mut primary_column_ids = Vec::with_capacity(primary_key_indices.len());
     let column_defs = raw_table_info
         .meta
         .schema
@@ -43,10 +42,6 @@ pub(crate) fn build_template_from_raw_table_info(
             let is_primary_key = primary_key_indices.contains(&i);
             let column_def = try_as_column_def(c, is_primary_key)
                 .context(error::ConvertColumnDefSnafu { column: &c.name })?;
-
-            if is_primary_key {
-                primary_column_ids.push(i as u32);
-            }
 
             Ok(RegionColumnDef {
                 column_def: Some(column_def),
@@ -62,7 +57,7 @@ pub(crate) fn build_template_from_raw_table_info(
         region_id: 0,
         engine: METRIC_ENGINE_NAME.to_string(),
         column_defs,
-        primary_key: primary_column_ids,
+        primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
         path: String::new(),
         options,
     };
