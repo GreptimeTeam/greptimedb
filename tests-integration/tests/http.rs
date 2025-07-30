@@ -114,7 +114,7 @@ macro_rules! http_tests {
                 test_pipeline_skip_error,
                 test_pipeline_filter,
 
-                test_otlp_metrics,
+                test_otlp_metrics_new,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
                 test_otlp_logs,
@@ -3588,13 +3588,14 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
-pub async fn test_otlp_metrics(store_type: StorageType) {
+pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_metrics").await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_metrics_new").await;
 
     let content = r#"
-{"resourceMetrics":[{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291872539000","exemplars":[],"flags":0,"asInt":0}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"},{"resource":{"attributes":[],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"","version":"","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"gen","description":"","unit":"","metadata":[],"gauge":{"dataPoints":[{"attributes":[],"startTimeUnixNano":"0","timeUnixNano":"1736489291919917000","exemplars":[],"flags":0,"asInt":1}]}}],"schemaUrl":""}],"schemaUrl":"https://opentelemetry.io/schemas/1.13.0"}]}
+{"resourceMetrics":[{"resource":{"attributes":[{"key":"host.arch","value":{"stringValue":"arm64"}},{"key":"os.type","value":{"stringValue":"darwin"}},{"key":"os.version","value":{"stringValue":"25.0.0"}},{"key":"service.name","value":{"stringValue":"claude-code"}},{"key":"service.version","value":{"stringValue":"1.0.62"}}],"droppedAttributesCount":0},"scopeMetrics":[{"scope":{"name":"com.anthropic.claude_code","version":"1.0.62","attributes":[],"droppedAttributesCount":0},"metrics":[{"name":"claude_code.cost.usage","description":"Cost of the Claude Code session","unit":"USD","metadata":[],"sum":{"dataPoints":[{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0052544},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":2.244618}],"aggregationTemporality":1,"isMonotonic":true}},{"name":"claude_code.token.usage","description":"Number of tokens used","unit":"tokens","metadata":[],"sum":{"dataPoints":[{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"input"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":6208.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"output"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":72.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheRead"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheCreation"}},{"key":"model","value":{"stringValue":"claude-3-5-haiku-20241022"}}],"startTimeUnixNano":"1753780502453000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"input"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":743056.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"output"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":1030.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheRead"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0},{"attributes":[{"key":"user.id","value":{"stringValue":"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4"}},{"key":"session.id","value":{"stringValue":"736525A3-F5D4-496B-933E-827AF23A5B97"}},{"key":"terminal.type","value":{"stringValue":"ghostty"}},{"key":"type","value":{"stringValue":"cacheCreation"}},{"key":"model","value":{"stringValue":"claude-sonnet-4-20250514"}}],"startTimeUnixNano":"1753780513420000000","timeUnixNano":"1753780559836000000","exemplars":[],"flags":0,"asDouble":0.0}],"aggregationTemporality":1,"isMonotonic":true}}],"schemaUrl":""}],"schemaUrl":""}]}
     "#;
 
     let req: ExportMetricsServiceRequest = serde_json::from_str(content).unwrap();
@@ -3602,6 +3603,162 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
 
     // handshake
     let client = TestClient::new(app).await;
+
+    // write metrics data
+    // with scope attrs and all resource attrs
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-scope-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-all-resource-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let expected = "[[\"claude_code_cost_usage\"],[\"claude_code_token_usage\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
+    validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
+
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    //   "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //   "greptime_value" DOUBLE NULL,
+    //   "host_arch" STRING NULL,
+    //   "job" STRING NULL,
+    //   "model" STRING NULL,
+    //   "os_type" STRING NULL,
+    //   "os_version" STRING NULL,
+    //   "otel_scope_name" STRING NULL,
+    //   "otel_scope_schema_url" STRING NULL,
+    //   "otel_scope_version" STRING NULL,
+    //   "service_name" STRING NULL,
+    //   "service_version" STRING NULL,
+    //   "session_id" STRING NULL,
+    //   "terminal_type" STRING NULL,
+    //   "user_id" STRING NULL,
+    //   TIME INDEX ("greptime_timestamp"),
+    //   PRIMARY KEY ("host_arch", "job", "model", "os_type", "os_version", "otel_scope_name", "otel_scope_schema_url", "otel_scope_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //   )
+    // ENGINE=metric
+    // WITH(
+    //   on_physical_table = 'greptime_physical_table',
+    //   otlp_metric_compat = 'prom'
+    // )
+    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_all_show_create_table",
+        &client,
+        "show create table claude_code_cost_usage;",
+        expected,
+    )
+    .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,0.0052544,\"arm64\",\"claude-code\",\"claude-3-5-haiku-20241022\",\"darwin\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"arm64\",\"claude-code\",\"claude-sonnet-4-20250514\",\"darwin\",\"25.0.0\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_all_select",
+        &client,
+        "select * from claude_code_cost_usage;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // write metrics data
+    // with scope attrs
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-otlp-metric-promote-scope-attrs"),
+                HeaderValue::from_static("true"),
+            ),
+        ],
+        "/v1/otlp/v1/metrics",
+        body.clone(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     "job" STRING NULL,
+    //     "model" STRING NULL,
+    //     "otel_scope_name" STRING NULL,
+    //     "otel_scope_schema_url" STRING NULL,
+    //     "otel_scope_version" STRING NULL,
+    //     "service_name" STRING NULL,
+    //     "service_version" STRING NULL,
+    //     "session_id" STRING NULL,
+    //     "terminal_type" STRING NULL,
+    //     "user_id" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp"),
+    //     PRIMARY KEY ("job", "model", "otel_scope_name", "otel_scope_schema_url", "otel_scope_version", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    validate_data(
+        "otlp_metrics_show_create_table",
+        &client,
+        "show create table claude_code_cost_usage;",
+        expected,
+    )
+    .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"com.anthropic.claude_code\",\"\",\"1.0.62\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_select",
+        &client,
+        "select * from claude_code_cost_usage;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     // write metrics data
     let res = send_req(
@@ -3617,36 +3774,54 @@ pub async fn test_otlp_metrics(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // select metrics data
-    let expected = "[[1736489291872539000,0.0],[1736489291919917000,1.0]]";
-    validate_data("otlp_metrics", &client, "select * from gen;", expected).await;
-
-    // drop table
-    let res = client.get("/v1/sql?sql=drop table gen;").send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // write metrics data with gzip
-    let res = send_req(
-        &client,
-        vec![(
-            HeaderName::from_static("content-type"),
-            HeaderValue::from_static("application/x-protobuf"),
-        )],
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        true,
-    )
-    .await;
-    assert_eq!(StatusCode::OK, res.status());
-
-    // select metrics data again
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
+    //     "greptime_value" DOUBLE NULL,
+    //     "job" STRING NULL,
+    //     "model" STRING NULL,
+    //     "service_name" STRING NULL,
+    //     "service_version" STRING NULL,
+    //     "session_id" STRING NULL,
+    //     "terminal_type" STRING NULL,
+    //     "user_id" STRING NULL,
+    //     TIME INDEX ("greptime_timestamp"),
+    //     PRIMARY KEY ("job", "model", "service_name", "service_version", "session_id", "terminal_type", "user_id")
+    //     )
+    //   ENGINE=metric
+    //   WITH(
+    //     on_physical_table = 'greptime_physical_table',
+    //     otlp_metric_compat = 'prom'
+    //   )
+    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
-        "otlp_metrics_with_gzip",
+        "otlp_metrics_show_create_table_none",
         &client,
-        "select * from gen;",
+        "show create table claude_code_cost_usage;",
         expected,
     )
     .await;
+
+    // select metrics data
+    let expected = "[[1753780559836,0.0052544,\"claude-code\",\"claude-3-5-haiku-20241022\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"],[1753780559836,2.244618,\"claude-code\",\"claude-sonnet-4-20250514\",\"claude-code\",\"1.0.62\",\"736525A3-F5D4-496B-933E-827AF23A5B97\",\"ghostty\",\"6DA02FD9-B5C5-4E61-9355-9FE8EC9A0CF4\"]]";
+    validate_data(
+        "otlp_metrics_select_none",
+        &client,
+        "select * from claude_code_cost_usage;",
+        expected,
+    )
+    .await;
+
+    // drop table
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
 
     guard.remove_all().await;
 }

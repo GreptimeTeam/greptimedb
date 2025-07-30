@@ -59,6 +59,12 @@ pub mod constants {
     pub const GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME: &str = "x-greptime-log-extract-keys";
     pub const GREPTIME_TRACE_TABLE_NAME_HEADER_NAME: &str = "x-greptime-trace-table-name";
 
+    // OTLP headers
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-all-resource-attrs";
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-scope-attrs";
+
     /// The header key that contains the pipeline params.
     pub const GREPTIME_PIPELINE_PARAMS_HEADER: &str = "x-greptime-pipeline-params";
 }

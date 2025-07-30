@@ -18,13 +18,15 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use http::HeaderMap;
-use pipeline::{GreptimePipelineParams, SelectInfo};
+use pipeline::{truthy, GreptimePipelineParams, SelectInfo};
 
 use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
-    GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_PARAMS_HEADER,
-    GREPTIME_PIPELINE_VERSION_HEADER_NAME, GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+    GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
 
 /// Axum extractor for optional target log table name from HTTP header
@@ -125,6 +127,44 @@ where
             pipeline_name,
             pipeline_version,
             pipeline_params: GreptimePipelineParams::from_params(pipeline_parameters.as_deref()),
+        })
+    }
+}
+
+/// Axum extractor for OTLP metric options from HTTP headers.
+pub struct OtlpMetricOptions {
+    /// Persist all resource attributes to the table
+    /// If false, only persist selected attributes. See [`DEFAULT_ATTRS`] in `otlp/metrics.rs`
+    pub promote_all_resource_attrs: bool,
+    /// Persist scope attributes to the table
+    /// If false, persist none
+    pub promote_scope_attrs: bool,
+}
+
+impl<S> FromRequestParts<S> for OtlpMetricOptions
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        let promote_all_resource_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+        let promote_scope_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+
+        Ok(OtlpMetricOptions {
+            promote_all_resource_attrs,
+            promote_scope_attrs,
         })
     }
 }

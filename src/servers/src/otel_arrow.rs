@@ -85,6 +85,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
+                // use metric engine by default
                 if let Err(e) = handler.metrics(request, query_context.clone()).await {
                     let _ = sender
                         .send(Err(Status::new(

@@ -106,7 +106,8 @@ where
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(self.instance.clone());
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
@@ -158,7 +159,7 @@ where
         let grpc_server = builder
             .database_handler(greptime_request_handler.clone())
             .prometheus_handler(self.instance.clone(), user_provider.clone())
-            .otel_arrow_handler(OtelArrowServiceHandler(self.instance.clone()))
+            .otel_arrow_handler(OtelArrowServiceHandler::new(self.instance.clone()))
             .flight_handler(Arc::new(greptime_request_handler))
             .frontend_grpc_handler(frontend_grpc_handler)
             .build();
