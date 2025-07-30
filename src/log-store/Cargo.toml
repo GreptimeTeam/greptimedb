@@ -51,6 +51,5 @@ common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 itertools.workspace = true
 rand.workspace = true
-rand_distr = "0.4"
 rskafka = { workspace = true, features = ["unstable-fuzzing"] }
 uuid.workspace = true
