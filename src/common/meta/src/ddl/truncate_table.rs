@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::helper::{from_pb_time_ranges, to_pb_time_ranges};
 use api::v1::region::{
     region_request, truncate_request, RegionRequest, RegionRequestHeader,
     TruncateRequest as PbTruncateRegionRequest,
@@ -154,6 +155,14 @@ impl TruncateTableProcedure {
                     datanode
                 );
 
+                let time_ranges = &self.data.task.time_ranges;
+                let kind = if time_ranges.is_empty() {
+                    truncate_request::Kind::All(api::v1::region::All {})
+                } else {
+                    let pb_time_ranges = to_pb_time_ranges(time_ranges);
+                    truncate_request::Kind::TimeRanges(pb_time_ranges)
+                };
+
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -161,7 +170,7 @@ impl TruncateTableProcedure {
                     }),
                     body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
                         region_id: region_id.as_u64(),
-                        kind: Some(truncate_request::Kind::All(api::v1::region::All {})),
+                        kind: Some(kind),
                     })),
                 };
 

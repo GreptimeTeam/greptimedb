@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::{from_pb_time_ranges, from_pb_time_unit, ColumnDataTypeWrapper};
+use api::helper::{from_pb_time_ranges, ColumnDataTypeWrapper};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
@@ -33,7 +33,6 @@ use api::v1::{
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
-use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
