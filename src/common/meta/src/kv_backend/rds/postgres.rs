@@ -626,24 +626,6 @@ impl PgStore {
     /// - `TlsMode::Require` - Require TLS connection
     /// - `TlsMode::VerifyCa` - Require TLS and verify server certificate against CA
     /// - `TlsMode::VerifyFull` - Require TLS and verify server certificate and hostname
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use crate::kv_backend::rds::postgres::{TlsOption, TlsMode};
-    ///
-    /// // Plain connection (backward compatible)
-    /// let store = PgStore::with_url("postgresql://user:pass@localhost/db", "metakv", 128).await?;
-    ///
-    /// // TLS connection with client certificate
-    /// let tls_config = Some(TlsOption {
-    ///     mode: TlsMode::Require,
-    ///     cert_path: "path/to/client.crt".to_string(),
-    ///     key_path: "path/to/client.key".to_string(),
-    ///     watch: false,
-    /// });
-    /// let tls_store = PgStore::with_url_and_tls("postgresql://user:pass@localhost/db", "metakv", 128, tls_config).await?;
-    /// ```
     pub async fn with_url_and_tls(
         url: &str,
         table_name: &str,
