@@ -11784,6 +11784,7 @@ dependencies = [
  "jsonb",
  "lazy_static",
  "num-bigint",
+ "num-traits",
  "regex",
  "serde",
  "serde_json",

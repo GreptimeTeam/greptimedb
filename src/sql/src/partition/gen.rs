@@ -12,120 +12,118 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::max;
-
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 
 use crate::between_string;
 use crate::error::{InvalidPartitionNumberSnafu, InvalidPartitionRangeSnafu, Result};
 
-/// Converts a string to a BigUint by treating its bytes as a big-endian number.
-/// The string is optionally padded with null bytes (0x00) to a specified length
-/// before conversion, ensuring consistent numerical representation for comparison.
-fn string_to_biguint_padded(s: &str, min_len: usize) -> BigUint {
-    let mut bytes = s.as_bytes().to_vec();
-    // Pad with null bytes to ensure a consistent length for numerical comparison
-    // This is crucial for lexicographical ordering when converting back and forth.
-    while bytes.len() < min_len {
-        bytes.push(0x00);
-    }
-    BigUint::from_bytes_be(&bytes)
-}
-
-/// Converts a BigUint back to a string, ensuring all characters are visible ASCII.
-/// It converts the BigUint to a byte array, trims trailing null bytes (0x00),
-/// and then collects bytes only until the first non-visible ASCII character is encountered.
-/// The resulting byte array is then converted to a String using lossy UTF-8 conversion.
-fn biguint_to_string_trimmed(n: &BigUint) -> String {
-    let mut bytes = n.to_bytes_be();
-    // Trim trailing null bytes to get the original string length or closest representation
-    while let Some(&0x00) = bytes.last() {
-        bytes.pop();
-    }
-
-    // Collect bytes only as long as they are visible ASCII characters (0x20 to 0x7E).
-    // The string is truncated at the first non-visible character.
-    let mut visible_ascii_bytes: Vec<u8> = Vec::new();
-    for &b in bytes.iter() {
-        if b >= 0x28 && b <= 0x7E {
-            visible_ascii_bytes.push(b);
-        } else {
-            // Stop collecting if a non-visible ASCII character is found
-            break;
+/// Merges a list of potentially overlapping or adjacent character ranges
+/// into a sorted, unique list of characters, forming the custom alphabet.
+fn get_custom_alphabet(ranges: &[(char, char)]) -> Vec<char> {
+    let mut chars: Vec<char> = Vec::new();
+    for &(start_char, end_char) in ranges {
+        if start_char > end_char {
+            continue;
+        }
+        for c in (start_char as u32)..=(end_char as u32) {
+            // Ensure characters are visible ASCII, though the problem implies input is ASCII.
+            // This filter is a safeguard if non-ASCII chars are accidentally passed.
+            if c >= 0x20 && c <= 0x7E {
+                // Visible ASCII range
+                chars.push(std::char::from_u32(c).unwrap());
+            }
         }
     }
-
-    // Convert the collected bytes to a String.
-    String::from_utf8_lossy(&visible_ascii_bytes).into_owned()
+    chars.sort_unstable();
+    chars.dedup();
+    chars
 }
 
-/// Merges a list of potentially overlapping or adjacent string ranges
-/// into a sorted list of non-overlapping BigUint ranges.
-/// Each range (start, end) is inclusive.
-fn merge_ranges(mut ranges: Vec<(BigUint, BigUint)>) -> Vec<(BigUint, BigUint)> {
-    if ranges.is_empty() {
-        return Vec::new();
-    }
-
-    // Sort ranges by their start points
-    ranges.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut merged = Vec::new();
-    let mut current_start = ranges[0].0.clone();
-    let mut current_end = ranges[0].1.clone();
-
-    for i in 1..ranges.len() {
-        let (next_start, next_end) = &ranges[i];
-
-        // If the next range overlaps or is immediately adjacent to the current merged range
-        // Note: We use `current_end + BigUint::one()` because ranges are inclusive.
-        if next_start <= &(current_end.clone() + BigUint::from(1u32)) {
-            current_end = max(current_end, next_end.clone());
-        } else {
-            // No overlap or adjacency, add the current merged range and start a new one
-            merged.push((current_start, current_end));
-            current_start = next_start.clone();
-            current_end = next_end.clone();
-        }
-    }
-    merged.push((current_start, current_end)); // Add the last merged range
-
-    merged
-}
-
-/// Maps a position from the "effective" (compressed, non-excluded) range
-/// back to its corresponding BigUint value in the original string space.
-/// This function correctly navigates through the provided merged valid ranges.
-fn map_effective_to_original(
-    effective_pos: &BigUint,
-    merged_valid_ranges: &Vec<(BigUint, BigUint)>,
+/// Converts a string to a BigUint based on a custom alphabet and fixed length.
+/// The string is conceptually padded with the first character of the alphabet
+/// or truncated to match `fixed_len`.
+fn string_to_custom_biguint_fixed_len(
+    s: &str,
+    alphabet: &Vec<char>,
+    base: &BigUint,
+    fixed_len: usize,
 ) -> BigUint {
-    let mut effective_pos_remaining = effective_pos.clone();
+    if fixed_len == 0 {
+        return BigUint::from(0u32);
+    }
 
-    for (range_start, range_end) in merged_valid_ranges {
-        // Calculate the inclusive length of the current range
-        let current_range_length = range_end - range_start + BigUint::from(1u32);
+    let mut val = BigUint::from(0u32);
+    let first_char_idx = 0; // Index of the first character in the sorted alphabet
 
-        if effective_pos_remaining < current_range_length {
-            // The point falls within this current range
-            return range_start + effective_pos_remaining;
+    // Pad or truncate the string to fixed_len
+    let chars: Vec<char> = s.chars().take(fixed_len).collect();
+
+    for i in 0..fixed_len {
+        let c = if i < chars.len() {
+            chars[i]
         } else {
-            // The point is past this range, subtract its length from effective_pos_remaining
-            effective_pos_remaining -= &current_range_length;
-        }
+            // Pad with the first character of the alphabet
+            alphabet[first_char_idx]
+        };
+
+        // unwrap checked by previous logic to ensure string is made up with all
+        // available alphabets
+        let char_idx = alphabet.iter().position(|&x| x == c).unwrap();
+        let char_idx_biguint: BigUint = char_idx.into();
+
+        val = val * base + char_idx_biguint;
+    }
+    val
+}
+
+/// Converts a BigUint back to a string of fixed length based on a custom alphabet.
+fn custom_biguint_to_string_fixed_len(
+    n: &BigUint,
+    alphabet: &Vec<char>,
+    base: &BigUint,
+    fixed_len: usize,
+) -> String {
+    if fixed_len == 0 {
+        return String::new();
+    }
+    if alphabet.is_empty() {
+        return String::new();
     }
 
-    // This case should ideally not be reached if effective_pos is within total_effective_length.
-    // However, as a fallback, return the end of the last valid range.
-    // This might happen due to floating point inaccuracies if BigUint division was not integer division,
-    // or if effective_pos is exactly at the boundary of the total effective length.
-    if let Some((_, last_end)) = merged_valid_ranges.last() {
-        last_end.clone()
-    } else {
-        // If there are no valid ranges, return zero (or panic, depending on desired error handling)
-        BigUint::from(0u32)
+    let mut temp_n = n.clone();
+    let mut result_chars = Vec::with_capacity(fixed_len);
+    let first_char = alphabet[0];
+
+    // Handle the case where n is 0 or very small
+    if temp_n == BigUint::from(0u32) {
+        return (0..fixed_len).map(|_| first_char).collect();
     }
+
+    // Extract digits in base `base`
+    for _ in 0..fixed_len {
+        let char_idx = (&temp_n % base).to_usize().unwrap();
+        temp_n /= base;
+        result_chars.push(alphabet[char_idx]);
+    }
+
+    // The digits are extracted in reverse order (least significant first), so reverse them.
+    result_chars.reverse();
+
+    // Ensure the string is exactly fixed_len by padding if necessary (shouldn't be needed if logic is correct)
+    // and truncating (also shouldn't be needed if logic is correct, but as a safeguard)
+    let s: String = result_chars.into_iter().collect();
+
+    // The string may be shorter than fixed_len if temp_n became zero early.
+    // In this fixed-length context, we should pad with the first character of the alphabet.
+    // Example: if fixed_len=3, base=2, alphabet=['a','b'], n=1 (which is 'b' in base 2)
+    // it should be "aab"
+    // The current loop fills `fixed_len` characters, so this padding logic is mostly for conceptual clarity.
+    // If the BigUint represents a number that would result in a shorter string, it means leading zeros.
+    // The loop `for _ in 0..fixed_len` already ensures `fixed_len` characters are pushed.
+
+    s
 }
 
 /// Divides a range of string values into multiple segments.
@@ -147,9 +145,6 @@ fn map_effective_to_original(
 /// # Returns
 /// A `Vec<String>` containing the computed segment stops, sorted lexicographically.
 ///
-/// # Panics
-/// This function will panic if `start` or `end` strings are empty,
-/// or if `num_segments` is zero and `start` is not equal to `end`.
 ///
 /// # Examples
 /// ```
@@ -175,13 +170,16 @@ fn map_effective_to_original(
 /// println!("Stops for 'a' to 'z' (1 segment): {:?}", stops);
 /// ```
 pub fn divide_string_range(
-    ranges: &[(&str, &str)],
+    ranges: &[(char, char)],
+    max_len: usize,
     num_segments: u32,
     hardstops: &[&str],
 ) -> Result<Vec<String>> {
-    if ranges.is_empty() {
-        return Ok(vec![]);
+    // Input validation
+    if max_len == 0 {
+        return Ok(Vec::new());
     }
+
     if num_segments < 2 {
         InvalidPartitionNumberSnafu {
             partition_num: num_segments,
@@ -189,79 +187,86 @@ pub fn divide_string_range(
         .fail()?;
     }
 
-    // Determine the maximum length for consistent padding during BigUint conversion.
-    let mut max_len = 0;
-    for (start_str, end_str) in ranges {
-        max_len = max(max_len, start_str.len());
-        max_len = max(max_len, end_str.len());
-    }
-    for hs in hardstops {
-        max_len = max(max_len, hs.len());
-    }
-
-    // Parse and merge input ranges
-    let mut parsed_ranges_biguint: Vec<(BigUint, BigUint)> = Vec::new();
-    for (start_str, end_str) in ranges {
-        let start_biguint = string_to_biguint_padded(start_str, max_len);
-        let end_biguint = string_to_biguint_padded(end_str, max_len);
-
-        if start_biguint >= end_biguint {
-            InvalidPartitionRangeSnafu {
-                start: start_str.to_string(),
-                end: end_str.to_string(),
-            }
-            .fail()?;
-        }
-        parsed_ranges_biguint.push((start_biguint, end_biguint));
-    }
-
-    let merged_valid_ranges = merge_ranges(parsed_ranges_biguint);
-
-    if merged_valid_ranges.is_empty() {
+    if ranges.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Calculate the total effective length of the range, summing lengths of merged valid ranges.
-    let mut total_effective_length = BigUint::from(0u32);
-    for (range_start, range_end) in &merged_valid_ranges {
-        // Add 1 because ranges are inclusive
-        total_effective_length += range_end - range_start + BigUint::from(1u32);
+    // --- Step 1: Get the custom alphabet and its base ---
+    let alphabet = get_custom_alphabet(ranges);
+    if alphabet.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base: BigUint = alphabet.len().into();
+
+    // --- Step 2: Calculate the total effective length (number of possible strings) ---
+    // This is base^max_len, representing all strings of exactly max_len length.
+    let total_effective_length = base.pow(max_len as u32);
+
+    // Handle cases where total_effective_length is too small for num_segments
+    let num_segments_biguint: BigUint = num_segments.into();
+    if total_effective_length < num_segments_biguint {
+        return Ok(Vec::new());
     }
 
-    let num_segments_biguint: BigUint = num_segments.into();
-
-    // Calculate the step size in the effective (compressed) space.
-    let segment_step_in_effective_space: BigUint = &total_effective_length / &num_segments_biguint;
+    // Calculate the step size in the effective space.
+    let segment_step_in_effective_space = &total_effective_length / &num_segments_biguint;
 
     let mut computed_stops_with_values: Vec<(BigUint, String)> =
         Vec::with_capacity(num_segments as usize);
 
-    // Generate intermediate stops, excluding the very last one (end of the last range).
-    // The loop goes from 1 to num_segments - 1.
-    for i in 1..num_segments {
-        let i_biguint: BigUint = i.into();
-        let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
-        let current_biguint =
-            map_effective_to_original(&effective_pos_for_stop, &merged_valid_ranges);
+    // --- Step 3: Generate intermediate stops ---
+    if num_segments == 1 {
+        // If only one segment, the stop is the lexicographically last string of max_len.
+        let last_char_idx = alphabet.len() - 1;
+        let last_char = alphabet[last_char_idx];
+        let end_string: String = (0..max_len).map(|_| last_char).collect();
+        let end_biguint =
+            string_to_custom_biguint_fixed_len(&end_string, &alphabet, &base, max_len);
+        computed_stops_with_values.push((end_biguint, end_string));
+    } else {
+        // Generate intermediate stops, excluding the very last one.
+        // The loop goes from 1 to num_segments - 1.
+        for i in 1..num_segments {
+            let i_biguint: BigUint = i.into();
+            let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
+            let current_biguint = effective_pos_for_stop; // In this model, effective_pos is already the BigUint value
 
-        let stop_str = biguint_to_string_trimmed(&current_biguint);
-        computed_stops_with_values.push((current_biguint, stop_str));
+            let stop_str = custom_biguint_to_string_fixed_len(
+                &current_biguint,
+                &alphabet,
+                &base,
+                max_len as usize,
+            );
+            computed_stops_with_values.push((current_biguint, stop_str));
+        }
     }
 
-    // Handle hardstops if provided
+    // --- Step 4: Handle hardstops if provided ---
 
-    let mut final_stops_with_values = computed_stops_with_values.clone();
+    let mut final_stops_with_values = computed_stops_with_values;
     // Keep track of which computed stops have been replaced by a hardstop
     let mut used_computed_indices: Vec<bool> = vec![false; final_stops_with_values.len()];
 
     for hardstop_str in hardstops.iter() {
-        let hardstop_biguint = string_to_biguint_padded(hardstop_str, max_len);
+        // Validate hardstop characters are in the alphabet
+        for c in hardstop_str.chars() {
+            if !alphabet.contains(&c) {
+                InvalidPartitionRangeSnafu {
+                    start: hardstop_str.to_string(),
+                    end: "".to_string(),
+                }
+                .fail()?;
+            }
+        }
+
+        let hardstop_biguint =
+            string_to_custom_biguint_fixed_len(hardstop_str, &alphabet, &base, max_len);
 
         let mut min_diff: Option<BigUint> = None;
         let mut nearest_idx: Option<usize> = None;
 
         // Find the nearest *unused* computed stop
-        for (idx, (computed_val, _)) in computed_stops_with_values.iter().enumerate() {
+        for (idx, (computed_val, _)) in final_stops_with_values.iter().enumerate() {
             if !used_computed_indices[idx] {
                 let diff = if computed_val >= &hardstop_biguint {
                     computed_val - &hardstop_biguint
@@ -296,11 +301,12 @@ pub fn divide_string_range(
 
 pub fn partition_rule_for_range(
     field_name: &str,
-    ranges: &[(&str, &str)],
+    char_ranges: &[(char, char)],
+    max_len: usize,
     num_partitions: u32,
     hardstops: &[&str],
 ) -> Result<Vec<Expr>> {
-    let stops = divide_string_range(ranges, num_partitions, hardstops)?;
+    let stops = divide_string_range(char_ranges, max_len, num_partitions, hardstops)?;
 
     let ident_expr = Expr::Identifier(Ident::new(field_name).clone());
     let mut last_stop: Option<String> = None;
@@ -337,22 +343,42 @@ mod tests {
 
     #[test]
     fn test_divide_string_range() {
-        assert!(divide_string_range(&[("", "")], 10, &[]).is_err());
-        assert!(divide_string_range(&[("a", "a")], 10, &[]).is_err());
-        assert!(divide_string_range(&[("z", "a")], 10, &[]).is_err());
-        assert!(divide_string_range(&[("a", "b")], 0, &[]).is_err());
-        assert!(divide_string_range(&[("a", "b")], 1, &[]).is_err());
+        assert!(divide_string_range(&[('_', '_')], 20, 10, &[])
+            .unwrap()
+            .is_empty());
+        assert!(divide_string_range(&[('b', 'a')], 20, 10, &[])
+            .unwrap()
+            .is_empty());
+        assert!(divide_string_range(&[('a', 'z')], 20, 0, &[]).is_err());
+        assert!(divide_string_range(&[('a', 'z')], 20, 1, &[]).is_err());
 
         let stops =
-            divide_string_range(&[("a", "z")], 10, &[]).expect("failed to divide string range");
-        assert_eq!(stops, vec!["c", "e", "g", "i", "k", "m", "o", "q", "s"]);
+            divide_string_range(&[('a', 'z')], 16, 10, &[]).expect("failed to divide string range");
+        assert_eq!(
+            stops,
+            vec![
+                "cppppppppppppppp",
+                "fffffffffffffffe",
+                "huuuuuuuuuuuuuut",
+                "kkkkkkkkkkkkkkki",
+                "mzzzzzzzzzzzzzzx",
+                "pppppppppppppppm",
+                "sffffffffffffffb",
+                "uuuuuuuuuuuuuuuq",
+                "xkkkkkkkkkkkkkkf"
+            ]
+        );
 
-        let stops = divide_string_range(&[("ap-southeast-1", "us-west-2")], 4, &[])
+        let stops = divide_string_range(&[('0', '9'), ('-', '-'), ('a', 'z')], 16, 4, &[])
             .expect("failed to divide string range");
-        assert_eq!(stops, vec!["fp", "kq", "prmvg"]);
+        assert_eq!(
+            stops,
+            vec!["8888888888888888", "hhhhhhhhhhhhhhhh", "qqqqqqqqqqqqqqqq"]
+        );
 
         let stops = divide_string_range(
-            &[("ap-southeast-1", "us-west-2")],
+            &[('0', '9'), ('-', '-'), ('a', 'z')],
+            16,
             10,
             &["eu-central-1", "us-east-1"],
         )
@@ -360,23 +386,39 @@ mod tests {
         assert_eq!(
             stops,
             vec![
-                "cpz@",
+                "2owa2owa2owa2owa",
+                "6dsl6dsl6dsl6dsl",
+                "a2owa2owa2owa2ow",
                 "eu-central-1",
-                "gq",
-                "iq`",
-                "kq",
-                "mq",
-                "orG",
-                "qr",
+                "hhhhhhhhhhhhhhhh",
+                "l6dsl6dsl6dsl6ds",
+                "owa2owa2owa2owa2",
+                "sl6dsl6dsl6dsl6d",
                 "us-east-1"
             ]
         );
 
-        let stops = divide_string_range(&[("0", "9"), ("a", "f")], 16, &[])
+        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 32, 16, &[])
             .expect("failed to divide string range");
         assert_eq!(
             stops,
-            vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+            vec![
+                "10000000000000000000000000000000",
+                "20000000000000000000000000000000",
+                "30000000000000000000000000000000",
+                "40000000000000000000000000000000",
+                "50000000000000000000000000000000",
+                "60000000000000000000000000000000",
+                "70000000000000000000000000000000",
+                "80000000000000000000000000000000",
+                "90000000000000000000000000000000",
+                "a0000000000000000000000000000000",
+                "b0000000000000000000000000000000",
+                "c0000000000000000000000000000000",
+                "d0000000000000000000000000000000",
+                "e0000000000000000000000000000000",
+                "f0000000000000000000000000000000"
+            ]
         );
     }
 
@@ -384,7 +426,8 @@ mod tests {
     fn test_generate_partition_expr() {
         let rules = partition_rule_for_range(
             "ns",
-            &[("ap-southeast-1", "us-west-2")],
+            &[('0', '9'), ('-', '-'), ('a', 'z')],
+            16,
             10,
             &["eu-central-1", "us-east-1"],
         )
@@ -392,14 +435,14 @@ mod tests {
         assert_eq!(
             rules.iter().map(|e| e.to_string()).collect::<Vec<String>>(),
             vec![
-                "ns < 'cpz@'",
-                "ns >= 'cpz@' AND ns < 'eu-central-1'",
-                "ns >= 'eu-central-1' AND ns < 'gq'",
-                "ns >= 'gq' AND ns < 'iq`'",
-                "ns >= 'iq`' AND ns < 'kq'",
-                "ns >= 'kq' AND ns < 'mq'",
-                "ns >= 'mq' AND ns < 'orG'",
-                "ns >= 'orG' AND ns < 'qr'",
+                "ns < '2owa2owa2owa2owa'",
+                "ns >= '2owa2owa2owa2owa' AND ns < '6dsl6dsl6dsl6dsl'",
+                "ns >= '6dsl6dsl6dsl6dsl' AND ns < 'a2owa2owa2owa2ow'",
+                "ns >= 'a2owa2owa2owa2ow' AND ns < 'eu-central-1'",
+                "ns >= 'eu-central-1' AND ns < 'hhhhhhhhhhhhhhhh'",
+                "ns >= 'hhhhhhhhhhhhhhhh' AND ns < 'l6dsl6dsl6dsl6ds'",
+                "ns >= 'l6dsl6dsl6dsl6ds' AND ns < 'owa2owa2owa2owa2'",
+                "ns >= 'owa2owa2owa2owa2' AND ns < 'sl6dsl6dsl6dsl6d'",
                 "ns >= 'us-east-1'"
             ]
         );
