@@ -15,6 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use snafu::ensure;
 use tokio::sync::Mutex;
 
@@ -82,14 +83,28 @@ pub struct Sequence {
 }
 
 impl Sequence {
+    /// Returns the next value and increments the sequence.
     pub async fn next(&self) -> Result<u64> {
         let mut inner = self.inner.lock().await;
         inner.next().await
     }
 
+    /// Returns the range of available sequences.
     pub async fn min_max(&self) -> Range<u64> {
         let inner = self.inner.lock().await;
         inner.initial..inner.max
+    }
+
+    /// Returns the next value without incrementing the sequence.
+    pub async fn peek(&self) -> u64 {
+        let inner = self.inner.lock().await;
+        inner.next
+    }
+
+    /// Jumps to the given value.
+    pub async fn jump_to(&self, next: u64) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.jump_to(next).await
     }
 }
 
@@ -203,11 +218,54 @@ impl Inner {
         }
         .fail()
     }
+
+    /// Jumps to the given value.
+    /// The next value must be greater than the current next value.
+    pub async fn jump_to(&mut self, next: u64) -> Result<()> {
+        ensure!(
+            next > self.next,
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "The next value {} is not greater than the current next value {}",
+                    next, self.next
+                ),
+            }
+        );
+
+        let key = self.name.as_bytes();
+        let expect = self
+            .generator
+            .get(key)
+            .await?
+            .map(|kv| kv.value)
+            .unwrap_or_default();
+
+        let req = CompareAndPutRequest {
+            key: key.to_vec(),
+            expect,
+            value: u64::to_le_bytes(next).to_vec(),
+        };
+        let res = self.generator.compare_and_put(req).await?;
+        ensure!(
+            res.success,
+            error::UnexpectedSnafu {
+                err_msg: format!("Failed to reset sequence {} to {}", self.name, next),
+            }
+        );
+        warn!("Sequence {} jumped to {}", self.name, next);
+        // Reset the sequence to the initial value.
+        self.initial = next;
+        self.next = next;
+        self.range = None;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::any::Any;
+    use std::assert_matches::assert_matches;
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -305,6 +363,28 @@ mod tests {
         for i in initial..initial + 100 {
             assert_eq!(i, seq.next().await.unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn test_sequence_set() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let seq = SequenceBuilder::new("test_seq", kv_backend.clone())
+            .initial(1024)
+            .step(10)
+            .build();
+        seq.jump_to(1025).await.unwrap();
+        assert_eq!(seq.next().await.unwrap(), 1025);
+        let err = seq.jump_to(1025).await.unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert_eq!(seq.next().await.unwrap(), 1026);
+
+        seq.jump_to(1048).await.unwrap();
+        // Recreate the sequence to test the sequence is reset correctly.
+        let seq = SequenceBuilder::new("test_seq", kv_backend)
+            .initial(1024)
+            .step(10)
+            .build();
+        assert_eq!(seq.next().await.unwrap(), 1048);
     }
 
     #[tokio::test]
