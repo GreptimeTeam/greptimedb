@@ -1527,8 +1527,7 @@ mod tests {
                         RegionId::new(1, 1),
                         RegionOpenRequest {
                             engine: MITO_ENGINE_NAME.to_string(),
-                            table_dir: String::new(),
-                            path_type: PathType::Bare,
+                            region_dir: String::new(),
                             options: Default::default(),
                             skip_wal_replay: false,
                         },
@@ -1537,8 +1536,7 @@ mod tests {
                         RegionId::new(1, 2),
                         RegionOpenRequest {
                             engine: MITO_ENGINE_NAME.to_string(),
-                            table_dir: String::new(),
-                            path_type: PathType::Bare,
+                            region_dir: String::new(),
                             options: Default::default(),
                             skip_wal_replay: false,
                         },
@@ -1558,8 +1556,7 @@ mod tests {
                         RegionId::new(1, 1),
                         RegionOpenRequest {
                             engine: MITO_ENGINE_NAME.to_string(),
-                            table_dir: String::new(),
-                            path_type: PathType::Bare,
+                            region_dir: String::new(),
                             options: Default::default(),
                             skip_wal_replay: false,
                         },
@@ -1568,8 +1565,7 @@ mod tests {
                         RegionId::new(1, 2),
                         RegionOpenRequest {
                             engine: MITO_ENGINE_NAME.to_string(),
-                            table_dir: String::new(),
-                            path_type: PathType::Bare,
+                            region_dir: String::new(),
                             options: Default::default(),
                             skip_wal_replay: false,
                         },
