@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
+use common_meta::key::{CANDIDATES_ROOT, ELECTION_KEY};
 use common_telemetry::{error, info, warn};
 use etcd_client::{
     Client, GetOptions, LeaderKey as EtcdLeaderKey, LeaseKeepAliveStream, LeaseKeeper, PutOptions,
@@ -28,7 +29,7 @@ use tokio::time::{timeout, MissedTickBehavior};
 
 use crate::election::{
     listen_leader_change, send_leader_change_and_set_flags, Election, LeaderChangeMessage,
-    LeaderKey, CANDIDATES_ROOT, CANDIDATE_LEASE_SECS, ELECTION_KEY, KEEP_ALIVE_INTERVAL_SECS,
+    LeaderKey, CANDIDATE_LEASE_SECS, KEEP_ALIVE_INTERVAL_SECS,
 };
 use crate::error;
 use crate::error::Result;
