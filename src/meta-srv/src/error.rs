@@ -113,6 +113,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to set next sequence number"))]
+    SetNextSequence {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to start telemetry task"))]
     StartTelemetryTask {
         #[snafu(implicit)]
@@ -1010,7 +1017,9 @@ impl ErrorExt for Error {
             | Error::ListTables { source, .. } => source.status_code(),
             Error::StartTelemetryTask { source, .. } => source.status_code(),
 
-            Error::NextSequence { source, .. } => source.status_code(),
+            Error::NextSequence { source, .. } | Error::SetNextSequence { source, .. } => {
+                source.status_code()
+            }
             Error::DowngradeLeader { source, .. } => source.status_code(),
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
             Error::SubmitDdlTask { source, .. } => source.status_code(),

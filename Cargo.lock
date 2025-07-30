@@ -4807,6 +4807,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "common-version",
+ "dashmap",
  "datafusion",
  "datafusion-expr",
  "datanode",
@@ -5228,7 +5229,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=7b657b53ed8f60d745574d710f92326d38d7ebc8#7b657b53ed8f60d745574d710f92326d38d7ebc8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b515206826fc96ca3310a3f90ad321d614a683bb#b515206826fc96ca3310a3f90ad321d614a683bb"
 dependencies = [
  "prost 0.13.5",
  "serde",

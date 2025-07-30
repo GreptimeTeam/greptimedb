@@ -225,7 +225,9 @@ async fn test_series_scan() {
     let mut partition_batches = vec![vec![]; 3];
     let mut streams: Vec<_> = (0..3)
         .map(|partition| {
-            let stream = scanner.scan_partition(&metrics_set, partition).unwrap();
+            let stream = scanner
+                .scan_partition(&Default::default(), &metrics_set, partition)
+                .unwrap();
             Some(stream)
         })
         .collect();

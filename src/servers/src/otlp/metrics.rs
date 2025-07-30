@@ -12,28 +12,65 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
+use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
+use regex::Regex;
+use session::protocol_ctx::OtlpMetricCtx;
 
 use crate::error::Result;
+use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
 use crate::row_writer::{self, MultiTableData, TableData};
 
 /// the default column count for table writer
 const APPROXIMATE_COLUMN_COUNT: usize = 8;
 
-/// Normalize otlp instrumentation, metric and attribute names
-///
-/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
-/// - since the name are case-insensitive, we transform them to lowercase for
-///   better sql usability
-/// - replace `.` and `-` with `_`
-fn normalize_otlp_name(name: &str) -> String {
-    name.to_lowercase().replace(['.', '-'], "_")
+const COUNT_TABLE_SUFFIX: &str = "_count";
+const SUM_TABLE_SUFFIX: &str = "_sum";
+
+const JOB_KEY: &str = "job";
+const INSTANCE_KEY: &str = "instance";
+
+const UNDERSCORE: &str = "_";
+
+// see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
+// instance and job alias to service.instance.id and service.name that we need to keep
+const DEFAULT_ATTRS: [&str; 19] = [
+    "service.instance.id",
+    "service.name",
+    "service.namespace",
+    "service.version",
+    "cloud.availability_zone",
+    "cloud.region",
+    "container.name",
+    "deployment.environment",
+    "deployment.environment.name",
+    "k8s.cluster.name",
+    "k8s.container.name",
+    "k8s.cronjob.name",
+    "k8s.daemonset.name",
+    "k8s.deployment.name",
+    "k8s.job.name",
+    "k8s.namespace.name",
+    "k8s.pod.name",
+    "k8s.replicaset.name",
+    "k8s.statefulset.name",
+];
+
+lazy_static! {
+    static ref DEFAULT_ATTRS_HASHSET: HashSet<String> =
+        HashSet::from_iter(DEFAULT_ATTRS.iter().map(|s| s.to_string()));
+    static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
+
+const OTEL_SCOPE_NAME: &str = "name";
+const OTEL_SCOPE_VERSION: &str = "version";
+const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 
 /// Convert OpenTelemetry metrics to GreptimeDB insert requests
 ///
@@ -44,15 +81,28 @@ fn normalize_otlp_name(name: &str) -> String {
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<(RowInsertRequests, usize)> {
     let mut table_writer = MultiTableData::default();
 
     for resource in &request.resource_metrics {
-        let resource_attrs = resource.resource.as_ref().map(|r| &r.attributes);
+        let resource_attrs = resource.resource.as_ref().map(|r| {
+            let mut attrs = r.attributes.clone();
+            process_resource_attrs(&mut attrs, metric_ctx);
+            attrs
+        });
+
         for scope in &resource.scope_metrics {
-            let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
+            let scope_attrs = process_scope_attrs(scope, metric_ctx);
+
             for metric in &scope.metrics {
-                encode_metrics(&mut table_writer, metric, resource_attrs, scope_attrs)?;
+                encode_metrics(
+                    &mut table_writer,
+                    metric,
+                    resource_attrs.as_ref(),
+                    scope_attrs.as_ref(),
+                    metric_ctx,
+                )?;
             }
         }
     }
@@ -60,28 +110,153 @@ pub fn to_grpc_insert_requests(
     Ok(table_writer.into_row_insert_requests())
 }
 
+fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx) {
+    if metric_ctx.is_legacy {
+        return;
+    }
+
+    // check if promote all
+    if !metric_ctx.promote_all_resource_attrs {
+        attrs.retain(|kv| DEFAULT_ATTRS_HASHSET.contains(&kv.key));
+    }
+
+    // remap service.name and service.instance.id to job and instance
+    let mut tmp = Vec::with_capacity(2);
+    for kv in attrs.iter() {
+        match &kv.key as &str {
+            KEY_SERVICE_NAME => {
+                tmp.push(KeyValue {
+                    key: JOB_KEY.to_string(),
+                    value: kv.value.clone(),
+                });
+            }
+            KEY_SERVICE_INSTANCE_ID => {
+                tmp.push(KeyValue {
+                    key: INSTANCE_KEY.to_string(),
+                    value: kv.value.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    attrs.extend(tmp);
+}
+
+fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Option<Vec<KeyValue>> {
+    if metric_ctx.is_legacy {
+        return scope.scope.as_ref().map(|s| s.attributes.clone());
+    };
+
+    if !metric_ctx.promote_scope_attrs {
+        return None;
+    }
+
+    // persist scope attrs with name, version and schema_url
+    scope.scope.as_ref().map(|s| {
+        let mut attrs = s.attributes.clone();
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_NAME.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(s.name.clone())),
+            }),
+        });
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_VERSION.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(s.version.clone())),
+            }),
+        });
+        attrs.push(KeyValue {
+            key: OTEL_SCOPE_SCHEMA_URL.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(scope.schema_url.clone())),
+            }),
+        });
+        attrs
+    })
+}
+
+// replace . with _
+// see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
+pub fn normalize_metric_name(name: &str) -> String {
+    let name = INVALID_METRIC_NAME.replace_all(name, UNDERSCORE);
+
+    if let Some((_, first)) = name.char_indices().next()
+        && first >= '0'
+        && first <= '9'
+    {
+        format!("_{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Normalize otlp instrumentation, metric and attribute names
+///
+/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/api.md#instrument-name-syntax>
+/// - since the name are case-insensitive, we transform them to lowercase for
+///   better sql usability
+/// - replace `.` and `-` with `_`
+pub fn legacy_normalize_otlp_name(name: &str) -> String {
+    name.to_lowercase().replace(['.', '-'], "_")
+}
+
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    let name = &metric.name;
+    let name = if metric_ctx.is_legacy {
+        legacy_normalize_otlp_name(&metric.name)
+    } else {
+        normalize_metric_name(&metric.name)
+    };
+
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(table_writer, name, gauge, resource_attrs, scope_attrs)?;
+                encode_gauge(
+                    table_writer,
+                    &name,
+                    gauge,
+                    resource_attrs,
+                    scope_attrs,
+                    metric_ctx,
+                )?;
             }
             metric::Data::Sum(sum) => {
-                encode_sum(table_writer, name, sum, resource_attrs, scope_attrs)?;
+                encode_sum(
+                    table_writer,
+                    &name,
+                    sum,
+                    resource_attrs,
+                    scope_attrs,
+                    metric_ctx,
+                )?;
             }
             metric::Data::Summary(summary) => {
-                encode_summary(table_writer, name, summary, resource_attrs, scope_attrs)?;
+                encode_summary(
+                    table_writer,
+                    &name,
+                    summary,
+                    resource_attrs,
+                    scope_attrs,
+                    metric_ctx,
+                )?;
             }
             metric::Data::Histogram(hist) => {
-                encode_histogram(table_writer, name, hist, resource_attrs, scope_attrs)?;
+                encode_histogram(
+                    table_writer,
+                    &name,
+                    hist,
+                    resource_attrs,
+                    scope_attrs,
+                    metric_ctx,
+                )?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
             metric::Data::ExponentialHistogram(_hist) => {}
@@ -91,39 +266,74 @@ fn encode_metrics(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttributeType {
+    Resource,
+    Scope,
+    DataPoint,
+    Legacy,
+}
+
 fn write_attributes(
     writer: &mut TableData,
     row: &mut Vec<Value>,
     attrs: Option<&Vec<KeyValue>>,
+    attribute_type: AttributeType,
 ) -> Result<()> {
-    if let Some(attrs) = attrs {
-        let table_tags = attrs.iter().filter_map(|attr| {
-            if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
-                let key = normalize_otlp_name(&attr.key);
+    let Some(attrs) = attrs else {
+        return Ok(());
+    };
+
+    let tags = attrs.iter().filter_map(|attr| {
+        attr.value
+            .as_ref()
+            .and_then(|v| v.value.as_ref())
+            .and_then(|val| {
+                let key = match attribute_type {
+                    AttributeType::Resource | AttributeType::DataPoint => {
+                        normalize_metric_name(&attr.key)
+                    }
+                    AttributeType::Scope => {
+                        format!("otel_scope_{}", normalize_metric_name(&attr.key))
+                    }
+                    AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
+                };
                 match val {
-                    any_value::Value::StringValue(s) => Some((key, s.to_string())),
+                    any_value::Value::StringValue(s) => Some((key, s.clone())),
                     any_value::Value::IntValue(v) => Some((key, v.to_string())),
                     any_value::Value::DoubleValue(v) => Some((key, v.to_string())),
                     _ => None, // TODO(sunng87): allow different type of values
                 }
-            } else {
-                None
-            }
-        });
+            })
+    });
+    row_writer::write_tags(writer, tags, row)?;
 
-        row_writer::write_tags(writer, table_tags, row)?;
-    }
     Ok(())
 }
 
-fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: i64) -> Result<()> {
-    row_writer::write_ts_to_nanos(
-        table,
-        GREPTIME_TIMESTAMP,
-        Some(time_nano),
-        Precision::Nanosecond,
-        row,
-    )
+fn write_timestamp(
+    table: &mut TableData,
+    row: &mut Vec<Value>,
+    time_nano: i64,
+    legacy_mode: bool,
+) -> Result<()> {
+    if legacy_mode {
+        row_writer::write_ts_to_nanos(
+            table,
+            GREPTIME_TIMESTAMP,
+            Some(time_nano),
+            Precision::Nanosecond,
+            row,
+        )
+    } else {
+        row_writer::write_ts_to_millis(
+            table,
+            GREPTIME_TIMESTAMP,
+            Some(time_nano / 1000000),
+            Precision::Millisecond,
+            row,
+        )
+    }
 }
 
 fn write_data_point_value(
@@ -152,12 +362,20 @@ fn write_tags_and_timestamp(
     scope_attrs: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
     timestamp_nanos: i64,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    write_attributes(table, row, resource_attrs)?;
-    write_attributes(table, row, scope_attrs)?;
-    write_attributes(table, row, data_point_attrs)?;
+    if metric_ctx.is_legacy {
+        write_attributes(table, row, resource_attrs, AttributeType::Legacy)?;
+        write_attributes(table, row, scope_attrs, AttributeType::Legacy)?;
+        write_attributes(table, row, data_point_attrs, AttributeType::Legacy)?;
+    } else {
+        // TODO(shuiyisong): check `__type__` and `__unit__` tags in prometheus
+        write_attributes(table, row, resource_attrs, AttributeType::Resource)?;
+        write_attributes(table, row, scope_attrs, AttributeType::Scope)?;
+        write_attributes(table, row, data_point_attrs, AttributeType::DataPoint)?;
+    }
 
-    write_timestamp(table, row, timestamp_nanos)?;
+    write_timestamp(table, row, timestamp_nanos, metric_ctx.is_legacy)?;
 
     Ok(())
 }
@@ -172,9 +390,10 @@ fn encode_gauge(
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
-        normalize_otlp_name(name),
+        name,
         APPROXIMATE_COLUMN_COUNT,
         gauge.data_points.len(),
     );
@@ -188,6 +407,7 @@ fn encode_gauge(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            metric_ctx,
         )?;
 
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
@@ -206,9 +426,10 @@ fn encode_sum(
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
-        normalize_otlp_name(name),
+        name,
         APPROXIMATE_COLUMN_COUNT,
         sum.data_points.len(),
     );
@@ -222,6 +443,7 @@ fn encode_sum(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            metric_ctx,
         )?;
         write_data_point_value(table, &mut row, GREPTIME_VALUE, &data_point.value)?;
         table.add_row(row);
@@ -249,8 +471,9 @@ fn encode_histogram(
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    let normalized_name = normalize_otlp_name(name);
+    let normalized_name = name;
 
     let bucket_table_name = format!("{}_bucket", normalized_name);
     let sum_table_name = format!("{}_sum", normalized_name);
@@ -273,6 +496,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
+                metric_ctx,
             )?;
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
@@ -312,6 +536,7 @@ fn encode_histogram(
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
+                metric_ctx,
             )?;
 
             row_writer::write_f64(&mut sum_table, GREPTIME_VALUE, sum, &mut sum_row)?;
@@ -326,6 +551,7 @@ fn encode_histogram(
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
+            metric_ctx,
         )?;
 
         row_writer::write_f64(
@@ -356,35 +582,126 @@ fn encode_summary(
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    let table = table_writer.get_or_default_table_data(
-        normalize_otlp_name(name),
-        APPROXIMATE_COLUMN_COUNT,
-        summary.data_points.len(),
-    );
+    if metric_ctx.is_legacy {
+        let table = table_writer.get_or_default_table_data(
+            name,
+            APPROXIMATE_COLUMN_COUNT,
+            summary.data_points.len(),
+        );
 
-    for data_point in &summary.data_points {
-        let mut row = table.alloc_one_row();
-        write_tags_and_timestamp(
-            table,
-            &mut row,
-            resource_attrs,
-            scope_attrs,
-            Some(data_point.attributes.as_ref()),
-            data_point.time_unix_nano as i64,
-        )?;
-
-        for quantile in &data_point.quantile_values {
-            row_writer::write_f64(
+        for data_point in &summary.data_points {
+            let mut row = table.alloc_one_row();
+            write_tags_and_timestamp(
                 table,
-                format!("greptime_p{:02}", quantile.quantile * 100f64),
-                quantile.value,
                 &mut row,
+                resource_attrs,
+                scope_attrs,
+                Some(data_point.attributes.as_ref()),
+                data_point.time_unix_nano as i64,
+                metric_ctx,
             )?;
-        }
 
-        row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
-        table.add_row(row);
+            for quantile in &data_point.quantile_values {
+                row_writer::write_f64(
+                    table,
+                    format!("greptime_p{:02}", quantile.quantile * 100f64),
+                    quantile.value,
+                    &mut row,
+                )?;
+            }
+
+            row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
+            table.add_row(row);
+        }
+    } else {
+        // 1. quantile table
+        // 2. count table
+        // 3. sum table
+
+        let metric_name = name;
+        let count_name = format!("{}{}", metric_name, COUNT_TABLE_SUFFIX);
+        let sum_name = format!("{}{}", metric_name, SUM_TABLE_SUFFIX);
+
+        for data_point in &summary.data_points {
+            {
+                let quantile_table = table_writer.get_or_default_table_data(
+                    metric_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
+
+                for quantile in &data_point.quantile_values {
+                    let mut row = quantile_table.alloc_one_row();
+                    write_tags_and_timestamp(
+                        quantile_table,
+                        &mut row,
+                        resource_attrs,
+                        scope_attrs,
+                        Some(data_point.attributes.as_ref()),
+                        data_point.time_unix_nano as i64,
+                        metric_ctx,
+                    )?;
+                    row_writer::write_tag(quantile_table, "quantile", quantile.quantile, &mut row)?;
+                    row_writer::write_f64(
+                        quantile_table,
+                        GREPTIME_VALUE,
+                        quantile.value,
+                        &mut row,
+                    )?;
+                    quantile_table.add_row(row);
+                }
+            }
+            {
+                let count_table = table_writer.get_or_default_table_data(
+                    &count_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
+                let mut row = count_table.alloc_one_row();
+                write_tags_and_timestamp(
+                    count_table,
+                    &mut row,
+                    resource_attrs,
+                    scope_attrs,
+                    Some(data_point.attributes.as_ref()),
+                    data_point.time_unix_nano as i64,
+                    metric_ctx,
+                )?;
+
+                row_writer::write_f64(
+                    count_table,
+                    GREPTIME_VALUE,
+                    data_point.count as f64,
+                    &mut row,
+                )?;
+
+                count_table.add_row(row);
+            }
+            {
+                let sum_table = table_writer.get_or_default_table_data(
+                    &sum_name,
+                    APPROXIMATE_COLUMN_COUNT,
+                    summary.data_points.len(),
+                );
+
+                let mut row = sum_table.alloc_one_row();
+                write_tags_and_timestamp(
+                    sum_table,
+                    &mut row,
+                    resource_attrs,
+                    scope_attrs,
+                    Some(data_point.attributes.as_ref()),
+                    data_point.time_unix_nano as i64,
+                    metric_ctx,
+                )?;
+
+                row_writer::write_f64(sum_table, GREPTIME_VALUE, data_point.sum, &mut row)?;
+
+                sum_table.add_row(row);
+            }
+        }
     }
 
     Ok(())
@@ -401,12 +718,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_otlp_name() {
-        assert_eq!(normalize_otlp_name("jvm.memory.free"), "jvm_memory_free");
-        assert_eq!(normalize_otlp_name("jvm-memory-free"), "jvm_memory_free");
-        assert_eq!(normalize_otlp_name("jvm_memory_free"), "jvm_memory_free");
-        assert_eq!(normalize_otlp_name("JVM_MEMORY_FREE"), "jvm_memory_free");
-        assert_eq!(normalize_otlp_name("JVM_memory_FREE"), "jvm_memory_free");
+    fn test_legacy_normalize_otlp_name() {
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm.memory.free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm-memory-free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("jvm_memory_free"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("JVM_MEMORY_FREE"),
+            "jvm_memory_free"
+        );
+        assert_eq!(
+            legacy_normalize_otlp_name("JVM_memory_FREE"),
+            "jvm_memory_free"
+        );
     }
 
     fn keyvalue(key: &str, value: &str) -> KeyValue {
@@ -441,14 +773,15 @@ mod tests {
             &mut tables,
             "datamon",
             &gauge,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 5);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
@@ -456,8 +789,7 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
                 "greptime_value"
@@ -491,14 +823,15 @@ mod tests {
             &mut tables,
             "datamon",
             &sum,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
         assert_eq!(table.num_rows(), 2);
-        assert_eq!(table.num_columns(), 5);
+        assert_eq!(table.num_columns(), 4);
         assert_eq!(
             table
                 .columns()
@@ -506,8 +839,7 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
                 "greptime_value"
@@ -541,14 +873,15 @@ mod tests {
             &mut tables,
             "datamon",
             &summary,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
         let table = tables.get_or_default_table_data("datamon", 0, 0);
-        assert_eq!(table.num_rows(), 1);
-        assert_eq!(table.num_columns(), 7);
+        assert_eq!(table.num_rows(), 2);
+        assert_eq!(table.num_columns(), 5);
         assert_eq!(
             table
                 .columns()
@@ -556,13 +889,45 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
-                "greptime_p90",
-                "greptime_p95",
-                "greptime_count"
+                "quantile",
+                "greptime_value"
+            ]
+        );
+
+        let table = tables.get_or_default_table_data("datamon_count", 0, 0);
+        assert_eq!(table.num_rows(), 1);
+        assert_eq!(table.num_columns(), 4);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
+            ]
+        );
+
+        let table = tables.get_or_default_table_data("datamon_sum", 0, 0);
+        assert_eq!(table.num_rows(), 1);
+        assert_eq!(table.num_columns(), 4);
+        assert_eq!(
+            table
+                .columns()
+                .iter()
+                .map(|c| &c.column_name)
+                .collect::<Vec<&String>>(),
+            vec![
+                "otel_scope_scope",
+                "host",
+                "greptime_timestamp",
+                "greptime_value"
             ]
         );
     }
@@ -592,8 +957,9 @@ mod tests {
             &mut tables,
             "histo",
             &histogram,
-            Some(&vec![keyvalue("resource", "app")]),
+            Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
+            &OtlpMetricCtx::default(),
         )
         .unwrap();
 
@@ -602,7 +968,7 @@ mod tests {
         // bucket table
         let bucket_table = tables.get_or_default_table_data("histo_bucket", 0, 0);
         assert_eq!(bucket_table.num_rows(), 5);
-        assert_eq!(bucket_table.num_columns(), 6);
+        assert_eq!(bucket_table.num_columns(), 5);
         assert_eq!(
             bucket_table
                 .columns()
@@ -610,8 +976,7 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
                 "le",
@@ -621,7 +986,7 @@ mod tests {
 
         let sum_table = tables.get_or_default_table_data("histo_sum", 0, 0);
         assert_eq!(sum_table.num_rows(), 1);
-        assert_eq!(sum_table.num_columns(), 5);
+        assert_eq!(sum_table.num_columns(), 4);
         assert_eq!(
             sum_table
                 .columns()
@@ -629,17 +994,16 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
-                "greptime_value",
+                "greptime_value"
             ]
         );
 
         let count_table = tables.get_or_default_table_data("histo_count", 0, 0);
         assert_eq!(count_table.num_rows(), 1);
-        assert_eq!(count_table.num_columns(), 5);
+        assert_eq!(count_table.num_columns(), 4);
         assert_eq!(
             count_table
                 .columns()
@@ -647,12 +1011,19 @@ mod tests {
                 .map(|c| &c.column_name)
                 .collect::<Vec<&String>>(),
             vec![
-                "resource",
-                "scope",
+                "otel_scope_scope",
                 "host",
                 "greptime_timestamp",
-                "greptime_value",
+                "greptime_value"
             ]
         );
+    }
+
+    #[test]
+    fn test_normalize_otlp_name() {
+        assert_eq!(normalize_metric_name("test.123"), "test_123");
+        assert_eq!(normalize_metric_name("test_123"), "test_123");
+        assert_eq!(normalize_metric_name("test._123"), "test__123");
+        assert_eq!(normalize_metric_name("123_test"), "_123_test");
     }
 }

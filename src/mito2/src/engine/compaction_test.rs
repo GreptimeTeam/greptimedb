@@ -485,7 +485,7 @@ async fn test_compaction_region_with_overlapping_delete_all() {
     put_and_flush(&engine, region_id, &column_schemas, 0..2400).await; // window 3600
     put_and_flush(&engine, region_id, &column_schemas, 0..3600).await; // window 3600
     delete_and_flush(&engine, region_id, &column_schemas, 0..10800).await; // window 10800
-
+    tokio::time::sleep(Duration::from_millis(2)).await;
     compact(&engine, region_id).await;
     let scanner = engine
         .scanner(region_id, ScanRequest::default())

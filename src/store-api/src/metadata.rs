@@ -593,6 +593,19 @@ impl RegionMetadataBuilder {
                 self.drop_defaults(names)?;
             }
             AlterKind::SetDefaults { columns } => self.set_defaults(&columns)?,
+            AlterKind::SyncColumns { column_metadatas } => {
+                self.primary_key = column_metadatas
+                    .iter()
+                    .filter_map(|column_metadata| {
+                        if column_metadata.semantic_type == SemanticType::Tag {
+                            Some(column_metadata.column_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.column_metadatas = column_metadatas;
+            }
         }
         Ok(self)
     }

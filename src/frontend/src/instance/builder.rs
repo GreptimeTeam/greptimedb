@@ -25,6 +25,7 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use dashmap::DashMap;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -223,6 +224,7 @@ impl FrontendBuilder {
             slow_query_recorder,
             limiter,
             process_manager,
+            otlp_metrics_table_legacy_cache: DashMap::new(),
         })
     }
 }

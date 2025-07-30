@@ -309,6 +309,5 @@ fn build_new_table_info(
         "Built new table info: {:?} for table {}, table_id: {}",
         new_info.meta, table_name, table_id
     );
-
     Ok(new_info)
 }

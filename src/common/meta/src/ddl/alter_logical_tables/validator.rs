@@ -21,7 +21,9 @@ use store_api::storage::TableId;
 use table::table_reference::TableReference;
 
 use crate::ddl::utils::table_id::get_all_table_ids_by_names;
-use crate::ddl::utils::table_info::get_all_table_info_values_by_table_ids;
+use crate::ddl::utils::table_info::{
+    all_logical_table_routes_have_same_physical_id, get_all_table_info_values_by_table_ids,
+};
 use crate::error::{
     AlterLogicalTablesInvalidArgumentsSnafu, Result, TableInfoNotFoundSnafu,
     TableRouteNotFoundSnafu,
@@ -146,23 +148,16 @@ impl<'a> AlterLogicalTableValidator<'a> {
         table_route_manager: &TableRouteManager,
         table_ids: &[TableId],
     ) -> Result<()> {
-        let table_routes = table_route_manager
-            .table_route_storage()
-            .batch_get(table_ids)
+        let all_logical_table_routes_have_same_physical_id =
+            all_logical_table_routes_have_same_physical_id(
+                table_route_manager,
+                table_ids,
+                self.physical_table_id,
+            )
             .await?;
 
-        let physical_table_id = self.physical_table_id;
-
-        let is_same_physical_table = table_routes.iter().all(|r| {
-            if let Some(TableRouteValue::Logical(r)) = r {
-                r.physical_table_id() == physical_table_id
-            } else {
-                false
-            }
-        });
-
         ensure!(
-            is_same_physical_table,
+            all_logical_table_routes_have_same_physical_id,
             AlterLogicalTablesInvalidArgumentsSnafu {
                 err_msg: "All the tasks should have the same physical table id"
             }

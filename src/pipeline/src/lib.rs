@@ -50,3 +50,8 @@ macro_rules! unwrap_or_continue_if_err {
         }
     }};
 }
+
+pub fn truthy<V: AsRef<str>>(v: V) -> bool {
+    let v = v.as_ref().to_lowercase();
+    v == "true" || v == "1" || v == "yes" || v == "on" || v == "t"
+}

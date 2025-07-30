@@ -27,7 +27,9 @@ use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::ensure;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{PrepareRequest, RegionScanner, ScannerProperties};
+use store_api::region_engine::{
+    PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+};
 
 use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::range::RangeBuilderList;
@@ -71,7 +73,7 @@ impl UnorderedScan {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_num = self.properties.num_partitions();
         let streams = (0..part_num)
-            .map(|i| self.scan_partition(&metrics_set, i))
+            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
             .collect::<Result<Vec<_>, BoxedError>>()?;
         let stream = stream! {
             for mut stream in streams {
@@ -139,7 +141,7 @@ impl UnorderedScan {
 
         let streams = (0..self.properties.partitions.len())
             .map(|partition| {
-                let metrics = self.partition_metrics(partition, &metrics_set);
+                let metrics = self.partition_metrics(false, partition, &metrics_set);
                 self.scan_batch_in_partition(partition, metrics)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -149,6 +151,7 @@ impl UnorderedScan {
 
     fn partition_metrics(
         &self,
+        explain_verbose: bool,
         partition: usize,
         metrics_set: &ExecutionPlanMetricsSet,
     ) -> PartitionMetrics {
@@ -157,6 +160,7 @@ impl UnorderedScan {
             partition,
             "UnorderedScan",
             self.stream_ctx.query_start,
+            explain_verbose,
             metrics_set,
         );
         self.metrics_list.set(partition, part_metrics.clone());
@@ -165,10 +169,19 @@ impl UnorderedScan {
 
     fn scan_partition_impl(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream> {
-        let metrics = self.partition_metrics(partition, metrics_set);
+        if ctx.explain_verbose {
+            common_telemetry::info!(
+                "UnorderedScan partition {}, region_id: {}",
+                partition,
+                self.stream_ctx.input.region_metadata().region_id
+            );
+        }
+
+        let metrics = self.partition_metrics(ctx.explain_verbose, partition, metrics_set);
 
         let batch_stream = self.scan_batch_in_partition(partition, metrics.clone())?;
 
@@ -263,6 +276,8 @@ impl UnorderedScan {
                 metrics.scan_cost += fetch_start.elapsed();
                 part_metrics.merge_metrics(&metrics);
             }
+
+            part_metrics.on_finish();
         };
         Ok(Box::pin(stream))
     }
@@ -288,10 +303,11 @@ impl RegionScanner for UnorderedScan {
 
     fn scan_partition(
         &self,
+        ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
-        self.scan_partition_impl(metrics_set, partition)
+        self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
     }
 
