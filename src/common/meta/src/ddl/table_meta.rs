@@ -181,6 +181,10 @@ impl TableMetadataAllocator {
             region_wal_options,
         })
     }
+
+    pub fn table_id_sequence(&self) -> SequenceRef {
+        self.table_id_sequence.clone()
+    }
 }
 
 pub type PeerAllocatorRef = Arc<dyn PeerAllocator>;
