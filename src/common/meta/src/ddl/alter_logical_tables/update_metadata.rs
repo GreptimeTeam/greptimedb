@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use common_grpc_expr::alter_expr_to_request;
-use itertools::Itertools;
 use snafu::ResultExt;
 use table::metadata::{RawTableInfo, TableInfo};
 
 use crate::ddl::alter_logical_tables::executor::AlterLogicalTablesExecutor;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
+use crate::ddl::utils::table_info::batch_update_table_info_values;
 use crate::error;
 use crate::error::{ConvertAlterTableRequestSnafu, Result};
 use crate::key::table_info::TableInfoValue;
@@ -48,25 +48,8 @@ impl AlterLogicalTablesProcedure {
 
     pub(crate) async fn update_logical_tables_metadata(&mut self) -> Result<()> {
         let table_info_values = self.build_update_metadata()?;
-        let manager = &self.context.table_metadata_manager;
-        let chunk_size = manager.batch_update_table_info_value_chunk_size();
-        if table_info_values.len() > chunk_size {
-            let chunks = table_info_values
-                .into_iter()
-                .chunks(chunk_size)
-                .into_iter()
-                .map(|check| check.collect::<Vec<_>>())
-                .collect::<Vec<_>>();
-            for chunk in chunks {
-                manager.batch_update_table_info_values(chunk).await?;
-            }
-        } else {
-            manager
-                .batch_update_table_info_values(table_info_values)
-                .await?;
-        }
-
-        Ok(())
+        batch_update_table_info_values(&self.context.table_metadata_manager, table_info_values)
+            .await
     }
 
     pub(crate) fn build_update_metadata(
