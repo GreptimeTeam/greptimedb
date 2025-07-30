@@ -75,6 +75,7 @@ pub async fn metrics(
 
     query_ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
         promote_all_resource_attrs: http_opts.promote_all_resource_attrs,
+        resource_attrs: http_opts.resource_attrs,
         promote_scope_attrs: http_opts.promote_scope_attrs,
         with_metric_engine,
         // set is_legacy later

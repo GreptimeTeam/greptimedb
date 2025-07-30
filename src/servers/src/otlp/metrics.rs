@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
@@ -38,33 +37,7 @@ const INSTANCE_KEY: &str = "instance";
 
 const UNDERSCORE: &str = "_";
 
-// see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
-// instance and job alias to service.instance.id and service.name that we need to keep
-const DEFAULT_ATTRS: [&str; 19] = [
-    "service.instance.id",
-    "service.name",
-    "service.namespace",
-    "service.version",
-    "cloud.availability_zone",
-    "cloud.region",
-    "container.name",
-    "deployment.environment",
-    "deployment.environment.name",
-    "k8s.cluster.name",
-    "k8s.container.name",
-    "k8s.cronjob.name",
-    "k8s.daemonset.name",
-    "k8s.deployment.name",
-    "k8s.job.name",
-    "k8s.namespace.name",
-    "k8s.pod.name",
-    "k8s.replicaset.name",
-    "k8s.statefulset.name",
-];
-
 lazy_static! {
-    static ref DEFAULT_ATTRS_HASHSET: HashSet<String> =
-        HashSet::from_iter(DEFAULT_ATTRS.iter().map(|s| s.to_string()));
     static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
 
@@ -115,11 +88,6 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
         return;
     }
 
-    // check if promote all
-    if !metric_ctx.promote_all_resource_attrs {
-        attrs.retain(|kv| DEFAULT_ATTRS_HASHSET.contains(&kv.key));
-    }
-
     // remap service.name and service.instance.id to job and instance
     let mut tmp = Vec::with_capacity(2);
     for kv in attrs.iter() {
@@ -139,6 +107,12 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
             _ => {}
         }
     }
+
+    // if promote all, then exclude the list, else, include the list
+    attrs.retain(|kv| {
+        metric_ctx.promote_all_resource_attrs ^ metric_ctx.resource_attrs.contains(&kv.key)
+    });
+
     attrs.extend(tmp);
 }
 

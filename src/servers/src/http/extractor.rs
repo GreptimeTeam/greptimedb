@@ -14,6 +14,7 @@
 
 use core::str;
 
+use ahash::HashSet;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -24,7 +25,8 @@ use crate::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
     GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME,
-    GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_RESOURCE_ATTRS_LIST_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
     GREPTIME_PIPELINE_PARAMS_HEADER, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
     GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
 };
@@ -134,8 +136,13 @@ where
 /// Axum extractor for OTLP metric options from HTTP headers.
 pub struct OtlpMetricOptions {
     /// Persist all resource attributes to the table
-    /// If false, only persist selected attributes. See [`DEFAULT_ATTRS`] in `otlp/metrics.rs`
+    /// If false, persist selected attributes. See [`promote_resource_attrs`].
     pub promote_all_resource_attrs: bool,
+
+    /// If `promote_all_resource_attrs` is true, then this list is a exclude list.
+    /// If `promote_all_resource_attrs` is false, then this list is a include list.
+    pub resource_attrs: HashSet<String>,
+
     /// Persist scope attributes to the table
     /// If false, persist none
     pub promote_scope_attrs: bool,
@@ -155,6 +162,14 @@ where
         )?
         .map(truthy)
         .unwrap_or(false);
+
+        let resource_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_RESOURCE_ATTRS_LIST_HEADER_NAME],
+        )?
+        .map(|s| s.split(';').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
         let promote_scope_attrs = string_value_from_header(
             headers,
             &[GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME],
@@ -164,6 +179,7 @@ where
 
         Ok(OtlpMetricOptions {
             promote_all_resource_attrs,
+            resource_attrs,
             promote_scope_attrs,
         })
     }
