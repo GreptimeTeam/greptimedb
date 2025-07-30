@@ -23,12 +23,13 @@ use datafusion::arrow::array::Array;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
+    RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_common::DFSchema;
 use datafusion_expr::EmptyRelation;
@@ -149,9 +150,18 @@ impl Absent {
             ),
             Field::new(&value_column, DataType::Float64, true),
         ];
+
+        // remove duplicate fake labels
+        let mut fake_labels = fake_labels
+            .into_iter()
+            .collect::<HashMap<String, String>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        fake_labels.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         for (name, _) in fake_labels.iter() {
             fields.push(Field::new(name, DataType::Utf8, true));
         }
+
         let output_schema = Arc::new(DFSchema::from_unqualified_fields(
             fields.into(),
             HashMap::new(),
@@ -174,6 +184,13 @@ impl Absent {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let output_schema = Arc::new(self.output_schema.as_arrow().clone());
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(output_schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
         Arc::new(AbsentExec {
             start: self.start,
             end: self.end,
@@ -181,8 +198,9 @@ impl Absent {
             time_index_column: self.time_index_column.clone(),
             value_column: self.value_column.clone(),
             fake_labels: self.fake_labels.clone(),
-            output_schema: Arc::new(self.output_schema.as_arrow().clone()),
+            output_schema: output_schema.clone(),
             input: exec_input,
+            properties,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -238,6 +256,7 @@ pub struct AbsentExec {
     fake_labels: Vec<(String, String)>,
     output_schema: SchemaRef,
     input: Arc<dyn ExecutionPlan>,
+    properties: PlanProperties,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -251,7 +270,7 @@ impl ExecutionPlan for AbsentExec {
     }
 
     fn properties(&self) -> &PlanProperties {
-        self.input.properties()
+        &self.properties
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -271,7 +290,7 @@ impl ExecutionPlan for AbsentExec {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        vec![true]
+        vec![false]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -292,6 +311,7 @@ impl ExecutionPlan for AbsentExec {
             fake_labels: self.fake_labels.clone(),
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
+            properties: self.properties.clone(),
             metric: self.metric.clone(),
         }))
     }
@@ -509,6 +529,15 @@ mod tests {
 
         let memory_exec = MemoryExec::try_new(&[vec![batch]], schema, None).unwrap();
 
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+
         let absent_exec = AbsentExec {
             start: 0,
             end: 5000,
@@ -516,15 +545,14 @@ mod tests {
             time_index_column: "timestamp".to_string(),
             value_column: "value".to_string(),
             fake_labels: vec![],
-            output_schema: Arc::new(Schema::new(vec![
-                Field::new(
-                    "timestamp",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    true,
-                ),
-                Field::new("value", DataType::Float64, true),
-            ])),
+            output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
+            properties: PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            ),
             metric: ExecutionPlanMetricsSet::new(),
         };
 
@@ -568,6 +596,14 @@ mod tests {
         // Empty input
         let memory_exec = MemoryExec::try_new(&[vec![]], schema, None).unwrap();
 
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
         let absent_exec = AbsentExec {
             start: 0,
             end: 2000,
@@ -575,15 +611,14 @@ mod tests {
             time_index_column: "timestamp".to_string(),
             value_column: "value".to_string(),
             fake_labels: vec![],
-            output_schema: Arc::new(Schema::new(vec![
-                Field::new(
-                    "timestamp",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    true,
-                ),
-                Field::new("value", DataType::Float64, true),
-            ])),
+            output_schema: output_schema.clone(),
             input: Arc::new(memory_exec),
+            properties: PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            ),
             metric: ExecutionPlanMetricsSet::new(),
         };
 
