@@ -2546,16 +2546,30 @@ impl PromPlanner {
             .build()
             .context(DataFusionPlanningSnafu)?;
 
+        let fake_labels = self
+            .ctx
+            .selector_matcher
+            .iter()
+            .filter_map(|matcher| match matcher.op {
+                MatchOp::Equal => Some((matcher.name.clone(), matcher.value.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
         // Create the absent plan
         let absent_plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(Absent::new(
-                self.ctx.start,
-                self.ctx.end,
-                self.ctx.interval,
-                self.ctx.time_index_column.as_ref().unwrap().clone(),
-                self.ctx.field_columns[0].clone(),
-                ordered_aggregated_input,
-            )),
+            node: Arc::new(
+                Absent::try_new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.interval,
+                    self.ctx.time_index_column.as_ref().unwrap().clone(),
+                    self.ctx.field_columns[0].clone(),
+                    fake_labels,
+                    ordered_aggregated_input,
+                )
+                .context(DataFusionPlanningSnafu)?,
+            ),
         });
 
         Ok(absent_plan)

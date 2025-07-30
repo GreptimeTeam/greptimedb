@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -28,25 +30,56 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
-use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion_common::DFSchema;
+use datafusion_expr::EmptyRelation;
+use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
+use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow_array::StringArray;
 use datatypes::compute::SortOptions;
 use futures::{ready, Stream, StreamExt};
+use greptime_proto::substrait_extension as pb;
+use prost::Message;
+use snafu::ResultExt;
 
+use crate::error::DeserializeSnafu;
 use crate::extension_plan::Millisecond;
 
 /// Maximum number of rows per output batch
 const ABSENT_BATCH_SIZE: usize = 8192;
 
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Absent {
     start: Millisecond,
     end: Millisecond,
     step: Millisecond,
     time_index_column: String,
     value_column: String,
+    fake_labels: Vec<(String, String)>,
     input: LogicalPlan,
+    output_schema: DFSchemaRef,
+}
+
+impl PartialOrd for Absent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        // compare on fields except schema and input
+        (
+            self.start,
+            self.end,
+            self.step,
+            &self.time_index_column,
+            &self.value_column,
+            &self.fake_labels,
+        )
+            .partial_cmp(&(
+                other.start,
+                other.end,
+                other.step,
+                &other.time_index_column,
+                &other.value_column,
+                &other.fake_labels,
+            ))
+    }
 }
 
 impl UserDefinedLogicalNodeCore for Absent {
@@ -59,9 +92,7 @@ impl UserDefinedLogicalNodeCore for Absent {
     }
 
     fn schema(&self) -> &DFSchemaRef {
-        // For the absent function, we create a schema with timestamp and value columns
-        // This is a simplified approach - in a real implementation you might want to cache this
-        self.input.schema()
+        &self.output_schema
     }
 
     fn expressions(&self) -> Vec<Expr> {
@@ -93,28 +124,49 @@ impl UserDefinedLogicalNodeCore for Absent {
             step: self.step,
             time_index_column: self.time_index_column.clone(),
             value_column: self.value_column.clone(),
+            fake_labels: self.fake_labels.clone(),
             input: inputs[0].clone(),
+            output_schema: self.output_schema.clone(),
         })
     }
 }
 
 impl Absent {
-    pub fn new(
+    pub fn try_new(
         start: Millisecond,
         end: Millisecond,
         step: Millisecond,
         time_index_column: String,
         value_column: String,
+        fake_labels: Vec<(String, String)>,
         input: LogicalPlan,
-    ) -> Self {
-        Self {
+    ) -> DataFusionResult<Self> {
+        let mut fields = vec![
+            Field::new(
+                &time_index_column,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(&value_column, DataType::Float64, true),
+        ];
+        for (name, _) in fake_labels.iter() {
+            fields.push(Field::new(name, DataType::Utf8, true));
+        }
+        let output_schema = Arc::new(DFSchema::from_unqualified_fields(
+            fields.into(),
+            HashMap::new(),
+        )?);
+
+        Ok(Self {
             start,
             end,
             step,
             time_index_column,
             value_column,
+            fake_labels,
             input,
-        }
+            output_schema,
+        })
     }
 
     pub const fn name() -> &'static str {
@@ -122,30 +174,58 @@ impl Absent {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let output_schema = Arc::new(Schema::new(vec![
-            Field::new(
-                &self.time_index_column,
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                true,
-            ),
-            Field::new(&self.value_column, DataType::Float64, true),
-        ]));
-
         Arc::new(AbsentExec {
             start: self.start,
             end: self.end,
             step: self.step,
             time_index_column: self.time_index_column.clone(),
             value_column: self.value_column.clone(),
-            output_schema,
+            fake_labels: self.fake_labels.clone(),
+            output_schema: Arc::new(self.output_schema.as_arrow().clone()),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
 
-    // TODO: Implement serialize/deserialize when protobuf definitions are added
-    // pub fn serialize(&self) -> Vec<u8>
-    // pub fn deserialize(bytes: &[u8]) -> Result<Self>
+    pub fn serialize(&self) -> Vec<u8> {
+        pb::Absent {
+            start: self.start,
+            end: self.end,
+            step: self.step,
+            time_index_column: self.time_index_column.clone(),
+            value_column: self.value_column.clone(),
+            fake_labels: self
+                .fake_labels
+                .iter()
+                .map(|(name, value)| pb::LabelPair {
+                    key: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
+        let pb_absent = pb::Absent::decode(bytes).context(DeserializeSnafu)?;
+        let placeholder_plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        Self::try_new(
+            pb_absent.start,
+            pb_absent.end,
+            pb_absent.step,
+            pb_absent.time_index_column,
+            pb_absent.value_column,
+            pb_absent
+                .fake_labels
+                .iter()
+                .map(|label| (label.key.clone(), label.value.clone()))
+                .collect(),
+            placeholder_plan,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -155,6 +235,7 @@ pub struct AbsentExec {
     step: Millisecond,
     time_index_column: String,
     value_column: String,
+    fake_labels: Vec<(String, String)>,
     output_schema: SchemaRef,
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -208,6 +289,7 @@ impl ExecutionPlan for AbsentExec {
             step: self.step,
             time_index_column: self.time_index_column.clone(),
             value_column: self.value_column.clone(),
+            fake_labels: self.fake_labels.clone(),
             output_schema: self.output_schema.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
@@ -232,6 +314,7 @@ impl ExecutionPlan for AbsentExec {
                 .unwrap()
                 .0,
             output_schema: self.output_schema.clone(),
+            fake_labels: self.fake_labels.clone(),
             input,
             metric: baseline_metric,
             // Buffer for streaming output timestamps
@@ -270,6 +353,7 @@ pub struct AbsentStream {
     step: Millisecond,
     time_index_column_index: usize,
     output_schema: SchemaRef,
+    fake_labels: Vec<(String, String)>,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
     // Buffer for streaming output timestamps
@@ -373,15 +457,21 @@ impl AbsentStream {
             return Ok(None);
         }
 
-        let timestamp_array = Arc::new(TimestampMillisecondArray::from(
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.output_schema.fields().len());
+        let num_rows = self.output_timestamps.len();
+        columns.push(Arc::new(TimestampMillisecondArray::from(
             self.output_timestamps.clone(),
-        ));
-        let value_array = Arc::new(Float64Array::from(vec![1.0; self.output_timestamps.len()]));
+        )) as _);
+        columns.push(Arc::new(Float64Array::from(vec![1.0; num_rows])) as _);
 
-        let batch = RecordBatch::try_new(
-            self.output_schema.clone(),
-            vec![timestamp_array, value_array],
-        )?;
+        for (_, value) in self.fake_labels.iter() {
+            columns.push(Arc::new(StringArray::from_iter(std::iter::repeat_n(
+                Some(value.clone()),
+                num_rows,
+            ))) as _);
+        }
+
+        let batch = RecordBatch::try_new(self.output_schema.clone(), columns)?;
 
         self.output_timestamps.clear();
         Ok(Some(batch))
@@ -425,6 +515,7 @@ mod tests {
             step: 1000,
             time_index_column: "timestamp".to_string(),
             value_column: "value".to_string(),
+            fake_labels: vec![],
             output_schema: Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
@@ -483,6 +574,7 @@ mod tests {
             step: 1000,
             time_index_column: "timestamp".to_string(),
             value_column: "value".to_string(),
+            fake_labels: vec![],
             output_schema: Arc::new(Schema::new(vec![
                 Field::new(
                     "timestamp",
