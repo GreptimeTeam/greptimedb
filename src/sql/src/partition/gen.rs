@@ -30,7 +30,7 @@ fn get_custom_alphabet(ranges: &[(char, char)]) -> Vec<char> {
         for c in (start_char as u32)..=(end_char as u32) {
             // Ensure characters are visible ASCII, though the problem implies input is ASCII.
             // This filter is a safeguard if non-ASCII chars are accidentally passed.
-            if c >= 0x20 && c <= 0x7E {
+            if (0x20..=0x7E).contains(&c) {
                 // Visible ASCII range
                 chars.push(std::char::from_u32(c).unwrap());
             }
@@ -46,7 +46,7 @@ fn get_custom_alphabet(ranges: &[(char, char)]) -> Vec<char> {
 /// or truncated to match `fixed_len`.
 fn string_to_custom_biguint_fixed_len(
     s: &str,
-    alphabet: &Vec<char>,
+    alphabet: &[char],
     base: &BigUint,
     fixed_len: usize,
 ) -> BigUint {
@@ -81,7 +81,7 @@ fn string_to_custom_biguint_fixed_len(
 /// Converts a BigUint back to a string of fixed length based on a custom alphabet.
 fn custom_biguint_to_string_fixed_len(
     n: &BigUint,
-    alphabet: &Vec<char>,
+    alphabet: &[char],
     base: &BigUint,
     fixed_len: usize,
 ) -> String {
@@ -231,12 +231,8 @@ pub fn divide_string_range(
             let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
             let current_biguint = effective_pos_for_stop; // In this model, effective_pos is already the BigUint value
 
-            let stop_str = custom_biguint_to_string_fixed_len(
-                &current_biguint,
-                &alphabet,
-                &base,
-                max_len as usize,
-            );
+            let stop_str =
+                custom_biguint_to_string_fixed_len(&current_biguint, &alphabet, &base, max_len);
             computed_stops_with_values.push((current_biguint, stop_str));
         }
     }
