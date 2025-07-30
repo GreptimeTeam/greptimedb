@@ -47,8 +47,9 @@ use crate::rpc::KeyValue;
 
 /// TLS mode configuration for PostgreSQL connections.
 /// This mirrors the TlsMode from servers::tls to avoid circular dependencies.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TlsMode {
+    #[default]
     Disable,
     Prefer,
     Require,
@@ -64,12 +65,6 @@ pub struct TlsOption {
     pub cert_path: String,
     pub key_path: String,
     pub watch: bool,
-}
-
-impl Default for TlsMode {
-    fn default() -> Self {
-        TlsMode::Disable
-    }
 }
 
 impl Default for TlsOption {
@@ -394,7 +389,7 @@ impl ExecutorFactory<PgClient> for PgExecutorFactory {
 pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
 
 // TLS connector factory functions
-fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustlsConnect> {
+pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustlsConnect> {
     let mut root_store = rustls::RootCertStore::empty();
 
     // Add system root certificates

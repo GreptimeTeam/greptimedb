@@ -14,6 +14,7 @@ pg_kvbackend = [
     "dep:tokio-postgres-rustls",
     "dep:rustls-pemfile",
     "dep:rustls-native-certs",
+    "dep:rustls",
 ]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
 enterprise = []
