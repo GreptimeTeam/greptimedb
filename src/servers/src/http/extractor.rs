@@ -131,12 +131,13 @@ where
     }
 }
 
+/// Axum extractor for OTLP metric options from HTTP headers.
 pub struct OtlpMetricOptions {
-    // persist all resource attributes to the table
-    // if false, only persist selected attributes
+    /// Persist all resource attributes to the table
+    /// If false, only persist selected attributes. See [`DEFAULT_ATTRS`] in `otlp/metrics.rs`
     pub promote_all_resource_attrs: bool,
-    // persist scope attributes to the table
-    // if false, persist none
+    /// Persist scope attributes to the table
+    /// If false, persist none
     pub promote_scope_attrs: bool,
 }
 

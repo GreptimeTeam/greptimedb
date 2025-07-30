@@ -351,7 +351,7 @@ impl Instance {
 
     async fn check_otlp_legacy(
         &self,
-        names: &Vec<&String>,
+        names: &[&String],
         ctx: QueryContextRef,
     ) -> server_error::Result<bool> {
         let db_string = ctx.get_db_string();
