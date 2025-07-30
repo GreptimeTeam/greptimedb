@@ -24,6 +24,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
+use common_slow_query_recorder::SlowQuery;
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
@@ -83,6 +85,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    slow_query_recorder: Option<SlowQueryRecorderRef>,
 }
 
 impl MysqlInstanceShim {
@@ -91,6 +94,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        slow_query_recorder: Option<SlowQueryRecorderRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -118,6 +122,7 @@ impl MysqlInstanceShim {
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            slow_query_recorder,
         }
     }
 
@@ -450,6 +455,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let params: Vec<ParamValue> = p.into_iter().collect();
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
 
+        let _slow_query_timer = self.plan(&stmt_key).and_then(|plan| {
+            self.slow_query_recorder
+                .as_ref()
+                .and_then(|recorder| recorder.start(SlowQuery::Sql(plan.query), query_ctx.clone()))
+        });
+
         let outputs = match self
             .do_execute(query_ctx.clone(), stmt_key, Params::ProtocolParams(params))
             .await
@@ -562,6 +573,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             }
         }
+
+        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            recorder.start(SlowQuery::Sql(query.to_string()), query_ctx.clone())
+        } else {
+            None
+        };
 
         let outputs = self.do_query(query, query_ctx.clone()).await;
         writer::write_output(writer, query_ctx, outputs).await?;

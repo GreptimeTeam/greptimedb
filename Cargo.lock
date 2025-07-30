@@ -2710,6 +2710,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-slow-query-recorder"
+version = "0.16.0"
+dependencies = [
+ "api",
+ "catalog",
+ "common-catalog",
+ "common-error",
+ "common-macro",
+ "common-telemetry",
+ "common-time",
+ "operator",
+ "promql-parser",
+ "query",
+ "rand 0.9.0",
+ "session",
+ "snafu 0.8.5",
+ "sql",
+ "store-api",
+ "table",
+ "tokio",
+]
+
+[[package]]
 name = "common-sql"
 version = "0.16.0"
 dependencies = [
@@ -4803,6 +4826,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query-recorder",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -7139,6 +7163,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
+name = "md5"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
+
+[[package]]
 name = "measure_time"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8199,7 +8229,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
- "md5",
+ "md5 0.7.0",
  "moka",
  "opendal",
  "prometheus",
@@ -9032,8 +9062,8 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.30.2"
-source = "git+https://github.com/sunng87/pgwire?rev=127573d997228cfb70c7699881c568eae8131270#127573d997228cfb70c7699881c568eae8131270"
+version = "0.31.0"
+source = "git+https://github.com/sunng87/pgwire?rev=573bb87a81791fe1cddf51eff0ec631fb41a81df#573bb87a81791fe1cddf51eff0ec631fb41a81df"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9042,7 +9072,7 @@ dependencies = [
  "futures",
  "hex",
  "lazy-regex",
- "md5",
+ "md5 0.8.0",
  "postgres-types",
  "rand 0.9.0",
  "ring",
@@ -11330,6 +11360,7 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-session",
+ "common-slow-query-recorder",
  "common-sql",
  "common-telemetry",
  "common-test-util",
@@ -12838,6 +12869,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
+ "common-slow-query-recorder",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -12892,6 +12924,7 @@ dependencies = [
  "tonic 0.12.3",
  "tower 0.5.2",
  "url",
+ "urlencoding",
  "uuid",
  "yaml-rust",
  "zstd 0.13.2",

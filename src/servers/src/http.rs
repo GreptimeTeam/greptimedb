@@ -28,6 +28,7 @@ use axum::{middleware, routing, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_recordbatch::RecordBatch;
+use common_slow_query_recorder::SlowQueryRecorderRef;
 use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -531,6 +532,7 @@ impl From<NullResponse> for HttpResponse {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
+    pub slow_query_recorder: Option<SlowQueryRecorderRef>,
 }
 
 #[derive(Clone)]
@@ -556,8 +558,15 @@ impl HttpServerBuilder {
         }
     }
 
-    pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
+    pub fn with_sql_handler(
+        self,
+        sql_handler: ServerSqlQueryHandlerRef,
+        slow_query_recorder: Option<SlowQueryRecorderRef>,
+    ) -> Self {
+        let sql_router = HttpServer::route_sql(ApiState {
+            sql_handler,
+            slow_query_recorder,
+        });
 
         Self {
             router: self
@@ -1310,7 +1319,7 @@ mod test {
         let instance = Arc::new(DummyInstance { _tx: tx });
         let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
         let server = HttpServerBuilder::new(options)
-            .with_sql_handler(sql_instance)
+            .with_sql_handler(sql_instance, None)
             .build();
         server.build(server.make_app()).unwrap().route(
             "/test/timeout",

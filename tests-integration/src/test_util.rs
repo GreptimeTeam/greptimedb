@@ -415,9 +415,10 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
-            instance.fe_instance().clone(),
-        ))
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.fe_instance().clone()),
+            None,
+        )
         .with_logs_handler(instance.fe_instance().clone())
         .with_metrics_handler(MetricsHandler)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
@@ -451,10 +452,12 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 
     let mut http_server = HttpServerBuilder::new(http_opts);
 
+    let slow_query_recorder = instance.fe_instance().slow_query_recorder();
     http_server = http_server
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(
-            instance.fe_instance().clone(),
-        ))
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(instance.fe_instance().clone()),
+            slow_query_recorder,
+        )
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
@@ -535,7 +538,10 @@ pub async fn setup_test_prom_app_with_frontend(
     };
     let frontend_ref = instance.fe_instance().clone();
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
+        .with_sql_handler(
+            ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()),
+            None,
+        )
         .with_logs_handler(instance.fe_instance().clone())
         .with_prom_handler(
             frontend_ref.clone(),
@@ -629,6 +635,7 @@ pub async fn setup_mysql_server_with_user_provider(
     let fe_mysql_addr = format!("127.0.0.1:{}", ports::get_port());
 
     let fe_instance_ref = instance.fe_instance().clone();
+    let slow_query_recorder = fe_instance_ref.slow_query_recorder();
     let opts = MysqlOptions {
         addr: fe_mysql_addr.clone(),
         ..Default::default()
@@ -649,6 +656,7 @@ pub async fn setup_mysql_server_with_user_provider(
             opts.reject_no_database.unwrap_or(false),
         )),
         None,
+        slow_query_recorder,
     );
 
     mysql_server
@@ -698,6 +706,7 @@ pub async fn setup_pg_server_with_user_provider(
         0,
         runtime,
         user_provider,
+        None,
         None,
     ));
 

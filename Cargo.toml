@@ -31,6 +31,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/session",
+    "src/common/slow-query-recorder",
     "src/common/sql",
     "src/common/stat",
     "src/common/substrait",
@@ -267,6 +268,7 @@ common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
 common-session = { path = "src/common/session" }
+common-slow-query-recorder = { path = "src/common/slow-query-recorder" }
 common-sql = { path = "src/common/sql" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }

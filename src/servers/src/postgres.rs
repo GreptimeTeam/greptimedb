@@ -31,10 +31,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ::auth::UserProviderRef;
+use common_slow_query_recorder::slow_query_recorder::SlowQueryRecorderRef;
 use derive_builder::Builder;
-use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::{ClientInfo, PgWireServerHandlers};
+use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -78,6 +79,7 @@ pub struct PostgresServerHandlerInner {
 
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
+    slow_query_recorder: Option<SlowQueryRecorderRef>,
 }
 
 #[derive(Builder)]
@@ -92,35 +94,30 @@ pub(crate) struct MakePostgresServerHandler {
 pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
 
 impl PgWireServerHandlers for PostgresServerHandler {
-    type StartupHandler = PostgresServerHandlerInner;
-    type SimpleQueryHandler = PostgresServerHandlerInner;
-    type ExtendedQueryHandler = PostgresServerHandlerInner;
-    type CopyHandler = NoopCopyHandler;
-    type ErrorHandler = PostgresServerHandlerInner;
-
-    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
         self.0.clone()
     }
 
-    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
         self.0.clone()
     }
 
-    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+    fn startup_handler(&self) -> Arc<impl StartupHandler> {
         self.0.clone()
     }
 
-    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
-        Arc::new(NoopCopyHandler)
-    }
-
-    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+    fn error_handler(&self) -> Arc<impl ErrorHandler> {
         self.0.clone()
     }
 }
 
 impl MakePostgresServerHandler {
-    fn make(&self, addr: Option<SocketAddr>, process_id: u32) -> PostgresServerHandler {
+    fn make(
+        &self,
+        addr: Option<SocketAddr>,
+        process_id: u32,
+        slow_query_recorder: Option<SlowQueryRecorderRef>,
+    ) -> PostgresServerHandler {
         let session = Arc::new(Session::new(
             addr,
             Channel::Postgres,
@@ -135,6 +132,7 @@ impl MakePostgresServerHandler {
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            slow_query_recorder,
         };
         PostgresServerHandler(Arc::new(handler))
     }

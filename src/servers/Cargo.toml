@@ -48,6 +48,7 @@ common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-session.workspace = true
+common-slow-query-recorder.workspace = true
 common-sql.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
@@ -90,7 +91,7 @@ opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 #pgwire = { version = "0.30", default-features = false, features = ["server-api-ring"] }
-pgwire = { git = "https://github.com/sunng87/pgwire", rev = "127573d997228cfb70c7699881c568eae8131270", default-features = false, features = [
+pgwire = { git = "https://github.com/sunng87/pgwire", rev = "573bb87a81791fe1cddf51eff0ec631fb41a81df", default-features = false, features = [
     "server-api-ring",
 ] }
 pin-project = "1.0"
