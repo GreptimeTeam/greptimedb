@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::{from_pb_time_ranges, to_pb_time_ranges};
+use api::helper::to_pb_time_ranges;
 use api::v1::region::{
     region_request, truncate_request, RegionRequest, RegionRequestHeader,
     TruncateRequest as PbTruncateRegionRequest,
