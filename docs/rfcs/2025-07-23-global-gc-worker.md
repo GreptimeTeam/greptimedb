@@ -40,6 +40,35 @@ The detailed process is as follows:
 4.  **Deletion Marking (Obsolete Files)**: Files that have exceeded their maximum configurable lingering time and are not referenced by any active temporary manifests are marked for deletion.
 5.  **Lingering Time (Unused Files)**: Unused files (those never recorded in any manifest) are also subject to a configurable maximum lingering time before they are eligible for deletion.
 
+Following flowchart illustrates the GC worker's process:
+
+```mermaid
+flowchart TD
+    A[Major Compaction Completed] --> B[Trigger GC Worker]
+    B --> C[Scan Region Manifest]
+    C --> D[Identify File Types]
+    D --> E[Unused Files<br/>Never recorded in manifest]
+    D --> F[Obsolete Files<br/>Previously in manifest<br/>but marked for removal]
+    E --> G[Check Lingering Time]
+    F --> G
+    G --> H{File exceeds<br/>configured lingering time?}
+    H -->|No| I[Skip deletion]
+    H -->|Yes| J[Check Temporary Manifest]
+    J --> K{File in use by<br/>active queries?}
+    K -->|Yes| L[Retain file<br/>Wait for next GC cycle]
+    K -->|No| M[Safely delete file]
+    I --> N[End GC cycle]
+    L --> N
+    M --> O[Update Manifest]
+    O --> N
+    N --> P[Wait for next Major Compaction]
+    P --> A
+    style A fill:#e1f5fe
+    style B fill:#f3e5f5
+    style M fill:#e8f5e8
+    style L fill:#fff3e0
+```
+
 #### Handling Obsolete Files
 
 An obsolete file is permanently deleted only if two conditions are met:
@@ -81,7 +110,7 @@ This section summarizes the key aspects and trade-offs of the proposed integrate
 
 This section outlines key areas requiring further discussion and defines potential avenues for future development.
 
-*   **Slow Query Recorder Implementation**: Detailed specifications for the slow query recorder's implementation and its precise interaction mechanisms with temporary manifests are needed.
+*   **Slow Query Recorder Implementation**: Detailed specifications for modify slow query recorder's implementation and its precise interaction mechanisms with temporary manifests are needed.
 *   **Configurable Lingering Times**: Establish and make configurable the specific lingering times for both obsolete and unused files to optimize storage reclamation and data availability.
 
 ## Alternatives
@@ -98,6 +127,8 @@ Instead of integrating the GC worker directly into the major compaction process,
 *   **Increased Complexity**: Requires a separate service to manage, monitor, and coordinate with other components.
 *   **Potential for Redundancy**: May duplicate some file scanning logic already present in compaction.
 *   **Consistency Challenges**: Ensuring read consistency would require more complex coordination mechanisms between the standalone GC service and active queries, potentially involving a distributed lock manager or a more sophisticated temporary manifest system.
+
+This alternative could be implemented in the future if the integrated GC worker proves insufficient or if there is a need for more advanced GC strategies.
 
 ### 2. Manifest-Driven Deletion (No Lingering Time)
 
