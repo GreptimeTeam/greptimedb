@@ -14,7 +14,7 @@
 
 use std::cmp::max;
 
-use num_bigint::{BigUint, ToBigUint};
+use num_bigint::BigUint;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 
 use crate::between_string;
@@ -58,6 +58,74 @@ fn biguint_to_string_trimmed(n: &BigUint) -> String {
 
     // Convert the collected bytes to a String.
     String::from_utf8_lossy(&visible_ascii_bytes).into_owned()
+}
+
+/// Merges a list of potentially overlapping or adjacent string ranges
+/// into a sorted list of non-overlapping BigUint ranges.
+/// Each range (start, end) is inclusive.
+fn merge_ranges(mut ranges: Vec<(BigUint, BigUint)>) -> Vec<(BigUint, BigUint)> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort ranges by their start points
+    ranges.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut merged = Vec::new();
+    let mut current_start = ranges[0].0.clone();
+    let mut current_end = ranges[0].1.clone();
+
+    for i in 1..ranges.len() {
+        let (next_start, next_end) = &ranges[i];
+
+        // If the next range overlaps or is immediately adjacent to the current merged range
+        // Note: We use `current_end + BigUint::one()` because ranges are inclusive.
+        if next_start <= &(current_end.clone() + BigUint::from(1u32)) {
+            current_end = max(current_end, next_end.clone());
+        } else {
+            // No overlap or adjacency, add the current merged range and start a new one
+            merged.push((current_start, current_end));
+            current_start = next_start.clone();
+            current_end = next_end.clone();
+        }
+    }
+    merged.push((current_start, current_end)); // Add the last merged range
+
+    merged
+}
+
+/// Maps a position from the "effective" (compressed, non-excluded) range
+/// back to its corresponding BigUint value in the original string space.
+/// This function correctly navigates through the provided merged valid ranges.
+fn map_effective_to_original(
+    effective_pos: &BigUint,
+    merged_valid_ranges: &Vec<(BigUint, BigUint)>,
+) -> BigUint {
+    let mut effective_pos_remaining = effective_pos.clone();
+
+    for (range_start, range_end) in merged_valid_ranges {
+        // Calculate the inclusive length of the current range
+        let current_range_length = range_end - range_start + BigUint::from(1u32);
+
+        if effective_pos_remaining < current_range_length {
+            // The point falls within this current range
+            return range_start + effective_pos_remaining;
+        } else {
+            // The point is past this range, subtract its length from effective_pos_remaining
+            effective_pos_remaining -= &current_range_length;
+        }
+    }
+
+    // This case should ideally not be reached if effective_pos is within total_effective_length.
+    // However, as a fallback, return the end of the last valid range.
+    // This might happen due to floating point inaccuracies if BigUint division was not integer division,
+    // or if effective_pos is exactly at the boundary of the total effective length.
+    if let Some((_, last_end)) = merged_valid_ranges.last() {
+        last_end.clone()
+    } else {
+        // If there are no valid ranges, return zero (or panic, depending on desired error handling)
+        BigUint::from(0u32)
+    }
 }
 
 /// Divides a range of string values into multiple segments.
@@ -107,18 +175,12 @@ fn biguint_to_string_trimmed(n: &BigUint) -> String {
 /// println!("Stops for 'a' to 'z' (1 segment): {:?}", stops);
 /// ```
 pub fn divide_string_range(
-    start: &str,
-    end: &str,
+    ranges: &[(&str, &str)],
     num_segments: u32,
     hardstops: &[&str],
 ) -> Result<Vec<String>> {
-    // Input validation
-    if start.is_empty() || end.is_empty() {
-        InvalidPartitionRangeSnafu {
-            start: start.to_string(),
-            end: end.to_string(),
-        }
-        .fail()?;
+    if ranges.is_empty() {
+        return Ok(vec![]);
     }
     if num_segments < 2 {
         InvalidPartitionNumberSnafu {
@@ -128,41 +190,60 @@ pub fn divide_string_range(
     }
 
     // Determine the maximum length for consistent padding during BigUint conversion.
-    // This ensures that "a" and "aa" are treated differently, and "a" is padded to "a\0"
-    // if compared to "aa".
-    let mut max_len = max(start.len(), end.len());
+    let mut max_len = 0;
+    for (start_str, end_str) in ranges {
+        max_len = max(max_len, start_str.len());
+        max_len = max(max_len, end_str.len());
+    }
     for hs in hardstops {
         max_len = max(max_len, hs.len());
     }
 
-    let start_biguint = string_to_biguint_padded(start, max_len);
-    let end_biguint = string_to_biguint_padded(end, max_len);
+    // Parse and merge input ranges
+    let mut parsed_ranges_biguint: Vec<(BigUint, BigUint)> = Vec::new();
+    for (start_str, end_str) in ranges {
+        let start_biguint = string_to_biguint_padded(start_str, max_len);
+        let end_biguint = string_to_biguint_padded(end_str, max_len);
 
-    // Handle invalid range
-    if start_biguint >= end_biguint {
-        InvalidPartitionRangeSnafu {
-            start: start.to_string(),
-            end: end.to_string(),
+        if start_biguint >= end_biguint {
+            InvalidPartitionRangeSnafu {
+                start: start_str.to_string(),
+                end: end_str.to_string(),
+            }
+            .fail()?;
         }
-        .fail()?;
+        parsed_ranges_biguint.push((start_biguint, end_biguint));
     }
 
-    let range = &end_biguint - &start_biguint;
-    let num_segments_biguint = num_segments.to_biguint().unwrap();
+    let merged_valid_ranges = merge_ranges(parsed_ranges_biguint);
 
-    // Calculate the step size. If range is smaller than num_segments, step might be 0.
-    let step = range / num_segments_biguint;
+    if merged_valid_ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Calculate the total effective length of the range, summing lengths of merged valid ranges.
+    let mut total_effective_length = BigUint::from(0u32);
+    for (range_start, range_end) in &merged_valid_ranges {
+        // Add 1 because ranges are inclusive
+        total_effective_length += range_end - range_start + BigUint::from(1u32);
+    }
+
+    let num_segments_biguint: BigUint = num_segments.into();
+
+    // Calculate the step size in the effective (compressed) space.
+    let segment_step_in_effective_space: BigUint = &total_effective_length / &num_segments_biguint;
 
     let mut computed_stops_with_values: Vec<(BigUint, String)> =
         Vec::with_capacity(num_segments as usize);
 
-    // Generate intermediate stops based on the new logic.
-
-    // Generate intermediate stops, excluding the very last one (end).
+    // Generate intermediate stops, excluding the very last one (end of the last range).
     // The loop goes from 1 to num_segments - 1.
     for i in 1..num_segments {
-        // Note: `..num_segments` excludes `num_segments`
-        let current_biguint = &start_biguint + &step * i.to_biguint().unwrap();
+        let i_biguint: BigUint = i.into();
+        let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
+        let current_biguint =
+            map_effective_to_original(&effective_pos_for_stop, &merged_valid_ranges);
+
         let stop_str = biguint_to_string_trimmed(&current_biguint);
         computed_stops_with_values.push((current_biguint, stop_str));
     }
@@ -215,12 +296,11 @@ pub fn divide_string_range(
 
 pub fn partition_rule_for_range(
     field_name: &str,
-    start: &str,
-    end: &str,
+    ranges: &[(&str, &str)],
     num_partitions: u32,
     hardstops: &[&str],
 ) -> Result<Vec<Expr>> {
-    let stops = divide_string_range(start, end, num_partitions, hardstops)?;
+    let stops = divide_string_range(ranges, num_partitions, hardstops)?;
 
     let ident_expr = Expr::Identifier(Ident::new(field_name).clone());
     let mut last_stop: Option<String> = None;
@@ -257,22 +337,22 @@ mod tests {
 
     #[test]
     fn test_divide_string_range() {
-        assert!(divide_string_range("", "", 10, &[]).is_err());
-        assert!(divide_string_range("a", "a", 10, &[]).is_err());
-        assert!(divide_string_range("z", "a", 10, &[]).is_err());
-        assert!(divide_string_range("a", "b", 0, &[]).is_err());
-        assert!(divide_string_range("a", "b", 1, &[]).is_err());
+        assert!(divide_string_range(&[("", "")], 10, &[]).is_err());
+        assert!(divide_string_range(&[("a", "a")], 10, &[]).is_err());
+        assert!(divide_string_range(&[("z", "a")], 10, &[]).is_err());
+        assert!(divide_string_range(&[("a", "b")], 0, &[]).is_err());
+        assert!(divide_string_range(&[("a", "b")], 1, &[]).is_err());
 
-        let stops = divide_string_range("a", "z", 10, &[]).expect("failed to divide string range");
+        let stops =
+            divide_string_range(&[("a", "z")], 10, &[]).expect("failed to divide string range");
         assert_eq!(stops, vec!["c", "e", "g", "i", "k", "m", "o", "q", "s"]);
 
-        let stops = divide_string_range("ap-southeast-1", "us-west-2", 4, &[])
+        let stops = divide_string_range(&[("ap-southeast-1", "us-west-2")], 4, &[])
             .expect("failed to divide string range");
         assert_eq!(stops, vec!["fp", "kq", "prmvg"]);
 
         let stops = divide_string_range(
-            "ap-southeast-1",
-            "us-west-2",
+            &[("ap-southeast-1", "us-west-2")],
             10,
             &["eu-central-1", "us-east-1"],
         )
@@ -291,14 +371,20 @@ mod tests {
                 "us-east-1"
             ]
         );
+
+        let stops = divide_string_range(&[("0", "9"), ("a", "f")], 16, &[])
+            .expect("failed to divide string range");
+        assert_eq!(
+            stops,
+            vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+        );
     }
 
     #[test]
     fn test_generate_partition_expr() {
         let rules = partition_rule_for_range(
             "ns",
-            "ap-southeast-1",
-            "us-west-2",
+            &[("ap-southeast-1", "us-west-2")],
             10,
             &["eu-central-1", "us-east-1"],
         )
