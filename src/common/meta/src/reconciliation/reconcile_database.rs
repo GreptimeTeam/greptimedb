@@ -72,7 +72,7 @@ impl ReconcileDatabaseContext {
             wait_for_inflight_subprocedures(
                 procedure_ctx,
                 &self.volatile_ctx.inflight_subprocedures,
-                self.persistent_ctx.fast_fail,
+                self.persistent_ctx.fail_fast,
             )
             .await?;
             self.volatile_ctx.inflight_subprocedures.clear();
@@ -86,7 +86,7 @@ impl ReconcileDatabaseContext {
 pub(crate) struct PersistentContext {
     catalog: String,
     schema: String,
-    fast_fail: bool,
+    fail_fast: bool,
     parallelism: usize,
     resolve_strategy: ResolveStrategy,
 }
@@ -95,14 +95,14 @@ impl PersistentContext {
     pub fn new(
         catalog: String,
         schema: String,
-        fast_fail: bool,
+        fail_fast: bool,
         parallelism: usize,
         resolve_strategy: ResolveStrategy,
     ) -> Self {
         Self {
             catalog,
             schema,
-            fast_fail,
+            fail_fast,
             parallelism,
             resolve_strategy,
         }
@@ -136,12 +136,12 @@ impl ReconcileDatabaseProcedure {
         ctx: Context,
         catalog: String,
         schema: String,
-        fast_fail: bool,
+        fail_fast: bool,
         parallelism: usize,
         resolve_strategy: ResolveStrategy,
     ) -> Self {
         let persistent_ctx =
-            PersistentContext::new(catalog, schema, fast_fail, parallelism, resolve_strategy);
+            PersistentContext::new(catalog, schema, fail_fast, parallelism, resolve_strategy);
         let context = ReconcileDatabaseContext::new(ctx, persistent_ctx);
         let state = Box::new(ReconcileDatabaseStart);
         Self { context, state }

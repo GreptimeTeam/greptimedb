@@ -23,12 +23,12 @@ use crate::error::{
 
 /// Wait for inflight subprocedures.
 ///
-/// If `fast_fail` is true, the function will return an error if any subprocedure fails.
+/// If `fail_fast` is true, the function will return an error if any subprocedure fails.
 /// Otherwise, the function will continue waiting for all subprocedures to complete.
 pub(crate) async fn wait_for_inflight_subprocedures(
     procedure_ctx: &ProcedureContext,
     subprocedures: &[ProcedureId],
-    fast_fail: bool,
+    fail_fast: bool,
 ) -> Result<()> {
     let mut receivers = Vec::with_capacity(subprocedures.len());
     for procedure_id in subprocedures {
@@ -51,7 +51,7 @@ pub(crate) async fn wait_for_inflight_subprocedures(
         tasks.push(fut);
     }
 
-    if fast_fail {
+    if fail_fast {
         try_join_all(tasks).await.context(WaitProcedureSnafu)?;
     } else {
         for result in join_all(tasks).await {
