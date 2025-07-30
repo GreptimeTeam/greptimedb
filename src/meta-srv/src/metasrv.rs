@@ -37,6 +37,7 @@ use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::sequence::SequenceRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
@@ -436,6 +437,7 @@ pub struct Metasrv {
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
+    table_id_sequence: SequenceRef,
 
     plugins: Plugins,
 }
@@ -705,6 +707,10 @@ impl Metasrv {
 
     pub fn subscription_manager(&self) -> Option<SubscriptionManagerRef> {
         self.plugins.get::<SubscriptionManagerRef>()
+    }
+
+    pub fn table_id_sequence(&self) -> &SequenceRef {
+        &self.table_id_sequence
     }
 
     pub fn plugins(&self) -> &Plugins {
