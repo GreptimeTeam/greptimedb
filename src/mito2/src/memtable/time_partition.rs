@@ -28,7 +28,7 @@ use datatypes::arrow::array::{
     TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
 };
 use datatypes::arrow::buffer::{BooleanBuffer, MutableBuffer};
-use datatypes::arrow::datatypes::{DataType, Int64Type};
+use datatypes::arrow::datatypes::{DataType, Int64Type, SchemaRef};
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{build_primary_key_codec, PrimaryKeyCodec};
 use smallvec::{smallvec, SmallVec};
@@ -40,6 +40,7 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::memtable::bulk::part::{BulkPart, BulkPartConverter};
 use crate::memtable::version::SmallMemtableVec;
 use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 
 /// Initial time window if not specified.
 const INITIAL_TIME_WINDOW: Duration = Duration::from_days(1);
@@ -211,6 +212,10 @@ pub struct TimePartitions {
     builder: MemtableBuilderRef,
     /// Primary key encoder.
     primary_key_codec: Arc<dyn PrimaryKeyCodec>,
+
+    /// Cached schema for bulk insert.
+    /// This field is Some if the memtable uses bulk insert.
+    bulk_schema: Option<SchemaRef>,
 }
 
 pub type TimePartitionsRef = Arc<TimePartitions>;
@@ -225,12 +230,17 @@ impl TimePartitions {
     ) -> Self {
         let inner = PartitionsInner::new(next_memtable_id);
         let primary_key_codec = build_primary_key_codec(&metadata);
+        let bulk_schema = builder
+            .use_bulk_insert(&metadata)
+            .then(|| to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default()));
+
         Self {
             inner: Mutex::new(inner),
             part_duration: part_duration.unwrap_or(INITIAL_TIME_WINDOW),
             metadata,
             builder,
             primary_key_codec,
+            bulk_schema,
         }
     }
 
@@ -238,9 +248,10 @@ impl TimePartitions {
     ///
     /// It creates new partitions if necessary.
     pub fn write(&self, kvs: &KeyValues) -> Result<()> {
-        if self.builder.use_bulk_insert(&self.metadata) {
+        if let Some(bulk_schema) = &self.bulk_schema {
             let mut converter = BulkPartConverter::new(
                 &self.metadata,
+                bulk_schema.clone(),
                 kvs.num_rows(),
                 self.primary_key_codec.clone(),
                 false,
@@ -432,6 +443,7 @@ impl TimePartitions {
             metadata: metadata.clone(),
             builder: self.builder.clone(),
             primary_key_codec: self.primary_key_codec.clone(),
+            bulk_schema: self.bulk_schema.clone(),
         }
     }
 

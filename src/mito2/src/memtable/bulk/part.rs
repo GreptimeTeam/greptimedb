@@ -36,7 +36,7 @@ use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
 use datatypes::arrow_array::BinaryArray;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector};
-use datatypes::value::Value;
+use datatypes::value::{Value, ValueRef};
 use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues, KeyValuesRef};
 use mito_codec::row_converter::{
@@ -48,7 +48,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt, Snafu};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::SequenceNumber;
 use table::predicate::Predicate;
@@ -64,6 +64,8 @@ use crate::memtable::BoxedBatchIterator;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
+
+const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
 #[derive(Clone)]
 pub struct BulkPart {
@@ -218,7 +220,7 @@ impl BulkPart {
 /// Builder type for primary key dictionary array.
 type PrimaryKeyArrayBuilder = BinaryDictionaryBuilder<UInt32Type>;
 
-/// Primary key column builder trait for handling different data types.
+/// Primary key column builder for handling strings specially.
 enum PrimaryKeyColumnBuilder {
     /// String dictionary builder for string types.
     StringDict(StringDictionaryBuilder<UInt32Type>),
@@ -228,10 +230,11 @@ enum PrimaryKeyColumnBuilder {
 
 impl PrimaryKeyColumnBuilder {
     /// Appends a value to the builder.
-    fn push_value_ref(&mut self, value: datatypes::value::ValueRef) -> Result<()> {
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match self {
             PrimaryKeyColumnBuilder::StringDict(builder) => {
                 if let Ok(Some(s)) = value.as_string() {
+                    // We know the value is a string.
                     builder.append_value(s);
                 } else {
                     builder.append_null();
@@ -257,6 +260,8 @@ impl PrimaryKeyColumnBuilder {
 pub struct BulkPartConverter {
     /// Region metadata.
     region_metadata: RegionMetadataRef,
+    /// Schema of the converted batch.
+    schema: SchemaRef,
     /// Primary key codec for encoding keys
     primary_key_codec: Arc<dyn PrimaryKeyCodec>,
     /// Buffer for encoding primary key.
@@ -265,9 +270,8 @@ pub struct BulkPartConverter {
     key_array_builder: PrimaryKeyArrayBuilder,
     /// Builders for non-primary key columns.
     value_builder: ValueBuilder,
-    /// Flag to control whether to store primary key columns in arrays.
-    store_primary_key_columns: bool,
     /// Builders for individual primary key columns.
+    /// The order of builders is the same as the order of primary key columns in the region metadata.
     primary_key_column_builders: Vec<PrimaryKeyColumnBuilder>,
 
     /// Max timestamp value.
@@ -279,36 +283,40 @@ pub struct BulkPartConverter {
 }
 
 impl BulkPartConverter {
+    /// Creates a new converter.
+    ///
+    /// If `store_primary_key_columns` is true and the encoding is not sparse encoding, it
+    /// stores primary key columns in arrays additionally.
     pub fn new(
         region_metadata: &RegionMetadataRef,
+        schema: SchemaRef,
         capacity: usize,
         primary_key_codec: Arc<dyn PrimaryKeyCodec>,
-        store_primary_key_columns: bool,
+        mut store_primary_key_columns: bool,
     ) -> Self {
+        debug_assert_eq!(
+            region_metadata.primary_key_encoding,
+            primary_key_codec.encoding()
+        );
+
+        if region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+            // We can't get primary key columns now.
+            store_primary_key_columns = false;
+        }
+
         let primary_key_column_builders = if store_primary_key_columns {
-            region_metadata
-                .primary_key_columns()
-                .map(|col| {
-                    if col.column_schema.data_type.is_string() {
-                        PrimaryKeyColumnBuilder::StringDict(StringDictionaryBuilder::new())
-                    } else {
-                        PrimaryKeyColumnBuilder::Vector(
-                            col.column_schema.data_type.create_mutable_vector(capacity),
-                        )
-                    }
-                })
-                .collect()
+            new_primary_key_column_builders(&region_metadata, capacity)
         } else {
             Vec::new()
         };
 
         Self {
             region_metadata: region_metadata.clone(),
+            schema,
             primary_key_codec,
             key_buf: Vec::new(),
             key_array_builder: PrimaryKeyArrayBuilder::new(),
             value_builder: ValueBuilder::new(region_metadata, capacity),
-            store_primary_key_columns,
             primary_key_column_builders,
             min_ts: i64::MAX,
             max_ts: i64::MIN,
@@ -362,7 +370,7 @@ impl BulkPartConverter {
         };
 
         // If storing primary key columns, append values to individual builders
-        if self.store_primary_key_columns {
+        if !self.primary_key_column_builders.is_empty() {
             for (builder, pk_value) in self
                 .primary_key_column_builders
                 .iter_mut()
@@ -395,35 +403,28 @@ impl BulkPartConverter {
     /// It sorts the record batch by (primary key, timestamp, sequence desc).
     pub fn convert(mut self) -> Result<BulkPart> {
         let values = Values::from(self.value_builder);
-        let mut columns = Vec::with_capacity(4 + values.fields.len());
+        let mut columns =
+            Vec::with_capacity(4 + values.fields.len() + self.primary_key_column_builders.len());
 
-        // Build primary key column arrays if enabled
-        let primary_key_arrays = if self.store_primary_key_columns {
-            let pk_arrays: Vec<ArrayRef> = self
-                .primary_key_column_builders
-                .into_iter()
-                .map(|builder| builder.into_arrow_array())
-                .collect();
-
-            Some(pk_arrays)
-        } else {
-            None
-        };
-
+        // Build primary key column arrays if enabled.
+        for builder in self.primary_key_column_builders {
+            columns.push(builder.into_arrow_array());
+        }
+        // Then fields columns.
         columns.extend(values.fields.iter().map(|field| field.to_arrow_array()));
+        // Time index.
         let timestamp_index = columns.len();
         columns.push(values.timestamp.to_arrow_array());
+        // Primary key.
         let pk_array = self.key_array_builder.finish();
         columns.push(Arc::new(pk_array));
+        // Sequence and op type.
         columns.push(values.sequence.to_arrow_array());
         columns.push(values.op_type.to_arrow_array());
 
-        let schema = to_sst_arrow_schema(&self.region_metadata);
-
-        let batch = RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)?;
+        let batch = RecordBatch::try_new(self.schema, columns).context(NewRecordBatchSnafu)?;
         // Sorts the record batch.
-        let (batch, _sorted_primary_key_arrays) =
-            sort_primary_key_record_batch(&batch, primary_key_arrays)?;
+        let batch = sort_primary_key_record_batch(&batch)?;
 
         Ok(BulkPart {
             batch,
@@ -436,11 +437,30 @@ impl BulkPartConverter {
     }
 }
 
+fn new_primary_key_column_builders(
+    metadata: &RegionMetadata,
+    capacity: usize,
+) -> Vec<PrimaryKeyColumnBuilder> {
+    metadata
+        .primary_key_columns()
+        .map(|col| {
+            if col.column_schema.data_type.is_string() {
+                PrimaryKeyColumnBuilder::StringDict(StringDictionaryBuilder::with_capacity(
+                    capacity,
+                    INIT_DICT_VALUE_CAPACITY,
+                    capacity,
+                ))
+            } else {
+                PrimaryKeyColumnBuilder::Vector(
+                    col.column_schema.data_type.create_mutable_vector(capacity),
+                )
+            }
+        })
+        .collect()
+}
+
 /// Sorts the record batch with primary key format.
-fn sort_primary_key_record_batch(
-    batch: &RecordBatch,
-    primary_key_arrays: Option<Vec<ArrayRef>>,
-) -> Result<(RecordBatch, Option<Vec<ArrayRef>>)> {
+fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
@@ -472,30 +492,7 @@ fn sort_primary_key_record_batch(
     let indices = datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None)
         .context(ComputeArrowSnafu)?;
 
-    let sorted_batch =
-        datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)?;
-
-    // Sort the primary key arrays using the same indices
-    let sorted_primary_key_arrays = if let Some(pk_arrays) = primary_key_arrays {
-        let sorted_pk_arrays: Result<Vec<ArrayRef>> = pk_arrays
-            .into_iter()
-            .map(|pk_array| {
-                datatypes::arrow::compute::take(
-                    &pk_array,
-                    &indices,
-                    Some(TakeOptions {
-                        check_bounds: false,
-                    }),
-                )
-                .context(ComputeArrowSnafu)
-            })
-            .collect();
-        Some(sorted_pk_arrays?)
-    } else {
-        None
-    };
-
-    Ok((sorted_batch, sorted_primary_key_arrays))
+    datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
 }
 
 #[derive(Debug)]
@@ -892,6 +889,7 @@ mod tests {
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::parquet::format::ReadFormat;
+    use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
 
     fn check_binary_array_to_dictionary(
@@ -1379,8 +1377,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
 
-        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
 
         let key_values1 = build_key_values_with_ts_seq_values(
             &metadata,
@@ -1410,6 +1410,38 @@ mod tests {
         assert_eq!(bulk_part.max_ts, 2000);
         assert_eq!(bulk_part.sequence, 2);
         assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
+
+        // Validate primary key columns are stored
+        // Schema should include primary key columns k0 and k1 at the beginning
+        let schema = bulk_part.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ]
+        );
+
+        // Verify the primary key column data
+        let k0_column = bulk_part
+            .batch
+            .column_by_name("k0")
+            .expect("k0 column should exist");
+        let k1_column = bulk_part
+            .batch
+            .column_by_name("k1")
+            .expect("k1 column should exist");
+
+        // k0 should be a string dictionary array with values "key1" and "key2"
+        assert_eq!(k0_column.len(), 3);
+        assert_eq!(k1_column.len(), 3);
     }
 
     #[test]
@@ -1417,8 +1449,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
 
-        let mut converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
 
         let key_values1 = build_key_values_with_ts_seq_values(
             &metadata,
@@ -1466,6 +1500,36 @@ mod tests {
 
         assert_eq!(ts_array.values(), &[1000, 2000, 3000]);
         assert_eq!(seq_array.values(), &[1, 2, 3]);
+
+        // Validate primary key columns are stored
+        let schema = bulk_part.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ]
+        );
+
+        // Verify the primary key column data
+        let k0_column = bulk_part
+            .batch
+            .column_by_name("k0")
+            .expect("k0 column should exist");
+        let k1_column = bulk_part
+            .batch
+            .column_by_name("k1")
+            .expect("k1 column should exist");
+
+        assert_eq!(k0_column.len(), 3);
+        assert_eq!(k1_column.len(), 3);
     }
 
     #[test]
@@ -1473,8 +1537,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 10;
         let primary_key_codec = build_primary_key_codec(&metadata);
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
 
-        let converter = BulkPartConverter::new(&metadata, capacity, primary_key_codec, false);
+        let converter =
+            BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
 
         let bulk_part = converter.convert().unwrap();
 
@@ -1482,5 +1548,106 @@ mod tests {
         assert_eq!(bulk_part.min_ts, i64::MAX);
         assert_eq!(bulk_part.max_ts, i64::MIN);
         assert_eq!(bulk_part.sequence, SequenceNumber::MIN);
+
+        // Validate primary key columns are present in schema even for empty batch
+        let schema = bulk_part.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec![
+                "k0",
+                "k1",
+                "v0",
+                "v1",
+                "ts",
+                "__primary_key",
+                "__sequence",
+                "__op_type"
+            ]
+        );
+
+        // Verify empty primary key columns exist
+        let k0_column = bulk_part
+            .batch
+            .column_by_name("k0")
+            .expect("k0 column should exist");
+        let k1_column = bulk_part
+            .batch
+            .column_by_name("k1")
+            .expect("k1 column should exist");
+
+        assert_eq!(k0_column.len(), 0);
+        assert_eq!(k1_column.len(), 0);
+    }
+
+    #[test]
+    fn test_bulk_part_converter_without_primary_key_columns() {
+        let metadata = metadata_for_test();
+        let capacity = 100;
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions {
+                raw_pk_columns: false,
+                string_pk_use_dict: true,
+            },
+        );
+
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, false);
+
+        let key_values1 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "key1".to_string(),
+            1u32,
+            vec![1000, 2000].into_iter(),
+            vec![Some(1.0), Some(2.0)].into_iter(),
+            1,
+        );
+
+        let key_values2 = build_key_values_with_ts_seq_values(
+            &metadata,
+            "key2".to_string(),
+            2u32,
+            vec![1500].into_iter(),
+            vec![Some(3.0)].into_iter(),
+            2,
+        );
+
+        converter.append_key_values(&key_values1).unwrap();
+        converter.append_key_values(&key_values2).unwrap();
+
+        let bulk_part = converter.convert().unwrap();
+
+        assert_eq!(bulk_part.num_rows(), 3);
+        assert_eq!(bulk_part.min_ts, 1000);
+        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.sequence, 2);
+        assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
+
+        // Validate primary key columns are NOT stored individually
+        let schema = bulk_part.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify individual primary key columns are not present
+        assert!(
+            bulk_part.batch.column_by_name("k0").is_none(),
+            "k0 column should not exist"
+        );
+        assert!(
+            bulk_part.batch.column_by_name("k1").is_none(),
+            "k1 column should not exist"
+        );
+
+        // But encoded primary key should exist
+        let pk_column = bulk_part
+            .batch
+            .column_by_name("__primary_key")
+            .expect("__primary_key column should exist");
+        assert_eq!(pk_column.len(), 3);
     }
 }

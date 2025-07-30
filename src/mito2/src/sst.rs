@@ -63,6 +63,86 @@ pub fn to_sst_arrow_schema(metadata: &RegionMetadata) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
 
+/// Options of flat schema.
+pub struct FlatSchemaOptions {
+    /// Whether to store primary key columns additionally instead of an encoded column.
+    pub raw_pk_columns: bool,
+    /// Whether to use dictionary encoding for string primary key columns
+    /// when storing primary key columns.
+    pub string_pk_use_dict: bool,
+}
+
+impl Default for FlatSchemaOptions {
+    fn default() -> Self {
+        Self {
+            raw_pk_columns: true,
+            string_pk_use_dict: true,
+        }
+    }
+}
+
+/// Gets the arrow schema to store in parquet.
+///
+/// The schema is:
+/// ```text
+/// primary key columns, field columns, time index, __prmary_key, __sequence, __op_type
+/// ```
+///
+/// # Panics
+/// Panics if the metadata is invalid.
+pub fn to_flat_sst_arrow_schema(
+    metadata: &RegionMetadata,
+    options: &FlatSchemaOptions,
+) -> SchemaRef {
+    let num_fields = if options.raw_pk_columns {
+        metadata.column_metadatas.len() + 3
+    } else {
+        metadata.column_metadatas.len() + 3 - metadata.primary_key.len()
+    };
+    let mut fields = Vec::with_capacity(num_fields);
+    let schema = metadata.schema.arrow_schema();
+    if options.raw_pk_columns {
+        for pk_id in &metadata.primary_key {
+            let pk_index = metadata.column_index_by_id(*pk_id).unwrap();
+            if options.string_pk_use_dict
+                && metadata.column_metadatas[pk_index]
+                    .column_schema
+                    .data_type
+                    .is_string()
+            {
+                let field = &schema.fields[pk_index];
+                let field = Arc::new(Field::new_dictionary(
+                    field.name(),
+                    datatypes::arrow::datatypes::DataType::UInt32,
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                ));
+                fields.push(field);
+            } else {
+                fields.push(schema.fields[pk_index].clone());
+            }
+        }
+    }
+    let remaining_fields = schema
+        .fields()
+        .iter()
+        .zip(&metadata.column_metadatas)
+        .filter_map(|(field, column_meta)| {
+            if column_meta.semantic_type == SemanticType::Field {
+                Some(field.clone())
+            } else {
+                None
+            }
+        })
+        .chain([metadata.time_index_field()])
+        .chain(internal_fields());
+    for field in remaining_fields {
+        fields.push(field);
+    }
+
+    Arc::new(Schema::new(fields))
+}
+
 /// Fields for internal columns.
 fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
