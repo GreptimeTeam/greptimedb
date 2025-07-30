@@ -174,7 +174,7 @@ impl RegionServer {
     async fn table_provider(
         &self,
         region_id: RegionId,
-        ctx: Option<&session::context::QueryContext>,
+        ctx: Option<QueryContextRef>,
     ) -> Result<Arc<dyn TableProvider>> {
         let status = self
             .inner
@@ -207,8 +207,14 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
-        let provider = self.table_provider(region_id, Some(&query_ctx)).await?;
+        let provider = self
+            .table_provider(region_id, Some(query_ctx.clone()))
+            .await?;
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(provider));
+
+        if query_ctx.explain_verbose() {
+            common_telemetry::info!("Handle remote read for region: {}", region_id);
+        }
 
         let decoder = self
             .inner
@@ -243,9 +249,11 @@ impl RegionServer {
         };
 
         let ctx: Option<session::context::QueryContext> = request.header.as_ref().map(|h| h.into());
-
-        let provider = self.table_provider(request.region_id, ctx.as_ref()).await?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+
+        let provider = self
+            .table_provider(request.region_id, Some(query_ctx.clone()))
+            .await?;
 
         struct RegionDataSourceInjector {
             source: Arc<dyn TableSource>,
