@@ -16,22 +16,28 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use api::v1::SemanticType;
+use common_telemetry::warn;
 use datatypes::schema::ColumnSchema;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableMeta;
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{
-    MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, Result, UnexpectedSnafu,
+    self, MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, Result, UnexpectedSnafu,
 };
+use crate::key::table_name::{TableNameKey, TableNameManager};
+use crate::key::TableMetadataManagerRef;
+use crate::node_manager::NodeManagerRef;
 
 #[derive(Debug, PartialEq, Eq)]
-struct PartialRegionMetadata<'a> {
-    column_metadatas: &'a [ColumnMetadata],
-    primary_key: &'a [u32],
-    table_id: TableId,
+pub(crate) struct PartialRegionMetadata<'a> {
+    pub(crate) column_metadatas: &'a [ColumnMetadata],
+    pub(crate) primary_key: &'a [u32],
+    pub(crate) table_id: TableId,
 }
 
 impl<'a> From<&'a RegionMetadata> for PartialRegionMetadata<'a> {
@@ -269,15 +275,17 @@ pub(crate) fn check_column_metadata_invariants(
 /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
 ///
 /// Returns an error if:
-/// - Any column is missing in the `name_to_ids`.
-/// - The column id in table metadata is not the same as the column id in the column metadata.
+/// - Any column is missing in the `name_to_ids`(if `name_to_ids` is provided).
+/// - The column id in table metadata is not the same as the column id in the column metadata.(if `name_to_ids` is provided)
 /// - The table index is missing in the column metadata.
 /// - The primary key or partition key columns are missing in the column metadata.
+///
+/// TODO(weny): add tests
 pub(crate) fn build_table_meta_from_column_metadatas(
     table_id: TableId,
     table_ref: TableReference,
     table_meta: &RawTableMeta,
-    name_to_ids: &HashMap<String, u32>,
+    name_to_ids: Option<HashMap<String, u32>>,
     column_metadata: &[ColumnMetadata],
 ) -> Result<RawTableMeta> {
     let column_in_column_metadata = column_metadata
@@ -306,10 +314,10 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         }
     );
 
-    // Ensures all primary key and partition key exists in the column metadata.
-    for column_name in primary_key_names.iter().chain(partition_key_names.iter()) {
-        let column_in_column_metadata =
-            column_in_column_metadata
+    if let Some(name_to_ids) = &name_to_ids {
+        // Ensures all primary key and partition key exists in the column metadata.
+        for column_name in primary_key_names.iter().chain(partition_key_names.iter()) {
+            let column_in_column_metadata = column_in_column_metadata
                 .get(column_name)
                 .with_context(|| MissingColumnInColumnMetadataSnafu {
                     column_name: column_name.to_string(),
@@ -317,19 +325,25 @@ pub(crate) fn build_table_meta_from_column_metadatas(
                     table_id,
                 })?;
 
-        let column_id = *name_to_ids
-            .get(*column_name)
-            .with_context(|| UnexpectedSnafu {
-                err_msg: format!("column id not found in name_to_ids: {}", column_name),
-            })?;
-        ensure!(
-            column_id == column_in_column_metadata.column_id,
-            MismatchColumnIdSnafu {
-                column_name: column_name.to_string(),
-                column_id,
-                table_name: table_ref.to_string(),
-                table_id,
-            }
+            let column_id = *name_to_ids
+                .get(*column_name)
+                .with_context(|| UnexpectedSnafu {
+                    err_msg: format!("column id not found in name_to_ids: {}", column_name),
+                })?;
+            ensure!(
+                column_id == column_in_column_metadata.column_id,
+                MismatchColumnIdSnafu {
+                    column_name: column_name.to_string(),
+                    column_id,
+                    table_name: table_ref.to_string(),
+                    table_id,
+                }
+            );
+        }
+    } else {
+        warn!(
+            "`name_to_ids` is not provided, table: {}, table_id: {}",
+            table_ref, table_id
         );
     }
 
@@ -340,6 +354,7 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     let time_index = &mut new_raw_table_meta.schema.timestamp_index;
     let columns = &mut new_raw_table_meta.schema.column_schemas;
     let column_ids = &mut new_raw_table_meta.column_ids;
+    let next_column_id = &mut new_raw_table_meta.next_column_id;
 
     column_ids.clear();
     value_indices.clear();
@@ -368,11 +383,61 @@ pub(crate) fn build_table_meta_from_column_metadatas(
         column_ids.push(col.column_id);
     }
 
+    *next_column_id = column_ids
+        .iter()
+        .max()
+        .map(|max| max + 1)
+        .unwrap_or(*next_column_id)
+        .max(*next_column_id);
+
     if let Some(time_index) = *time_index {
         new_raw_table_meta.schema.column_schemas[time_index].set_time_index();
     }
 
     Ok(new_raw_table_meta)
+}
+
+/// Validates the table id and name consistency.
+///
+/// It will check the table id and table name consistency.
+/// If the table id and table name are not consistent, it will return an error.
+pub(crate) async fn validate_table_id_and_name(
+    table_name_manager: &TableNameManager,
+    table_id: TableId,
+    table_name: &TableName,
+) -> Result<()> {
+    let table_name_key = TableNameKey::new(
+        &table_name.catalog_name,
+        &table_name.schema_name,
+        &table_name.table_name,
+    );
+    let table_name_value = table_name_manager
+        .get(table_name_key)
+        .await?
+        .with_context(|| error::TableNotFoundSnafu {
+            table_name: table_name.to_string(),
+        })?;
+
+    ensure!(
+        table_name_value.table_id() == table_id,
+        error::UnexpectedSnafu {
+            err_msg: format!(
+                "The table id mismatch for table: {}, expected {}, actual {}",
+                table_name,
+                table_id,
+                table_name_value.table_id()
+            ),
+        }
+    );
+
+    Ok(())
+}
+
+#[derive(Clone)]
+pub struct Context {
+    pub node_manager: NodeManagerRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
+    pub cache_invalidator: CacheInvalidatorRef,
 }
 
 #[cfg(test)]
@@ -385,12 +450,14 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
     use store_api::metadata::ColumnMetadata;
+    use store_api::storage::RegionId;
     use table::metadata::{RawTableMeta, TableMetaBuilder};
     use table::table_reference::TableReference;
 
     use super::*;
     use crate::ddl::test_util::region_metadata::build_region_metadata;
     use crate::error::Error;
+    use crate::reconciliation::utils::check_column_metadatas_consistent;
 
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
@@ -449,6 +516,30 @@ mod tests {
     }
 
     #[test]
+    fn test_build_table_info_from_column_metadatas_identical() {
+        let column_metadatas = new_test_column_metadatas();
+        let table_id = 1;
+        let table_ref = TableReference::full("test_catalog", "test_schema", "test_table");
+        let mut table_meta = new_test_raw_table_info();
+        table_meta.column_ids = vec![0, 1, 2];
+        let name_to_ids = HashMap::from([
+            ("col1".to_string(), 0),
+            ("ts".to_string(), 1),
+            ("col2".to_string(), 2),
+        ]);
+
+        let new_table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_meta,
+            Some(name_to_ids),
+            &column_metadatas,
+        )
+        .unwrap();
+        assert_eq!(new_table_meta, table_meta);
+    }
+
+    #[test]
     fn test_build_table_info_from_column_metadatas() {
         let mut column_metadatas = new_test_column_metadatas();
         column_metadatas.push(ColumnMetadata {
@@ -470,7 +561,7 @@ mod tests {
             table_id,
             table_ref,
             &table_meta,
-            &name_to_ids,
+            Some(name_to_ids),
             &column_metadatas,
         )
         .unwrap();
@@ -480,6 +571,7 @@ mod tests {
         assert_eq!(new_table_meta.value_indices, vec![1, 2]);
         assert_eq!(new_table_meta.schema.timestamp_index, Some(1));
         assert_eq!(new_table_meta.column_ids, vec![0, 1, 2, 3]);
+        assert_eq!(new_table_meta.next_column_id, 4);
     }
 
     #[test]
@@ -499,7 +591,7 @@ mod tests {
             table_id,
             table_ref,
             &table_meta,
-            &name_to_ids,
+            Some(name_to_ids),
             &column_metadatas,
         )
         .unwrap_err();
@@ -524,7 +616,7 @@ mod tests {
             table_id,
             table_ref,
             &table_meta,
-            &name_to_ids,
+            Some(name_to_ids),
             &column_metadatas,
         )
         .unwrap_err();
@@ -555,7 +647,7 @@ mod tests {
             table_id,
             table_ref,
             &table_meta,
-            &name_to_ids,
+            Some(name_to_ids.clone()),
             &column_metadatas,
         )
         .unwrap_err();
@@ -569,7 +661,7 @@ mod tests {
             table_id,
             table_ref,
             &table_meta,
-            &name_to_ids,
+            Some(name_to_ids),
             &column_metadatas,
         )
         .unwrap_err();

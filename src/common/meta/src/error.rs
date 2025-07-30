@@ -878,6 +878,12 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display("Missing column ids"))]
+    MissingColumnIds {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Missing column in column metadata: {}, table: {}, table_id: {}",
         column_name,
@@ -907,6 +913,24 @@ pub enum Error {
         table_name: String,
         table_id: TableId,
     },
+
+    #[snafu(display("Failed to convert column def, column: {}", column))]
+    ConvertColumnDef {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
+        "Column metadata inconsistencies found in table: {}, table_id: {}",
+        table_name,
+        table_id
+    ))]
+    ColumnMetadataConflicts {
+        table_name: String,
+        table_id: TableId,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -928,8 +952,10 @@ impl ErrorExt for Error {
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
+            | MissingColumnIds { .. }
             | MissingColumnInColumnMetadata { .. }
-            | MismatchColumnId { .. } => StatusCode::Unexpected,
+            | MismatchColumnId { .. }
+            | ColumnMetadataConflicts { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
@@ -1013,6 +1039,7 @@ impl ErrorExt for Error {
             AbortProcedure { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
             PutPoison { source, .. } => source.status_code(),
+            ConvertColumnDef { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
