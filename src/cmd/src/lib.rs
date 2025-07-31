@@ -149,16 +149,18 @@ fn log_env_flags() {
     }
 }
 
-pub fn maybe_activate_heap_profile() {
-    match activate_heap_profile() {
-        Ok(()) => {
-            info!("Heap profile is active");
-        }
-        Err(err) => {
-            if err.status_code() == StatusCode::Unsupported {
-                info!("Heap profile is not supported");
-            } else {
-                warn!(err; "Failed to activate heap profile");
+pub fn maybe_activate_heap_profile(memory_options: &common_options::memory::MemoryOptions) {
+    if memory_options.enable_heap_profiling {
+        match activate_heap_profile() {
+            Ok(()) => {
+                info!("Heap profile is active");
+            }
+            Err(err) => {
+                if err.status_code() == StatusCode::Unsupported {
+                    info!("Heap profile is not supported");
+                } else {
+                    warn!(err; "Failed to activate heap profile");
+                }
             }
         }
     }

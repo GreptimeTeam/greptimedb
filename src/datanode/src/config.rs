@@ -16,6 +16,7 @@
 
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_options::memory::MemoryOptions;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
@@ -85,6 +86,7 @@ pub struct DatanodeOptions {
     pub export_metrics: ExportMetricsOption,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
+    pub memory: MemoryOptions,
 
     /// Deprecated options, please use the new options instead.
     #[deprecated(note = "Please use `grpc.addr` instead.")]
@@ -131,6 +133,7 @@ impl Default for DatanodeOptions {
             export_metrics: ExportMetricsOption::default(),
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
+            memory: MemoryOptions::default(),
 
             // Deprecated options
             rpc_addr: None,

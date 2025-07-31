@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::options::GlobalOptions;
-use crate::{error, maybe_activate_heap_profile, App, Result};
+use crate::{error, App, Result};
 pub const APP_NAME: &str = "greptime-cli";
 use async_trait::async_trait;
 

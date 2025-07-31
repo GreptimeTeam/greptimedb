@@ -12,5 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod datanode;
-pub mod memory;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MemoryOptions {
+    /// Whether to enable heap profiling activation.
+    /// When true, heap profiling will be activated during startup.
+    /// Default is true.
+    pub enable_heap_profiling: bool,
+}
+
+impl Default for MemoryOptions {
+    fn default() -> Self {
+        Self {
+            enable_heap_profiling: true,
+        }
+    }
+}

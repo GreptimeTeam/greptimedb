@@ -21,6 +21,7 @@ client.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-error.workspace = true
+common-options.workspace = true
 common-function.workspace = true
 common-greptimedb-telemetry.workspace = true
 common-grpc.workspace = true

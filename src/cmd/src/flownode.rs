@@ -279,7 +279,7 @@ impl StartCommand {
             None,
         );
 
-        maybe_activate_heap_profile();
+        maybe_activate_heap_profile(&opts.component.memory);
         log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 

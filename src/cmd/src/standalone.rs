@@ -45,6 +45,7 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::{build_wal_options_allocator, WalOptionsAllocatorRef};
+use common_options::memory::MemoryOptions;
 use common_procedure::{ProcedureInfo, ProcedureManagerRef};
 use common_telemetry::info;
 use common_telemetry::logging::{
@@ -157,6 +158,7 @@ pub struct StandaloneOptions {
     pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: Option<SlowQueryOptions>,
     pub query: QueryOptions,
+    pub memory: MemoryOptions,
 }
 
 impl Default for StandaloneOptions {
@@ -190,6 +192,7 @@ impl Default for StandaloneOptions {
             max_in_flight_write_bytes: None,
             slow_query: Some(SlowQueryOptions::default()),
             query: QueryOptions::default(),
+            memory: MemoryOptions::default(),
         }
     }
 }
@@ -485,7 +488,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
-        maybe_activate_heap_profile();
+        maybe_activate_heap_profile(&opts.component.memory);
         log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 
