@@ -32,6 +32,7 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_meta::ddl::create_flow::FLOW_EVAL_INTERVAL_KEY;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
@@ -796,6 +797,17 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let eval_interval = create_flow
+        .eval_interval
+        .map(|v| common_time::Duration::new_second(v));
+    let mut flow_options = HashMap::new();
+    if let Some(interval) = eval_interval {
+        flow_options.insert(
+            FLOW_EVAL_INTERVAL_KEY.to_string(),
+            serde_json::to_string(&interval).context(EncodeJsonSnafu)?,
+        );
+    }
+
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -806,7 +818,7 @@ pub fn to_create_flow_task_expr(
         expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: HashMap::new(),
+        flow_options,
     })
 }
 

@@ -378,6 +378,8 @@ pub enum CreateFlowState {
     CreateMetadata,
 }
 
+pub const FLOW_EVAL_INTERVAL_KEY: &str = "flow_eval_interval";
+
 /// The type of flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlowType {
