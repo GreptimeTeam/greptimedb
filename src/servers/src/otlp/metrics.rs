@@ -39,8 +39,7 @@ const INSTANCE_KEY: &str = "instance";
 const UNDERSCORE: &str = "_";
 
 // see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
-// instance and job alias to service.instance.id and service.name that we need to keep
-const DEFAULT_ATTRS: [&str; 19] = [
+const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
     "service.instance.id",
     "service.name",
     "service.namespace",
@@ -63,8 +62,8 @@ const DEFAULT_ATTRS: [&str; 19] = [
 ];
 
 lazy_static! {
-    static ref DEFAULT_ATTRS_HASHSET: HashSet<String> =
-        HashSet::from_iter(DEFAULT_ATTRS.iter().map(|s| s.to_string()));
+    static ref DEFAULT_PROMOTE_ATTRS_SET: HashSet<String> =
+        HashSet::from_iter(DEFAULT_PROMOTE_ATTRS.iter().map(|s| s.to_string()));
     static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
 }
 
@@ -115,11 +114,6 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
         return;
     }
 
-    // check if promote all
-    if !metric_ctx.promote_all_resource_attrs {
-        attrs.retain(|kv| DEFAULT_ATTRS_HASHSET.contains(&kv.key));
-    }
-
     // remap service.name and service.instance.id to job and instance
     let mut tmp = Vec::with_capacity(2);
     for kv in attrs.iter() {
@@ -139,6 +133,17 @@ fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx)
             _ => {}
         }
     }
+
+    // if promote all, then exclude the list, else, include the list
+    if metric_ctx.promote_all_resource_attrs {
+        attrs.retain(|kv| !metric_ctx.resource_attrs.contains(&kv.key));
+    } else {
+        attrs.retain(|kv| {
+            metric_ctx.resource_attrs.contains(&kv.key)
+                || DEFAULT_PROMOTE_ATTRS_SET.contains(&kv.key)
+        });
+    }
+
     attrs.extend(tmp);
 }
 

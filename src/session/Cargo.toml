@@ -11,6 +11,7 @@ testing = []
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 api.workspace = true
 arc-swap = "1.5"
 auth.workspace = true
