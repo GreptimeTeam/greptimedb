@@ -507,7 +507,7 @@ impl BatchingTask {
                     let sleep_until = if let Some(eval_interval) = self.config.flow_eval_interval {
                         tokio::time::Instant::now() + eval_interval.to_std_duration()
                     } else {
-                        // if not explictly set, just automatically calculate next start time
+                        // if not explicitly set, just automatically calculate next start time
                         // using time window size and more args
                         let state = self.state.write().unwrap();
 

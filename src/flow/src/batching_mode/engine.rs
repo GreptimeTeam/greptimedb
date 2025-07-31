@@ -36,12 +36,12 @@ use tokio::sync::{oneshot, RwLock};
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{find_time_window_expr, TimeWindowExpr};
-use crate::batching_mode::utils::sql_to_df_plan;
+use crate::batching_mode::utils::{is_tql, sql_to_df_plan};
 use crate::batching_mode::BatchingModeOptions;
 use crate::engine::FlowEngine;
 use crate::error::{
-    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, TableNotFoundMetaSnafu,
-    UnexpectedSnafu, UnsupportedSnafu,
+    ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu, InvalidQuerySnafu,
+    TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -361,6 +361,14 @@ impl BatchingEngine {
             }
         }
 
+        let Some(query_ctx) = query_ctx else {
+            UnexpectedSnafu {
+                reason: "Query context is None".to_string(),
+            }
+            .fail()?
+        };
+        let query_ctx = Arc::new(query_ctx);
+
         // optionally set a eval interval for the flow
 
         let flow_eval_interval: Option<common_time::Duration> = flow_options
@@ -373,6 +381,13 @@ impl BatchingEngine {
                 }
                 .build()
             })?;
+
+        if flow_eval_interval.is_none() && is_tql(query_ctx.clone(), &sql)? {
+            InvalidQuerySnafu {
+                reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
+            }
+            .fail()?;
+        }
 
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
@@ -387,13 +402,6 @@ impl BatchingEngine {
             }
         );
 
-        let Some(query_ctx) = query_ctx else {
-            UnexpectedSnafu {
-                reason: "Query context is None".to_string(),
-            }
-            .fail()?
-        };
-        let query_ctx = Arc::new(query_ctx);
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
             // also check table option to see if ttl!=instant
