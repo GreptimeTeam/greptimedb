@@ -433,52 +433,6 @@ pub(crate) async fn validate_table_id_and_name(
     Ok(())
 }
 
-/// Resolves the column metadata for a logical table by selecting the column metadata
-/// from the region with the maximum number of columns.
-///
-/// # Panics
-/// Panics if `region_metadatas` is empty.
-///
-/// TODO(weny): add tests
-pub(crate) fn resolve_column_metadatas_for_logical_table(
-    region_metadatas: &[RegionMetadata],
-    table_info: &RawTableInfo,
-) -> Result<Vec<ColumnMetadata>> {
-    let is_same_table = region_metadatas
-        .windows(2)
-        .all(|w| w[0].region_id.table_id() == w[1].region_id.table_id());
-
-    ensure!(
-        is_same_table,
-        UnexpectedSnafu {
-            err_msg: "Region metadatas are not from the same table"
-        }
-    );
-
-    let region_metadata = region_metadatas
-        .iter()
-        .max_by_key(|r| r.column_metadatas.len())
-        .unwrap();
-
-    let is_invariant_preserved = check_column_metadatas_invariants_for_logical_table(
-        &region_metadata.column_metadatas,
-        table_info,
-    );
-    ensure!(
-        is_invariant_preserved,
-        UnexpectedSnafu {
-            err_msg: format!(
-                "Column metadata invariants violated for region {}. Resolved column metadata: {:?}, region column metadata: {:?}",
-                region_metadata.region_id,
-                region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>()
-            )
-        }
-    );
-
-    Ok(region_metadata.column_metadatas.clone())
-}
-
 /// Checks whether the column metadata invariants hold for the logical table.
 ///
 /// Invariants:
@@ -518,13 +472,16 @@ pub(crate) fn check_column_metadatas_invariants_for_logical_table(
 
     let new_timestamp_column_name = column_metadatas
         .iter()
-        .find(|c| c.semantic_type == SemanticType::Field)
+        .find(|c| c.semantic_type == SemanticType::Timestamp)
         .map(|c| c.column_schema.name.as_str());
 
     old_timestamp_column_name != new_timestamp_column_name
 }
 
 /// Returns true if the logical table info needs to be updated.
+///
+/// The logical table only support to add columns, so we can check the length of column metadatas
+/// to determine whether the logical table info needs to be updated.
 pub(crate) fn need_update_logical_table_info(
     table_info: &RawTableInfo,
     column_metadatas: &[ColumnMetadata],

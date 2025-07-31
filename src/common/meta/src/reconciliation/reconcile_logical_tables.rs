@@ -39,7 +39,7 @@ use crate::error::Result;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::utils::Context;
@@ -199,24 +199,25 @@ impl Procedure for ReconcileLogicalTablesProcedure {
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.context.table_name().table_ref();
 
-        let table_names = self
+        let mut table_ids = self
             .context
             .persistent_ctx
-            .logical_tables
+            .logical_table_ids
             .iter()
-            .map(|t| TableNameLock::new(&t.catalog_name, &t.schema_name, &t.table_name).into())
+            .map(|t| TableLock::Write(*t).into())
             .collect::<Vec<_>>();
+        table_ids.sort_unstable();
+        table_ids.push(TableLock::Read(self.context.table_id()).into());
         if self.context.persistent_ctx.is_subprocedure {
             // The catalog and schema are already locked by the parent procedure.
             // Only lock the table name.
-            return LockKey::new(table_names);
+            return LockKey::new(table_ids);
         }
-
         let mut keys = vec![
             CatalogLock::Read(table_ref.catalog).into(),
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
         ];
-        keys.extend(table_names);
+        keys.extend(table_ids);
         LockKey::new(keys)
     }
 }

@@ -95,6 +95,7 @@ impl State for ResolveTableMetadatas {
                     update_table_infos.push((*table_id, column_metadatas));
                 }
             } else {
+                // If the logical regions have inconsistent column metadatas, it won't affect read and write.
                 // It's safe to continue if the column metadatas of the logical table are inconsistent.
                 warn!(
                     "Found inconsistent column metadatas for table: {}, table_id: {}. Remaining the inconsistent column metadatas",
