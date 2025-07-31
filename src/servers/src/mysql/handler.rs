@@ -29,6 +29,8 @@ use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
+use loki_proto::stats::Cache;
+use moka::sync::Cache;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -80,7 +82,7 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: SessionRef,
     user_provider: Option<UserProviderRef>,
-    prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
+    prepared_stmts: Arc<Cache<String, SqlPlan>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
 }
@@ -105,6 +107,11 @@ impl MysqlInstanceShim {
             }
         }
 
+        let cache = Cache::builder()
+            .time_to_live(Duration::from_secs(30 * 60))
+            .time_to_idle(Duration::from_secs(5 * 60))
+            .build();
+
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
@@ -115,7 +122,7 @@ impl MysqlInstanceShim {
                 process_id,
             )),
             user_provider,
-            prepared_stmts: Default::default(),
+            prepared_stmts: Arc::new(cache),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
         }
@@ -159,14 +166,12 @@ impl MysqlInstanceShim {
 
     /// Save query and logical plan with a given statement key
     fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
-        let mut prepared_stmts = self.prepared_stmts.write();
-        let _ = prepared_stmts.insert(stmt_key, plan);
+        self.prepared_stmts.insert(stmt_key, plan);
     }
 
     /// Retrieve the query and logical plan by a given statement key
     fn plan(&self, stmt_key: &str) -> Option<SqlPlan> {
-        let guard = self.prepared_stmts.read();
-        guard.get(stmt_key).cloned()
+        self.prepared_stmts.get(stmt_key).cloned()
     }
 
     /// Save the prepared statement and return the parameters and result columns
@@ -317,8 +322,7 @@ impl MysqlInstanceShim {
 
     /// Remove the prepared statement by a given statement key
     fn do_close(&mut self, stmt_key: String) {
-        let mut guard = self.prepared_stmts.write();
-        let _ = guard.remove(&stmt_key);
+        self.prepared_stmts.remove(&stmt_key);
     }
 
     fn auth_plugin(&self) -> &str {

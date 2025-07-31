@@ -130,6 +130,7 @@ urlencoding = "2.1"
 uuid.workspace = true
 vrl.workspace = true
 zstd.workspace = true
+moka = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
@@ -153,6 +154,7 @@ table.workspace = true
 tempfile = "3.0.0"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.12"
+moka = { workspace = true, features = ["sync"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
