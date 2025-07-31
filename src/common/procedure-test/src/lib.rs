@@ -26,6 +26,7 @@ use common_procedure::{
     Context, ContextProvider, Output, PoisonKey, Procedure, ProcedureId, ProcedureState,
     ProcedureWithId, Result, Status, StringKey,
 };
+use tokio::sync::watch::Receiver;
 
 /// A Mock [ContextProvider].
 #[derive(Default)]
@@ -55,6 +56,13 @@ impl MockContextProvider {
 impl ContextProvider for MockContextProvider {
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
         Ok(self.states.get(&procedure_id).cloned())
+    }
+
+    async fn procedure_state_receiver(
+        &self,
+        _procedure_id: ProcedureId,
+    ) -> Result<Option<Receiver<ProcedureState>>> {
+        Ok(None)
     }
 
     async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {

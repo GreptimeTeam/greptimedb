@@ -601,6 +601,7 @@ mod tests {
     use futures_util::FutureExt;
     use object_store::{EntryMode, ObjectStore};
     use tokio::sync::mpsc;
+    use tokio::sync::watch::Receiver;
 
     use super::*;
     use crate::local::{test_util, DynamicKeyLockGuard};
@@ -665,6 +666,13 @@ mod tests {
                 &self,
                 _procedure_id: ProcedureId,
             ) -> Result<Option<ProcedureState>> {
+                unimplemented!()
+            }
+
+            async fn procedure_state_receiver(
+                &self,
+                _procedure_id: ProcedureId,
+            ) -> Result<Option<Receiver<ProcedureState>>> {
                 unimplemented!()
             }
 

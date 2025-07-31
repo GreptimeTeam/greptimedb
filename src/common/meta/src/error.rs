@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_procedure::ProcedureId;
 use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
@@ -136,6 +137,21 @@ pub enum Error {
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get procedure state receiver, procedure id: {procedure_id}"))]
+    ProcedureStateReceiver {
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure state receiver not found: {procedure_id}"))]
+    ProcedureStateReceiverNotFound {
+        procedure_id: ProcedureId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -952,6 +968,7 @@ impl ErrorExt for Error {
             NoLeader { .. } => StatusCode::TableUnavailable,
             ValueNotExist { .. }
             | ProcedurePoisonConflict { .. }
+            | ProcedureStateReceiverNotFound { .. }
             | MissingColumnIds { .. }
             | MissingColumnInColumnMetadata { .. }
             | MismatchColumnId { .. }
@@ -1040,6 +1057,7 @@ impl ErrorExt for Error {
             ConvertAlterTableRequest { source, .. } => source.status_code(),
             PutPoison { source, .. } => source.status_code(),
             ConvertColumnDef { source, .. } => source.status_code(),
+            ProcedureStateReceiver { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
