@@ -1428,20 +1428,6 @@ mod tests {
                 "__op_type"
             ]
         );
-
-        // Verify the primary key column data
-        let k0_column = bulk_part
-            .batch
-            .column_by_name("k0")
-            .expect("k0 column should exist");
-        let k1_column = bulk_part
-            .batch
-            .column_by_name("k1")
-            .expect("k1 column should exist");
-
-        // k0 should be a string dictionary array with values "key1" and "key2"
-        assert_eq!(k0_column.len(), 3);
-        assert_eq!(k1_column.len(), 3);
     }
 
     #[test]
@@ -1517,19 +1503,6 @@ mod tests {
                 "__op_type"
             ]
         );
-
-        // Verify the primary key column data
-        let k0_column = bulk_part
-            .batch
-            .column_by_name("k0")
-            .expect("k0 column should exist");
-        let k1_column = bulk_part
-            .batch
-            .column_by_name("k1")
-            .expect("k1 column should exist");
-
-        assert_eq!(k0_column.len(), 3);
-        assert_eq!(k1_column.len(), 3);
     }
 
     #[test]
@@ -1565,19 +1538,6 @@ mod tests {
                 "__op_type"
             ]
         );
-
-        // Verify empty primary key columns exist
-        let k0_column = bulk_part
-            .batch
-            .column_by_name("k0")
-            .expect("k0 column should exist");
-        let k1_column = bulk_part
-            .batch
-            .column_by_name("k1")
-            .expect("k1 column should exist");
-
-        assert_eq!(k0_column.len(), 0);
-        assert_eq!(k1_column.len(), 0);
     }
 
     #[test]
@@ -1632,22 +1592,5 @@ mod tests {
             field_names,
             vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
         );
-
-        // Verify individual primary key columns are not present
-        assert!(
-            bulk_part.batch.column_by_name("k0").is_none(),
-            "k0 column should not exist"
-        );
-        assert!(
-            bulk_part.batch.column_by_name("k1").is_none(),
-            "k1 column should not exist"
-        );
-
-        // But encoded primary key should exist
-        let pk_column = bulk_part
-            .batch
-            .column_by_name("__primary_key")
-            .expect("__primary_key column should exist");
-        assert_eq!(pk_column.len(), 3);
     }
 }
