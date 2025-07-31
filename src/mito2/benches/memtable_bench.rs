@@ -383,9 +383,8 @@ fn bulk_part_converter(c: &mut Criterion) {
                 );
                 let mut converter = BulkPartConverter::new(&metadata, schema, rows, codec, false);
 
-                for kvs in generator.iter() {
+                if let Some(kvs) = generator.iter().next() {
                     converter.append_key_values(&kvs).unwrap();
-                    break;
                 }
 
                 let _bulk_part = converter.convert().unwrap();
@@ -411,9 +410,8 @@ fn bulk_part_converter(c: &mut Criterion) {
                     let mut converter =
                         BulkPartConverter::new(&metadata, schema, rows, codec, true);
 
-                    for kvs in generator.iter() {
+                    if let Some(kvs) = generator.iter().next() {
                         converter.append_key_values(&kvs).unwrap();
-                        break;
                     }
 
                     let _bulk_part = converter.convert().unwrap();
