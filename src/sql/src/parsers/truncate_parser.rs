@@ -65,9 +65,9 @@ impl ParserContext<'_> {
             let start = self
                 .parser
                 .parse_value()
-                .with_context(|_| error::UnexpectedSnafu {
+                .with_context(|e| error::UnexpectedSnafu {
                     expected: "a timestamp value",
-                    actual: self.peek_token_as_string(),
+                    actual: e.to_string(),
                 })?;
 
             let _ = self
@@ -117,9 +117,10 @@ impl ParserContext<'_> {
                     // Otherwise, continue to parse next range
                     continue;
                 }
-                _ => Err(ParserError::ParserError(
-                    "Expected a comma or end of statement".to_string(),
-                ))
+                _ => Err(ParserError::ParserError(format!(
+                    "Expected a comma or end of statement at {}",
+                    self.parser.peek_token().span.start
+                )))
                 .context(UnexpectedSnafu {
                     expected: "a comma or end of statement",
                     actual: self.peek_token_as_string(),
@@ -421,6 +422,41 @@ mod tests {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
         assert!(
             result.is_err() && format!("{result:?}").contains("expected: 'a timestamp value'"),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo FILE RANGE (1 2) (3 4)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err() && format!("{result:?}").contains("expected: 'a comma'"),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo FILE RANGE (,),(3,4)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err() && format!("{result:?}").contains("Expected: a value, found: ,"),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo FILE RANGE (1,2) (3,4)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err()
+                && format!("{result:?}")
+                    .contains("expected: 'a comma or end of statement', found: ("),
+            "result is: {result:?}"
+        );
+
+        let sql = "TRUNCATE TABLE foo FILE RANGE (1,2),,,,,,,,,(3,4)";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        assert!(
+            result.is_err()
+                && format!("{result:?}").contains("expected: 'a left parenthesis', found: ,"),
             "result is: {result:?}"
         );
     }

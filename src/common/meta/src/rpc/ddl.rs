@@ -18,7 +18,7 @@ pub mod trigger;
 use std::collections::{HashMap, HashSet};
 use std::result;
 
-use api::helper::{from_pb_time_ranges, to_pb_time_ranges, to_pb_time_unit};
+use api::helper::{from_pb_time_ranges, to_pb_time_ranges};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
