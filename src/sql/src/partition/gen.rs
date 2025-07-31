@@ -171,15 +171,9 @@ fn custom_biguint_to_string_fixed_len(
 /// ```
 pub fn divide_string_range(
     ranges: &[(char, char)],
-    max_len: usize,
     num_segments: u32,
     hardstops: &[&str],
 ) -> Result<Vec<String>> {
-    // Input validation
-    if max_len == 0 {
-        return Ok(Vec::new());
-    }
-
     if num_segments < 2 {
         InvalidPartitionNumberSnafu {
             partition_num: num_segments,
@@ -187,23 +181,29 @@ pub fn divide_string_range(
         .fail()?;
     }
 
-    if ranges.is_empty() {
+    // --- Step 1: Get the custom alphabet and its base ---
+    let alphabet = get_custom_alphabet(ranges);
+    let base: BigUint = alphabet.len().into();
+
+    // Compute how many characters we need for the number of partitions
+    let num_segments_biguint: BigUint = num_segments.into();
+    if base < num_segments_biguint {
         return Ok(Vec::new());
     }
 
-    // --- Step 1: Get the custom alphabet and its base ---
-    let alphabet = get_custom_alphabet(ranges);
-    if alphabet.is_empty() {
-        return Ok(Vec::new());
+    let mut max_len = 0;
+    let mut current_total_strings_power = BigUint::from(1u32);
+    // Loop until base^len is >= num_segments
+    while current_total_strings_power < num_segments_biguint {
+        current_total_strings_power *= &base;
+        max_len += 1;
     }
-    let base: BigUint = alphabet.len().into();
 
     // --- Step 2: Calculate the total effective length (number of possible strings) ---
     // This is base^max_len, representing all strings of exactly max_len length.
     let total_effective_length = base.pow(max_len as u32);
 
     // Handle cases where total_effective_length is too small for num_segments
-    let num_segments_biguint: BigUint = num_segments.into();
     if total_effective_length < num_segments_biguint {
         return Ok(Vec::new());
     }
@@ -215,26 +215,16 @@ pub fn divide_string_range(
         Vec::with_capacity(num_segments as usize);
 
     // --- Step 3: Generate intermediate stops ---
-    if num_segments == 1 {
-        // If only one segment, the stop is the lexicographically last string of max_len.
-        let last_char_idx = alphabet.len() - 1;
-        let last_char = alphabet[last_char_idx];
-        let end_string: String = (0..max_len).map(|_| last_char).collect();
-        let end_biguint =
-            string_to_custom_biguint_fixed_len(&end_string, &alphabet, &base, max_len);
-        computed_stops_with_values.push((end_biguint, end_string));
-    } else {
-        // Generate intermediate stops, excluding the very last one.
-        // The loop goes from 1 to num_segments - 1.
-        for i in 1..num_segments {
-            let i_biguint: BigUint = i.into();
-            let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
-            let current_biguint = effective_pos_for_stop; // In this model, effective_pos is already the BigUint value
+    // Generate intermediate stops, excluding the very last one.
+    // The loop goes from 1 to num_segments - 1.
+    for i in 1..num_segments {
+        let i_biguint: BigUint = i.into();
+        let effective_pos_for_stop = segment_step_in_effective_space.clone() * i_biguint;
+        let current_biguint = effective_pos_for_stop; // In this model, effective_pos is already the BigUint value
 
-            let stop_str =
-                custom_biguint_to_string_fixed_len(&current_biguint, &alphabet, &base, max_len);
-            computed_stops_with_values.push((current_biguint, stop_str));
-        }
+        let stop_str =
+            custom_biguint_to_string_fixed_len(&current_biguint, &alphabet, &base, max_len);
+        computed_stops_with_values.push((current_biguint, stop_str));
     }
 
     // --- Step 4: Handle hardstops if provided ---
@@ -298,11 +288,10 @@ pub fn divide_string_range(
 pub fn partition_rule_for_range(
     field_name: &str,
     char_ranges: &[(char, char)],
-    max_len: usize,
     num_partitions: u32,
     hardstops: &[&str],
 ) -> Result<Vec<Expr>> {
-    let stops = divide_string_range(char_ranges, max_len, num_partitions, hardstops)?;
+    let stops = divide_string_range(char_ranges, num_partitions, hardstops)?;
 
     let ident_expr = Expr::Identifier(Ident::new(field_name).clone());
     let mut last_stop: Option<String> = None;
@@ -339,42 +328,25 @@ mod tests {
 
     #[test]
     fn test_divide_string_range() {
-        assert!(divide_string_range(&[('_', '_')], 20, 10, &[])
+        assert!(divide_string_range(&[('_', '_')], 10, &[])
             .unwrap()
             .is_empty());
-        assert!(divide_string_range(&[('b', 'a')], 20, 10, &[])
+        assert!(divide_string_range(&[('b', 'a')], 10, &[])
             .unwrap()
             .is_empty());
-        assert!(divide_string_range(&[('a', 'z')], 20, 0, &[]).is_err());
-        assert!(divide_string_range(&[('a', 'z')], 20, 1, &[]).is_err());
+        assert!(divide_string_range(&[('a', 'z')], 0, &[]).is_err());
+        assert!(divide_string_range(&[('a', 'z')], 1, &[]).is_err());
 
         let stops =
-            divide_string_range(&[('a', 'z')], 16, 10, &[]).expect("failed to divide string range");
-        assert_eq!(
-            stops,
-            vec![
-                "cppppppppppppppp",
-                "fffffffffffffffe",
-                "huuuuuuuuuuuuuut",
-                "kkkkkkkkkkkkkkki",
-                "mzzzzzzzzzzzzzzx",
-                "pppppppppppppppm",
-                "sffffffffffffffb",
-                "uuuuuuuuuuuuuuuq",
-                "xkkkkkkkkkkkkkkf"
-            ]
-        );
+            divide_string_range(&[('a', 'z')], 10, &[]).expect("failed to divide string range");
+        assert_eq!(stops, vec!["c", "e", "g", "i", "k", "m", "o", "q", "s"]);
 
-        let stops = divide_string_range(&[('0', '9'), ('-', '-'), ('a', 'z')], 16, 4, &[])
+        let stops = divide_string_range(&[('0', '9'), ('-', '-'), ('a', 'z')], 4, &[])
             .expect("failed to divide string range");
-        assert_eq!(
-            stops,
-            vec!["8888888888888888", "hhhhhhhhhhhhhhhh", "qqqqqqqqqqqqqqqq"]
-        );
+        assert_eq!(stops, vec!["8", "h", "q"]);
 
         let stops = divide_string_range(
             &[('0', '9'), ('-', '-'), ('a', 'z')],
-            16,
             10,
             &["eu-central-1", "us-east-1"],
         )
@@ -382,39 +354,23 @@ mod tests {
         assert_eq!(
             stops,
             vec![
-                "2owa2owa2owa2owa",
-                "6dsl6dsl6dsl6dsl",
-                "a2owa2owa2owa2ow",
+                "2",
+                "5",
+                "8",
+                "b",
                 "eu-central-1",
-                "hhhhhhhhhhhhhhhh",
-                "l6dsl6dsl6dsl6ds",
-                "owa2owa2owa2owa2",
-                "sl6dsl6dsl6dsl6d",
+                "h",
+                "k",
+                "n",
                 "us-east-1"
             ]
         );
 
-        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 32, 16, &[])
+        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 16, &[])
             .expect("failed to divide string range");
         assert_eq!(
             stops,
-            vec![
-                "10000000000000000000000000000000",
-                "20000000000000000000000000000000",
-                "30000000000000000000000000000000",
-                "40000000000000000000000000000000",
-                "50000000000000000000000000000000",
-                "60000000000000000000000000000000",
-                "70000000000000000000000000000000",
-                "80000000000000000000000000000000",
-                "90000000000000000000000000000000",
-                "a0000000000000000000000000000000",
-                "b0000000000000000000000000000000",
-                "c0000000000000000000000000000000",
-                "d0000000000000000000000000000000",
-                "e0000000000000000000000000000000",
-                "f0000000000000000000000000000000"
-            ]
+            vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
         );
     }
 
@@ -423,7 +379,6 @@ mod tests {
         let rules = partition_rule_for_range(
             "ns",
             &[('0', '9'), ('-', '-'), ('a', 'z')],
-            16,
             10,
             &["eu-central-1", "us-east-1"],
         )
@@ -431,14 +386,14 @@ mod tests {
         assert_eq!(
             rules.iter().map(|e| e.to_string()).collect::<Vec<String>>(),
             vec![
-                "ns < '2owa2owa2owa2owa'",
-                "ns >= '2owa2owa2owa2owa' AND ns < '6dsl6dsl6dsl6dsl'",
-                "ns >= '6dsl6dsl6dsl6dsl' AND ns < 'a2owa2owa2owa2ow'",
-                "ns >= 'a2owa2owa2owa2ow' AND ns < 'eu-central-1'",
-                "ns >= 'eu-central-1' AND ns < 'hhhhhhhhhhhhhhhh'",
-                "ns >= 'hhhhhhhhhhhhhhhh' AND ns < 'l6dsl6dsl6dsl6ds'",
-                "ns >= 'l6dsl6dsl6dsl6ds' AND ns < 'owa2owa2owa2owa2'",
-                "ns >= 'owa2owa2owa2owa2' AND ns < 'sl6dsl6dsl6dsl6d'",
+                "ns < '2'",
+                "ns >= '2' AND ns < '5'",
+                "ns >= '5' AND ns < '8'",
+                "ns >= '8' AND ns < 'b'",
+                "ns >= 'b' AND ns < 'eu-central-1'",
+                "ns >= 'eu-central-1' AND ns < 'h'",
+                "ns >= 'h' AND ns < 'k'",
+                "ns >= 'k' AND ns < 'n'",
                 "ns >= 'us-east-1'"
             ]
         );
