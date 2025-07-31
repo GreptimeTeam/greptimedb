@@ -40,6 +40,23 @@ MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 _RJEM_MALLOC_CONF=prof:true ./target/debug/greptime standalone start
 ```
 
+### Memory profiling control
+
+You can control heap profiling activation using the new HTTP APIs:
+
+```bash
+# Check current profiling status
+curl -X GET localhost:4000/mem/status
+
+# Activate heap profiling (if not already active)
+curl -X POST localhost:4000/mem/activate
+
+# Deactivate heap profiling
+curl -X POST localhost:4000/mem/deactivate
+```
+
+### Dump memory profiling data
+
 Dump memory profiling data through HTTP API:
 
 ```bash
