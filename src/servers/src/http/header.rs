@@ -62,8 +62,10 @@ pub mod constants {
     // OTLP headers
     pub const GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME: &str =
         "x-greptime-otlp-metric-promote-all-resource-attrs";
-    pub const GREPTIME_OTLP_METRIC_RESOURCE_ATTRS_LIST_HEADER_NAME: &str =
-        "x-greptime-otlp-metric-resource-attrs-list";
+    pub const GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-promote-resource-attrs";
+    pub const GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME: &str =
+        "x-greptime-otlp-metric-ignore-resource-attrs";
     pub const GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME: &str =
         "x-greptime-otlp-metric-promote-scope-attrs";
 

@@ -32,15 +32,26 @@ impl ProtocolCtx {
     }
 }
 
+/// The context information for OTLP metrics ingestion.
+/// - `promote_all_resource_attrs`
+///     If true, all resource attributes will be promoted to the final table schema.
+/// - `resource_attrs`
+///     If `promote_all_resource_attrs` is true, then the list is an exclude list from `ignore_resource_attrs`.
+///     If `promote_all_resource_attrs` is false, then this list is a include list from `promote_resource_attrs`.
+/// - `promote_scope_attrs`
+///     If true, all scope attributes will be promoted to the final table schema.
+///     Along with the scope name, scope version and scope schema URL.
+/// - `with_metric_engine`
+/// - `is_legacy`
+///     If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
+///     So we call this path 'legacy'.
+///     After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
+///     The difference is how we convert the input data into the final table schema.
 #[derive(Debug, Clone, Default)]
 pub struct OtlpMetricCtx {
     pub promote_all_resource_attrs: bool,
     pub resource_attrs: HashSet<String>,
     pub promote_scope_attrs: bool,
     pub with_metric_engine: bool,
-    // If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
-    // So we call this path 'legacy'.
-    // After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
-    // The difference is how we convert the input data into the final table schema.
     pub is_legacy: bool,
 }
