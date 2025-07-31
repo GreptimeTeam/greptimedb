@@ -310,7 +310,6 @@ impl StatementExecutor {
                 let time_ranges = self
                     .convert_truncate_time_ranges(&table_name, stmt.time_ranges(), &query_ctx)
                     .await?;
-                // TODO(discord9): add truncate table stmt
                 self.truncate_table(table_name, time_ranges, query_ctx)
                     .await
             }
