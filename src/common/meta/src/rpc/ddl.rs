@@ -18,7 +18,7 @@ pub mod trigger;
 use std::collections::{HashMap, HashSet};
 use std::result;
 
-use api::helper::{from_pb_time_ranges, to_pb_time_unit};
+use api::helper::{from_pb_time_ranges, to_pb_time_ranges, to_pb_time_unit};
 use api::v1::alter_database_expr::Kind as PbAlterDatabaseKind;
 use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::{
@@ -890,29 +890,7 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
                 schema_name: task.schema,
                 table_name: task.table,
                 table_id: Some(api::v1::TableId { id: task.table_id }),
-                time_ranges: {
-                    if task.time_ranges.is_empty() {
-                        None
-                    } else {
-                        let time_unit = task
-                            .time_ranges
-                            .first()
-                            .map(|r| r.0.unit())
-                            .unwrap_or_default();
-                        let time_ranges = task
-                            .time_ranges
-                            .into_iter()
-                            .map(|(start, end)| api::v1::TimeRange {
-                                start: start.value(),
-                                end: end.value(),
-                            })
-                            .collect();
-                        Some(api::v1::TimeRanges {
-                            time_unit: to_pb_time_unit(time_unit) as i32,
-                            time_ranges,
-                        })
-                    }
-                },
+                time_ranges: Some(to_pb_time_ranges(&task.time_ranges)),
             }),
         })
     }

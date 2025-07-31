@@ -1098,6 +1098,9 @@ pub fn to_pb_time_unit(unit: TimeUnit) -> v1::TimeUnit {
 }
 
 pub fn from_pb_time_ranges(time_ranges: v1::TimeRanges) -> Result<Vec<(Timestamp, Timestamp)>> {
+    if time_ranges.time_ranges.is_empty() {
+        return Ok(vec![]);
+    }
     let proto_time_unit = v1::TimeUnit::try_from(time_ranges.time_unit).map_err(|_| {
         InvalidTimeUnitSnafu {
             time_unit: time_ranges.time_unit,
@@ -1117,7 +1120,23 @@ pub fn from_pb_time_ranges(time_ranges: v1::TimeRanges) -> Result<Vec<(Timestamp
         .collect())
 }
 
+/// All time_ranges must be of the same time unit.
+///
+/// if input `time_ranges` is empty, it will return a default `TimeRanges` with `Millisecond` as the time unit.
 pub fn to_pb_time_ranges(time_ranges: &[(Timestamp, Timestamp)]) -> v1::TimeRanges {
+    debug_assert!(time_ranges
+        .iter()
+        .all(|(start, end)| start.unit() == end.unit()));
+    time_ranges.iter().fold(None, |acc, (start, _end)| {
+        {
+            if let Some(acc) = acc {
+                if acc != start.unit() {
+                    panic!("All time ranges must have the same time unit");
+                }
+            }
+        }
+        Some(start.unit())
+    });
     let mut pb_time_ranges = v1::TimeRanges {
         // default time unit is Millisecond
         time_unit: v1::TimeUnit::Millisecond as i32,

@@ -83,7 +83,7 @@ impl Display for TruncateTable {
             return Ok(());
         }
 
-        write!(f, " RANGE ")?;
+        write!(f, " FILE RANGE ")?;
         let mut is_first = true;
         for (start, end) in &self.time_ranges {
             if is_first {
@@ -127,7 +127,7 @@ TRUNCATE TABLE t1"#,
             }
         }
 
-        let sql = r"truncate table t1 range (1,2);";
+        let sql = r"truncate table t1 file range (1,2);";
         let stmts: Vec<Statement> =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
@@ -138,7 +138,27 @@ TRUNCATE TABLE t1"#,
                 let new_sql = format!("\n{}", trunc);
                 assert_eq!(
                     r#"
-TRUNCATE TABLE t1 RANGE (1, 2)"#,
+TRUNCATE TABLE t1 FILE RANGE (1, 2)"#,
+                    &new_sql
+                );
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+
+        let sql = r"truncate table t1 file range (1,2), (3,4);";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::TruncateTable { .. });
+        match &stmts[0] {
+            Statement::TruncateTable(trunc) => {
+                let new_sql = format!("\n{}", trunc);
+                assert_eq!(
+                    r#"
+TRUNCATE TABLE t1 FILE RANGE (1, 2), (3, 4)"#,
                     &new_sql
                 );
             }
