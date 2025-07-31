@@ -260,11 +260,10 @@ pub async fn instant_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "instant_query"])
         .start_timer();
 
-    let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
-        recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
-    } else {
-        None
-    };
+    let _slow_query_timer = handler
+        .slow_query_recorder()
+        .as_ref()
+        .map(|recorder| recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone()));
 
     if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
         && !name_matchers.is_empty()
@@ -376,11 +375,10 @@ pub async fn range_query(
         .with_label_values(&[query_ctx.get_db_string().as_str(), "range_query"])
         .start_timer();
 
-    let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
-        recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
-    } else {
-        None
-    };
+    let _slow_query_timer = handler
+        .slow_query_recorder()
+        .as_ref()
+        .map(|recorder| recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone()));
 
     if let Some(name_matchers) = find_metric_name_not_equal_matchers(&promql_expr)
         && !name_matchers.is_empty()
@@ -582,11 +580,9 @@ pub async fn labels_query(
             lookback: lookback.clone(),
         };
 
-        let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+        let _slow_query_timer = handler.slow_query_recorder().as_ref().map(|recorder| {
             recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
-        } else {
-            None
-        };
+        });
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         handle_schema_err!(
@@ -1248,11 +1244,9 @@ pub async fn series_query(
             lookback: lookback.clone(),
         };
 
-        let _slow_query_timer = if let Some(recorder) = &handler.slow_query_recorder() {
+        let _slow_query_timer = handler.slow_query_recorder().as_ref().map(|recorder| {
             recorder.start(SlowQuery::Promql(prom_query.clone()), query_ctx.clone())
-        } else {
-            None
-        };
+        });
 
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
 

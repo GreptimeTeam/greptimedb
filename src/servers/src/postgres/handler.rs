@@ -32,7 +32,7 @@ use pgwire::api::results::{
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::PortalStore;
-use pgwire::api::{ClientInfo, ClientPortalStore, ErrorHandler, Type};
+use pgwire::api::{ClientInfo, ClientPortalStore, ErrorHandler, Type, DEFAULT_NAME};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::extendedquery::Execute;
 use pgwire::messages::simplequery::Query;
@@ -60,14 +60,12 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+        let _slow_query_timer = self.slow_query_recorder.as_ref().map(|recorder| {
             recorder.start(
                 SlowQuery::Sql(query.query.clone()),
                 self.session.new_query_context(),
             )
-        } else {
-            None
-        };
+        });
 
         self._on_query(client, query).await
     }
@@ -291,6 +289,18 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let _slow_query_timer = client
+            .portal_store()
+            .get_portal(message.name.as_deref().unwrap_or(DEFAULT_NAME))
+            .and_then(|portal| {
+                self.slow_query_recorder.as_ref().map(|recorder| {
+                    recorder.start(
+                        SlowQuery::Sql(portal.statement.statement.query.clone()),
+                        self.session.new_query_context(),
+                    )
+                })
+            });
+
         self._on_execute(client, message).await
     }
 

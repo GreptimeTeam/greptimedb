@@ -102,14 +102,12 @@ pub async fn sql(
 
     let sql = query_params.sql.or(form_params.sql);
 
-    let _slow_query_timer = if let Some(recorder) = &state.slow_query_recorder {
+    let _slow_query_timer = state.slow_query_recorder.as_ref().map(|recorder| {
         recorder.start(
             SlowQuery::Sql(sql.clone().unwrap_or_default()),
             query_ctx.clone(),
         )
-    } else {
-        None
-    };
+    });
 
     let format = query_params
         .format
