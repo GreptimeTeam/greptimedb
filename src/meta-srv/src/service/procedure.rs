@@ -21,7 +21,7 @@ use api::v1::meta::{
     ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
     ResponseHeader,
 };
-use common_meta::ddl::ExecutorContext;
+use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
 use common_meta::rpc::procedure;
 use common_telemetry::warn;
@@ -100,7 +100,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .context(error::ConvertProtoDataSnafu)?;
 
         let resp = self
-            .procedure_executor()
+            .ddl_manager()
             .submit_ddl_task(
                 &ExecutorContext {
                     tracing_context: Some(header.tracing_context),

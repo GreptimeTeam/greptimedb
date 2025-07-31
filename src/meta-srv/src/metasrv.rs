@@ -25,7 +25,7 @@ use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::distributed_time_constants;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -432,7 +432,7 @@ pub struct Metasrv {
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    procedure_executor: ProcedureExecutorRef,
+    ddl_manager: DdlManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     runtime_switch_manager: RuntimeSwitchManagerRef,
@@ -683,8 +683,8 @@ impl Metasrv {
         &self.mailbox
     }
 
-    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
-        &self.procedure_executor
+    pub fn ddl_manager(&self) -> &DdlManagerRef {
+        &self.ddl_manager
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {

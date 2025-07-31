@@ -34,13 +34,14 @@ use common_meta::cluster::{NodeInfo, NodeStatus};
 use common_meta::datanode::RegionStat;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
-use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl, ProcedureExecutorRef};
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
+use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
@@ -636,9 +637,8 @@ impl StartCommand {
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
         };
-        let procedure_manager_c = procedure_manager.clone();
 
-        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager_c, true)
+        let ddl_manager = DdlManager::try_new(ddl_context, procedure_manager.clone(), true)
             .context(error::InitDdlManagerSnafu)?;
         #[cfg(feature = "enterprise")]
         let ddl_manager = {
@@ -646,7 +646,11 @@ impl StartCommand {
                 plugins.get();
             ddl_manager.with_trigger_ddl_manager(trigger_ddl_manager)
         };
-        let ddl_task_executor: ProcedureExecutorRef = Arc::new(ddl_manager);
+
+        let procedure_executor = Arc::new(LocalProcedureExecutor::new(
+            Arc::new(ddl_manager),
+            procedure_manager.clone(),
+        ));
 
         let fe_instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -654,7 +658,7 @@ impl StartCommand {
             layered_cache_registry.clone(),
             catalog_manager.clone(),
             node_manager.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor.clone(),
             process_manager,
         )
         .with_plugin(plugins.clone())
@@ -679,7 +683,7 @@ impl StartCommand {
             catalog_manager.clone(),
             kv_backend.clone(),
             layered_cache_registry.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor,
             node_manager,
         )
         .await
