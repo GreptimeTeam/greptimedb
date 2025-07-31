@@ -67,8 +67,8 @@ impl InstanceBuilder {
             None,
         );
 
-        maybe_activate_heap_profile(&dn_opts.memory);
         log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&dn_opts.memory);
         create_resource_limit_metrics(APP_NAME);
 
         plugins::setup_datanode_plugins(plugins, &opts.plugins, dn_opts)
