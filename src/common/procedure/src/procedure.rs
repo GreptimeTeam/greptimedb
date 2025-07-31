@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
+use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
 use crate::error::{self, Error, Result};
@@ -58,6 +59,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Returns a [Status::Suspended] with given `subprocedures` and `persist` flag.
+    pub fn suspended(subprocedures: Vec<ProcedureWithId>, persist: bool) -> Status {
+        Status::Suspended {
+            subprocedures,
+            persist,
+        }
+    }
+
     /// Returns a [Status::Poisoned] with given `keys` and `error`.
     pub fn poisoned(keys: impl IntoIterator<Item = PoisonKey>, error: Error) -> Status {
         Status::Poisoned {
@@ -139,6 +148,11 @@ impl Status {
 pub trait ContextProvider: Send + Sync {
     /// Query the procedure state.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+
+    async fn procedure_state_receiver(
+        &self,
+        procedure_id: ProcedureId,
+    ) -> Result<Option<Receiver<ProcedureState>>>;
 
     /// Try to put a poison key for a procedure.
     ///

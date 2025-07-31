@@ -2623,6 +2623,7 @@ dependencies = [
  "async-trait",
  "common-procedure",
  "snafu 0.8.5",
+ "tokio",
 ]
 
 [[package]]

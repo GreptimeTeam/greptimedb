@@ -85,6 +85,8 @@ pub(crate) struct PersistentContext {
     // The physical table route.
     // The value will be set in `ReconciliationStart` state.
     pub(crate) physical_table_route: Option<PhysicalTableRouteValue>,
+    // Whether the procedure is a subprocedure.
+    pub(crate) is_subprocedure: bool,
 }
 
 impl PersistentContext {
@@ -92,6 +94,7 @@ impl PersistentContext {
         table_id: TableId,
         table_name: TableName,
         resolve_strategy: ResolveStrategy,
+        is_subprocedure: bool,
     ) -> Self {
         Self {
             table_id,
@@ -99,6 +102,7 @@ impl PersistentContext {
             resolve_strategy,
             table_info_value: None,
             physical_table_route: None,
+            is_subprocedure,
         }
     }
 }
@@ -143,8 +147,10 @@ impl ReconcileTableProcedure {
         table_id: TableId,
         table_name: TableName,
         resolve_strategy: ResolveStrategy,
+        is_subprocedure: bool,
     ) -> Self {
-        let persistent_ctx = PersistentContext::new(table_id, table_name, resolve_strategy);
+        let persistent_ctx =
+            PersistentContext::new(table_id, table_name, resolve_strategy, is_subprocedure);
         let context = ReconcileTableContext::new(ctx, persistent_ctx);
         let state = Box::new(ReconciliationStart);
         Self { context, state }
@@ -210,6 +216,17 @@ impl Procedure for ReconcileTableProcedure {
 
     fn lock_key(&self) -> LockKey {
         let table_ref = &self.context.table_name().table_ref();
+
+        if self.context.persistent_ctx.is_subprocedure {
+            // The catalog and schema are already locked by the parent procedure.
+            // Only lock the table name.
+            return LockKey::new(vec![TableNameLock::new(
+                table_ref.catalog,
+                table_ref.schema,
+                table_ref.table,
+            )
+            .into()]);
+        }
 
         LockKey::new(vec![
             CatalogLock::Read(table_ref.catalog).into(),
