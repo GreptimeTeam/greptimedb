@@ -28,7 +28,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::datanode::{DatanodeOptions, Instance, APP_NAME};
 use crate::error::{MetaClientInitSnafu, MissingConfigSnafu, Result, StartDatanodeSnafu};
-use crate::{create_resource_limit_metrics, log_versions};
+use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile};
 
 /// Builder for Datanode instance.
 pub struct InstanceBuilder {
@@ -67,6 +67,7 @@ impl InstanceBuilder {
             None,
         );
 
+        maybe_activate_heap_profile();
         log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 

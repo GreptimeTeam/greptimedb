@@ -30,7 +30,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, LoadLayeredConfigSnafu, Result, StartMetaServerSnafu};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
 
 type MetasrvOptions = GreptimeOptions<meta_srv::metasrv::MetasrvOptions>;
 
@@ -324,6 +324,7 @@ impl StartCommand {
             None,
         );
 
+        maybe_activate_heap_profile();
         log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 

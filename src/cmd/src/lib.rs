@@ -15,7 +15,10 @@
 #![feature(assert_matches, let_chains)]
 
 use async_trait::async_trait;
-use common_telemetry::{error, info};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_mem_prof::activate_heap_profile;
+use common_telemetry::{error, info, warn};
 use stat::{get_cpu_limit, get_memory_limit};
 
 use crate::error::Result;
@@ -143,5 +146,20 @@ fn log_env_flags() {
     info!("command line arguments");
     for argument in std::env::args() {
         info!("argument: {}", argument);
+    }
+}
+
+pub fn maybe_activate_heap_profile() {
+    match activate_heap_profile() {
+        Ok(()) => {
+            info!("Heap profile is active");
+        }
+        Err(err) => {
+            if err.status_code() == StatusCode::Unsupported {
+                info!("Heap profile is not supported");
+            } else {
+                warn!(err; "Failed to activate heap profile");
+            }
+        }
     }
 }

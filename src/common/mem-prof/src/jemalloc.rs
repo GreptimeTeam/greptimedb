@@ -96,6 +96,7 @@ pub async fn dump_flamegraph() -> Result<Vec<u8>> {
 }
 
 pub fn activate_heap_profile() -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
     unsafe {
         tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, true).context(ActivateProfSnafu)?;
     }
@@ -103,6 +104,7 @@ pub fn activate_heap_profile() -> Result<()> {
 }
 
 pub fn deactivate_heap_profile() -> Result<()> {
+    ensure!(is_prof_enabled()?, ProfilingNotEnabledSnafu);
     unsafe {
         tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, false).context(DeactivateProfSnafu)?;
     }

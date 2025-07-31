@@ -47,7 +47,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{self, Result};
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
 
 type FrontendOptions = GreptimeOptions<frontend::frontend::FrontendOptions>;
 
@@ -282,6 +282,7 @@ impl StartCommand {
             opts.component.slow_query.as_ref(),
         );
 
+        maybe_activate_heap_profile();
         log_versions(verbose_version(), short_version(), APP_NAME);
         create_resource_limit_metrics(APP_NAME);
 

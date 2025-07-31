@@ -20,7 +20,6 @@ use cmd::error::{InitTlsProviderSnafu, Result};
 use cmd::options::GlobalOptions;
 use cmd::{cli, datanode, flownode, frontend, metasrv, standalone, App};
 use common_base::Plugins;
-use common_mem_prof::activate_heap_profile;
 use common_version::{verbose_version, version};
 use servers::install_ring_crypto_provider;
 
@@ -99,8 +98,6 @@ async fn main() -> Result<()> {
 async fn main_body() -> Result<()> {
     setup_human_panic();
     install_ring_crypto_provider().map_err(|msg| InitTlsProviderSnafu { msg }.build())?;
-    // Activate heap profiling by default.
-    let _ = activate_heap_profile();
     start(Command::parse()).await
 }
 
