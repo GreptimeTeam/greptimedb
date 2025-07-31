@@ -54,4 +54,24 @@ pub struct OtlpMetricCtx {
     pub promote_scope_attrs: bool,
     pub with_metric_engine: bool,
     pub is_legacy: bool,
+    pub metric_type: MetricType,
+}
+
+impl OtlpMetricCtx {
+    pub fn set_metric_type(&mut self, metric_type: MetricType) {
+        self.metric_type = metric_type;
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum MetricType {
+    // defualt value when initializing the context
+    #[default]
+    Init,
+    NonMonotonicSum,
+    MonotonicSum,
+    Gauge,
+    Histogram,
+    ExponentialHistogram,
+    Summary,
 }

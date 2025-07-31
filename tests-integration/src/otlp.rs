@@ -69,7 +69,7 @@ mod test {
 
         let mut output = instance
             .do_query(
-                "SELECT * FROM my_test_metric ORDER BY greptime_timestamp",
+                "SELECT * FROM my_test_metric_my_ignored_unit ORDER BY greptime_timestamp",
                 ctx.clone(),
             )
             .await;
@@ -91,7 +91,7 @@ mod test {
 
         let mut output = instance
             .do_query(
-                "SELECT le, greptime_value FROM my_test_histo_bucket order by le",
+                "SELECT le, greptime_value FROM my_test_histo_my_ignored_unit_bucket order by le",
                 ctx.clone(),
             )
             .await;
@@ -113,7 +113,10 @@ mod test {
         );
 
         let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
+            .do_query(
+                "SELECT * FROM my_test_histo_my_ignored_unit_sum",
+                ctx.clone(),
+            )
             .await;
         let output = output.remove(0).unwrap();
         let OutputData::Stream(stream) = output.data else {
@@ -131,7 +134,10 @@ mod test {
         );
 
         let mut output = instance
-            .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
+            .do_query(
+                "SELECT * FROM my_test_histo_my_ignored_unit_count",
+                ctx.clone(),
+            )
             .await;
         let output = output.remove(0).unwrap();
         let OutputData::Stream(stream) = output.data else {

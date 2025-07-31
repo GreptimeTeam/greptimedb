@@ -3633,10 +3633,10 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let expected = "[[\"claude_code_cost_usage\"],[\"claude_code_token_usage\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD\"],[\"claude_code_token_usage_tokens\"],[\"demo\"],[\"greptime_physical_table\"],[\"numbers\"]]";
     validate_data("otlp_metrics_all_tables", &client, "show tables;", expected).await;
 
-    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD" (
     //   "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //   "greptime_value" DOUBLE NULL,
     //   "host_arch" STRING NULL,
@@ -3659,11 +3659,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //   on_physical_table = 'greptime_physical_table',
     //   otlp_metric_compat = 'prom'
     // )
-    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_all_show_create_table",
         &client,
-        "show create table claude_code_cost_usage;",
+        "show create table `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
@@ -3673,19 +3673,19 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_all_select",
         &client,
-        "select * from claude_code_cost_usage;",
+        "select * from `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
 
     // drop table
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD`;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -3711,7 +3711,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD" (
     //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "greptime_value" DOUBLE NULL,
     //     "job" STRING NULL,
@@ -3731,11 +3731,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table",
         &client,
-        "show create table claude_code_cost_usage;",
+        "show create table `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
@@ -3745,19 +3745,19 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_select",
         &client,
-        "select * from claude_code_cost_usage;",
+        "select * from `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
 
     // drop table
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD`;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -3776,7 +3776,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage" (
+    // CREATE TABLE IF NOT EXISTS "claude_code_cost_usage_USD" (
     //     "greptime_timestamp" TIMESTAMP(3) NOT NULL,
     //     "greptime_value" DOUBLE NULL,
     //     "job" STRING NULL,
@@ -3794,11 +3794,11 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table_none",
         &client,
-        "show create table claude_code_cost_usage;",
+        "show create table `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
@@ -3808,19 +3808,19 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     validate_data(
         "otlp_metrics_select_none",
         &client,
-        "select * from claude_code_cost_usage;",
+        "select * from `claude_code_cost_usage_USD`;",
         expected,
     )
     .await;
 
     // drop table
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_cost_usage;")
+        .get("/v1/sql?sql=drop table `claude_code_cost_usage_USD`;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
-        .get("/v1/sql?sql=drop table claude_code_token_usage;")
+        .get("/v1/sql?sql=drop table claude_code_token_usage_tokens;")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

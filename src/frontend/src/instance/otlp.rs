@@ -72,7 +72,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .unwrap_or_default();
         metric_ctx.is_legacy = is_legacy;
 
-        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &metric_ctx)?;
+        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = if !is_legacy {

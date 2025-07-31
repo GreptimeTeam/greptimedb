@@ -33,7 +33,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 use pipeline::PipelineWay;
 use prost::Message;
 use session::context::{Channel, QueryContext};
-use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+use session::protocol_ctx::{MetricType, OtlpMetricCtx, ProtocolCtx};
 use snafu::prelude::*;
 
 use crate::error::{self, PipelineSnafu, Result};
@@ -80,6 +80,7 @@ pub async fn metrics(
         with_metric_engine,
         // set is_legacy later
         is_legacy: false,
+        metric_type: MetricType::Init,
     }));
     let query_ctx = Arc::new(query_ctx);
 
