@@ -40,7 +40,7 @@ use crate::ddl::{utils, DdlContext};
 use crate::error::{
     EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
     SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, UnsupportedSnafu, WaitProcedureSnafu,
+    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -733,6 +733,8 @@ async fn handle_drop_trigger_task(
     query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
+        use crate::error::UnsupportedSnafu;
+
         return UnsupportedSnafu {
             operation: "drop trigger",
         }
@@ -812,6 +814,8 @@ async fn handle_create_trigger_task(
     query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
+        use crate::error::UnsupportedSnafu;
+
         return UnsupportedSnafu {
             operation: "create trigger",
         }
