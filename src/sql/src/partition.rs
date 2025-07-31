@@ -18,7 +18,7 @@ use sqlparser::ast::{BinaryOperator, Expr, Ident, Value};
 use crate::error::{InvalidPartitionNumberSnafu, Result};
 use crate::statements::create::Partitions;
 
-mod gen;
+pub mod gen;
 
 /// The default number of partitions for OpenTelemetry traces.
 const DEFAULT_PARTITION_NUM_FOR_TRACES: u32 = 16;
