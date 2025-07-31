@@ -33,9 +33,14 @@ INSERT INTO monitor(ts, host, cpu, memory) VALUES
 
 ADMIN FLUSH_TABLE('monitor');
 
+INSERT INTO monitor(ts, host, cpu, memory) VALUES
+(1700000000111, 'host42', 66.6, 1024);
+
+ADMIN FLUSH_TABLE('monitor');
+
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-TRUNCATE monitor RANGE (0, 1700000000000);
+TRUNCATE monitor FILE RANGE (0, 1700000000000), (1700000000111, 1700000000200);
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
