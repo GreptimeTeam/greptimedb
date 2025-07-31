@@ -51,8 +51,13 @@ pub fn step_aggr_to_upper_aggr(
     };
     if !is_all_aggr_exprs_steppable(&input_aggr.aggr_expr) {
         return Err(datafusion_common::DataFusionError::NotImplemented(format!(
-            "Some aggregate expressions are not steppable in {:?}",
-            input_aggr.aggr_expr
+            "Some aggregate expressions are not steppable in [{}]",
+            input_aggr
+                .aggr_expr
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
 
