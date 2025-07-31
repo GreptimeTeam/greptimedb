@@ -30,6 +30,23 @@ curl https://raw.githubusercontent.com/brendangregg/FlameGraph/master/flamegraph
 
 ## Profiling
 
+### Configuration
+
+You can control heap profiling activation through configuration. Add the following to your configuration file:
+
+```toml
+[memory]
+# Whether to enable heap profiling activation during startup.
+# When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+# is set to "prof:true,prof_active:false". The official image adds this env variable.
+# Default is true.
+enable_heap_profiling = true
+```
+
+By default, if you set `MALLOC_CONF=prof:true,prof_active:false`, the database will enable profiling during startup. You can disable this behavior by setting `enable_heap_profiling = false` in the configuration.
+
+### Starting with environment variables
+
 Start GreptimeDB instance with environment variables:
 
 ```bash
