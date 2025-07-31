@@ -165,7 +165,7 @@ const MAX_REQUEST_SIZE: usize = 1024 * 1024;
 
 /// Returns true if the key is an internal key.
 fn is_internal_key(kv: &FileKeyValue) -> bool {
-    kv.key == ELECTION_KEY.as_bytes() || kv.key == CANDIDATES_ROOT.as_bytes()
+    kv.key.starts_with(ELECTION_KEY.as_bytes()) || kv.key.starts_with(CANDIDATES_ROOT.as_bytes())
 }
 
 impl MetadataSnapshotManager {

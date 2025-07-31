@@ -21,7 +21,7 @@ use datatypes::schema::ColumnSchema;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableMeta;
+use table::metadata::{RawTableInfo, RawTableMeta};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -431,6 +431,62 @@ pub(crate) async fn validate_table_id_and_name(
     );
 
     Ok(())
+}
+
+/// Checks whether the column metadata invariants hold for the logical table.
+///
+/// Invariants:
+/// - Primary key (Tag) columns must exist in the new metadata.
+/// - Timestamp column must remain exactly the same in name and ID.
+///
+/// TODO(weny): add tests
+pub(crate) fn check_column_metadatas_invariants_for_logical_table(
+    column_metadatas: &[ColumnMetadata],
+    table_info: &RawTableInfo,
+) -> bool {
+    let new_primary_keys = column_metadatas
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+        .map(|c| c.column_schema.name.as_str())
+        .collect::<HashSet<_>>();
+
+    let old_primary_keys = table_info
+        .meta
+        .primary_key_indices
+        .iter()
+        .map(|i| table_info.meta.schema.column_schemas[*i].name.as_str());
+
+    for name in old_primary_keys {
+        if !new_primary_keys.contains(name) {
+            return false;
+        }
+    }
+
+    let old_timestamp_column_name = table_info
+        .meta
+        .schema
+        .column_schemas
+        .iter()
+        .find(|c| c.is_time_index())
+        .map(|c| c.name.as_str());
+
+    let new_timestamp_column_name = column_metadatas
+        .iter()
+        .find(|c| c.semantic_type == SemanticType::Timestamp)
+        .map(|c| c.column_schema.name.as_str());
+
+    old_timestamp_column_name != new_timestamp_column_name
+}
+
+/// Returns true if the logical table info needs to be updated.
+///
+/// The logical table only support to add columns, so we can check the length of column metadatas
+/// to determine whether the logical table info needs to be updated.
+pub(crate) fn need_update_logical_table_info(
+    table_info: &RawTableInfo,
+    column_metadatas: &[ColumnMetadata],
+) -> bool {
+    table_info.meta.schema.column_schemas.len() != column_metadatas.len()
 }
 
 #[derive(Clone)]
