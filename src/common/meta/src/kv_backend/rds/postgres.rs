@@ -19,9 +19,11 @@ use std::sync::Arc;
 
 use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 // TLS-related imports (feature-gated)
 use rustls::ClientConfig;
-use rustls_native_certs;
+use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 use snafu::ResultExt;
 use strum::AsRefStr;
@@ -64,6 +66,7 @@ pub struct TlsOption {
     pub mode: TlsMode,
     pub cert_path: String,
     pub key_path: String,
+    pub ca_cert_path: String,
     pub watch: bool,
 }
 
@@ -73,6 +76,7 @@ impl Default for TlsOption {
             mode: TlsMode::Disable,
             cert_path: String::new(),
             key_path: String::new(),
+            ca_cert_path: String::new(),
             watch: false,
         }
     }
@@ -388,50 +392,128 @@ impl ExecutorFactory<PgClient> for PgExecutorFactory {
 /// It uses [deadpool_postgres::Pool] as the connection pool for [RdsStore].
 pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
 
-// TLS connector factory functions
+/// Creates a PostgreSQL TLS connector based on the provided configuration.
+///
+/// This function creates a rustls-based TLS connector for PostgreSQL connections,
+/// following PostgreSQL's TLS mode specifications exactly:
+///
+/// # TLS Modes (PostgreSQL Specification)
+///
+/// - `Disable`: No TLS connection attempted
+/// - `Prefer`: Try TLS first, fallback to plaintext if TLS fails (handled by connection logic)
+/// - `Require`: Only TLS connections, but NO certificate verification (accept any cert)
+/// - `VerifyCa`: TLS + verify certificate is signed by trusted CA (no hostname verification)
+/// - `VerifyFull`: TLS + verify CA + verify hostname matches certificate CN/SAN
+///
+/// (`VerifyCa` and `VerifyFull` are not implemented yet)
+///
 pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustlsConnect> {
-    let mut root_store = rustls::RootCertStore::empty();
+    common_telemetry::info!(
+        "Creating PostgreSQL TLS connector with mode: {:?}",
+        tls_config.mode
+    );
 
-    // Add system root certificates
-    match rustls_native_certs::load_native_certs() {
-        Ok(certs) => {
-            for cert in certs {
-                if let Err(e) = root_store.add(cert) {
-                    return PostgresTlsConfigSnafu {
-                        reason: format!("Failed to add root certificate: {}", e),
-                    }
-                    .fail();
-                }
-            }
-        }
-        Err(e) => {
-            return PostgresTlsConfigSnafu {
-                reason: format!("Failed to load system root certificates: {}", e),
-            }
-            .fail();
-        }
-    }
-
-    let config_builder = ClientConfig::builder().with_root_certificates(root_store);
-
+    // Create the TLS client configuration based on the mode and client cert requirements
     let client_config = if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
-        // Load client certificate and key
+        // Client certificate authentication required
+        common_telemetry::info!("Loading client certificate for mutual TLS");
         let cert_chain = load_certs(&tls_config.cert_path)?;
         let private_key = load_private_key(&tls_config.key_path)?;
 
-        config_builder
-            .with_client_auth_cert(cert_chain, private_key)
-            .map_err(|e| {
-                PostgresTlsConfigSnafu {
-                    reason: format!("Failed to configure client authentication: {}", e),
+        match tls_config.mode {
+            TlsMode::Disable => {
+                return PostgresTlsConfigSnafu {
+                    reason: "Cannot create TLS connector for Disable mode".to_string(),
                 }
-                .build()
-            })?
+                .fail();
+            }
+            TlsMode::Prefer | TlsMode::Require => {
+                // For Prefer/Require: Accept any certificate (no verification)
+                let verifier = Arc::new(AcceptAnyVerifier);
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(verifier)
+                    .with_client_auth_cert(cert_chain, private_key)
+                    .map_err(|e| {
+                        PostgresTlsConfigSnafu {
+                            reason: format!("Failed to configure client authentication: {}", e),
+                        }
+                        .build()
+                    })?
+            }
+            TlsMode::VerifyCa | TlsMode::VerifyFull => PostgresTlsConfigSnafu {
+                reason: format!("Verify CA or Full mode are not yet implemented"),
+            }
+            .fail()?,
+        }
     } else {
-        config_builder.with_no_client_auth()
+        return PostgresTlsConfigSnafu {
+            reason: "Cert or Key file doesn't exist".to_string(),
+        }
+        .fail();
     };
 
+    common_telemetry::info!("Successfully created PostgreSQL TLS connector");
     Ok(MakeRustlsConnect::new(client_config))
+}
+
+#[derive(Debug)]
+struct AcceptAnyVerifier;
+
+impl ServerCertVerifier for AcceptAnyVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        // Accept any certificate without verification (PostgreSQL Prefer/Require mode)
+        common_telemetry::debug!(
+            "Accepting server certificate without verification (Prefer/Require mode)"
+        );
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        // Accept any signature without verification
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        // Accept any signature without verification
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Support all signature schemes
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA1,
+            SignatureScheme::ECDSA_SHA1_Legacy,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+            SignatureScheme::ED448,
+        ]
+    }
 }
 
 fn load_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -618,14 +700,6 @@ impl PgStore {
     /// * `table_name` - Name of the table to use for key-value storage
     /// * `max_txn_ops` - Maximum number of operations per transaction
     /// * `tls_config` - Optional TLS configuration. If None, uses plaintext connection.
-    ///
-    /// # TLS Configuration
-    ///
-    /// The TLS configuration supports multiple modes:
-    /// - `TlsMode::Disable` - No TLS (default for backward compatibility)
-    /// - `TlsMode::Require` - Require TLS connection
-    /// - `TlsMode::VerifyCa` - Require TLS and verify server certificate against CA
-    /// - `TlsMode::VerifyFull` - Require TLS and verify server certificate and hostname
     pub async fn with_url_and_tls(
         url: &str,
         table_name: &str,
@@ -638,6 +712,7 @@ impl PgStore {
         let pool = match tls_config {
             Some(tls_config) if tls_config.mode != TlsMode::Disable => {
                 let tls_connector = create_postgres_tls_connector(&tls_config)?;
+
                 cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
                     .context(CreatePostgresPoolSnafu)?
             }

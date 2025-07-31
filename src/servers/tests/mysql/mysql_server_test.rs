@@ -259,6 +259,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-rsa.key".to_owned(),
+        ca_cert_path: String::new(),
         watch: false,
     };
 
@@ -298,6 +299,7 @@ async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Resul
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server-pkcs8.key".to_owned(),
+        ca_cert_path: String::new(),
         watch: false,
     };
 
@@ -602,6 +604,7 @@ async fn do_test_query_all_datatypes_with_secure_server(
                 "tests/ssl/server-rsa.key".to_owned()
             }
         },
+        ca_cert_path: String::new(),
         watch: false,
     };
 
