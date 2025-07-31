@@ -11425,6 +11425,7 @@ dependencies = [
 name = "session"
 version = "0.16.0"
 dependencies = [
+ "ahash 0.8.11",
  "api",
  "arc-swap",
  "auth",

@@ -62,10 +62,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .flat_map(|s| s.metrics.iter().map(|m| &m.name))
             .collect::<Vec<_>>();
 
-        // If the user uses OTLP metrics ingestion before v0.16, it uses the old path.
-        // So we call this path 'legacy'.
-        // After v0.16, we store the OTLP metrics using prometheus compatible format, the new path.
-        // The difference is how we convert the input data into the final table schema.
+        // See [`OtlpMetricCtx`] for details
         let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
 
         let mut metric_ctx = ctx
