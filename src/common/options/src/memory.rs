@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct MemoryOptions {
     /// Whether to enable heap profiling activation.
-    /// When true, heap profiling will be activated during startup.
+    /// When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+    /// is set to "prof:true,prof_active:false". The official image adds this env variable.
     /// Default is true.
     pub enable_heap_profiling: bool,
 }
