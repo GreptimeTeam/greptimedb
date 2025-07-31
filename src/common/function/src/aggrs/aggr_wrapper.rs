@@ -105,12 +105,9 @@ impl StateMergeHelper {
 
         let state_func = supported.into_iter().filter_map(|f| {
             StateWrapper::new((*f).clone())
-                .inspect_err(|e| {
-                    common_telemetry::error!(
-                        "Failed to register state function for {:?} with error={e:?}",
-                        f
-                    )
-                })
+                .inspect_err(
+                    |e| common_telemetry::error!(e;"Failed to register state function for {:?}", f),
+                )
                 .ok()
                 .map(AggregateUDF::new_from_impl)
         });
