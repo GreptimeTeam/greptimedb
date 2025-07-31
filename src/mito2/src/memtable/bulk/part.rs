@@ -233,7 +233,7 @@ impl PrimaryKeyColumnBuilder {
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match self {
             PrimaryKeyColumnBuilder::StringDict(builder) => {
-                if let Ok(Some(s)) = value.as_string() {
+                if let Some(s) = value.as_string().context(DataTypeMismatchSnafu)? {
                     // We know the value is a string.
                     builder.append_value(s);
                 } else {
@@ -292,19 +292,16 @@ impl BulkPartConverter {
         schema: SchemaRef,
         capacity: usize,
         primary_key_codec: Arc<dyn PrimaryKeyCodec>,
-        mut store_primary_key_columns: bool,
+        store_primary_key_columns: bool,
     ) -> Self {
         debug_assert_eq!(
             region_metadata.primary_key_encoding,
             primary_key_codec.encoding()
         );
 
-        if region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
-            // We can't get primary key columns now.
-            store_primary_key_columns = false;
-        }
-
-        let primary_key_column_builders = if store_primary_key_columns {
+        let primary_key_column_builders = if store_primary_key_columns
+            && region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse
+        {
             new_primary_key_column_builders(region_metadata, capacity)
         } else {
             Vec::new()
