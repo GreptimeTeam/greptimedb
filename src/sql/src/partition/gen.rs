@@ -172,7 +172,7 @@ fn custom_biguint_to_string_fixed_len(
 pub fn divide_string_range(
     ranges: &[(char, char)],
     num_segments: u32,
-    hardstops: &[&str],
+    hardstops: &[impl AsRef<str>],
 ) -> Result<Vec<String>> {
     if num_segments < 2 {
         InvalidPartitionNumberSnafu {
@@ -183,13 +183,14 @@ pub fn divide_string_range(
 
     // --- Step 1: Get the custom alphabet and its base ---
     let alphabet = get_custom_alphabet(ranges);
+    if alphabet.len() < 2 {
+        return Ok(Vec::new());
+    }
+
     let base: BigUint = alphabet.len().into();
 
     // Compute how many characters we need for the number of partitions
     let num_segments_biguint: BigUint = num_segments.into();
-    if base < num_segments_biguint {
-        return Ok(Vec::new());
-    }
 
     let mut max_len = 0;
     let mut current_total_strings_power = BigUint::from(1u32);
@@ -235,6 +236,7 @@ pub fn divide_string_range(
 
     for hardstop_str in hardstops.iter() {
         // Validate hardstop characters are in the alphabet
+        let hardstop_str = hardstop_str.as_ref();
         for c in hardstop_str.chars() {
             if !alphabet.contains(&c) {
                 InvalidPartitionRangeSnafu {
@@ -289,7 +291,7 @@ pub fn partition_rule_for_range(
     field_name: &str,
     char_ranges: &[(char, char)],
     num_partitions: u32,
-    hardstops: &[&str],
+    hardstops: &[impl AsRef<str>],
 ) -> Result<Vec<Expr>> {
     let stops = divide_string_range(char_ranges, num_partitions, hardstops)?;
 
@@ -328,20 +330,20 @@ mod tests {
 
     #[test]
     fn test_divide_string_range() {
-        assert!(divide_string_range(&[('_', '_')], 10, &[])
+        assert!(divide_string_range(&[('_', '_')], 10, &[] as &[&str])
             .unwrap()
             .is_empty());
-        assert!(divide_string_range(&[('b', 'a')], 10, &[])
+        assert!(divide_string_range(&[('b', 'a')], 10, &[] as &[&str])
             .unwrap()
             .is_empty());
-        assert!(divide_string_range(&[('a', 'z')], 0, &[]).is_err());
-        assert!(divide_string_range(&[('a', 'z')], 1, &[]).is_err());
+        assert!(divide_string_range(&[('a', 'z')], 0, &[] as &[&str]).is_err());
+        assert!(divide_string_range(&[('a', 'z')], 1, &[] as &[&str]).is_err());
 
-        let stops =
-            divide_string_range(&[('a', 'z')], 10, &[]).expect("failed to divide string range");
+        let stops = divide_string_range(&[('a', 'z')], 10, &[] as &[&str])
+            .expect("failed to divide string range");
         assert_eq!(stops, vec!["c", "e", "g", "i", "k", "m", "o", "q", "s"]);
 
-        let stops = divide_string_range(&[('0', '9'), ('-', '-'), ('a', 'z')], 4, &[])
+        let stops = divide_string_range(&[('0', '9'), ('-', '-'), ('a', 'z')], 4, &[] as &[&str])
             .expect("failed to divide string range");
         assert_eq!(stops, vec!["8", "h", "q"]);
 
@@ -366,11 +368,25 @@ mod tests {
             ]
         );
 
-        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 16, &[])
+        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 16, &[] as &[&str])
             .expect("failed to divide string range");
         assert_eq!(
             stops,
             vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+        );
+
+        let stops = divide_string_range(&[('0', '9'), ('a', 'f')], 80, &[] as &[&str])
+            .expect("failed to divide string range");
+        assert_eq!(
+            stops,
+            vec![
+                "03", "06", "09", "0c", "0f", "12", "15", "18", "1b", "1e", "21", "24", "27", "2a",
+                "2d", "30", "33", "36", "39", "3c", "3f", "42", "45", "48", "4b", "4e", "51", "54",
+                "57", "5a", "5d", "60", "63", "66", "69", "6c", "6f", "72", "75", "78", "7b", "7e",
+                "81", "84", "87", "8a", "8d", "90", "93", "96", "99", "9c", "9f", "a2", "a5", "a8",
+                "ab", "ae", "b1", "b4", "b7", "ba", "bd", "c0", "c3", "c6", "c9", "cc", "cf", "d2",
+                "d5", "d8", "db", "de", "e1", "e4", "e7", "ea", "ed"
+            ]
         );
     }
 
