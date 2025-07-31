@@ -171,8 +171,8 @@ impl SlowQueryEventHandler {
     }
 
     async fn record_slow_query(&self, event: SlowQueryEvent) {
-        // Only capture the query statement.
-        if !self.is_sql_query_statement(&event.query, event.query_ctx.clone()) {
+        // If the query is SQL, only capture the query statement.
+        if !event.is_promql && !self.is_sql_query_statement(&event.query, event.query_ctx.clone()) {
             debug!(
                 "Skip the slow query event: {:?} because it's not a query statement",
                 event
@@ -553,6 +553,7 @@ impl SlowQueryTimer {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
 
+                slow_query_event.query = query.query.to_string();
                 slow_query_event.is_promql = true;
                 slow_query_event.promql_start = Some(start);
                 slow_query_event.promql_end = Some(end);
