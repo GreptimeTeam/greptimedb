@@ -799,7 +799,7 @@ pub fn to_create_flow_task_expr(
 
     let eval_interval = create_flow
         .eval_interval
-        .map(|v| common_time::Duration::new_second(v));
+        .map(common_time::Duration::new_second);
     let mut flow_options = HashMap::new();
     if let Some(interval) = eval_interval {
         flow_options.insert(
