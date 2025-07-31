@@ -271,7 +271,7 @@ pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> Strin
         }
     }
 
-    if matches!(metric_type, MetricType::NonMonotonicSum) {
+    if matches!(metric_type, MetricType::MonotonicSum) {
         name_tokens.retain(|t| t != TOTAL);
         name_tokens.push(TOTAL.to_string());
     }
