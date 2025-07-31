@@ -254,7 +254,8 @@ impl TimePartitions {
                 bulk_schema.clone(),
                 kvs.num_rows(),
                 self.primary_key_codec.clone(),
-                false,
+                // Always store primary keys for bulk mode.
+                true,
             );
             converter.append_key_values(kvs)?;
             let part = converter.convert()?;

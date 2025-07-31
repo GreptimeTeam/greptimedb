@@ -305,7 +305,7 @@ impl BulkPartConverter {
         }
 
         let primary_key_column_builders = if store_primary_key_columns {
-            new_primary_key_column_builders(&region_metadata, capacity)
+            new_primary_key_column_builders(region_metadata, capacity)
         } else {
             Vec::new()
         };

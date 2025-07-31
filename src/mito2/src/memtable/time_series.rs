@@ -113,12 +113,10 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
         }
     }
 
-    fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
-        if metadata.primary_key.is_empty() {
-            true
-        } else {
-            false
-        }
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
+        // Now if we can use simple bulk memtable, the input request is already
+        // a bulk write request and won't call this method.
+        false
     }
 }
 
