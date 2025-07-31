@@ -31,6 +31,7 @@ use common_datasource::file_format::{infer_schemas, FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
 use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
+use common_meta::ddl::create_flow::FLOW_EVAL_INTERVAL_KEY;
 use common_meta::key::flow::flow_info::FlowInfoValue;
 use common_meta::SchemaOptions;
 use common_query::prelude::GREPTIME_TIMESTAMP;
@@ -1019,6 +1020,11 @@ pub fn show_create_flow(
         or_replace: false,
         if_not_exists: true,
         expire_after: flow_val.expire_after(),
+        eval_interval: flow_val
+            .options
+            .get(FLOW_EVAL_INTERVAL_KEY)
+            .and_then(|v| serde_json::from_str::<common_time::Duration>(v).ok())
+            .map(|d| d.to_std_duration().as_secs() as _),
         comment,
         query,
     };

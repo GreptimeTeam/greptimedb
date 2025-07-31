@@ -75,11 +75,12 @@ pub struct TaskConfig {
     pub time_window_expr: Option<TimeWindowExpr>,
     /// in seconds
     pub expire_after: Option<i64>,
-    sink_table_name: [String; 3],
+    pub sink_table_name: [String; 3],
     pub source_table_names: HashSet<[String; 3]>,
-    catalog_manager: CatalogManagerRef,
-    query_type: QueryType,
-    batch_opts: Arc<BatchingModeOptions>,
+    pub catalog_manager: CatalogManagerRef,
+    pub query_type: QueryType,
+    pub batch_opts: Arc<BatchingModeOptions>,
+    pub flow_eval_interval: Option<common_time::Duration>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -102,7 +103,7 @@ fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<Quer
 }
 
 #[derive(Debug, Clone)]
-enum QueryType {
+pub enum QueryType {
     /// query is a tql query
     Tql,
     /// query is a sql query
@@ -128,6 +129,7 @@ pub struct TaskArgs<'a> {
     pub catalog_manager: CatalogManagerRef,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
+    pub flow_eval_interval: Option<common_time::Duration>,
 }
 
 pub struct PlanInfo {
@@ -150,6 +152,7 @@ impl BatchingTask {
             catalog_manager,
             shutdown_rx,
             batch_opts,
+            flow_eval_interval,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -164,6 +167,7 @@ impl BatchingTask {
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
                 batch_opts,
+                flow_eval_interval,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         })
@@ -499,7 +503,12 @@ impl BatchingTask {
                     max_window_cnt = max_window_cnt.map(|cnt| {
                         (cnt + 1).min(self.config.batch_opts.experimental_max_filter_num_per_query)
                     });
-                    let sleep_until = {
+                    
+                    let sleep_until = if let Some(eval_interval) = self.config.flow_eval_interval {
+                        tokio::time::Instant::now() + eval_interval.to_std_duration()
+                    } else {
+                        // if not explictly set, just automatically calculate next start time
+                        // using time window size and more args
                         let state = self.state.write().unwrap();
 
                         let time_window_size = self
