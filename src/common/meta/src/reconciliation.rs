@@ -14,6 +14,9 @@
 
 // TODO(weny): Remove it
 #[allow(dead_code)]
+pub(crate) mod reconcile_database;
+// TODO(weny): Remove it
+#[allow(dead_code)]
 pub(crate) mod reconcile_table;
 // TODO(weny): Remove it
 #[allow(dead_code)]

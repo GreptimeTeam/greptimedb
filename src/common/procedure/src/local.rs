@@ -247,6 +247,13 @@ impl ContextProvider for ManagerContext {
         Ok(self.state(procedure_id))
     }
 
+    async fn procedure_state_receiver(
+        &self,
+        procedure_id: ProcedureId,
+    ) -> Result<Option<Receiver<ProcedureState>>> {
+        Ok(self.state_receiver(procedure_id))
+    }
+
     async fn try_put_poison(&self, key: &PoisonKey, procedure_id: ProcedureId) -> Result<()> {
         {
             // validate the procedure exists
@@ -343,6 +350,14 @@ impl ManagerContext {
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Returns the [Receiver<ProcedureState>] of specific `procedure_id`.
+    fn state_receiver(&self, procedure_id: ProcedureId) -> Option<Receiver<ProcedureState>> {
+        let procedures = self.procedures.read().unwrap();
+        procedures
+            .get(&procedure_id)
+            .map(|meta| meta.state_receiver.clone())
     }
 
     /// Returns the [ProcedureMeta] of all procedures.
