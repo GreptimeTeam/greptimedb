@@ -20,7 +20,7 @@ use std::sync::Arc;
 use api::v1::flow::{DirtyWindowRequests, FlowResponse};
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{FlowType, FLOW_EVAL_INTERVAL_KEY};
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
 use common_meta::key::TableMetadataManagerRef;
@@ -361,6 +361,19 @@ impl BatchingEngine {
             }
         }
 
+        // optionally set a eval interval for the flow
+
+        let flow_eval_interval: Option<common_time::Duration> = flow_options
+            .get(FLOW_EVAL_INTERVAL_KEY)
+            .map(|v| serde_json::from_str(v))
+            .transpose()
+            .map_err(|e| {
+                UnexpectedSnafu {
+                    reason: format!("Failed to parse flow eval interval: {e}"),
+                }
+                .build()
+            })?;
+
         let flow_type = flow_options.get(FlowType::FLOW_TYPE_KEY);
 
         ensure!(
@@ -442,6 +455,7 @@ impl BatchingEngine {
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
             batch_opts: self.batch_opts.clone(),
+            flow_eval_interval,
         };
 
         let task = BatchingTask::try_new(task_args)?;
