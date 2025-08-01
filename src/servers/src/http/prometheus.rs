@@ -56,7 +56,7 @@ use crate::error::{
     TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
-use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
+use crate::prom_store::{DATABASE_LABEL, FIELD_NAME_LABEL, METRIC_NAME_LABEL, SCHEMA_LABEL};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
@@ -1034,6 +1034,22 @@ pub async fn label_values_query(
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
         field_columns.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
+    } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
+        let catalog_manager = handler.catalog_manager();
+        match catalog_manager
+            .schema_names(&catalog, Some(&query_ctx))
+            .await
+        {
+            Ok(mut schema_names) => {
+                schema_names.sort_unstable();
+                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
+                    schema_names,
+                ));
+            }
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
+            }
+        }
     }
 
     let queries = params.matches.0;
