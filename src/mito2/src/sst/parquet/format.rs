@@ -51,7 +51,7 @@ use crate::error::{
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::to_sst_arrow_schema;
+use crate::sst::{to_flat_sst_arrow_schema, to_sst_arrow_schema, FlatSchemaOptions};
 
 /// Arrow array type for the primary key dictionary.
 pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
@@ -59,7 +59,7 @@ pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
 /// Number of columns that have fixed positions.
 ///
 /// Contains: time index and internal columns.
-const FIXED_POS_COLUMN_NUM: usize = 4;
+pub(crate) const FIXED_POS_COLUMN_NUM: usize = 4;
 
 /// Helper for writing the SST format with primary key.
 pub(crate) struct PrimaryKeyWriteFormat {
@@ -161,7 +161,9 @@ impl ReadFormat {
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> Self {
-        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids))
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
+        ReadFormat::Flat(FlatReadFormat::new(metadata, arrow_schema, column_ids))
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -346,42 +348,18 @@ impl PrimaryKeyReadFormat {
             .collect();
         let arrow_schema = to_sst_arrow_schema(&metadata);
 
-        // Maps column id of a projected field to its index in SST.
-        let mut projected_field_id_index: Vec<_> = column_ids
-            .filter_map(|column_id| {
-                // Only apply projection to fields.
-                field_id_to_index
-                    .get(&column_id)
-                    .copied()
-                    .map(|index| (column_id, index))
-            })
-            .collect();
-        let mut projection_indices: Vec<_> = projected_field_id_index
-            .iter()
-            .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(arrow_schema.fields.len() - FIXED_POS_COLUMN_NUM..arrow_schema.fields.len())
-            .collect();
-        projection_indices.sort_unstable();
-
-        // Sort fields by their indices in the SST. Then the order of fields is their order
-        // in the Batch.
-        projected_field_id_index.sort_unstable_by_key(|x| x.1);
-        // Because the SST put fields before other columns, we don't need to consider other
-        // columns.
-        let field_id_to_projected_index = projected_field_id_index
-            .into_iter()
-            .map(|(column_id, _)| column_id)
-            .enumerate()
-            .map(|(index, column_id)| (column_id, index))
-            .collect();
+        let format_projection = FormatProjection::compute_format_projection(
+            &field_id_to_index,
+            arrow_schema.fields.len(),
+            column_ids,
+        );
 
         PrimaryKeyReadFormat {
             metadata,
             arrow_schema,
             field_id_to_index,
-            projection_indices,
-            field_id_to_projected_index,
+            projection_indices: format_projection.projection_indices,
+            field_id_to_projected_index: format_projection.column_id_to_projected_index,
             override_sequence: None,
         }
     }
@@ -715,6 +693,68 @@ impl PrimaryKeyReadFormat {
     }
 }
 
+/// Helper to compute the projection for the SST.
+pub(crate) struct FormatProjection {
+    /// Indices of columns to read from the SST. It contains all internal columns.
+    pub(crate) projection_indices: Vec<usize>,
+    /// Column id to their index in the projected schema (
+    /// the schema after projection).
+    pub(crate) column_id_to_projected_index: HashMap<ColumnId, usize>,
+}
+
+impl FormatProjection {
+    /// Computes the projection.
+    ///
+    /// `id_to_index` is a mapping from column id to the index of the column in the SST.
+    pub(crate) fn compute_format_projection(
+        id_to_index: &HashMap<ColumnId, usize>,
+        sst_column_num: usize,
+        column_ids: impl Iterator<Item = ColumnId>,
+    ) -> Self {
+        // Maps column id of a projected column to its index in SST.
+        // It also ignores columns not in the SST.
+        // [(column id, index in SST)]
+        let mut projected_schema: Vec<_> = column_ids
+            .filter_map(|column_id| {
+                id_to_index
+                    .get(&column_id)
+                    .copied()
+                    .map(|index| (column_id, index))
+            })
+            .collect();
+        // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
+        // This ensures the schema of `projected_schema` is the same as the batch returned from the SST.
+        projected_schema.sort_unstable_by_key(|x| x.1);
+        // Dedups the entries to avoid the case that `column_ids` has duplicated columns.
+        projected_schema.dedup_by_key(|x| x.1);
+
+        // Collects all projected indices.
+        // It contains the positions of all columns we need to read.
+        let mut projection_indices: Vec<_> = projected_schema
+            .iter()
+            .map(|(_column_id, index)| *index)
+            // We need to add all fixed position columns.
+            .chain(sst_column_num - FIXED_POS_COLUMN_NUM..sst_column_num)
+            .collect();
+        projection_indices.sort_unstable();
+        // Removes duplications.
+        projection_indices.dedup();
+
+        // Creates a map from column id to the index of that column in the projected record batch.
+        let column_id_to_projected_index = projected_schema
+            .into_iter()
+            .map(|(column_id, _)| column_id)
+            .enumerate()
+            .map(|(index, column_id)| (column_id, index))
+            .collect();
+
+        Self {
+            projection_indices,
+            column_id_to_projected_index,
+        }
+    }
+}
+
 /// Values of column statistics of the SST.
 ///
 /// It also distinguishes the case that a column is not found and
@@ -872,7 +912,6 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::read::plain_batch::PlainBatch;
     use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::FlatSchemaOptions;
 
@@ -1234,8 +1273,7 @@ mod tests {
         let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
 
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(4);
-        let rb = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
-        let batch = PlainBatch::new(rb);
+        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
         let expect_record = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
@@ -1250,8 +1288,7 @@ mod tests {
 
         let num_rows = 4;
         let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
-        let rb = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
-        let batch = PlainBatch::new(rb);
+        let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
 
         let expected_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0

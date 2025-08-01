@@ -27,26 +27,23 @@
 //!
 //! It stores field columns in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns())
 //! and stores primary key columns in the same order as [RegionMetadata::primary_key].
-//!
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_time::Timestamp;
+use api::v1::SemanticType;
 use datatypes::arrow::array::UInt64Array;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
-use parquet::file::statistics::Statistics;
+use parquet::file::metadata::RowGroupMetaData;
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{NewRecordBatchSnafu, Result};
-use crate::sst::file::{FileId, FileTimeRange};
-use crate::sst::parquet::format::{ReadFormat, StatValues};
-use crate::sst::{to_flat_sst_arrow_schema, to_plain_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::parquet::format::{FormatProjection, ReadFormat, StatValues};
+use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 
 /// Helper for writing the SST format.
 #[allow(dead_code)]
@@ -91,18 +88,26 @@ impl FlatWriteFormat {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
         let Some(override_sequence) = self.override_sequence else {
-            return Ok(batch.as_record_batch().clone());
+            return Ok(batch.clone());
         };
 
         let mut columns = batch.columns().to_vec();
         let sequence_array = Arc::new(UInt64Array::from(vec![override_sequence; batch.num_rows()]));
-        columns[batch.sequence_column_index()] = sequence_array;
+        columns[sequence_column_index(batch.num_columns())] = sequence_array;
 
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
 }
 
-/// Helper for reading the SST format with projection.
+/// Returns the position of the sequence column.
+pub(crate) fn sequence_column_index(num_columns: usize) -> usize {
+    num_columns - 2
+}
+
+// TODO(yingwen): Support new_override_sequence_array().
+/// Helper for reading the flat SST format with projection.
+///
+/// It only supports flat format that stores primary keys additionally.
 pub struct FlatReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
@@ -113,56 +118,35 @@ pub struct FlatReadFormat {
     /// Column id to their index in the projected schema (
     /// the schema after projection).
     column_id_to_projected_index: HashMap<ColumnId, usize>,
+    /// Column id to index in SST.
+    column_id_to_sst_index: HashMap<ColumnId, usize>,
 }
 
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
+    ///
+    /// The given `arrow_schema` is the schema created from the `metadata`
+    /// by [to_flat_sst_arrow_schema()].
     pub fn new(
         metadata: RegionMetadataRef,
+        arrow_schema: SchemaRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> FlatReadFormat {
-        let arrow_schema = to_plain_sst_arrow_schema(&metadata);
+        // Creates a map to lookup index.
+        let id_to_index = sst_column_id_indices(&metadata);
 
-        // Maps column id of a projected column to its index in SST.
-        // The metadata and the SST have the same column order.
-        // [(column id, index in SST)]
-        let mut projected_column_id_index: Vec<_> = column_ids
-            .filter_map(|column_id| {
-                metadata
-                    .column_index_by_id(column_id)
-                    .map(|index| (column_id, index))
-            })
-            .collect();
-        // Collect all projected indices.
-        let mut projection_indices: Vec<_> = projected_column_id_index
-            .iter()
-            .map(|(_column_id, index)| *index)
-            // We need to add all fixed position columns.
-            .chain(
-                arrow_schema.fields.len() - PLAIN_FIXED_POS_COLUMN_NUM..arrow_schema.fields.len(),
-            )
-            .collect();
-        projection_indices.sort_unstable();
-
-        // Sorts columns by their indices in the SST. Then the output order is their order
-        // in the batch returned from the SST.
-        projected_column_id_index.sort_unstable_by_key(|x| x.1);
-        // Dedups the entries.
-        projected_column_id_index.dedup_by_key(|x| x.1);
-        // Then we map the column id to the index of the column id in `projected_column_id_index`.
-        // So we can get the index of the column id in the batch returned from the SST.
-        let column_id_to_projected_index = projected_column_id_index
-            .into_iter()
-            .map(|(column_id, _)| column_id)
-            .enumerate()
-            .map(|(index, column_id)| (column_id, index))
-            .collect();
+        let format_projection = FormatProjection::compute_format_projection(
+            &id_to_index,
+            arrow_schema.fields.len(),
+            column_ids,
+        );
 
         FlatReadFormat {
             metadata,
             arrow_schema,
-            projection_indices,
-            column_id_to_projected_index,
+            projection_indices: format_projection.projection_indices,
+            column_id_to_projected_index: format_projection.column_id_to_projected_index,
+            column_id_to_sst_index: id_to_index,
         }
     }
 
@@ -177,13 +161,7 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(column_index) = self.metadata.column_index_by_id(column_id) else {
-            // No such column in the SST.
-            return StatValues::NoColumn;
-        };
-        let column = &self.metadata.column_metadatas[column_index];
-        let stats = ReadFormat::column_values(row_groups, column, column_index, true);
-        StatValues::from_stats_opt(stats)
+        self.get_stat_values(row_groups, column_id, true)
     }
 
     /// Returns max values of specific column in row groups.
@@ -192,13 +170,7 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(column_index) = self.metadata.column_index_by_id(column_id) else {
-            // No such column in the SST.
-            return StatValues::NoColumn;
-        };
-        let column = &self.metadata.column_metadatas[column_index];
-        let stats = ReadFormat::column_values(row_groups, column, column_index, false);
-        StatValues::from_stats_opt(stats)
+        self.get_stat_values(row_groups, column_id, false)
     }
 
     /// Returns null counts of specific column in row groups.
@@ -207,11 +179,12 @@ impl FlatReadFormat {
         row_groups: &[impl Borrow<RowGroupMetaData>],
         column_id: ColumnId,
     ) -> StatValues {
-        let Some(column_index) = self.metadata.column_index_by_id(column_id) else {
+        let Some(index) = self.column_id_to_sst_index.get(&column_id) else {
             // No such column in the SST.
             return StatValues::NoColumn;
         };
-        let stats = ReadFormat::column_null_counts(row_groups, column_index);
+
+        let stats = ReadFormat::column_null_counts(row_groups, *index);
         StatValues::from_stats_opt(stats)
     }
 
@@ -232,68 +205,58 @@ impl FlatReadFormat {
     pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
     }
+
+    fn get_stat_values(
+        &self,
+        row_groups: &[impl Borrow<RowGroupMetaData>],
+        column_id: ColumnId,
+        is_min: bool,
+    ) -> StatValues {
+        let Some(column) = self.metadata.column_by_id(column_id) else {
+            // No such column in the SST.
+            return StatValues::NoColumn;
+        };
+        // Safety: `column_id_to_sst_index` is built from `metadata`.
+        let index = self.column_id_to_sst_index.get(&column_id).unwrap();
+
+        let stats = ReadFormat::column_values(row_groups, column, *index, is_min);
+        StatValues::from_stats_opt(stats)
+    }
+}
+
+/// Returns a map that the key is the column id and the value is the column position
+/// in the SST.
+/// It only supports SSTs with raw primary key columns.
+fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
+    let mut id_to_index = HashMap::with_capacity(metadata.column_metadatas.len());
+    let mut column_index = 0;
+    // keys
+    for pk_id in &metadata.primary_key {
+        id_to_index.insert(*pk_id, column_index);
+        column_index += 1;
+    }
+    // fields
+    for column in &metadata.column_metadatas {
+        if column.semantic_type == SemanticType::Field {
+            id_to_index.insert(column.column_id, column_index);
+            column_index += 1;
+        }
+    }
+    // time index
+    id_to_index.insert(metadata.time_index_column().column_id, column_index);
+
+    id_to_index
 }
 
 #[cfg(test)]
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         Self::new(
             Arc::clone(&metadata),
+            arrow_schema,
             metadata.column_metadatas.iter().map(|c| c.column_id),
         )
     }
-}
-
-/// Gets the min/max time index of the SST from the parquet meta.
-/// It assumes the parquet is created by the mito engine.
-#[allow(dead_code)]
-pub(crate) fn parquet_time_range(
-    file_id: FileId,
-    parquet_meta: &ParquetMetaData,
-    metadata: &RegionMetadata,
-) -> Option<FileTimeRange> {
-    let time_index_pos = metadata.time_index_column_pos();
-    // Safety: The time index column is valid.
-    let time_unit = metadata
-        .time_index_column()
-        .column_schema
-        .data_type
-        .as_timestamp()
-        .unwrap()
-        .unit();
-    let mut time_range: Option<FileTimeRange> = None;
-    for row_group_meta in parquet_meta.row_groups() {
-        let stats = row_group_meta.column(time_index_pos).statistics()?;
-        // The physical type for the timestamp should be i64.
-        let (min, max) = match stats {
-            Statistics::Int64(value_stats) => (*value_stats.min_opt()?, *value_stats.max_opt()?),
-            Statistics::Int32(_)
-            | Statistics::Boolean(_)
-            | Statistics::Int96(_)
-            | Statistics::Float(_)
-            | Statistics::Double(_)
-            | Statistics::ByteArray(_)
-            | Statistics::FixedLenByteArray(_) => {
-                common_telemetry::warn!(
-                    "Invalid statistics {:?} for time index in parquet in {}",
-                    stats,
-                    file_id
-                );
-                return None;
-            }
-        };
-        let (min_in_rg, max_in_rg) = (
-            Timestamp::new(min, time_unit),
-            Timestamp::new(max, time_unit),
-        );
-        if let Some(range) = &mut time_range {
-            range.0 = range.0.min(min_in_rg);
-            range.1 = range.1.max(max_in_rg);
-        } else {
-            time_range = Some((min_in_rg, max_in_rg));
-        }
-    }
-
-    time_range
 }
