@@ -21,6 +21,7 @@ use common_telemetry::debug;
 use deadpool_postgres::{Config, Pool, Runtime};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 // TLS-related imports (feature-gated)
 use rustls::ClientConfig;
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
@@ -403,9 +404,7 @@ pub type PgStore = RdsStore<PgClient, PgExecutorFactory, PgSqlTemplateSet>;
 /// - `Prefer`: Try TLS first, fallback to plaintext if TLS fails (handled by connection logic)
 /// - `Require`: Only TLS connections, but NO certificate verification (accept any cert)
 /// - `VerifyCa`: TLS + verify certificate is signed by trusted CA (no hostname verification)
-/// - `VerifyFull`: TLS + verify CA + verify hostname matches certificate CN/SAN
-///
-/// (`VerifyCa` and `VerifyFull` are not implemented yet)
+/// - `VerifyFull`: TLS + verify CA + verify hostname matches certificate SAN
 ///
 pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustlsConnect> {
     common_telemetry::info!(
@@ -427,10 +426,18 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         }
-        TlsMode::VerifyCa | TlsMode::VerifyFull => PostgresTlsConfigSnafu {
-            reason: "Verify CA or Full mode are not yet implemented".to_string(),
+        TlsMode::VerifyCa => {
+            // For VerifyCa: Verify server cert against CA store, but skip hostname verification
+            let ca_store = load_ca(&tls_config.ca_cert_path)?;
+            let verifier = Arc::new(NoHostnameVerification { roots: ca_store });
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
         }
-        .fail()?,
+        TlsMode::VerifyFull => {
+            let ca_store = load_ca(&tls_config.ca_cert_path)?;
+            ClientConfig::builder().with_root_certificates(ca_store)
+        }
     };
 
     // Create the TLS client configuration based on the mode and client cert requirements
@@ -457,6 +464,7 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
     Ok(MakeRustlsConnect::new(client_config))
 }
 
+/// For Prefer/Require mode, we accept any server certificate without verification.
 #[derive(Debug)]
 struct AcceptAnyVerifier;
 
@@ -469,7 +477,6 @@ impl ServerCertVerifier for AcceptAnyVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, TlsError> {
-        // Accept any certificate without verification (PostgreSQL Prefer/Require mode)
         common_telemetry::debug!(
             "Accepting server certificate without verification (Prefer/Require mode)"
         );
@@ -494,6 +501,72 @@ impl ServerCertVerifier for AcceptAnyVerifier {
     ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
         // Accept any signature without verification
         Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        // Support all signature schemes
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// For VerifyCa mode, we verify the server certificate against our CA store
+/// and skip verify server's HostName.
+#[derive(Debug)]
+struct NoHostnameVerification {
+    roots: Arc<rustls::RootCertStore>,
+}
+
+impl ServerCertVerifier for NoHostnameVerification {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, TlsError> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .all,
+        )?;
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -535,6 +608,48 @@ fn load_private_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'stat
             .build()
         })?;
     Ok(key)
+}
+
+fn load_ca(path: &str) -> Result<Arc<rustls::RootCertStore>> {
+    let mut root_store = rustls::RootCertStore::empty();
+
+    // Add system root certificates
+    match rustls_native_certs::load_native_certs() {
+        Ok(certs) => {
+            let num_certs = certs.len();
+            for cert in certs {
+                if let Err(e) = root_store.add(cert) {
+                    return PostgresTlsConfigSnafu {
+                        reason: format!("Failed to add root certificate: {}", e),
+                    }
+                    .fail();
+                }
+            }
+            common_telemetry::info!("Loaded {num_certs} system root certificates successfully");
+        }
+        Err(e) => {
+            return PostgresTlsConfigSnafu {
+                reason: format!("Failed to load system root certificates: {}", e),
+            }
+            .fail();
+        }
+    }
+
+    // Try add custom CA certificate if provided
+    if !path.is_empty() {
+        let ca_certs = load_certs(path)?;
+        for cert in ca_certs {
+            if let Err(e) = root_store.add(cert) {
+                return PostgresTlsConfigSnafu {
+                    reason: format!("Failed to add custom CA certificate: {}", e),
+                }
+                .fail();
+            }
+        }
+        common_telemetry::info!("Added custom CA certificate from {}", path);
+    }
+
+    Ok(Arc::new(root_store))
 }
 
 #[async_trait::async_trait]

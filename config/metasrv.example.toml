@@ -72,8 +72,8 @@ node_max_idle_time = "24hours"
 ## - "disable" - No TLS
 ## - "prefer" (default) - Try TLS, fallback to plain
 ## - "require" - Require TLS
-## - "verify_ca" - Require TLS and verify CA (not yet implemented)
-## - "verify_full" - Require TLS and verify hostname (not yet implemented)
+## - "verify_ca" - Require TLS and verify CA
+## - "verify_full" - Require TLS and verify hostname
 mode = "prefer"
 
 ## Path to client certificate file (for client authentication)
