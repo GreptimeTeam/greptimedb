@@ -190,6 +190,7 @@ fn test_load_metasrv_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            store_tls: None,
             ..Default::default()
         },
         ..Default::default()
@@ -298,6 +299,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
+
             ..Default::default()
         },
         ..Default::default()

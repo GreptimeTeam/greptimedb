@@ -51,8 +51,8 @@ use crate::rpc::KeyValue;
 /// This mirrors the TlsMode from servers::tls to avoid circular dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TlsMode {
-    #[default]
     Disable,
+    #[default]
     Prefer,
     Require,
     VerifyCa,
@@ -711,10 +711,21 @@ impl PgStore {
 
         let pool = match tls_config {
             Some(tls_config) if tls_config.mode != TlsMode::Disable => {
-                let tls_connector = create_postgres_tls_connector(&tls_config)?;
-
-                cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
-                    .context(CreatePostgresPoolSnafu)?
+                match create_postgres_tls_connector(&tls_config) {
+                    Ok(tls_connector) => cfg
+                        .create_pool(Some(Runtime::Tokio1), tls_connector)
+                        .context(CreatePostgresPoolSnafu)?,
+                    Err(e) => {
+                        if tls_config.mode == TlsMode::Prefer {
+                            // Fallback to insecure connection if TLS fails
+                            common_telemetry::info!("Failed to create TLS connector, falling back to insecure connection");
+                            cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+                                .context(CreatePostgresPoolSnafu)?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
             }
             _ => cfg
                 .create_pool(Some(Runtime::Tokio1), NoTls)
