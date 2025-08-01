@@ -425,7 +425,7 @@ impl DdlManager {
             .tracing_context
             .as_ref()
             .map(TracingContext::from_w3c)
-            .unwrap_or(TracingContext::from_current_span())
+            .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
         async move {
             debug!("Submitting Ddl task: {:?}", request.task);

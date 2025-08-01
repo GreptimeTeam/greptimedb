@@ -137,7 +137,7 @@ impl ProcedureExecutor for LocalProcedureExecutor {
             .procedure_state(pid)
             .await
             .context(QueryProcedureSnafu)?
-            .context(ProcedureNotFoundSnafu {
+            .with_context(|| ProcedureNotFoundSnafu {
                 pid: pid.to_string(),
             })?;
 
