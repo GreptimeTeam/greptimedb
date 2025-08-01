@@ -63,13 +63,13 @@ You can control heap profiling activation using the new HTTP APIs:
 
 ```bash
 # Check current profiling status
-curl -X GET localhost:4000/mem/status
+curl -X GET localhost:4000/debug/prof/mem/status
 
 # Activate heap profiling (if not already active)
-curl -X POST localhost:4000/mem/activate
+curl -X POST localhost:4000/debug/prof/mem/activate
 
 # Deactivate heap profiling
-curl -X POST localhost:4000/mem/deactivate
+curl -X POST localhost:4000/debug/prof/mem/deactivate
 ```
 
 ### Dump memory profiling data
