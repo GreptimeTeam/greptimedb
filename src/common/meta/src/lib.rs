@@ -37,6 +37,7 @@ pub mod node_expiry_listener;
 pub mod node_manager;
 pub mod peer;
 pub mod poison_key;
+pub mod procedure_executor;
 pub mod range_stream;
 pub mod reconciliation;
 pub mod region_keeper;

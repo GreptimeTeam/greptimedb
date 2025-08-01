@@ -34,12 +34,12 @@ use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
-use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{
     self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
 };
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{

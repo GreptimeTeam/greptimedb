@@ -464,7 +464,7 @@ impl MetasrvBuilder {
             election,
             procedure_manager,
             mailbox,
-            procedure_executor: ddl_manager,
+            ddl_manager,
             wal_options_allocator,
             table_metadata_manager,
             runtime_switch_manager,
