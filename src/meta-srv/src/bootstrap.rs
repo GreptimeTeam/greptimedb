@@ -457,13 +457,6 @@ fn convert_tls_option(tls_option: &TlsOption) -> PgTlsOption {
         servers::tls::TlsMode::VerifyFull => PgTlsMode::VerifyFull,
     };
 
-    common_telemetry::info!(
-        "[DEBUG] Converting TLS config: mode={:?}, cert_path={}, key_path={}",
-        mode,
-        tls_option.cert_path,
-        tls_option.key_path
-    );
-
     PgTlsOption {
         mode,
         cert_path: tls_option.cert_path.clone(),
