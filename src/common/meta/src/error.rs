@@ -938,6 +938,13 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Failed to convert time ranges"))]
+    ConvertTimeRanges {
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
     #[snafu(display(
         "Column metadata inconsistencies found in table: {}, table_id: {}",
         table_name,
@@ -1012,7 +1019,8 @@ impl ErrorExt for Error {
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
-            | DeserializeFlexbuffers { .. } => StatusCode::Unexpected,
+            | DeserializeFlexbuffers { .. }
+            | ConvertTimeRanges { .. } => StatusCode::Unexpected,
 
             SendMessage { .. } | GetKvCache { .. } | CacheNotGet { .. } => StatusCode::Internal,
 

@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
 use snafu::Location;
@@ -73,14 +74,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Inconsistent time unit: {:?}", units))]
+    InconsistentTimeUnit {
+        units: Vec<TimeUnit>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UnknownColumnDataType { .. } | Error::InvalidTimeUnit { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnknownColumnDataType { .. }
+            | Error::InvalidTimeUnit { .. }
+            | Error::InconsistentTimeUnit { .. } => StatusCode::InvalidArguments,
             Error::IntoColumnDataType { .. } | Error::SerializeJson { .. } => {
                 StatusCode::Unexpected
             }

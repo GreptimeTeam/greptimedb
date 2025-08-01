@@ -35,7 +35,7 @@ use table::table_reference::TableReference;
 
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::ddl::DdlContext;
-use crate::error::{Result, TableNotFoundSnafu};
+use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::DeserializedValueWithBytes;
@@ -159,7 +159,8 @@ impl TruncateTableProcedure {
                 let kind = if time_ranges.is_empty() {
                     truncate_request::Kind::All(api::v1::region::All {})
                 } else {
-                    let pb_time_ranges = to_pb_time_ranges(time_ranges);
+                    let pb_time_ranges =
+                        to_pb_time_ranges(time_ranges).context(ConvertTimeRangesSnafu)?;
                     truncate_request::Kind::TimeRanges(pb_time_ranges)
                 };
 

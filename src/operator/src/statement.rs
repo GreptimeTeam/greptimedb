@@ -568,7 +568,7 @@ impl StatementExecutor {
             })?
             .unit();
 
-        let mut time_ranges = vec![];
+        let mut time_ranges = Vec::with_capacity(sql_values_time_range.len());
         for (start, end) in sql_values_time_range {
             let start = common_sql::convert::sql_value_to_value(
                 "range_start",
