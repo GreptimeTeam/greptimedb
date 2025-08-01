@@ -230,6 +230,7 @@ where
                     tls_server_config,
                     opts.keep_alive.as_secs(),
                     opts.reject_no_database.unwrap_or(false),
+                    opts.prepared_max_capacity,
                 )),
                 Some(instance.process_manager().clone()),
             );

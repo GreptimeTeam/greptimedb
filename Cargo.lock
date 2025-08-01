@@ -11363,7 +11363,6 @@ dependencies = [
  "log-query",
  "loki-proto",
  "mime_guess",
- "moka",
  "mysql_async",
  "notify",
  "object-pool",

@@ -29,8 +29,6 @@ use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
-use loki_proto::stats::Cache;
-use moka::sync::Cache;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -82,9 +80,10 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: SessionRef,
     user_provider: Option<UserProviderRef>,
-    prepared_stmts: Arc<Cache<String, SqlPlan>>,
+    prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    prepared_max_capacity: usize,
 }
 
 impl MysqlInstanceShim {
@@ -93,6 +92,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        prepared_max_capacity: usize,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -107,17 +107,6 @@ impl MysqlInstanceShim {
             }
         }
 
-        let max_capacity = std::env::var("PREPARED_STMT_MAX_CAPACITY")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1000);
-
-        let cache = Cache::builder()
-            .max_capacity(max_capacity)
-            .time_to_live(Duration::from_secs(30 * 60))
-            .time_to_idle(Duration::from_secs(5 * 60))
-            .build();
-
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
@@ -128,9 +117,10 @@ impl MysqlInstanceShim {
                 process_id,
             )),
             user_provider,
-            prepared_stmts: Arc::new(cache),
+            prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            prepared_max_capacity,
         }
     }
 
@@ -172,12 +162,27 @@ impl MysqlInstanceShim {
 
     /// Save query and logical plan with a given statement key
     fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
-        self.prepared_stmts.insert(stmt_key, plan);
+        let mut prepared_stmts = self.prepared_stmts.write();
+        let max_capacity = self.prepared_max_capacity;
+
+        let is_update = prepared_stmts.contains_key(&stmt_key);
+
+        if !is_update && prepared_stmts.len() >= max_capacity {
+            // Log a warning but don't insert
+            warn!(
+                "Prepared statement cache is full, max capacity: {}",
+                max_capacity
+            );
+            return;
+        }
+
+        let _ = prepared_stmts.insert(stmt_key, plan);
     }
 
     /// Retrieve the query and logical plan by a given statement key
     fn plan(&self, stmt_key: &str) -> Option<SqlPlan> {
-        self.prepared_stmts.get(stmt_key).cloned()
+        let guard = self.prepared_stmts.read();
+        guard.get(stmt_key).cloned()
     }
 
     /// Save the prepared statement and return the parameters and result columns
@@ -328,7 +333,8 @@ impl MysqlInstanceShim {
 
     /// Remove the prepared statement by a given statement key
     fn do_close(&mut self, stmt_key: String) {
-        self.prepared_stmts.remove(&stmt_key);
+        let mut guard = self.prepared_stmts.write();
+        let _ = guard.remove(&stmt_key);
     }
 
     fn auth_plugin(&self) -> &str {

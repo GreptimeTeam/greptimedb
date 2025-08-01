@@ -77,6 +77,8 @@ pub struct MysqlSpawnConfig {
     keep_alive_secs: u64,
     // other shim config
     reject_no_database: bool,
+    // prepared statement config
+    prepared_max_capacity: usize,
 }
 
 impl MysqlSpawnConfig {
@@ -85,12 +87,14 @@ impl MysqlSpawnConfig {
         tls: Arc<ReloadableTlsServerConfig>,
         keep_alive_secs: u64,
         reject_no_database: bool,
+        prepared_max_capacity: usize,
     ) -> MysqlSpawnConfig {
         MysqlSpawnConfig {
             force_tls,
             tls,
             keep_alive_secs,
             reject_no_database,
+            prepared_max_capacity,
         }
     }
 
@@ -195,12 +199,14 @@ impl MysqlServer {
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
         process_id: u32,
+        prepared_max_capacity: usize,
     ) -> Result<()> {
         let mut shim = MysqlInstanceShim::create(
             spawn_ref.query_handler(),
             spawn_ref.user_provider(),
             stream.peer_addr()?,
             process_id,
+            prepared_max_capacity,
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
