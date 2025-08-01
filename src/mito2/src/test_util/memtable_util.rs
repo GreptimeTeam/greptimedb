@@ -27,7 +27,9 @@ use datatypes::schema::ColumnSchema;
 use datatypes::vectors::TimestampMillisecondVector;
 use mito_codec::key_values::KeyValue;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
-use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::metadata::{
+    ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
+};
 use store_api::storage::{ColumnId, RegionId, SequenceNumber};
 use table::predicate::Predicate;
 
@@ -126,13 +128,17 @@ impl MemtableBuilder for EmptyMemtableBuilder {
     fn build(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(EmptyMemtable::new(id))
     }
+
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
+        true
+    }
 }
 
 /// Creates a region metadata to test memtable with default pk.
 ///
 /// The schema is `k0, k1, ts, v0, v1` and pk is `k0, k1`.
 pub(crate) fn metadata_for_test() -> RegionMetadataRef {
-    metadata_with_primary_key(vec![0, 1], false)
+    Arc::new(metadata_with_primary_key(vec![0, 1], false))
 }
 
 /// Creates a region metadata to test memtable and specific primary key.
@@ -142,7 +148,7 @@ pub(crate) fn metadata_for_test() -> RegionMetadataRef {
 pub fn metadata_with_primary_key(
     primary_key: Vec<ColumnId>,
     enable_table_id: bool,
-) -> RegionMetadataRef {
+) -> RegionMetadata {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
     let maybe_table_id = if enable_table_id { "__table_id" } else { "k1" };
     builder
@@ -180,8 +186,7 @@ pub fn metadata_with_primary_key(
             column_id: 4,
         })
         .primary_key(primary_key);
-    let region_metadata = builder.build().unwrap();
-    Arc::new(region_metadata)
+    builder.build().unwrap()
 }
 
 fn semantic_type_of_column(column_id: ColumnId, primary_key: &[ColumnId]) -> SemanticType {

@@ -112,6 +112,12 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
             ))
         }
     }
+
+    fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
+        // Now if we can use simple bulk memtable, the input request is already
+        // a bulk write request and won't call this method.
+        false
+    }
 }
 
 /// Memtable implementation that groups rows by their primary key.
@@ -828,7 +834,7 @@ impl Series {
 }
 
 /// `ValueBuilder` holds all the vector builders for field columns.
-struct ValueBuilder {
+pub(crate) struct ValueBuilder {
     timestamp: Vec<i64>,
     timestamp_type: ConcreteDataType,
     sequence: Vec<u64>,
@@ -872,7 +878,7 @@ impl ValueBuilder {
     /// Returns the size of field values.
     ///
     /// In this method, we don't check the data type of the value, because it is already checked in the caller.
-    fn push<'a>(
+    pub(crate) fn push<'a>(
         &mut self,
         ts: ValueRef,
         sequence: u64,
@@ -1103,10 +1109,10 @@ impl ValueBuilder {
 /// [Values] holds an immutable vectors of field columns, including `sequence` and `op_type`.
 #[derive(Clone)]
 pub struct Values {
-    timestamp: VectorRef,
-    sequence: Arc<UInt64Vector>,
-    op_type: Arc<UInt8Vector>,
-    fields: Vec<VectorRef>,
+    pub(crate) timestamp: VectorRef,
+    pub(crate) sequence: Arc<UInt64Vector>,
+    pub(crate) op_type: Arc<UInt8Vector>,
+    pub(crate) fields: Vec<VectorRef>,
 }
 
 impl Values {

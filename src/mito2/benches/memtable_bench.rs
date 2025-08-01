@@ -21,10 +21,12 @@ use datafusion_common::Column;
 use datafusion_expr::{lit, Expr};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use mito2::memtable::bulk::part::BulkPartConverter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
 use mito2::region::options::MergeMode;
+use mito2::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use rand::rngs::ThreadRng;
@@ -38,7 +40,7 @@ use table::predicate::Predicate;
 
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
-    let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+    let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
     let timestamps = (0..100).collect::<Vec<_>>();
 
     // Note that this test only generate one time series.
@@ -359,5 +361,71 @@ fn cpu_metadata() -> RegionMetadata {
     builder.build().unwrap()
 }
 
-criterion_group!(benches, write_rows, full_scan, filter_1_host);
+fn bulk_part_converter(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("bulk_part_converter");
+
+    for &rows in &[1024, 2048, 4096, 8192] {
+        // Benchmark without storing primary key columns (baseline)
+        group.bench_with_input(format!("{}_rows_no_pk_columns", rows), &rows, |b, &rows| {
+            b.iter(|| {
+                let generator =
+                    CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                let schema = to_flat_sst_arrow_schema(
+                    &metadata,
+                    &FlatSchemaOptions {
+                        raw_pk_columns: false,
+                        string_pk_use_dict: false,
+                    },
+                );
+                let mut converter = BulkPartConverter::new(&metadata, schema, rows, codec, false);
+
+                if let Some(kvs) = generator.iter().next() {
+                    converter.append_key_values(&kvs).unwrap();
+                }
+
+                let _bulk_part = converter.convert().unwrap();
+            });
+        });
+
+        // Benchmark with storing primary key columns
+        group.bench_with_input(
+            format!("{}_rows_with_pk_columns", rows),
+            &rows,
+            |b, &rows| {
+                b.iter(|| {
+                    let generator =
+                        CpuDataGenerator::new(metadata.clone(), rows, start_sec, start_sec + 1);
+                    let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+                    let schema = to_flat_sst_arrow_schema(
+                        &metadata,
+                        &FlatSchemaOptions {
+                            raw_pk_columns: true,
+                            string_pk_use_dict: true,
+                        },
+                    );
+                    let mut converter =
+                        BulkPartConverter::new(&metadata, schema, rows, codec, true);
+
+                    if let Some(kvs) = generator.iter().next() {
+                        converter.append_key_values(&kvs).unwrap();
+                    }
+
+                    let _bulk_part = converter.convert().unwrap();
+                });
+            },
+        );
+    }
+}
+
+criterion_group!(
+    benches,
+    write_rows,
+    full_scan,
+    filter_1_host,
+    bulk_part_converter,
+);
 criterion_main!(benches);
