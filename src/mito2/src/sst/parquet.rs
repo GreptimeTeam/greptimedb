@@ -24,11 +24,11 @@ use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
+pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub(crate) mod page_reader;
-pub mod plain_format;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;

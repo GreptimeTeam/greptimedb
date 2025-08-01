@@ -14,11 +14,19 @@
 
 //! Format to store in parquet.
 //!
+//! It can store both encoded primary key and raw key columns.
+//!
 //! We store two additional internal columns at last:
+//! - `__primary_key`, the encoded primary key of the row (tags). Type: dictionary(uint32, binary)
 //! - `__sequence`, the sequence number of a row. Type: uint64
 //! - `__op_type`, the op type of the row. Type: uint8
 //!
-//! We store other columns in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
+//! The format is
+//! ```text
+//! primary key columns, field columns, time index, encoded primary key, __sequence, __op_type.
+//!
+//! It stores field columns in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns())
+//! and stores primary key columns in the same order as [RegionMetadata::primary_key].
 //!
 
 use std::borrow::Borrow;
@@ -36,31 +44,25 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, SequenceNumber};
 
 use crate::error::{NewRecordBatchSnafu, Result};
-use crate::read::plain_batch::PlainBatch;
 use crate::sst::file::{FileId, FileTimeRange};
 use crate::sst::parquet::format::{ReadFormat, StatValues};
-use crate::sst::to_plain_sst_arrow_schema;
-
-/// Number of columns that have fixed positions.
-///
-/// Contains all internal columns.
-pub(crate) const PLAIN_FIXED_POS_COLUMN_NUM: usize = 2;
+use crate::sst::{to_flat_sst_arrow_schema, to_plain_sst_arrow_schema, FlatSchemaOptions};
 
 /// Helper for writing the SST format.
 #[allow(dead_code)]
-pub(crate) struct PlainWriteFormat {
+pub(crate) struct FlatWriteFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
 }
 
-impl PlainWriteFormat {
+impl FlatWriteFormat {
     /// Creates a new helper.
     #[allow(dead_code)]
-    pub(crate) fn new(metadata: RegionMetadataRef) -> PlainWriteFormat {
-        let arrow_schema = to_plain_sst_arrow_schema(&metadata);
-        PlainWriteFormat {
+    pub(crate) fn new(metadata: RegionMetadataRef, options: &FlatSchemaOptions) -> FlatWriteFormat {
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, options);
+        FlatWriteFormat {
             metadata,
             arrow_schema,
             override_sequence: None,
@@ -85,7 +87,7 @@ impl PlainWriteFormat {
 
     /// Convert `batch` to a arrow record batch to store in parquet.
     #[allow(dead_code)]
-    pub(crate) fn convert_batch(&self, batch: &PlainBatch) -> Result<RecordBatch> {
+    pub(crate) fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
         let Some(override_sequence) = self.override_sequence else {
@@ -100,8 +102,8 @@ impl PlainWriteFormat {
     }
 }
 
-/// Helper for reading the SST format.
-pub struct PlainReadFormat {
+/// Helper for reading the SST format with projection.
+pub struct FlatReadFormat {
     /// The metadata stored in the SST.
     metadata: RegionMetadataRef,
     /// SST file schema.
@@ -113,12 +115,12 @@ pub struct PlainReadFormat {
     column_id_to_projected_index: HashMap<ColumnId, usize>,
 }
 
-impl PlainReadFormat {
+impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
     pub fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
-    ) -> PlainReadFormat {
+    ) -> FlatReadFormat {
         let arrow_schema = to_plain_sst_arrow_schema(&metadata);
 
         // Maps column id of a projected column to its index in SST.
@@ -156,7 +158,7 @@ impl PlainReadFormat {
             .map(|(index, column_id)| (column_id, index))
             .collect();
 
-        PlainReadFormat {
+        FlatReadFormat {
             metadata,
             arrow_schema,
             projection_indices,
@@ -233,9 +235,9 @@ impl PlainReadFormat {
 }
 
 #[cfg(test)]
-impl PlainReadFormat {
+impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
-    pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PlainReadFormat {
+    pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
         Self::new(
             Arc::clone(&metadata),
             metadata.column_metadatas.iter().map(|c| c.column_id),

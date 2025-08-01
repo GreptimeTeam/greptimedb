@@ -50,7 +50,7 @@ use crate::error::{
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
-use crate::sst::parquet::plain_format::PlainReadFormat;
+use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::to_sst_arrow_schema;
 
 /// Arrow array type for the primary key dictionary.
@@ -136,7 +136,7 @@ impl PrimaryKeyWriteFormat {
 /// Helper to read parquet formats.
 pub enum ReadFormat {
     PrimaryKey(PrimaryKeyReadFormat),
-    Plain(PlainReadFormat),
+    Flat(FlatReadFormat),
 }
 
 impl ReadFormat {
@@ -156,12 +156,12 @@ impl ReadFormat {
         ReadFormat::PrimaryKey(PrimaryKeyReadFormat::new(metadata, column_ids))
     }
 
-    /// Creates a helper to read the plain format.
-    pub fn new_plain(
+    /// Creates a helper to read the flat format.
+    pub fn new_flat(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> Self {
-        ReadFormat::Plain(PlainReadFormat::new(metadata, column_ids))
+        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids))
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -178,7 +178,7 @@ impl ReadFormat {
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         match self {
             ReadFormat::PrimaryKey(format) => format.arrow_schema(),
-            ReadFormat::Plain(format) => format.arrow_schema(),
+            ReadFormat::Flat(format) => format.arrow_schema(),
         }
     }
 
@@ -186,7 +186,7 @@ impl ReadFormat {
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         match self {
             ReadFormat::PrimaryKey(format) => format.metadata(),
-            ReadFormat::Plain(format) => format.metadata(),
+            ReadFormat::Flat(format) => format.metadata(),
         }
     }
 
@@ -194,7 +194,7 @@ impl ReadFormat {
     pub(crate) fn projection_indices(&self) -> &[usize] {
         match self {
             ReadFormat::PrimaryKey(format) => format.projection_indices(),
-            ReadFormat::Plain(format) => format.projection_indices(),
+            ReadFormat::Flat(format) => format.projection_indices(),
         }
     }
 
@@ -206,7 +206,7 @@ impl ReadFormat {
     ) -> StatValues {
         match self {
             ReadFormat::PrimaryKey(format) => format.min_values(row_groups, column_id),
-            ReadFormat::Plain(format) => format.min_values(row_groups, column_id),
+            ReadFormat::Flat(format) => format.min_values(row_groups, column_id),
         }
     }
 
@@ -218,7 +218,7 @@ impl ReadFormat {
     ) -> StatValues {
         match self {
             ReadFormat::PrimaryKey(format) => format.max_values(row_groups, column_id),
-            ReadFormat::Plain(format) => format.max_values(row_groups, column_id),
+            ReadFormat::Flat(format) => format.max_values(row_groups, column_id),
         }
     }
 
@@ -230,7 +230,7 @@ impl ReadFormat {
     ) -> StatValues {
         match self {
             ReadFormat::PrimaryKey(format) => format.null_counts(row_groups, column_id),
-            ReadFormat::Plain(format) => format.null_counts(row_groups, column_id),
+            ReadFormat::Flat(format) => format.null_counts(row_groups, column_id),
         }
     }
 
@@ -781,7 +781,7 @@ fn new_primary_key_array(primary_key: &[u8], num_rows: usize) -> ArrayRef {
     Arc::new(DictionaryArray::new(keys, values))
 }
 
-// FIXME(yingwen): This method is no longer correct under plain format.
+// FIXME(yingwen): This method is no longer correct under flat format.
 /// Gets the min/max time index of the row group from the parquet meta.
 /// It assumes the parquet is created by the mito engine.
 pub(crate) fn parquet_row_group_time_range(
@@ -873,7 +873,8 @@ mod tests {
 
     use super::*;
     use crate::read::plain_batch::PlainBatch;
-    use crate::sst::parquet::plain_format::PlainWriteFormat;
+    use crate::sst::parquet::flat_format::FlatWriteFormat;
+    use crate::sst::FlatSchemaOptions;
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -1191,7 +1192,7 @@ mod tests {
         );
     }
 
-    fn build_test_plain_sst_schema() -> SchemaRef {
+    fn build_test_flat_sst_schema() -> SchemaRef {
         let fields = vec![
             Field::new("tag0", ArrowDataType::Int64, true),
             Field::new("field1", ArrowDataType::Int64, true),
@@ -1209,13 +1210,13 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_to_sst_arrow_schema() {
+    fn test_flat_to_sst_arrow_schema() {
         let metadata = build_test_region_metadata();
-        let format = PlainWriteFormat::new(metadata);
-        assert_eq!(&build_test_plain_sst_schema(), format.arrow_schema());
+        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
+        assert_eq!(&build_test_flat_sst_schema(), format.arrow_schema());
     }
 
-    fn input_columns_for_plain_batch(num_rows: usize) -> Vec<ArrayRef> {
+    fn input_columns_for_flat_batch(num_rows: usize) -> Vec<ArrayRef> {
         vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
             Arc::new(Int64Array::from(vec![2; num_rows])), // field1
@@ -1228,27 +1229,28 @@ mod tests {
     }
 
     #[test]
-    fn test_plain_convert_batch() {
+    fn test_flat_convert_batch() {
         let metadata = build_test_region_metadata();
-        let format = PlainWriteFormat::new(metadata);
+        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
 
-        let columns: Vec<ArrayRef> = input_columns_for_plain_batch(4);
-        let rb = RecordBatch::try_new(build_test_plain_sst_schema(), columns.clone()).unwrap();
+        let columns: Vec<ArrayRef> = input_columns_for_flat_batch(4);
+        let rb = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
         let batch = PlainBatch::new(rb);
-        let expect_record = RecordBatch::try_new(build_test_plain_sst_schema(), columns).unwrap();
+        let expect_record = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expect_record, actual);
     }
 
     #[test]
-    fn test_plain_convert_with_override_sequence() {
+    fn test_flat_convert_with_override_sequence() {
         let metadata = build_test_region_metadata();
-        let format = PlainWriteFormat::new(metadata).with_override_sequence(Some(415411));
+        let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default())
+            .with_override_sequence(Some(415411));
 
         let num_rows = 4;
-        let columns: Vec<ArrayRef> = input_columns_for_plain_batch(num_rows);
-        let rb = RecordBatch::try_new(build_test_plain_sst_schema(), columns).unwrap();
+        let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
+        let rb = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
         let batch = PlainBatch::new(rb);
 
         let expected_columns: Vec<ArrayRef> = vec![
@@ -1261,26 +1263,26 @@ mod tests {
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
         let expected_record =
-            RecordBatch::try_new(build_test_plain_sst_schema(), expected_columns).unwrap();
+            RecordBatch::try_new(build_test_flat_sst_schema(), expected_columns).unwrap();
 
         let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expected_record, actual);
     }
 
     #[test]
-    fn test_plain_projection_indices() {
+    fn test_flat_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format = ReadFormat::new_plain(metadata.clone(), [3].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied());
         assert_eq!(&[2, 5, 6], read_format.projection_indices());
         // Only read field1
-        let read_format = ReadFormat::new_plain(metadata.clone(), [4].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied());
         assert_eq!(&[1, 5, 6], read_format.projection_indices());
         // Only read ts
-        let read_format = ReadFormat::new_plain(metadata.clone(), [5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied());
         assert_eq!(&[4, 5, 6], read_format.projection_indices());
         // Read field0, tag0, ts
-        let read_format = ReadFormat::new_plain(metadata, [2, 1, 5].iter().copied());
+        let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied());
         assert_eq!(&[0, 3, 4, 5, 6], read_format.projection_indices());
     }
 }

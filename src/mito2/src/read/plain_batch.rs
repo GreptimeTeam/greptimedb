@@ -30,7 +30,11 @@ use crate::error::{
     ComputeArrowSnafu, CreateDefaultSnafu, InvalidRequestSnafu, NewRecordBatchSnafu, Result,
     UnexpectedSnafu,
 };
-use crate::sst::parquet::plain_format::PLAIN_FIXED_POS_COLUMN_NUM;
+
+/// Number of columns that have fixed positions.
+///
+/// Contains all internal columns.
+pub(crate) const PLAIN_FIXED_POS_COLUMN_NUM: usize = 2;
 
 /// [PlainBatch] represents a batch of rows.
 /// It is a wrapper around [RecordBatch].
