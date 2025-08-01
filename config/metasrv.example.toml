@@ -19,32 +19,6 @@ store_key_prefix = ""
 ## - `mysql_store`
 backend = "etcd_store"
 
-## TLS configuration for store backend (only applicable for PostgreSQL/MySQL backends)
-## When using PostgreSQL or MySQL as metadata store, you can configure TLS here
-[store_tls]
-## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
-## - "disable" (default) - No TLS
-## - "prefer" - Try TLS, fallback to plain
-## - "require" - Require TLS
-## - "verify_ca" - Require TLS and verify CA (not yet implemented)
-## - "verify_full" - Require TLS and verify hostname (not yet implemented)
-mode = "disable"
-
-## Path to client certificate file (for client authentication)
-# cert_path = "/path/to/client.crt"
-
-## Path to client private key file (for client authentication)  
-# key_path = "/path/to/client.key"
-
-## Path to CA certificate file (for server certificate verification)
-## Required when using custom CAs or self-signed certificates
-## Leave empty to use system root certificates only
-# ca_cert_path = "/path/to/ca.crt"
-
-## Watch for certificate file changes and auto reload
-watch = false
-
-
 ## Table name in RDS to store metadata. Effect when using a RDS kvbackend.
 ## **Only used when backend is `postgres_store`.**
 meta_table_name = "greptime_metakv"
@@ -90,6 +64,34 @@ node_max_idle_time = "24hours"
 #+ global_rt_size = 8
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
+
+## TLS configuration for store backend (only applicable for PostgreSQL/MySQL backends)
+## When using PostgreSQL or MySQL as metadata store, you can configure TLS here
+[store_tls]
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - "disable" - No TLS
+## - "prefer" (default) - Try TLS, fallback to plain
+## - "require" - Require TLS
+## - "verify_ca" - Require TLS and verify CA (not yet implemented)
+## - "verify_full" - Require TLS and verify hostname (not yet implemented)
+mode = "prefer"
+
+## Path to client certificate file (for client authentication)
+## Like "/path/to/client.crt"
+cert_path = ""
+
+## Path to client private key file (for client authentication)
+## Like "/path/to/client.key"
+key_path = ""
+
+## Path to CA certificate file (for server certificate verification)
+## Required when using custom CAs or self-signed certificates
+## Leave empty to use system root certificates only
+## Like "/path/to/ca.crt"
+ca_cert_path = ""
+
+## Watch for certificate file changes and auto reload
+watch = false
 
 ## The gRPC server options.
 [grpc]
