@@ -1127,6 +1127,7 @@ pub fn to_pb_time_ranges(time_ranges: &[(Timestamp, Timestamp)]) -> v1::TimeRang
     debug_assert!(time_ranges
         .iter()
         .all(|(start, end)| start.unit() == end.unit()));
+    #[cfg(debug_assertions)]
     time_ranges.iter().fold(None, |acc, (start, _end)| {
         {
             if let Some(acc) = acc {
