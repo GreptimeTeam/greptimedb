@@ -68,9 +68,7 @@ const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
 lazy_static! {
     static ref DEFAULT_PROMOTE_ATTRS_SET: HashSet<String> =
         HashSet::from_iter(DEFAULT_PROMOTE_ATTRS.iter().map(|s| s.to_string()));
-    static ref INVALID_METRIC_NAME_CHAR: Regex = Regex::new(r"[^a-zA-Z0-9:]").unwrap();
-    static ref INVALID_LABEL_NAME_CHAR: Regex = Regex::new(r"[^a-zA-Z0-9]").unwrap();
-    static ref MULTIPLE_UNDERSCORE: Regex = Regex::new(r"__+").unwrap();
+    static ref NON_ALPHA_NUM_CHAR: Regex = Regex::new(r"[^a-zA-Z0-9]").unwrap();
     static ref UNIT_MAP: HashMap<String, String> = [
         // Time
         ("d", "days"),
@@ -251,23 +249,24 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     })
 }
 
-// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/b8655058501bed61a06bb660869051491f46840b/pkg/translator/prometheus/normalize_name.go#L83
+// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_name.go#L55
 pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> String {
-    let mut name_tokens = INVALID_METRIC_NAME_CHAR
+    let mut name_tokens = NON_ALPHA_NUM_CHAR
         .split(&metric.name)
         .map(|s| s.to_string())
         .collect_vec();
     if !metric.unit.is_empty() {
         let (main, per) = build_unit_suffix(&metric.unit);
-        if let Some(main) = main {
-            if !name_tokens.contains(&main) {
-                name_tokens.push(main);
-            }
+        if let Some(main) = main
+            && !name_tokens.contains(&main)
+        {
+            name_tokens.push(main);
         }
-        if let Some(per) = per {
-            if !name_tokens.contains(&per) {
-                name_tokens.push(per);
-            }
+        if let Some(per) = per
+            && !name_tokens.contains(&per)
+        {
+            name_tokens.push("per".to_string());
+            name_tokens.push(per);
         }
     }
 
@@ -293,36 +292,33 @@ pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> Strin
 }
 
 fn build_unit_suffix(unit: &str) -> (Option<String>, Option<String>) {
-    let mut main_unit = None;
-    let mut per_unit = None;
-
     let (main, per) = unit.split_once('/').unwrap_or((unit, ""));
-    let main = clean_unit_name(main);
-    if !main.is_empty() {
-        main_unit = Some(UNIT_MAP.get(&main).cloned().unwrap_or(main));
-    }
+    (check_unit(main, &UNIT_MAP), check_unit(per, &PER_UNIT_MAP))
+}
 
-    let per = clean_unit_name(per);
-    if !per.is_empty() {
-        let tmp = PER_UNIT_MAP.get(&per).cloned().unwrap_or(per);
-        per_unit = Some(format!("per_{}", tmp));
+fn check_unit(unit_str: &str, unit_map: &HashMap<String, String>) -> Option<String> {
+    let u = unit_str.trim();
+    if !u.is_empty() && !u.contains("{}") {
+        let u = unit_map.get(u).map(|s| s.as_ref()).unwrap_or(u);
+        let u = clean_unit_name(u);
+        if !u.is_empty() {
+            return Some(u);
+        }
     }
-
-    (main_unit, per_unit)
+    None
 }
 
 fn clean_unit_name(name: &str) -> String {
-    let n = INVALID_METRIC_NAME_CHAR.replace_all(name, UNDERSCORE);
-    let n = MULTIPLE_UNDERSCORE.replace_all(&n, UNDERSCORE);
-    n.strip_prefix(UNDERSCORE)
-        .unwrap_or(&n)
-        .trim()
-        .replace("{}", "")
+    NON_ALPHA_NUM_CHAR.split(name).join(UNDERSCORE)
 }
 
-// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/b8655058501bed61a06bb660869051491f46840b/pkg/translator/prometheus/normalize_label.go#L26
+// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_label.go#L27
 pub fn normalize_label_name(name: &str) -> String {
-    let n = INVALID_LABEL_NAME_CHAR.replace(name, UNDERSCORE);
+    if name.is_empty() {
+        return name.to_string();
+    }
+
+    let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
     if let Some((_, first)) = n.char_indices().next()
         && first >= '0'
         && first <= '9'
@@ -883,6 +879,181 @@ mod tests {
             legacy_normalize_otlp_name("JVM_memory_FREE"),
             "jvm_memory_free"
         );
+    }
+
+    #[test]
+    fn test_normalize_metric_name() {
+        let test_cases = vec![
+            // Default case
+            (Metric::default(), MetricType::Init, ""),
+            // Basic metric with just name
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo",
+            ),
+            // Metric with unit "s" should append "seconds"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_seconds",
+            ),
+            // Metric already ending with unit suffix should not duplicate
+            (
+                Metric {
+                    name: "foo_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_seconds",
+            ),
+            // Monotonic sum should append "total"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_total",
+            ),
+            // Metric already ending with "total" should not duplicate
+            (
+                Metric {
+                    name: "foo_total".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_total",
+            ),
+            // Monotonic sum with unit should append both unit and "total"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric with unit suffix and monotonic sum
+            (
+                Metric {
+                    name: "foo_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric already ending with "total" and has unit
+            (
+                Metric {
+                    name: "foo_total".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric already ending with both unit and "total"
+            (
+                Metric {
+                    name: "foo_seconds_total".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric with unusual order (total_seconds) should be normalized
+            (
+                Metric {
+                    name: "foo_total_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Gauge with unit "1" should append "ratio"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "1".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Gauge,
+                "foo_ratio",
+            ),
+            // Complex unit like "m/s" should be converted to "meters_per_second"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_meters_per_second",
+            ),
+            // Metric with partial unit match
+            (
+                Metric {
+                    name: "foo_second".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_second_meters",
+            ),
+            // Metric already containing the main unit
+            (
+                Metric {
+                    name: "foo_meters".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_meters_per_second",
+            ),
+        ];
+
+        for (metric, metric_type, expected) in test_cases {
+            let result = normalize_metric_name(&metric, &metric_type);
+            assert_eq!(
+                result, expected,
+                "Failed for metric name: '{}', unit: '{}', type: {:?}",
+                metric.name, metric.unit, metric_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_label_name() {
+        let test_cases = vec![
+            ("", ""),
+            ("foo", "foo"),
+            ("foo_bar/baz:abc", "foo_bar_baz_abc"),
+            ("1foo", "key_1foo"),
+            ("_foo", "key_foo"),
+            ("__bar", "__bar"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = normalize_label_name(input);
+            assert_eq!(
+                result, expected,
+                "unexpected result for input '{}'; got '{}'; want '{}'",
+                input, result, expected
+            );
+        }
     }
 
     fn keyvalue(key: &str, value: &str) -> KeyValue {
