@@ -24,6 +24,7 @@ use datatypes::prelude::Value;
 use promql_parser::label::{Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
+use servers::prom_store::{DATABASE_LABEL, SCHEMA_LABEL};
 use servers::prometheus;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -114,7 +115,17 @@ impl Instance {
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>> {
-        let table_schema = ctx.current_schema();
+        let table_schema = matchers
+            .iter()
+            .find_map(|m| {
+                if m.name == SCHEMA_LABEL || m.name == DATABASE_LABEL {
+                    Some(m.value.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| ctx.current_schema());
+
         let table = self
             .catalog_manager
             .table(ctx.current_catalog(), &table_schema, &metric, Some(ctx))
