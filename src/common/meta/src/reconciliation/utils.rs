@@ -22,14 +22,12 @@ use snafu::{ensure, OptionExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, RawTableMeta};
-use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{
-    self, MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, Result, UnexpectedSnafu,
+    MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, Result, UnexpectedSnafu,
 };
-use crate::key::table_name::{TableNameKey, TableNameManager};
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
 
@@ -395,87 +393,6 @@ pub(crate) fn build_table_meta_from_column_metadatas(
     }
 
     Ok(new_raw_table_meta)
-}
-
-/// Validates the table id and name consistency.
-///
-/// It will check the table id and table name consistency.
-/// If the table id and table name are not consistent, it will return an error.
-pub(crate) async fn validate_table_id_and_name(
-    table_name_manager: &TableNameManager,
-    table_id: TableId,
-    table_name: &TableName,
-) -> Result<()> {
-    let table_name_key = TableNameKey::new(
-        &table_name.catalog_name,
-        &table_name.schema_name,
-        &table_name.table_name,
-    );
-    let table_name_value = table_name_manager
-        .get(table_name_key)
-        .await?
-        .with_context(|| error::TableNotFoundSnafu {
-            table_name: table_name.to_string(),
-        })?;
-
-    ensure!(
-        table_name_value.table_id() == table_id,
-        error::UnexpectedSnafu {
-            err_msg: format!(
-                "The table id mismatch for table: {}, expected {}, actual {}",
-                table_name,
-                table_id,
-                table_name_value.table_id()
-            ),
-        }
-    );
-
-    Ok(())
-}
-
-/// Checks whether the column metadata invariants hold for the logical table.
-///
-/// Invariants:
-/// - Primary key (Tag) columns must exist in the new metadata.
-/// - Timestamp column must remain exactly the same in name and ID.
-///
-/// TODO(weny): add tests
-pub(crate) fn check_column_metadatas_invariants_for_logical_table(
-    column_metadatas: &[ColumnMetadata],
-    table_info: &RawTableInfo,
-) -> bool {
-    let new_primary_keys = column_metadatas
-        .iter()
-        .filter(|c| c.semantic_type == SemanticType::Tag)
-        .map(|c| c.column_schema.name.as_str())
-        .collect::<HashSet<_>>();
-
-    let old_primary_keys = table_info
-        .meta
-        .primary_key_indices
-        .iter()
-        .map(|i| table_info.meta.schema.column_schemas[*i].name.as_str());
-
-    for name in old_primary_keys {
-        if !new_primary_keys.contains(name) {
-            return false;
-        }
-    }
-
-    let old_timestamp_column_name = table_info
-        .meta
-        .schema
-        .column_schemas
-        .iter()
-        .find(|c| c.is_time_index())
-        .map(|c| c.name.as_str());
-
-    let new_timestamp_column_name = column_metadatas
-        .iter()
-        .find(|c| c.semantic_type == SemanticType::Timestamp)
-        .map(|c| c.column_schema.name.as_str());
-
-    old_timestamp_column_name != new_timestamp_column_name
 }
 
 /// Returns true if the logical table info needs to be updated.
