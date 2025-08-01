@@ -14,6 +14,7 @@
 
 use std::fmt::Display;
 
+use itertools::Itertools;
 use serde::Serialize;
 use sqlparser::ast::{ObjectName, Visit, VisitMut, Visitor, VisitorMut};
 
@@ -84,16 +85,14 @@ impl Display for TruncateTable {
         }
 
         write!(f, " FILE RANGE ")?;
-        let mut is_first = true;
-        for (start, end) in &self.time_ranges {
-            if is_first {
-                is_first = false;
-            } else {
-                write!(f, ", ")?;
-            }
-            write!(f, "({}, {})", start, end)?;
-        }
-        Ok(())
+        write!(
+            f,
+            "{}",
+            self.time_ranges
+                .iter()
+                .map(|(start, end)| format!("({}, {})", start, end))
+                .join(", ")
+        )
     }
 }
 
