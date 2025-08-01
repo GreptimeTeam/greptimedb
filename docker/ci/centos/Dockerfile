@@ -15,4 +15,6 @@ ADD $TARGETARCH/greptime /greptime/bin/
 
 ENV PATH /greptime/bin/:$PATH
 
+ENV MALLOC_CONF="prof:true,prof_active:false"
+
 ENTRYPOINT ["greptime"]

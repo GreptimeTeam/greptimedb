@@ -47,4 +47,6 @@ WORKDIR /greptime
 COPY --from=builder /out/target/${OUTPUT_DIR}/greptime /greptime/bin/
 ENV PATH /greptime/bin/:$PATH
 
+ENV MALLOC_CONF="prof:true,prof_active:false"
+
 ENTRYPOINT ["greptime"]

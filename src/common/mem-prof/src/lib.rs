@@ -17,7 +17,10 @@ pub mod error;
 #[cfg(not(windows))]
 mod jemalloc;
 #[cfg(not(windows))]
-pub use jemalloc::{dump_flamegraph, dump_pprof, dump_profile};
+pub use jemalloc::{
+    activate_heap_profile, deactivate_heap_profile, dump_flamegraph, dump_pprof, dump_profile,
+    is_heap_profile_active,
+};
 
 #[cfg(windows)]
 pub async fn dump_profile() -> error::Result<Vec<u8>> {
@@ -31,5 +34,20 @@ pub async fn dump_pprof() -> error::Result<Vec<u8>> {
 
 #[cfg(windows)]
 pub async fn dump_flamegraph() -> error::Result<Vec<u8>> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub fn activate_heap_profile() -> error::Result<()> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub fn deactivate_heap_profile() -> error::Result<()> {
+    error::ProfilingNotSupportedSnafu.fail()
+}
+
+#[cfg(windows)]
+pub fn is_heap_profile_active() -> error::Result<bool> {
     error::ProfilingNotSupportedSnafu.fail()
 }

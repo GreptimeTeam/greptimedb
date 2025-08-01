@@ -40,6 +40,7 @@ use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::sequence::SequenceRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
+use common_options::memory::MemoryOptions;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
@@ -160,6 +161,8 @@ pub struct MetasrvOptions {
     pub flush_stats_factor: usize,
     /// The tracing options.
     pub tracing: TracingOptions,
+    /// The memory options.
+    pub memory: MemoryOptions,
     /// The datastore for kv metadata.
     pub backend: BackendImpl,
     #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
@@ -251,6 +254,7 @@ impl Default for MetasrvOptions {
             max_txn_ops: 128,
             flush_stats_factor: 3,
             tracing: TracingOptions::default(),
+            memory: MemoryOptions::default(),
             backend: BackendImpl::EtcdStore,
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
             meta_table_name: common_meta::kv_backend::DEFAULT_META_TABLE_NAME.to_string(),

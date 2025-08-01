@@ -24,6 +24,7 @@ use api::v1::{RowDeleteRequest, RowDeleteRequests, RowInsertRequest, RowInsertRe
 use common_config::Configurable;
 use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
+use common_options::memory::MemoryOptions;
 use common_runtime::JoinHandle;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use common_telemetry::{debug, info, trace};
@@ -111,6 +112,7 @@ pub struct FlownodeOptions {
     pub heartbeat: HeartbeatOptions,
     pub query: QueryOptions,
     pub user_provider: Option<String>,
+    pub memory: MemoryOptions,
 }
 
 impl Default for FlownodeOptions {
@@ -131,6 +133,7 @@ impl Default for FlownodeOptions {
                 allow_query_fallback: false,
             },
             user_provider: None,
+            memory: MemoryOptions::default(),
         }
     }
 }

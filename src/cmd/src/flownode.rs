@@ -46,7 +46,7 @@ use crate::error::{
     MissingConfigSnafu, Result, ShutdownFlownodeSnafu, StartFlownodeSnafu,
 };
 use crate::options::{GlobalOptions, GreptimeOptions};
-use crate::{create_resource_limit_metrics, log_versions, App};
+use crate::{create_resource_limit_metrics, log_versions, maybe_activate_heap_profile, App};
 
 pub const APP_NAME: &str = "greptime-flownode";
 
@@ -280,6 +280,7 @@ impl StartCommand {
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
 
         info!("Flownode start command: {:#?}", self);

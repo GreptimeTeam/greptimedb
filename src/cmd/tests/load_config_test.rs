@@ -245,6 +245,7 @@ fn test_load_flownode_example_config() {
                 ..Default::default()
             },
             user_provider: None,
+            memory: Default::default(),
         },
         ..Default::default()
     };

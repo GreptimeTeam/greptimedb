@@ -1221,6 +1221,9 @@ ttl = "30d"
 [query]
 parallelism = 0
 allow_query_fallback = false
+
+[memory]
+enable_heap_profiling = true
 "#,
     )
     .trim()

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use common_base::readable_size::ReadableSize;
 use common_config::config::Configurable;
 use common_options::datanode::DatanodeClientOptions;
+use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
 use query::options::QueryOptions;
@@ -62,6 +63,7 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
     pub slow_query: Option<SlowQueryOptions>,
+    pub memory: MemoryOptions,
 }
 
 impl Default for FrontendOptions {
@@ -88,6 +90,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             max_in_flight_write_bytes: None,
             slow_query: Some(SlowQueryOptions::default()),
+            memory: MemoryOptions::default(),
         }
     }
 }
