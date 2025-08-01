@@ -14,12 +14,9 @@
 
 use snafu::{ensure, ResultExt};
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{
-    self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedSnafu, UnexpectedTokenSnafu,
-};
+use crate::error::{self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedTokenSnafu};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
