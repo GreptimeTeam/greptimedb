@@ -305,6 +305,9 @@ impl TryFrom<&Statement> for DfStatement {
                 .fail();
             }
         };
-        Ok(DfStatement::Statement(Box::new(s.into())))
+        // SAFETY: both are from sqlparser (shallow and v0.54), they are identical.
+        Ok(DfStatement::Statement(Box::new(unsafe {
+            std::mem::transmute(s)
+        })))
     }
 }
