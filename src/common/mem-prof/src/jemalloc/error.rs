@@ -53,6 +53,24 @@ pub enum Error {
         #[snafu(source)]
         error: tikv_jemalloc_ctl::Error,
     },
+
+    #[snafu(display("Failed to activate heap profiling"))]
+    ActivateProf {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
+
+    #[snafu(display("Failed to deactivate heap profiling"))]
+    DeactivateProf {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
+
+    #[snafu(display("Failed to read heap profiling status"))]
+    ReadProfActive {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -63,6 +81,9 @@ impl ErrorExt for Error {
             Error::BuildTempPath { .. } => StatusCode::Internal,
             Error::OpenTempFile { .. } => StatusCode::StorageUnavailable,
             Error::DumpProfileData { .. } => StatusCode::StorageUnavailable,
+            Error::ActivateProf { .. } => StatusCode::Internal,
+            Error::DeactivateProf { .. } => StatusCode::Internal,
+            Error::ReadProfActive { .. } => StatusCode::Internal,
         }
     }
 

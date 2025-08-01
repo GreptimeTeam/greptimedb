@@ -136,3 +136,11 @@ default_ratio = 1.0
 ## Parallelism of the query engine for query sent by flownode.
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true
