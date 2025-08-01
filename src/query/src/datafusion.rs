@@ -272,6 +272,37 @@ impl DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        /// Only print context on panic, to avoid cluttering logs.
+        ///
+        /// TODO(discord9): remove this once we catch the bug
+        #[derive(Debug)]
+        struct PanicLogger<'a> {
+            input_logical_plan: &'a LogicalPlan,
+            after_analyze: Option<LogicalPlan>,
+            after_optimize: Option<LogicalPlan>,
+            phy_plan: Option<Arc<dyn ExecutionPlan>>,
+        }
+        impl Drop for PanicLogger<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    common_telemetry::error!(
+                        "Panic while creating physical plan, input logical plan: {:?}, after analyze: {:?}, after optimize: {:?}, final physical plan: {:?}",
+                        self.input_logical_plan,
+                        self.after_analyze,
+                        self.after_optimize,
+                        self.phy_plan
+                    );
+                }
+            }
+        }
+
+        let mut logger = PanicLogger {
+            input_logical_plan: logical_plan,
+            after_analyze: None,
+            after_optimize: None,
+            phy_plan: None,
+        };
+
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
         let state = ctx.state();
 
@@ -295,6 +326,8 @@ impl DatafusionQueryEngine {
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?;
 
+        logger.after_analyze = Some(analyzed_plan.clone());
+
         common_telemetry::debug!("Create physical plan, analyzed plan: {analyzed_plan}");
 
         // skip optimize for MergeScan
@@ -312,12 +345,15 @@ impl DatafusionQueryEngine {
         };
 
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
+        logger.after_optimize = Some(optimized_plan.clone());
 
         let physical_plan = state
             .query_planner()
             .create_physical_plan(&optimized_plan, state)
             .await?;
 
+        logger.phy_plan = Some(physical_plan.clone());
+        drop(logger);
         Ok(physical_plan)
     }
 

@@ -23,4 +23,5 @@ pub(crate) mod reconcile_table;
 pub(crate) mod reconcile_logical_tables;
 // TODO(weny): Remove it
 #[allow(dead_code)]
+pub(crate) mod reconcile_catalog;
 pub(crate) mod utils;

@@ -403,6 +403,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Catalog not found, catalog: {}", catalog))]
+    CatalogNotFound {
+        catalog: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid metadata, err: {}", err_msg))]
     InvalidMetadata {
         err_msg: String,
@@ -1062,6 +1069,7 @@ impl ErrorExt for Error {
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
+            | CatalogNotFound { .. }
             | InvalidNodeInfoKey { .. }
             | InvalidStatKey { .. }
             | ParseNum { .. }
