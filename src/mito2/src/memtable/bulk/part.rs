@@ -879,15 +879,20 @@ fn binary_array_to_dictionary(input: &BinaryArray) -> Result<PrimaryKeyArray> {
 mod tests {
     use std::collections::VecDeque;
 
+    use api::v1::{Row, WriteHint};
     use datafusion_common::ScalarValue;
-    use datatypes::prelude::{ScalarVector, Value};
+    use datatypes::prelude::{ConcreteDataType, ScalarVector, Value};
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
     use crate::sst::parquet::format::ReadFormat;
     use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
-    use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
+    use crate::test_util::memtable_util::{
+        build_key_values_with_ts_seq_values, metadata_for_test, metadata_with_primary_key,
+        region_metadata_to_row_schema,
+    };
 
     fn check_binary_array_to_dictionary(
         input: &[&[u8]],
@@ -1374,7 +1379,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
-        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
 
         let mut converter =
             BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
@@ -1432,7 +1440,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
-        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
 
         let mut converter =
             BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
@@ -1507,7 +1518,10 @@ mod tests {
         let metadata = metadata_for_test();
         let capacity = 10;
         let primary_key_codec = build_primary_key_codec(&metadata);
-        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
 
         let converter =
             BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, true);
@@ -1540,7 +1554,6 @@ mod tests {
     #[test]
     fn test_bulk_part_converter_without_primary_key_columns() {
         let metadata = metadata_for_test();
-        let capacity = 100;
         let primary_key_codec = build_primary_key_codec(&metadata);
         let schema = to_flat_sst_arrow_schema(
             &metadata,
@@ -1550,6 +1563,7 @@ mod tests {
             },
         );
 
+        let capacity = 100;
         let mut converter =
             BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec, false);
 
@@ -1589,5 +1603,235 @@ mod tests {
             field_names,
             vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_key_values_with_sparse_encoding(
+        metadata: &RegionMetadataRef,
+        primary_key_codec: &Arc<dyn PrimaryKeyCodec>,
+        table_id: u32,
+        tsid: u64,
+        k0: String,
+        k1: String,
+        timestamps: impl Iterator<Item = i64>,
+        values: impl Iterator<Item = Option<f64>>,
+        sequence: SequenceNumber,
+    ) -> KeyValues {
+        // Encode the primary key (__table_id, __tsid, k0, k1) into binary format using the sparse codec
+        let pk_values = vec![
+            (ReservedColumnId::table_id(), Value::UInt32(table_id)),
+            (ReservedColumnId::tsid(), Value::UInt64(tsid)),
+            (0, Value::String(k0.clone().into())),
+            (1, Value::String(k1.clone().into())),
+        ];
+        let mut encoded_key = Vec::new();
+        primary_key_codec
+            .encode_values(&pk_values, &mut encoded_key)
+            .unwrap();
+        assert!(!encoded_key.is_empty());
+
+        // Create schema for sparse encoding: __primary_key, ts, v0, v1
+        let column_schema = vec![
+            api::v1::ColumnSchema {
+                column_name: PRIMARY_KEY_COLUMN_NAME.to_string(),
+                datatype: api::helper::ColumnDataTypeWrapper::try_from(
+                    ConcreteDataType::binary_datatype(),
+                )
+                .unwrap()
+                .datatype() as i32,
+                semantic_type: api::v1::SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            api::v1::ColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: api::helper::ColumnDataTypeWrapper::try_from(
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                )
+                .unwrap()
+                .datatype() as i32,
+                semantic_type: api::v1::SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            api::v1::ColumnSchema {
+                column_name: "v0".to_string(),
+                datatype: api::helper::ColumnDataTypeWrapper::try_from(
+                    ConcreteDataType::int64_datatype(),
+                )
+                .unwrap()
+                .datatype() as i32,
+                semantic_type: api::v1::SemanticType::Field as i32,
+                ..Default::default()
+            },
+            api::v1::ColumnSchema {
+                column_name: "v1".to_string(),
+                datatype: api::helper::ColumnDataTypeWrapper::try_from(
+                    ConcreteDataType::float64_datatype(),
+                )
+                .unwrap()
+                .datatype() as i32,
+                semantic_type: api::v1::SemanticType::Field as i32,
+                ..Default::default()
+            },
+        ];
+
+        let rows = timestamps
+            .zip(values)
+            .map(|(ts, v)| Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(api::v1::value::ValueData::BinaryValue(
+                            encoded_key.clone(),
+                        )),
+                    },
+                    api::v1::Value {
+                        value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(ts)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(api::v1::value::ValueData::I64Value(ts)),
+                    },
+                    api::v1::Value {
+                        value_data: v.map(api::v1::value::ValueData::F64Value),
+                    },
+                ],
+            })
+            .collect();
+
+        let mutation = api::v1::Mutation {
+            op_type: 1,
+            sequence,
+            rows: Some(api::v1::Rows {
+                schema: column_schema,
+                rows,
+            }),
+            write_hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+        };
+        KeyValues::new(metadata.as_ref(), mutation).unwrap()
+    }
+
+    #[test]
+    fn test_bulk_part_converter_sparse_primary_key_encoding() {
+        use api::v1::SemanticType;
+        use datatypes::schema::ColumnSchema;
+        use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+        use store_api::storage::RegionId;
+
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![0, 1])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+
+        assert_eq!(metadata.primary_key_encoding, PrimaryKeyEncoding::Sparse);
+        assert_eq!(primary_key_codec.encoding(), PrimaryKeyEncoding::Sparse);
+
+        let capacity = 100;
+        let mut converter =
+            BulkPartConverter::new(&metadata, schema, capacity, primary_key_codec.clone(), true);
+
+        let key_values1 = build_key_values_with_sparse_encoding(
+            &metadata,
+            &primary_key_codec,
+            2048u32, // table_id
+            100u64,  // tsid
+            "key11".to_string(),
+            "key21".to_string(),
+            vec![1000, 2000].into_iter(),
+            vec![Some(1.0), Some(2.0)].into_iter(),
+            1,
+        );
+
+        let key_values2 = build_key_values_with_sparse_encoding(
+            &metadata,
+            &primary_key_codec,
+            4096u32, // table_id
+            200u64,  // tsid
+            "key12".to_string(),
+            "key22".to_string(),
+            vec![1500].into_iter(),
+            vec![Some(3.0)].into_iter(),
+            2,
+        );
+
+        converter.append_key_values(&key_values1).unwrap();
+        converter.append_key_values(&key_values2).unwrap();
+
+        let bulk_part = converter.convert().unwrap();
+
+        assert_eq!(bulk_part.num_rows(), 3);
+        assert_eq!(bulk_part.min_ts, 1000);
+        assert_eq!(bulk_part.max_ts, 2000);
+        assert_eq!(bulk_part.sequence, 2);
+        assert_eq!(bulk_part.timestamp_index, bulk_part.batch.num_columns() - 4);
+
+        // For sparse encoding, primary key columns should NOT be stored individually
+        // even when store_primary_key_columns is true, because sparse encoding
+        // stores the encoded primary key in the __primary_key column
+        let schema = bulk_part.batch.schema();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["v0", "v1", "ts", "__primary_key", "__sequence", "__op_type"]
+        );
+
+        // Verify the __primary_key column contains encoded sparse keys
+        let primary_key_column = bulk_part.batch.column_by_name("__primary_key").unwrap();
+        let dict_array = primary_key_column
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+
+        // Should have non-zero entries indicating encoded primary keys
+        assert!(!dict_array.is_empty());
+        assert_eq!(dict_array.len(), 3); // 3 rows total
+
+        // Verify values are properly encoded binary data (not empty)
+        let values = dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        for i in 0..values.len() {
+            assert!(
+                !values.value(i).is_empty(),
+                "Encoded primary key should not be empty"
+            );
+        }
     }
 }

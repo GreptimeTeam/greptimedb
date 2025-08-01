@@ -21,6 +21,7 @@ use common_base::readable_size::ReadableSize;
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
@@ -69,6 +70,7 @@ pub struct FlatSchemaOptions {
     pub raw_pk_columns: bool,
     /// Whether to use dictionary encoding for string primary key columns
     /// when storing primary key columns.
+    /// Only takes effect when `raw_pk_columns` is true.
     pub string_pk_use_dict: bool,
 }
 
@@ -77,6 +79,20 @@ impl Default for FlatSchemaOptions {
         Self {
             raw_pk_columns: true,
             string_pk_use_dict: true,
+        }
+    }
+}
+
+impl FlatSchemaOptions {
+    /// Creates a options according to the primary key encoding.
+    pub fn from_encoding(encoding: PrimaryKeyEncoding) -> Self {
+        if encoding == PrimaryKeyEncoding::Dense {
+            Self::default()
+        } else {
+            Self {
+                raw_pk_columns: false,
+                string_pk_use_dict: false,
+            }
         }
     }
 }

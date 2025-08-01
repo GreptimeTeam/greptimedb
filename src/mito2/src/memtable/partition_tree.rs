@@ -376,6 +376,7 @@ impl IterBuilder for PartitionTreeIterBuilder {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     use api::v1::value::ValueData;
     use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
@@ -405,9 +406,9 @@ mod tests {
 
     fn write_iter_sorted_input(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         let timestamps = (0..100).collect::<Vec<_>>();
         let kvs =
@@ -450,9 +451,9 @@ mod tests {
 
     fn write_iter_unsorted_input(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
@@ -515,9 +516,9 @@ mod tests {
 
     fn write_iter_projection(has_pk: bool) {
         let metadata = if has_pk {
-            memtable_util::metadata_with_primary_key(vec![1, 0], true)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true))
         } else {
-            memtable_util::metadata_with_primary_key(vec![], false)
+            Arc::new(memtable_util::metadata_with_primary_key(vec![], false))
         };
         // Try to build a memtable via the builder.
         let memtable = PartitionTreeMemtableBuilder::new(PartitionTreeConfig::default(), None)
@@ -555,7 +556,7 @@ mod tests {
     }
 
     fn write_iter_multi_keys(max_keys: usize, freeze_threshold: usize) {
-        let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let memtable = PartitionTreeMemtable::new(
             1,
@@ -605,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_memtable_filter() {
-        let metadata = memtable_util::metadata_with_primary_key(vec![0, 1], false);
+        let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![0, 1], false));
         // Try to build a memtable via the builder.
         let memtable = PartitionTreeMemtableBuilder::new(
             PartitionTreeConfig {

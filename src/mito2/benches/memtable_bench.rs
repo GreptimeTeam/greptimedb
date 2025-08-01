@@ -40,7 +40,7 @@ use table::predicate::Predicate;
 
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
-    let metadata = memtable_util::metadata_with_primary_key(vec![1, 0], true);
+    let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
     let timestamps = (0..100).collect::<Vec<_>>();
 
     // Note that this test only generate one time series.

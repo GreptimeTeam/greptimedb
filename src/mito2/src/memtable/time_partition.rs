@@ -230,9 +230,10 @@ impl TimePartitions {
     ) -> Self {
         let inner = PartitionsInner::new(next_memtable_id);
         let primary_key_codec = build_primary_key_codec(&metadata);
-        let bulk_schema = builder
-            .use_bulk_insert(&metadata)
-            .then(|| to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default()));
+        let bulk_schema = builder.use_bulk_insert(&metadata).then(|| {
+            let opts = FlatSchemaOptions::from_encoding(metadata.primary_key_encoding);
+            to_flat_sst_arrow_schema(&metadata, &opts)
+        });
 
         Self {
             inner: Mutex::new(inner),
