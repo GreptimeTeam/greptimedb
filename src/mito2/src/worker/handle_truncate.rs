@@ -54,7 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
             RegionTruncateRequest::ByTimeRanges { time_ranges } => {
-                debug!(
+                info!(
                     "Try to partially truncate region {} by time ranges: {:?}",
                     region_id, time_ranges
                 );

@@ -51,8 +51,8 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::error::{
-    self, ExternalSnafu, InvalidSetDatabaseOptionSnafu, InvalidTimeZoneSnafu,
-    InvalidUnsetDatabaseOptionSnafu, Result,
+    self, ConvertTimeRangesSnafu, ExternalSnafu, InvalidSetDatabaseOptionSnafu,
+    InvalidTimeZoneSnafu, InvalidUnsetDatabaseOptionSnafu, Result,
 };
 use crate::key::FlowId;
 
@@ -890,7 +890,9 @@ impl TryFrom<TruncateTableTask> for PbTruncateTableTask {
                 schema_name: task.schema,
                 table_name: task.table,
                 table_id: Some(api::v1::TableId { id: task.table_id }),
-                time_ranges: Some(to_pb_time_ranges(&task.time_ranges)),
+                time_ranges: Some(
+                    to_pb_time_ranges(&task.time_ranges).context(ConvertTimeRangesSnafu)?,
+                ),
             }),
         })
     }

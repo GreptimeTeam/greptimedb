@@ -17,7 +17,9 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::Token;
 
-use crate::error::{self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    self, InvalidSqlSnafu, InvalidTableNameSnafu, Result, UnexpectedSnafu, UnexpectedTokenSnafu,
+};
 use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
@@ -117,14 +119,11 @@ impl ParserContext<'_> {
                     // Otherwise, continue to parse next range
                     continue;
                 }
-                _ => Err(ParserError::ParserError(format!(
-                    "Expected a comma or end of statement at {}",
-                    self.parser.peek_token().span.start
-                )))
-                .context(UnexpectedSnafu {
+                _ => UnexpectedTokenSnafu {
                     expected: "a comma or end of statement",
                     actual: self.peek_token_as_string(),
-                })?,
+                }
+                .fail()?,
             }
         }
 
