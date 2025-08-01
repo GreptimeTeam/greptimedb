@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
-use common_meta::ddl::{ExecutorContext, ProcedureExecutorRef};
+use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
     RemoveRegionFollowerRequest,

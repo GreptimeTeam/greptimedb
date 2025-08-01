@@ -34,6 +34,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::LocalProcedureExecutor;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
@@ -213,7 +214,7 @@ impl GreptimeDbStandaloneBuilder {
             flow_id_sequence,
         ));
 
-        let ddl_task_executor = Arc::new(
+        let ddl_manager = Arc::new(
             DdlManager::try_new(
                 DdlContext {
                     node_manager: node_manager.clone(),
@@ -231,6 +232,10 @@ impl GreptimeDbStandaloneBuilder {
             )
             .unwrap(),
         );
+        let procedure_executor = Arc::new(LocalProcedureExecutor::new(
+            ddl_manager,
+            procedure_manager.clone(),
+        ));
 
         let server_addr = opts.frontend_options().grpc.server_addr.clone();
 
@@ -240,7 +245,7 @@ impl GreptimeDbStandaloneBuilder {
             cache_registry.clone(),
             catalog_manager.clone(),
             node_manager.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
         .with_plugin(plugins)
@@ -263,7 +268,7 @@ impl GreptimeDbStandaloneBuilder {
             catalog_manager.clone(),
             kv_backend.clone(),
             cache_registry.clone(),
-            ddl_task_executor.clone(),
+            procedure_executor.clone(),
             node_manager.clone(),
         )
         .await
