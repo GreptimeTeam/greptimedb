@@ -11411,6 +11411,7 @@ dependencies = [
  "tower 0.5.2",
  "tower-http 0.6.2",
  "tracing",
+ "tracing-opentelemetry",
  "urlencoding",
  "uuid",
  "vrl",

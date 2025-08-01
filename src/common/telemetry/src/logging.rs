@@ -25,7 +25,6 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
-use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
@@ -51,17 +50,20 @@ pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Target
     OnceCell::new();
 
 /// Handle for reloading trace level
+#[allow(clippy::type_complexity)]
 pub static TRACE_RELOAD_HANDLE: OnceCell<
     tracing_subscriber::reload::Handle<
-        tracing_opentelemetry::OpenTelemetryLayer<
-            Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
-            Tracer,
+        Vec<
+            tracing_opentelemetry::OpenTelemetryLayer<
+                Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+                Tracer,
+            >,
         >,
         Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
     >,
 > = OnceCell::new();
 
-static TRACER: OnceCell<Tracer> = OnceCell::new();
+pub static TRACER: OnceCell<Tracer> = OnceCell::new();
 
 /// The logging options that used to initialize the logger.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -390,7 +392,7 @@ pub fn init_global_logging(
             .expect("failed to store otlp tracer");
         let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         let (dyn_trace_layer, trace_reload_handle) =
-            tracing_subscriber::reload::Layer::new(trace_layer);
+            tracing_subscriber::reload::Layer::new(vec![trace_layer]);
 
         TRACE_RELOAD_HANDLE
             .set(trace_reload_handle)
@@ -444,14 +446,16 @@ pub fn init_global_logging(
         tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
 
-        // if opts.enable_otlp_tracing {
-        //     if let Some(tracer) = TRACER.get() {
-        //         let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
-        //         let _ = trace_reload_handle.reload(vec![trace_layer]);
-        //     }
-        // } else {
-        //     let _ = trace_reload_handle.reload(vec![]);
-        // }
+        if opts.enable_otlp_tracing {
+            if let Some(tracer) = TRACER.get()
+                && let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get()
+            {
+                let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
+                let _ = trace_reload_handle.reload(vec![trace_layer]);
+            }
+        } else if let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() {
+            let _ = trace_reload_handle.reload(vec![]);
+        }
     });
 
     guards

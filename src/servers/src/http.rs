@@ -86,6 +86,7 @@ pub mod authorize;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 pub mod dyn_log;
+pub mod dyn_trace;
 pub mod event;
 pub mod extractor;
 pub mod handler;
@@ -878,6 +879,7 @@ impl HttpServer {
                 Router::new()
                     // handler for changing log level dynamically
                     .route("/log_level", routing::post(dyn_log::dyn_log_handler))
+                    .route("/enable_trace", routing::post(dyn_trace::dyn_trace_handler))
                     .nest(
                         "/prof",
                         Router::new()
