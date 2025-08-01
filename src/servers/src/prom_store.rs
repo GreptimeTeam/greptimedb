@@ -81,7 +81,7 @@ pub fn table_name(q: &Query) -> Result<String> {
 pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String> {
     for query in &request.queries {
         for matcher in &query.matchers {
-            if matcher.name == SCHEMA_LABEL {
+            if matcher.name == SCHEMA_LABEL && matcher.r#type == MatcherType::Eq as i32 {
                 return Some(matcher.value.clone());
             }
         }
@@ -90,7 +90,7 @@ pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String>
     // If no __schema__ found, look for __database__
     for query in &request.queries {
         for matcher in &query.matchers {
-            if matcher.name == DATABASE_LABEL {
+            if matcher.name == DATABASE_LABEL && matcher.r#type == MatcherType::Eq as i32 {
                 return Some(matcher.value.clone());
             }
         }
