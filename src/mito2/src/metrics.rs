@@ -119,6 +119,14 @@ lazy_static! {
 
     // Compaction metrics
     /// Timer of different stages in compaction.
+    /// - pick
+    /// - merge (in parallel)
+    ///   - iter_source
+    ///   - write_batch
+    ///   - update_index
+    ///   - upload_parquet
+    ///   - upload puffin
+    /// - write_manifest
     pub static ref COMPACTION_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_mito_compaction_stage_elapsed",
         "mito compaction stage elapsed",
