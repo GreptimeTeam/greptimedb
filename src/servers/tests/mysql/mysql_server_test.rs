@@ -43,6 +43,7 @@ struct MysqlOpts<'a> {
     tls: TlsOption,
     auth_info: Option<DatabaseAuthInfo<'a>>,
     reject_no_database: bool,
+    prepared_max_capacity: usize,
 }
 
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
@@ -72,6 +73,7 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
             tls_server_config,
             0,
             opts.reject_no_database,
+            opts.prepared_max_capacity,
         )),
         None,
     ))
