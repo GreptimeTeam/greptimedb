@@ -20,11 +20,11 @@ use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
-use common_meta::ddl::ProcedureExecutorRef;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::procedure_executor::ProcedureExecutorRef;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -157,7 +157,8 @@ impl FrontendBuilder {
             self.catalog_manager.clone(),
         ));
 
-        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_manager: Arc<FlowMetadataManager> =
+            Arc::new(FlowMetadataManager::new(kv_backend.clone()));
         let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
