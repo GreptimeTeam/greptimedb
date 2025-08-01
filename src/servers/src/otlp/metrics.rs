@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
 use common_query::prelude::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, AnyValue, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
 use regex::Regex;
-use session::protocol_ctx::OtlpMetricCtx;
+use session::protocol_ctx::{MetricType, OtlpMetricCtx};
 
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
@@ -37,6 +38,9 @@ const JOB_KEY: &str = "job";
 const INSTANCE_KEY: &str = "instance";
 
 const UNDERSCORE: &str = "_";
+const DOUBLE_UNDERSCORE: &str = "__";
+const TOTAL: &str = "total";
+const RATIO: &str = "ratio";
 
 // see: https://prometheus.io/docs/guides/opentelemetry/#promoting-resource-attributes
 const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
@@ -64,7 +68,48 @@ const DEFAULT_PROMOTE_ATTRS: [&str; 19] = [
 lazy_static! {
     static ref DEFAULT_PROMOTE_ATTRS_SET: HashSet<String> =
         HashSet::from_iter(DEFAULT_PROMOTE_ATTRS.iter().map(|s| s.to_string()));
-    static ref INVALID_METRIC_NAME: Regex = Regex::new(r"[^a-zA-Z0-9:_]").unwrap();
+    static ref NON_ALPHA_NUM_CHAR: Regex = Regex::new(r"[^a-zA-Z0-9]").unwrap();
+    static ref UNIT_MAP: HashMap<String, String> = [
+        // Time
+        ("d", "days"),
+        ("h", "hours"),
+        ("min", "minutes"),
+        ("s", "seconds"),
+        ("ms", "milliseconds"),
+        ("us", "microseconds"),
+        ("ns", "nanoseconds"),
+        // Bytes
+        ("By", "bytes"),
+        ("KiBy", "kibibytes"),
+        ("MiBy", "mebibytes"),
+        ("GiBy", "gibibytes"),
+        ("TiBy", "tibibytes"),
+        ("KBy", "kilobytes"),
+        ("MBy", "megabytes"),
+        ("GBy", "gigabytes"),
+        ("TBy", "terabytes"),
+        // SI
+        ("m", "meters"),
+        ("V", "volts"),
+        ("A", "amperes"),
+        ("J", "joules"),
+        ("W", "watts"),
+        ("g", "grams"),
+        // Misc
+        ("Cel", "celsius"),
+        ("Hz", "hertz"),
+        ("1", ""),
+        ("%", "percent"),
+    ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    static ref PER_UNIT_MAP: HashMap<String, String> = [
+        ("s", "second"),
+        ("m", "minute"),
+        ("h", "hour"),
+        ("d", "day"),
+        ("w", "week"),
+        ("mo", "month"),
+        ("y", "year"),
+    ].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
 }
 
 const OTEL_SCOPE_NAME: &str = "name";
@@ -80,7 +125,7 @@ const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
-    metric_ctx: &OtlpMetricCtx,
+    metric_ctx: &mut OtlpMetricCtx,
 ) -> Result<(RowInsertRequests, usize)> {
     let mut table_writer = MultiTableData::default();
 
@@ -95,6 +140,13 @@ pub fn to_grpc_insert_requests(
             let scope_attrs = process_scope_attrs(scope, metric_ctx);
 
             for metric in &scope.metrics {
+                if metric.data.is_none() {
+                    continue;
+                }
+                if let Some(t) = metric.data.as_ref().map(from_metric_type) {
+                    metric_ctx.set_metric_type(t);
+                }
+
                 encode_metrics(
                     &mut table_writer,
                     metric,
@@ -107,6 +159,22 @@ pub fn to_grpc_insert_requests(
     }
 
     Ok(table_writer.into_row_insert_requests())
+}
+
+fn from_metric_type(data: &metric::Data) -> MetricType {
+    match data {
+        metric::Data::Gauge(_) => MetricType::Gauge,
+        metric::Data::Sum(s) => {
+            if s.is_monotonic {
+                MetricType::MonotonicSum
+            } else {
+                MetricType::NonMonotonicSum
+            }
+        }
+        metric::Data::Histogram(_) => MetricType::Histogram,
+        metric::Data::ExponentialHistogram(_) => MetricType::ExponentialHistogram,
+        metric::Data::Summary(_) => MetricType::Summary,
+    }
 }
 
 fn process_resource_attrs(attrs: &mut Vec<KeyValue>, metric_ctx: &OtlpMetricCtx) {
@@ -181,10 +249,37 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     })
 }
 
-// replace . with _
-// see: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.38.0/specification/compatibility/prometheus_and_openmetrics.md#otlp-metric-points-to-prometheus
-pub fn normalize_metric_name(name: &str) -> String {
-    let name = INVALID_METRIC_NAME.replace_all(name, UNDERSCORE);
+// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_name.go#L55
+pub fn normalize_metric_name(metric: &Metric, metric_type: &MetricType) -> String {
+    let mut name_tokens = NON_ALPHA_NUM_CHAR
+        .split(&metric.name)
+        .map(|s| s.to_string())
+        .collect_vec();
+    if !metric.unit.is_empty() {
+        let (main, per) = build_unit_suffix(&metric.unit);
+        if let Some(main) = main
+            && !name_tokens.contains(&main)
+        {
+            name_tokens.push(main);
+        }
+        if let Some(per) = per
+            && !name_tokens.contains(&per)
+        {
+            name_tokens.push("per".to_string());
+            name_tokens.push(per);
+        }
+    }
+
+    if matches!(metric_type, MetricType::MonotonicSum) {
+        name_tokens.retain(|t| t != TOTAL);
+        name_tokens.push(TOTAL.to_string());
+    }
+    if metric.unit == "1" && matches!(metric_type, MetricType::Gauge) {
+        name_tokens.retain(|t| t != RATIO);
+        name_tokens.push(RATIO.to_string());
+    }
+
+    let name = name_tokens.join(UNDERSCORE);
 
     if let Some((_, first)) = name.char_indices().next()
         && first >= '0'
@@ -192,8 +287,48 @@ pub fn normalize_metric_name(name: &str) -> String {
     {
         format!("_{}", name)
     } else {
-        name.to_string()
+        name
     }
+}
+
+fn build_unit_suffix(unit: &str) -> (Option<String>, Option<String>) {
+    let (main, per) = unit.split_once('/').unwrap_or((unit, ""));
+    (check_unit(main, &UNIT_MAP), check_unit(per, &PER_UNIT_MAP))
+}
+
+fn check_unit(unit_str: &str, unit_map: &HashMap<String, String>) -> Option<String> {
+    let u = unit_str.trim();
+    if !u.is_empty() && !u.contains("{}") {
+        let u = unit_map.get(u).map(|s| s.as_ref()).unwrap_or(u);
+        let u = clean_unit_name(u);
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    None
+}
+
+fn clean_unit_name(name: &str) -> String {
+    NON_ALPHA_NUM_CHAR.split(name).join(UNDERSCORE)
+}
+
+// See https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/145942706622aba5c276ca47f48df438228bfea4/pkg/translator/prometheus/normalize_label.go#L27
+pub fn normalize_label_name(name: &str) -> String {
+    if name.is_empty() {
+        return name.to_string();
+    }
+
+    let n = NON_ALPHA_NUM_CHAR.replace_all(name, UNDERSCORE);
+    if let Some((_, first)) = n.char_indices().next()
+        && first >= '0'
+        && first <= '9'
+    {
+        return format!("key_{}", n);
+    }
+    if n.starts_with(UNDERSCORE) && !n.starts_with(DOUBLE_UNDERSCORE) {
+        return format!("key{}", n);
+    }
+    n.to_string()
 }
 
 /// Normalize otlp instrumentation, metric and attribute names
@@ -216,7 +351,7 @@ fn encode_metrics(
     let name = if metric_ctx.is_legacy {
         legacy_normalize_otlp_name(&metric.name)
     } else {
-        normalize_metric_name(&metric.name)
+        normalize_metric_name(metric, &metric_ctx.metric_type)
     };
 
     // note that we don't store description or unit, we might want to deal with
@@ -296,10 +431,10 @@ fn write_attributes(
             .and_then(|val| {
                 let key = match attribute_type {
                     AttributeType::Resource | AttributeType::DataPoint => {
-                        normalize_metric_name(&attr.key)
+                        normalize_label_name(&attr.key)
                     }
                     AttributeType::Scope => {
-                        format!("otel_scope_{}", normalize_metric_name(&attr.key))
+                        format!("otel_scope_{}", normalize_label_name(&attr.key))
                     }
                     AttributeType::Legacy => legacy_normalize_otlp_name(&attr.key),
                 };
@@ -746,6 +881,181 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_normalize_metric_name() {
+        let test_cases = vec![
+            // Default case
+            (Metric::default(), MetricType::Init, ""),
+            // Basic metric with just name
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo",
+            ),
+            // Metric with unit "s" should append "seconds"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_seconds",
+            ),
+            // Metric already ending with unit suffix should not duplicate
+            (
+                Metric {
+                    name: "foo_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_seconds",
+            ),
+            // Monotonic sum should append "total"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_total",
+            ),
+            // Metric already ending with "total" should not duplicate
+            (
+                Metric {
+                    name: "foo_total".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_total",
+            ),
+            // Monotonic sum with unit should append both unit and "total"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric with unit suffix and monotonic sum
+            (
+                Metric {
+                    name: "foo_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric already ending with "total" and has unit
+            (
+                Metric {
+                    name: "foo_total".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric already ending with both unit and "total"
+            (
+                Metric {
+                    name: "foo_seconds_total".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Metric with unusual order (total_seconds) should be normalized
+            (
+                Metric {
+                    name: "foo_total_seconds".to_string(),
+                    unit: "s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::MonotonicSum,
+                "foo_seconds_total",
+            ),
+            // Gauge with unit "1" should append "ratio"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "1".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Gauge,
+                "foo_ratio",
+            ),
+            // Complex unit like "m/s" should be converted to "meters_per_second"
+            (
+                Metric {
+                    name: "foo".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_meters_per_second",
+            ),
+            // Metric with partial unit match
+            (
+                Metric {
+                    name: "foo_second".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_second_meters",
+            ),
+            // Metric already containing the main unit
+            (
+                Metric {
+                    name: "foo_meters".to_string(),
+                    unit: "m/s".to_string(),
+                    ..Default::default()
+                },
+                MetricType::Init,
+                "foo_meters_per_second",
+            ),
+        ];
+
+        for (metric, metric_type, expected) in test_cases {
+            let result = normalize_metric_name(&metric, &metric_type);
+            assert_eq!(
+                result, expected,
+                "Failed for metric name: '{}', unit: '{}', type: {:?}",
+                metric.name, metric.unit, metric_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_label_name() {
+        let test_cases = vec![
+            ("", ""),
+            ("foo", "foo"),
+            ("foo_bar/baz:abc", "foo_bar_baz_abc"),
+            ("1foo", "key_1foo"),
+            ("_foo", "key_foo"),
+            ("__bar", "__bar"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = normalize_label_name(input);
+            assert_eq!(
+                result, expected,
+                "unexpected result for input '{}'; got '{}'; want '{}'",
+                input, result, expected
+            );
+        }
+    }
+
     fn keyvalue(key: &str, value: &str) -> KeyValue {
         KeyValue {
             key: key.into(),
@@ -1022,13 +1332,5 @@ mod tests {
                 "greptime_value"
             ]
         );
-    }
-
-    #[test]
-    fn test_normalize_otlp_name() {
-        assert_eq!(normalize_metric_name("test.123"), "test_123");
-        assert_eq!(normalize_metric_name("test_123"), "test_123");
-        assert_eq!(normalize_metric_name("test._123"), "test__123");
-        assert_eq!(normalize_metric_name("123_test"), "_123_test");
     }
 }
