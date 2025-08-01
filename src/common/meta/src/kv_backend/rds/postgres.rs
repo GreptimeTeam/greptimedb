@@ -413,6 +413,26 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
         tls_config.mode
     );
 
+    let config_builder = match tls_config.mode {
+        TlsMode::Disable => {
+            return PostgresTlsConfigSnafu {
+                reason: "Cannot create TLS connector for Disable mode".to_string(),
+            }
+            .fail();
+        }
+        TlsMode::Prefer | TlsMode::Require => {
+            // For Prefer/Require: Accept any certificate (no verification)
+            let verifier = Arc::new(AcceptAnyVerifier);
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        }
+        TlsMode::VerifyCa | TlsMode::VerifyFull => PostgresTlsConfigSnafu {
+            reason: "Verify CA or Full mode are not yet implemented".to_string(),
+        }
+        .fail()?,
+    };
+
     // Create the TLS client configuration based on the mode and client cert requirements
     let client_config = if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
         // Client certificate authentication required
@@ -420,37 +440,17 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
         let cert_chain = load_certs(&tls_config.cert_path)?;
         let private_key = load_private_key(&tls_config.key_path)?;
 
-        match tls_config.mode {
-            TlsMode::Disable => {
-                return PostgresTlsConfigSnafu {
-                    reason: "Cannot create TLS connector for Disable mode".to_string(),
+        config_builder
+            .with_client_auth_cert(cert_chain, private_key)
+            .map_err(|e| {
+                PostgresTlsConfigSnafu {
+                    reason: format!("Failed to configure client authentication: {}", e),
                 }
-                .fail();
-            }
-            TlsMode::Prefer | TlsMode::Require => {
-                // For Prefer/Require: Accept any certificate (no verification)
-                let verifier = Arc::new(AcceptAnyVerifier);
-                ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(verifier)
-                    .with_client_auth_cert(cert_chain, private_key)
-                    .map_err(|e| {
-                        PostgresTlsConfigSnafu {
-                            reason: format!("Failed to configure client authentication: {}", e),
-                        }
-                        .build()
-                    })?
-            }
-            TlsMode::VerifyCa | TlsMode::VerifyFull => PostgresTlsConfigSnafu {
-                reason: "Verify CA or Full mode are not yet implemented".to_string(),
-            }
-            .fail()?,
-        }
+                .build()
+            })?
     } else {
-        return PostgresTlsConfigSnafu {
-            reason: "Cert or Key file doesn't exist".to_string(),
-        }
-        .fail();
+        common_telemetry::info!("No client certificate provided, skip client authentication");
+        config_builder.with_no_client_auth()
     };
 
     common_telemetry::info!("Successfully created PostgreSQL TLS connector");
@@ -498,21 +498,9 @@ impl ServerCertVerifier for AcceptAnyVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         // Support all signature schemes
-        vec![
-            SignatureScheme::RSA_PKCS1_SHA1,
-            SignatureScheme::ECDSA_SHA1_Legacy,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::ED25519,
-            SignatureScheme::ED448,
-        ]
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
