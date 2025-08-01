@@ -34,6 +34,7 @@ use query::options::QueryOptions;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
+use servers::tls::{TlsMode, TlsOption};
 use store_api::path_utils::WAL_DIR;
 
 #[allow(deprecated)]
@@ -190,7 +191,13 @@ fn test_load_metasrv_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            store_tls: None,
+            store_tls: Some(TlsOption {
+                mode: TlsMode::Prefer,
+                cert_path: String::new(),
+                key_path: String::new(),
+                ca_cert_path: String::new(),
+                watch: false,
+            }),
             ..Default::default()
         },
         ..Default::default()
