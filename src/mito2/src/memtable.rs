@@ -204,6 +204,12 @@ pub type MemtableRef = Arc<dyn Memtable>;
 pub trait MemtableBuilder: Send + Sync + fmt::Debug {
     /// Builds a new memtable instance.
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef;
+
+    /// Returns true if the memtable supports bulk insert and benefits from it.
+    fn use_bulk_insert(&self, metadata: &RegionMetadataRef) -> bool {
+        let _metadata = metadata;
+        false
+    }
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
