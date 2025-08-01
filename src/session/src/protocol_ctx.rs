@@ -65,7 +65,7 @@ impl OtlpMetricCtx {
 
 #[derive(Debug, Clone, Default)]
 pub enum MetricType {
-    // defualt value when initializing the context
+    // default value when initializing the context
     #[default]
     Init,
     NonMonotonicSum,
