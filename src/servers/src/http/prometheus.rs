@@ -1181,11 +1181,14 @@ async fn retrieve_schema_names(
         let mut found = true;
         for match_item in &matches {
             if let Some(table_name) = retrieve_metric_name_from_promql(match_item) {
-                let exits = catalog_manager
+                let exists = catalog_manager
                     .table_exists(catalog, &schema, &table_name, Some(query_ctx))
                     .await
                     .context(CatalogSnafu)?;
-                found = found && exits;
+                if !exists {
+                    found = false;
+                    break;
+                }
             }
         }
 
