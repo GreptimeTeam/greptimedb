@@ -107,7 +107,13 @@ impl MysqlInstanceShim {
             }
         }
 
+        let max_capacity = std::env::var("PREPARED_STMT_MAX_CAPACITY")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1000);
+
         let cache = Cache::builder()
+            .max_capacity(max_capacity)
             .time_to_live(Duration::from_secs(30 * 60))
             .time_to_idle(Duration::from_secs(5 * 60))
             .build();
