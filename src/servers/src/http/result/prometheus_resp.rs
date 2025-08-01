@@ -118,7 +118,7 @@ impl PrometheusJsonResponse {
     /// Convert from `Result<Output>`
     pub async fn from_query_result(
         result: Result<Output>,
-        metric_name: String,
+        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Self {
         let response: Result<Self> = try {
@@ -182,7 +182,7 @@ impl PrometheusJsonResponse {
     /// Convert [RecordBatches] to [PromData]
     fn record_batches_to_data(
         batches: RecordBatches,
-        metric_name: String,
+        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Result<PrometheusResponse> {
         // infer semantic type of each column from schema.
@@ -230,7 +230,6 @@ impl PrometheusJsonResponse {
             reason: "no value column found".to_string(),
         })?;
 
-        let metric_name = (METRIC_NAME, metric_name.as_str());
         // Preserves the order of output tags.
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
@@ -276,9 +275,10 @@ impl PrometheusJsonResponse {
                     }
 
                     // retrieve tags
-                    // TODO(ruihang): push table name `__metric__`
                     let mut tags = Vec::with_capacity(num_label_columns + 1);
-                    tags.push(metric_name);
+                    if let Some(metric_name) = &metric_name {
+                        tags.push((METRIC_NAME, metric_name.as_str()));
+                    }
                     for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
                         // TODO(ruihang): add test for NULL tag
                         if let Some(tag_value) = tag_column.get_data(row_index) {
