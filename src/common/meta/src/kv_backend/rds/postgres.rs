@@ -442,7 +442,7 @@ pub fn create_postgres_tls_connector(tls_config: &TlsOption) -> Result<MakeRustl
                     })?
             }
             TlsMode::VerifyCa | TlsMode::VerifyFull => PostgresTlsConfigSnafu {
-                reason: format!("Verify CA or Full mode are not yet implemented"),
+                reason: "Verify CA or Full mode are not yet implemented".to_string(),
             }
             .fail()?,
         }
