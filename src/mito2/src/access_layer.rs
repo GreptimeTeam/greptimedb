@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -28,6 +29,7 @@ use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{CleanDirSnafu, DeleteIndexSnafu, DeleteSstSnafu, OpenDalSnafu, Result};
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::Source;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, FileId, FileMeta, RegionFileId};
@@ -42,6 +44,87 @@ use crate::sst::parquet::{SstInfo, WriteOptions};
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
 pub type SstInfoArray = SmallVec<[SstInfo; 2]>;
+
+/// Write operation type.
+#[derive(Eq, PartialEq, Debug)]
+pub enum WriteType {
+    /// Writes from flush
+    Flush,
+    /// Writes from compaction.
+    Compaction,
+}
+
+#[derive(Debug)]
+pub struct Metrics {
+    pub(crate) write_type: WriteType,
+    pub(crate) iter_source: Duration,
+    pub(crate) write_batch: Duration,
+    pub(crate) update_index: Duration,
+    pub(crate) upload_parquet: Duration,
+    pub(crate) upload_puffin: Duration,
+}
+
+impl Metrics {
+    pub(crate) fn new(write_type: WriteType) -> Self {
+        Self {
+            write_type,
+            iter_source: Default::default(),
+            write_batch: Default::default(),
+            update_index: Default::default(),
+            upload_parquet: Default::default(),
+            upload_puffin: Default::default(),
+        }
+    }
+
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        assert_eq!(self.write_type, other.write_type);
+        self.iter_source += other.iter_source;
+        self.write_batch += other.write_batch;
+        self.update_index += other.update_index;
+        self.upload_parquet += other.upload_parquet;
+        self.upload_puffin += other.upload_puffin;
+        self
+    }
+
+    pub(crate) fn observe(self) {
+        match self.write_type {
+            WriteType::Flush => {
+                FLUSH_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                FLUSH_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
+            }
+            WriteType::Compaction => {
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["iter_source"])
+                    .observe(self.iter_source.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["write_batch"])
+                    .observe(self.write_batch.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["update_index"])
+                    .observe(self.update_index.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["upload_parquet"])
+                    .observe(self.upload_parquet.as_secs_f64());
+                COMPACTION_STAGE_ELAPSED
+                    .with_label_values(&["upload_puffin"])
+                    .observe(self.upload_puffin.as_secs_f64());
+            }
+        };
+    }
+}
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
@@ -145,11 +228,12 @@ impl AccessLayer {
         &self,
         request: SstWriteRequest,
         write_opts: &WriteOptions,
-    ) -> Result<SstInfoArray> {
+        write_type: WriteType,
+    ) -> Result<(SstInfoArray, Metrics)> {
         let region_id = request.metadata.region_id;
         let cache_manager = request.cache_manager.clone();
 
-        let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
+        let (sst_info, metrics) = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -162,6 +246,7 @@ impl AccessLayer {
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
+                    write_type,
                 )
                 .await?
         } else {
@@ -190,12 +275,15 @@ impl AccessLayer {
                 request.metadata,
                 indexer_builder,
                 path_provider,
+                Metrics::new(write_type),
             )
             .await
             .with_file_cleaner(cleaner);
-            writer
+            let ssts = writer
                 .write_all(request.source, request.max_sequence, write_opts)
-                .await?
+                .await?;
+            let metrics = writer.into_metrics();
+            (ssts, metrics)
         };
 
         // Put parquet metadata to cache manager.
@@ -210,7 +298,7 @@ impl AccessLayer {
             }
         }
 
-        Ok(sst_info)
+        Ok((sst_info, metrics))
     }
 }
 
