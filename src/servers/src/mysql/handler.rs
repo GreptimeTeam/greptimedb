@@ -83,6 +83,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts: Arc<RwLock<HashMap<String, SqlPlan>>>,
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
+    prepared_max_capacity: usize,
 }
 
 impl MysqlInstanceShim {
@@ -91,6 +92,7 @@ impl MysqlInstanceShim {
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
         process_id: u32,
+        prepared_max_capacity: usize,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -118,6 +120,7 @@ impl MysqlInstanceShim {
             prepared_stmts: Default::default(),
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
+            prepared_max_capacity,
         }
     }
 
@@ -160,6 +163,19 @@ impl MysqlInstanceShim {
     /// Save query and logical plan with a given statement key
     fn save_plan(&self, plan: SqlPlan, stmt_key: String) {
         let mut prepared_stmts = self.prepared_stmts.write();
+        let max_capacity = self.prepared_max_capacity;
+
+        let is_update = prepared_stmts.contains_key(&stmt_key);
+
+        if !is_update && prepared_stmts.len() >= max_capacity {
+            // Log a warning but don't insert
+            warn!(
+                "Prepared statement cache is full, max capacity: {}",
+                max_capacity
+            );
+            return;
+        }
+
         let _ = prepared_stmts.insert(stmt_key, plan);
     }
 
