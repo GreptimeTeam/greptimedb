@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod absent;
 mod empty_metric;
 mod histogram_fold;
 mod instant_manipulate;
@@ -24,6 +25,7 @@ mod series_divide;
 mod test_util;
 mod union_distinct_on;
 
+pub use absent::{Absent, AbsentExec, AbsentStream};
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 pub use empty_metric::{build_special_time_expr, EmptyMetric, EmptyMetricExec, EmptyMetricStream};
 pub use histogram_fold::{HistogramFold, HistogramFoldExec, HistogramFoldStream};
