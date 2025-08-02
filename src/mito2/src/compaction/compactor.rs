@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest};
+use crate::access_layer::{AccessLayer, AccessLayerRef, OperationType, SstWriteRequest, WriteType};
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::{new_picker, PickerOutput};
 use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
@@ -339,7 +339,7 @@ impl Compactor for DefaultCompactor {
                 }
                 .build_sst_reader()
                 .await?;
-                let output_files = sst_layer
+                let (sst_infos, metrics) = sst_layer
                     .write_sst(
                         SstWriteRequest {
                             op_type: OperationType::Compact,
@@ -354,8 +354,10 @@ impl Compactor for DefaultCompactor {
                             bloom_filter_index_config,
                         },
                         &write_opts,
+                        WriteType::Compaction,
                     )
-                    .await?
+                    .await?;
+                let output_files = sst_infos
                     .into_iter()
                     .map(|sst_info| FileMeta {
                         region_id,
@@ -373,9 +375,10 @@ impl Compactor for DefaultCompactor {
                 let output_file_names =
                     output_files.iter().map(|f| f.file_id.to_string()).join(",");
                 info!(
-                    "Region {} compaction inputs: [{}], outputs: [{}]",
-                    region_id, input_file_names, output_file_names
+                    "Region {} compaction inputs: [{}], outputs: [{}], metrics: {:?}",
+                    region_id, input_file_names, output_file_names, metrics
                 );
+                metrics.observe();
                 Ok(output_files)
             });
         }

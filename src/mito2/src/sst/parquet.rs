@@ -104,7 +104,9 @@ mod tests {
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
 
     use super::*;
-    use crate::access_layer::{FilePathProvider, OperationType, RegionFilePathFactory};
+    use crate::access_layer::{
+        FilePathProvider, Metrics, OperationType, RegionFilePathFactory, WriteType,
+    };
     use crate::cache::{CacheManager, CacheStrategy, PageKey};
     use crate::read::BatchReader;
     use crate::region::options::{IndexOptions, InvertedIndexOptions};
@@ -175,6 +177,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             file_path,
+            Metrics::new(WriteType::Flush),
         )
         .await;
 
@@ -232,6 +235,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            Metrics::new(WriteType::Flush),
         )
         .await;
 
@@ -311,6 +315,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            Metrics::new(WriteType::Flush),
         )
         .await;
 
@@ -353,6 +358,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            Metrics::new(WriteType::Flush),
         )
         .await;
         writer
@@ -405,6 +411,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            Metrics::new(WriteType::Flush),
         )
         .await;
         writer
@@ -442,6 +449,7 @@ mod tests {
             FixedPathProvider {
                 file_id: handle.file_id(),
             },
+            Metrics::new(WriteType::Flush),
         )
         .await;
 
@@ -584,6 +592,7 @@ mod tests {
             metadata.clone(),
             NoopIndexBuilder,
             path_provider,
+            Metrics::new(WriteType::Flush),
         )
         .await;
 
@@ -655,6 +664,7 @@ mod tests {
             metadata.clone(),
             indexer_builder,
             file_path.clone(),
+            Metrics::new(WriteType::Flush),
         )
         .await;
 

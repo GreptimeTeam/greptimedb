@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use common_telemetry::debug;
 use common_time::Timestamp;
@@ -38,7 +39,7 @@ use store_api::storage::SequenceNumber;
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
 
-use crate::access_layer::{FilePathProvider, SstInfoArray, TempFileCleaner};
+use crate::access_layer::{FilePathProvider, Metrics, SstInfoArray, TempFileCleaner};
 use crate::error::{InvalidMetadataSnafu, OpenDalSnafu, Result, WriteParquetSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::file::FileId;
@@ -65,6 +66,8 @@ pub struct ParquetWriter<F: WriterFactory, I: IndexerBuilder, P: FilePathProvide
     bytes_written: Arc<AtomicUsize>,
     /// Cleaner to remove temp files on failure.
     file_cleaner: Option<TempFileCleaner>,
+    /// Write metrics
+    metrics: Metrics,
 }
 
 pub trait WriterFactory {
@@ -100,12 +103,14 @@ where
         metadata: RegionMetadataRef,
         indexer_builder: I,
         path_provider: P,
+        metrics: Metrics,
     ) -> ParquetWriter<ObjectStoreWriterFactory, I, P> {
         ParquetWriter::new(
             ObjectStoreWriterFactory { object_store },
             metadata,
             indexer_builder,
             path_provider,
+            metrics,
         )
         .await
     }
@@ -128,6 +133,7 @@ where
         metadata: RegionMetadataRef,
         indexer_builder: I,
         path_provider: P,
+        metrics: Metrics,
     ) -> ParquetWriter<F, I, P> {
         let init_file = FileId::random();
         let indexer = indexer_builder.build(init_file).await;
@@ -142,6 +148,7 @@ where
             current_indexer: Some(indexer),
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
+            metrics,
         }
     }
 
@@ -234,12 +241,14 @@ where
             match res {
                 Ok(mut batch) => {
                     stats.update(&batch);
+                    let start = Instant::now();
                     // safety: self.current_indexer must be set when first batch has been written.
                     self.current_indexer
                         .as_mut()
                         .unwrap()
                         .update(&mut batch)
                         .await;
+                    self.metrics.update_index += start.elapsed();
                     if let Some(max_file_size) = opts.max_file_size
                         && self.bytes_written.load(Ordering::Relaxed) > max_file_size
                     {
@@ -286,16 +295,21 @@ where
         write_format: &WriteFormat,
         opts: &WriteOptions,
     ) -> Result<Option<Batch>> {
+        let start = Instant::now();
         let Some(batch) = source.next_batch().await? else {
             return Ok(None);
         };
+        self.metrics.iter_source += start.elapsed();
 
         let arrow_batch = write_format.convert_batch(&batch)?;
+
+        let start = Instant::now();
         self.maybe_init_writer(write_format.arrow_schema(), opts)
             .await?
             .write(&arrow_batch)
             .await
             .context(WriteParquetSnafu)?;
+        self.metrics.write_batch += start.elapsed();
         Ok(Some(batch))
     }
 
@@ -336,6 +350,11 @@ where
             // safety: self.writer is assigned above
             Ok(self.writer.as_mut().unwrap())
         }
+    }
+
+    /// Consumes write and return the collected metrics.
+    pub fn into_metrics(self) -> Metrics {
+        self.metrics
     }
 }
 
