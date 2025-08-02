@@ -22,7 +22,7 @@ use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{Protocol, SpanExporterBuilder, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::Sampler;
+use opentelemetry_sdk::trace::{Sampler, Tracer};
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -30,7 +30,7 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Layered, SubscriberExt};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
@@ -45,9 +45,25 @@ pub const DEFAULT_OTLP_HTTP_ENDPOINT: &str = "http://localhost:4318";
 /// The default logs directory.
 pub const DEFAULT_LOGGING_DIR: &str = "logs";
 
-// Handle for reloading log level
-pub static RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
+/// Handle for reloading log level
+pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Targets, Registry>> =
     OnceCell::new();
+
+/// Handle for reloading trace level
+#[allow(clippy::type_complexity)]
+pub static TRACE_RELOAD_HANDLE: OnceCell<
+    tracing_subscriber::reload::Handle<
+        Vec<
+            tracing_opentelemetry::OpenTelemetryLayer<
+                Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+                Tracer,
+            >,
+        >,
+        Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>,
+    >,
+> = OnceCell::new();
+
+pub static TRACER: OnceCell<Tracer> = OnceCell::new();
 
 /// The logging options that used to initialize the logger.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -341,9 +357,47 @@ pub fn init_global_logging(
 
         let (dyn_filter, reload_handle) = tracing_subscriber::reload::Layer::new(filter.clone());
 
-        RELOAD_HANDLE
+        LOG_RELOAD_HANDLE
             .set(reload_handle)
             .expect("reload handle already set, maybe init_global_logging get called twice?");
+
+        let sampler = opts
+            .tracing_sample_ratio
+            .as_ref()
+            .map(create_sampler)
+            .map(Sampler::ParentBased)
+            .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
+
+        let trace_config = opentelemetry_sdk::trace::config()
+            .with_sampler(sampler)
+            .with_resource(opentelemetry_sdk::Resource::new(vec![
+                KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                KeyValue::new(
+                    resource::SERVICE_INSTANCE_ID,
+                    node_id.unwrap_or("none".to_string()),
+                ),
+                KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
+                KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+            ]));
+
+        let tracer = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(build_otlp_exporter(opts))
+            .with_trace_config(trace_config)
+            .install_batch(opentelemetry_sdk::runtime::Tokio)
+            .expect("otlp tracer install failed");
+
+        TRACER
+            .set(tracer.clone())
+            .expect("failed to store otlp tracer");
+        let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let (dyn_trace_layer, trace_reload_handle) =
+            tracing_subscriber::reload::Layer::new(vec![trace_layer]);
+
+        TRACE_RELOAD_HANDLE
+            .set(trace_reload_handle)
+            .ok()
+            .expect("failed to set trace reload handle");
 
         // Must enable 'tokio_unstable' cfg to use this feature.
         // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
@@ -367,6 +421,7 @@ pub fn init_global_logging(
 
             Registry::default()
                 .with(dyn_filter)
+                .with(dyn_trace_layer)
                 .with(tokio_console_layer)
                 .with(stdout_logging_layer)
                 .with(file_logging_layer)
@@ -380,47 +435,26 @@ pub fn init_global_logging(
         #[cfg(not(feature = "tokio-console"))]
         let subscriber = Registry::default()
             .with(dyn_filter)
+            .with(dyn_trace_layer)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
             .with(err_file_logging_layer)
             .with(slow_query_logging_layer);
 
-        if opts.enable_otlp_tracing {
-            global::set_text_map_propagator(TraceContextPropagator::new());
+        global::set_text_map_propagator(TraceContextPropagator::new());
 
-            let sampler = opts
-                .tracing_sample_ratio
-                .as_ref()
-                .map(create_sampler)
-                .map(Sampler::ParentBased)
-                .unwrap_or(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)));
-
-            let trace_config = opentelemetry_sdk::trace::config()
-                .with_sampler(sampler)
-                .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                    KeyValue::new(
-                        resource::SERVICE_INSTANCE_ID,
-                        node_id.unwrap_or("none".to_string()),
-                    ),
-                    KeyValue::new(resource::SERVICE_VERSION, common_version::version()),
-                    KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                ]));
-
-            let tracer = opentelemetry_otlp::new_pipeline()
-                .tracing()
-                .with_exporter(build_otlp_exporter(opts))
-                .with_trace_config(trace_config)
-                .install_batch(opentelemetry_sdk::runtime::Tokio)
-                .expect("otlp tracer install failed");
-
-            tracing::subscriber::set_global_default(
-                subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer)),
-            )
+        tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
-        } else {
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("error setting global tracing subscriber");
+
+        if opts.enable_otlp_tracing {
+            if let Some(tracer) = TRACER.get()
+                && let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get()
+            {
+                let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer.clone());
+                let _ = trace_reload_handle.reload(vec![trace_layer]);
+            }
+        } else if let Some(trace_reload_handle) = TRACE_RELOAD_HANDLE.get() {
+            let _ = trace_reload_handle.reload(vec![]);
         }
     });
 
