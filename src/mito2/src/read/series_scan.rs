@@ -47,7 +47,6 @@ use crate::read::seq_scan::{build_sources, SeqScan};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 
-
 /// Timeout to send a batch to a sender.
 const SEND_TIMEOUT: Duration = Duration::from_millis(10);
 

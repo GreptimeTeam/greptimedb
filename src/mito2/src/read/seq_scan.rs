@@ -48,7 +48,6 @@ use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
-
 /// Scans a region and returns rows in a sorted sequence.
 ///
 /// The output order is always `order by primary keys, time index` inside every
