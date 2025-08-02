@@ -170,21 +170,6 @@ pub struct RecordBatchIter {
     sequence: Option<SequenceNumber>,
 }
 
-/// Iterator similar to RecordBatchIter but returns RecordBatch directly instead of Batch.
-/// Uses non-encoded primary key columns for filtering instead of encoded ones.
-pub struct NonEncodedRecordBatchIter {
-    /// The RecordBatch to read from
-    record_batch: Option<RecordBatch>,
-    /// Non-encoded primary key columns returned by BulkPartConverter::convert
-    primary_key_columns: Option<Vec<ArrayRef>>,
-    /// Iterator context for filtering
-    context: BulkIterContextRef,
-    /// Sequence number filter
-    sequence: Option<SequenceNumber>,
-    /// Whether the batch has been processed
-    processed: bool,
-}
-
 impl RecordBatchIter {
     /// Creates a new RecordBatchIter from a single RecordBatch.
     ///
@@ -301,6 +286,19 @@ impl Iterator for RecordBatchIter {
     }
 }
 
+/// Iterator similar to RecordBatchIter but returns RecordBatch directly instead of Batch.
+/// Uses non-encoded primary key columns for filtering instead of encoded ones.
+pub struct NonEncodedRecordBatchIter {
+    /// The RecordBatch to read from
+    record_batch: Option<RecordBatch>,
+    /// Non-encoded primary key columns returned by BulkPartConverter::convert
+    primary_key_columns: Option<Vec<ArrayRef>>,
+    /// Iterator context for filtering
+    context: BulkIterContextRef,
+    /// Sequence number filter
+    sequence: Option<SequenceNumber>,
+}
+
 impl NonEncodedRecordBatchIter {
     /// Creates a new NonEncodedRecordBatchIter from a RecordBatch and non-encoded primary key columns.
     ///
@@ -320,7 +318,6 @@ impl NonEncodedRecordBatchIter {
             primary_key_columns,
             context,
             sequence,
-            processed: false,
         }
     }
 
@@ -368,14 +365,16 @@ impl NonEncodedRecordBatchIter {
                 .iter()
                 .map(|seq| seq.map(|s| s <= sequence_threshold).unwrap_or(false))
                 .collect();
-            let sequence_filter = datatypes::arrow::array::BooleanArray::from(sequence_filter_values);
+            let sequence_filter =
+                datatypes::arrow::array::BooleanArray::from(sequence_filter_values);
 
             // Combine with existing filter using AND operation
             combined_filter = match combined_filter {
                 None => Some(sequence_filter),
                 Some(existing_filter) => {
-                    let and_result = datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
-                        .context(ComputeArrowSnafu)?;
+                    let and_result =
+                        datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
+                            .context(ComputeArrowSnafu)?;
                     Some(and_result)
                 }
             };
@@ -531,12 +530,6 @@ impl Iterator for NonEncodedRecordBatchIter {
     type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.processed {
-            return None;
-        }
-
-        self.processed = true;
-
         let record_batch = self.record_batch.take()?;
 
         if record_batch.num_rows() == 0 {
