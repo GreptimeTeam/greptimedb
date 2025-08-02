@@ -159,6 +159,7 @@ impl Instance {
             kv_state_store.clone(),
             kv_state_store,
             Some(runtime_switch_manager),
+            None,
         ));
 
         Ok((kv_backend, procedure_manager))

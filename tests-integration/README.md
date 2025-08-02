@@ -52,5 +52,5 @@ GT_KAFKA_ENDPOINTS = localhost:9092
 ```
 cd tests-integration/fixtures
 
-docker compose -f docker-compose-standalone.yml up kafka
+docker compose -f docker-compose.yml up kafka
 ```
