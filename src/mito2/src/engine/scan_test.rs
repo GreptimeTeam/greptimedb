@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use api::v1::Rows;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use futures::TryStreamExt;
@@ -149,6 +151,58 @@ async fn test_scan_with_min_sst_sequence() {
 ++",
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_max_concurrent_scan_files() {
+    let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
+    let config = MitoConfig {
+        max_concurrent_scan_files: 2,
+        ..Default::default()
+    };
+    let engine = env.create_engine(config).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let put_and_flush = async |start, end| {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: test_util::build_rows(start, end),
+        };
+        test_util::put_rows(&engine, region_id, rows).await;
+        test_util::flush_region(&engine, region_id, None).await;
+    };
+
+    // Write overlapping files.
+    put_and_flush(0, 4).await;
+    put_and_flush(3, 7).await;
+    put_and_flush(6, 9).await;
+
+    let request = ScanRequest::default();
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Seq(scanner) = scanner else {
+        panic!("Scanner should be seq scan");
+    };
+    let error = scanner.check_scan_limit().unwrap_err();
+    assert_eq!(StatusCode::RateLimited, error.status_code());
+
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        ..Default::default()
+    };
+    let scanner = engine.scanner(region_id, request).await.unwrap();
+    let Scanner::Series(scanner) = scanner else {
+        panic!("Scanner should be series scan");
+    };
+    let error = scanner.check_scan_limit().unwrap_err();
+    assert_eq!(StatusCode::RateLimited, error.status_code());
 }
 
 #[tokio::test]

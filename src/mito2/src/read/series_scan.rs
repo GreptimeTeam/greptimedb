@@ -38,7 +38,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
-    ScanSeriesSnafu,
+    ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -241,6 +241,32 @@ impl SeriesScan {
 
         Ok(Box::pin(futures::stream::iter(streams).flatten()))
     }
+
+    /// Checks resource limit for the scanner.
+    pub(crate) fn check_scan_limit(&self) -> Result<()> {
+        // Sum the total number of files across all partitions
+        let total_files: usize = self
+            .properties
+            .partitions
+            .iter()
+            .flat_map(|partition| partition.iter())
+            .map(|part_range| {
+                let range_meta = &self.stream_ctx.ranges[part_range.identifier];
+                range_meta.indices.len()
+            })
+            .sum();
+
+        let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
+        if total_files > max_concurrent_files {
+            return TooManyFilesToReadSnafu {
+                actual: total_files,
+                max: max_concurrent_files,
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
 }
 
 fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
@@ -278,6 +304,9 @@ impl RegionScanner for SeriesScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
+
+        self.check_scan_limit().map_err(BoxedError::new)?;
+
         Ok(())
     }
 
