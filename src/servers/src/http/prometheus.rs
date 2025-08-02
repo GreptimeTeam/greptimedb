@@ -56,7 +56,7 @@ use crate::error::{
     TableNotFoundSnafu, UnexpectedResultSnafu,
 };
 use crate::http::header::collect_plan_metrics;
-use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL};
+use crate::prom_store::{DATABASE_LABEL, FIELD_NAME_LABEL, METRIC_NAME_LABEL, SCHEMA_LABEL};
 use crate::prometheus_handler::PrometheusHandlerRef;
 
 /// For [ValueType::Vector] result type
@@ -1034,6 +1034,19 @@ pub async fn label_values_query(
         let mut field_columns = field_columns.into_iter().collect::<Vec<_>>();
         field_columns.sort_unstable();
         return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(field_columns));
+    } else if label_name == SCHEMA_LABEL || label_name == DATABASE_LABEL {
+        let catalog_manager = handler.catalog_manager();
+
+        match retrieve_schema_names(&query_ctx, catalog_manager, params.matches.0).await {
+            Ok(schema_names) => {
+                return PrometheusJsonResponse::success(PrometheusResponse::LabelValues(
+                    schema_names,
+                ));
+            }
+            Err(e) => {
+                return PrometheusJsonResponse::error(e.status_code(), e.output_msg());
+            }
+        }
     }
 
     let queries = params.matches.0;
@@ -1149,6 +1162,44 @@ async fn retrieve_field_names(
         }
     }
     Ok(field_columns)
+}
+
+async fn retrieve_schema_names(
+    query_ctx: &QueryContext,
+    catalog_manager: CatalogManagerRef,
+    matches: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut schemas = Vec::new();
+    let catalog = query_ctx.current_catalog();
+
+    let candidate_schemas = catalog_manager
+        .schema_names(catalog, Some(query_ctx))
+        .await
+        .context(CatalogSnafu)?;
+
+    for schema in candidate_schemas {
+        let mut found = true;
+        for match_item in &matches {
+            if let Some(table_name) = retrieve_metric_name_from_promql(match_item) {
+                let exists = catalog_manager
+                    .table_exists(catalog, &schema, &table_name, Some(query_ctx))
+                    .await
+                    .context(CatalogSnafu)?;
+                if !exists {
+                    found = false;
+                    break;
+                }
+            }
+        }
+
+        if found {
+            schemas.push(schema);
+        }
+    }
+
+    schemas.sort_unstable();
+
+    Ok(schemas)
 }
 
 /// Try to parse and extract the name of referenced metric from the promql query.
