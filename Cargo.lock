@@ -11791,6 +11791,8 @@ dependencies = [
  "itertools 0.14.0",
  "jsonb",
  "lazy_static",
+ "num-bigint",
+ "num-traits",
  "regex",
  "serde",
  "serde_json",
