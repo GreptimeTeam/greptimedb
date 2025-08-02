@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::ProcedureDetailResponse;
+use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
 use common_procedure::{ProcedureId, ProcedureManagerRef};
 use common_telemetry::tracing_context::W3cTrace;
 use snafu::{OptionExt, ResultExt};
@@ -76,6 +76,13 @@ pub trait ProcedureExecutor: Send + Sync {
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse>;
 
+    /// Submit a reconcile task.
+    async fn reconcile(
+        &self,
+        _ctx: &ExecutorContext,
+        request: ReconcileRequest,
+    ) -> Result<ReconcileResponse>;
+
     /// Query the procedure state by its id
     async fn query_procedure_state(
         &self,
@@ -120,6 +127,17 @@ impl ProcedureExecutor for LocalProcedureExecutor {
     ) -> Result<MigrateRegionResponse> {
         UnsupportedSnafu {
             operation: "migrate_region",
+        }
+        .fail()
+    }
+
+    async fn reconcile(
+        &self,
+        _ctx: &ExecutorContext,
+        _request: ReconcileRequest,
+    ) -> Result<ReconcileResponse> {
+        UnsupportedSnafu {
+            operation: "reconcile",
         }
         .fail()
     }

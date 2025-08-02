@@ -31,16 +31,27 @@ use crate::reconciliation::utils::{
 };
 
 /// Strategy for resolving column metadata inconsistencies.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-pub(crate) enum ResolveStrategy {
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
+pub enum ResolveStrategy {
     /// Always uses the column metadata from metasrv.
     UseMetasrv,
 
+    #[default]
     /// Trusts the latest column metadata from datanode.
     UseLatest,
 
     /// Aborts the resolution process if inconsistencies are detected.
     AbortOnConflict,
+}
+
+impl From<api::v1::meta::ResolveStrategy> for ResolveStrategy {
+    fn from(strategy: api::v1::meta::ResolveStrategy) -> Self {
+        match strategy {
+            api::v1::meta::ResolveStrategy::UseMetasrv => Self::UseMetasrv,
+            api::v1::meta::ResolveStrategy::UseLatest => Self::UseLatest,
+            api::v1::meta::ResolveStrategy::AbortOnConflict => Self::AbortOnConflict,
+        }
+    }
 }
 
 /// State responsible for resolving inconsistencies in column metadata across physical regions.

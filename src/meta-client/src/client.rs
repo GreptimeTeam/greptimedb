@@ -24,7 +24,7 @@ mod util;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use api::v1::meta::{ProcedureDetailResponse, Role};
+use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role};
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
@@ -270,6 +270,17 @@ impl ProcedureExecutor for MetaClient {
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
         self.migrate_region(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn reconcile(
+        &self,
+        _ctx: &ExecutorContext,
+        request: ReconcileRequest,
+    ) -> MetaResult<ReconcileResponse> {
+        self.reconcile(request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -609,6 +620,11 @@ impl MetaClient {
                 request.timeout,
             )
             .await
+    }
+
+    /// Reconcile the procedure state.
+    pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        self.procedure_client()?.reconcile(request).await
     }
 
     /// Submit a DDL task

@@ -78,14 +78,21 @@ pub(crate) struct PersistentContext {
     catalog: String,
     fast_fail: bool,
     resolve_strategy: ResolveStrategy,
+    parallelism: usize,
 }
 
 impl PersistentContext {
-    pub fn new(catalog: String, fast_fail: bool, resolve_strategy: ResolveStrategy) -> Self {
+    pub fn new(
+        catalog: String,
+        fast_fail: bool,
+        resolve_strategy: ResolveStrategy,
+        parallelism: usize,
+    ) -> Self {
         Self {
             catalog,
             fast_fail,
             resolve_strategy,
+            parallelism,
         }
     }
 }
@@ -111,8 +118,10 @@ impl ReconcileCatalogProcedure {
         catalog: String,
         fast_fail: bool,
         resolve_strategy: ResolveStrategy,
+        parallelism: usize,
     ) -> Self {
-        let persistent_ctx = PersistentContext::new(catalog, fast_fail, resolve_strategy);
+        let persistent_ctx =
+            PersistentContext::new(catalog, fast_fail, resolve_strategy, parallelism);
         let context = ReconcileCatalogContext::new(ctx, persistent_ctx);
         let state = Box::new(ReconcileCatalogStart);
         Self { context, state }

@@ -32,7 +32,7 @@ impl FunctionState {
     pub fn mock() -> Self {
         use std::sync::Arc;
 
-        use api::v1::meta::ProcedureStatus;
+        use api::v1::meta::{ProcedureStatus, ReconcileRequest};
         use async_trait::async_trait;
         use catalog::CatalogManagerRef;
         use common_base::AffectedRows;
@@ -60,6 +60,10 @@ impl FunctionState {
                 &self,
                 _request: MigrateRegionRequest,
             ) -> Result<Option<String>> {
+                Ok(Some("test_pid".to_string()))
+            }
+
+            async fn reconcile(&self, _request: ReconcileRequest) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))
             }
 

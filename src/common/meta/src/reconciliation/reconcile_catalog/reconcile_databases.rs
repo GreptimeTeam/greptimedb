@@ -15,13 +15,14 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, ProcedureWithId, Status};
+use common_telemetry::info;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::reconciliation::reconcile_catalog::end::ReconcileCatalogEnd;
 use crate::reconciliation::reconcile_catalog::{ReconcileCatalogContext, State};
-use crate::reconciliation::reconcile_database::{ReconcileDatabaseProcedure, DEFAULT_PARALLELISM};
+use crate::reconciliation::reconcile_database::ReconcileDatabaseProcedure;
 use crate::reconciliation::utils::Context;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,12 +76,16 @@ impl ReconcileDatabases {
             table_metadata_manager: ctx.table_metadata_manager.clone(),
             cache_invalidator: ctx.cache_invalidator.clone(),
         };
+        info!(
+            "Scheduling reconcile database: {}, catalog: {}",
+            schema, ctx.persistent_ctx.catalog
+        );
         let procedure = ReconcileDatabaseProcedure::new(
             context,
             ctx.persistent_ctx.catalog.clone(),
             schema,
             ctx.persistent_ctx.fast_fail,
-            DEFAULT_PARALLELISM,
+            ctx.persistent_ctx.parallelism,
             ctx.persistent_ctx.resolve_strategy,
             true,
         );

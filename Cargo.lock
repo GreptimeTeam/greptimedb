@@ -2521,6 +2521,7 @@ dependencies = [
  "common-procedure-test",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -5233,7 +5234,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fe8c13f5f3c1fbef63f57fbdd29f0490dfeb987b#fe8c13f5f3c1fbef63f57fbdd29f0490dfeb987b"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=f046902f73858a1ca0a0f52a76682c121a377ba5#f046902f73858a1ca0a0f52a76682c121a377ba5"
 dependencies = [
  "prost 0.13.5",
  "serde",
