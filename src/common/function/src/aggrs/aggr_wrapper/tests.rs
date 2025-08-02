@@ -258,7 +258,7 @@ async fn test_sum_udaf() {
     )
     .recompute_schema()
     .unwrap();
-    assert_eq!(res.lower_state.as_ref(), &expected_lower_plan);
+    assert_eq!(&res.lower_state, &expected_lower_plan);
 
     let expected_merge_plan = LogicalPlan::Aggregate(
         Aggregate::try_new(
@@ -297,7 +297,7 @@ async fn test_sum_udaf() {
         )
         .unwrap(),
     );
-    assert_eq!(res.upper_merge.as_ref(), &expected_merge_plan);
+    assert_eq!(&res.upper_merge, &expected_merge_plan);
 
     let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&res.lower_state, &ctx.state())
@@ -405,7 +405,7 @@ async fn test_avg_udaf() {
     let coerced_aggr_state_plan = TypeCoercion::new()
         .analyze(expected_aggr_state_plan.clone(), &Default::default())
         .unwrap();
-    assert_eq!(res.lower_state.as_ref(), &coerced_aggr_state_plan);
+    assert_eq!(&res.lower_state, &coerced_aggr_state_plan);
     assert_eq!(
         res.lower_state.schema().as_arrow(),
         &arrow_schema::Schema::new(vec![Field::new(
@@ -456,7 +456,7 @@ async fn test_avg_udaf() {
         )
         .unwrap(),
     );
-    assert_eq!(res.upper_merge.as_ref(), &expected_merge_plan);
+    assert_eq!(&res.upper_merge, &expected_merge_plan);
 
     let phy_aggr_state_plan = DefaultPhysicalPlanner::default()
         .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
