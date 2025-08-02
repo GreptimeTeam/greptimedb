@@ -317,8 +317,7 @@ impl<S> RegionWorkerLoop<S> {
                 region_id: truncate.region_id,
                 sender,
                 result,
-                truncated_entry_id: truncate.truncated_entry_id,
-                truncated_sequence: truncate.truncated_sequence,
+                kind: truncate.kind,
             };
             let _ = request_sender
                 .send(WorkerRequestWithTime::new(WorkerRequest::Background {

@@ -46,7 +46,7 @@ use common_meta::rpc::ddl::{
 use common_query::Output;
 use common_sql::convert::sql_value_to_value;
 use common_telemetry::{debug, info, tracing, warn};
-use common_time::Timezone;
+use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -1151,6 +1151,7 @@ impl StatementExecutor {
     pub async fn truncate_table(
         &self,
         table_name: TableName,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
@@ -1174,7 +1175,7 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        self.truncate_table_procedure(&table_name, table_id, query_context)
+        self.truncate_table_procedure(&table_name, table_id, time_ranges, query_context)
             .await?;
 
         Ok(Output::new_with_affected_rows(0))
@@ -1490,6 +1491,7 @@ impl StatementExecutor {
         &self,
         table_name: &TableName,
         table_id: TableId,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
@@ -1499,6 +1501,7 @@ impl StatementExecutor {
                 table_name.schema_name.to_string(),
                 table_name.table_name.to_string(),
                 table_id,
+                time_ranges,
             ),
         };
 

@@ -69,7 +69,10 @@ async fn test_engine_truncate_region_basic() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -118,7 +121,10 @@ async fn test_engine_put_data_after_truncate() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -194,7 +200,10 @@ async fn test_engine_truncate_after_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -249,7 +258,10 @@ async fn test_engine_truncate_reopen() {
 
     // Truncate the region
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 
@@ -337,7 +349,10 @@ async fn test_engine_truncate_during_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
         .await
         .unwrap();
 

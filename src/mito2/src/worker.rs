@@ -944,8 +944,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Truncate(_) => {
-                    self.handle_truncate_request(ddl.region_id, ddl.sender)
+                DdlRequest::Truncate(req) => {
+                    self.handle_truncate_request(ddl.region_id, req, ddl.sender)
                         .await;
                     continue;
                 }
