@@ -75,7 +75,7 @@ impl StoreConfig {
                 #[cfg(feature = "pg_kvbackend")]
                 BackendImpl::PostgresStore => {
                     let table_name = &self.meta_table_name;
-                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs)
+                    let pool = meta_srv::bootstrap::create_postgres_pool(store_addrs, None)
                         .await
                         .map_err(BoxedError::new)?;
                     Ok(common_meta::kv_backend::rds::PgStore::with_pg_pool(

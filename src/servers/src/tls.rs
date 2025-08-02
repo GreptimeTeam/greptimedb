@@ -62,6 +62,8 @@ pub struct TlsOption {
     #[serde(default)]
     pub key_path: String,
     #[serde(default)]
+    pub ca_cert_path: String,
+    #[serde(default)]
     pub watch: bool,
 }
 
@@ -253,6 +255,7 @@ mod tests {
                 mode: Disable,
                 cert_path: "/path/to/cert_path".to_string(),
                 key_path: "/path/to/key_path".to_string(),
+                ca_cert_path: String::new(),
                 watch: false
             },
             TlsOption::new(
@@ -413,6 +416,7 @@ mod tests {
                 .into_os_string()
                 .into_string()
                 .expect("failed to convert path to string"),
+            ca_cert_path: String::new(),
             watch: true,
         };
 
