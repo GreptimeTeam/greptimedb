@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["collect_column_defaults","default_constraint_to_expr"],"mod":["adapter","metrics","numbers","scan"],"struct":["NOW_EXPR","Table"],"type":["TableRef"]};

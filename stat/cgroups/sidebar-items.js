@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CGROUP_UNIFIED_MOUNTPOINT","CPU_MAX_FILE_CGROUP_V2","CPU_PERIOD_FILE_CGROUP_V1","CPU_QUOTA_FILE_CGROUP_V1","MAX_MEMORY_IN_BYTES","MAX_VALUE","MAX_VALUE_CGROUP_V2","MEMORY_MAX_FILE_CGROUP_V1","MEMORY_MAX_FILE_CGROUP_V2"],"fn":["get_cgroup_v2_cpu_limit","get_cpu_limit","get_memory_limit","is_cgroup_v2","read_value_from_file"]};

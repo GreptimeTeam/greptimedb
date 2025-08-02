@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["new_ddl_context","new_ddl_context_with_kv_backend","test_kafka_topic_pool"],"struct":["MockDatanodeManager","MockFlownodeManager","MockNode","NoopPeerLookupService"],"trait":["MockDatanodeHandler","MockFlownodeHandler"],"type":["AffectedRows"]};

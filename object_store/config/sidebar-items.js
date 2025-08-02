@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ObjectStoreConfig"],"struct":["AzblobConfig","FileConfig","GcsConfig","HttpClientConfig","ObjectStorageCacheConfig","OssConfig","S3Config"]};

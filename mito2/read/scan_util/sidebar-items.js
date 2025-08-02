@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_file_range_scan_stream","maybe_scan_other_ranges","scan_file_ranges","scan_mem_ranges"],"struct":["PartitionMetrics","PartitionMetricsInner","PartitionMetricsList","ScanMetricsSet","SeriesDistributorMetrics"]};
