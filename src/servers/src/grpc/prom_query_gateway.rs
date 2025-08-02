@@ -121,7 +121,7 @@ impl PrometheusGatewayService {
         let result = self.handler.do_query(&query, ctx).await;
         let (metric_name, mut result_type) =
             match retrieve_metric_name_and_result_type(&query.query) {
-                Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
+                Ok((metric_name, result_type)) => (metric_name, result_type),
                 Err(err) => {
                     return PrometheusJsonResponse::error(err.status_code(), err.output_msg())
                 }
