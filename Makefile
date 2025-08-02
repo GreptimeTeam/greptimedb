@@ -193,6 +193,17 @@ clippy: ## Check clippy rules.
 fix-clippy: ## Fix clippy violations.
 	cargo clippy --workspace --all-targets --all-features --fix
 
+.PHONY: check-udeps
+check-udeps: ## Check unused dependencies.
+	cargo udeps --workspace --all-targets
+
+.PHONY: fix-udeps
+fix-udeps: ## Remove unused dependencies automatically.
+	@echo "Running cargo-udeps to find unused dependencies..."
+	@cargo udeps --workspace --all-targets --output json > udeps-report.json || true
+	@echo "Removing unused dependencies..."
+	@python3 scripts/fix-udeps.py udeps-report.json
+	
 .PHONY: fmt-check
 fmt-check: ## Check code format.
 	cargo fmt --all -- --check
