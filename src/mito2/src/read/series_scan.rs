@@ -47,8 +47,6 @@ use crate::read::seq_scan::{build_sources, SeqScan};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
 
-/// Maximum number of files to read at the same time.
-const MAX_CONCURRENT_FILES: usize = 512;
 
 /// Timeout to send a batch to a sender.
 const SEND_TIMEOUT: Duration = Duration::from_millis(10);
@@ -259,10 +257,11 @@ impl SeriesScan {
             })
             .sum();
 
-        if total_files > MAX_CONCURRENT_FILES {
+        let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
+        if total_files > max_concurrent_files {
             return TooManyFilesToReadSnafu {
                 actual: total_files,
-                max: MAX_CONCURRENT_FILES,
+                max: max_concurrent_files,
             }
             .fail();
         }

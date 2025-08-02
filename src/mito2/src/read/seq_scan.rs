@@ -48,8 +48,6 @@ use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
 
-/// Maximum number of files to read at the same time.
-const MAX_CONCURRENT_FILES: usize = 512;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -403,10 +401,11 @@ impl SeqScan {
             .map(|partition| Self::max_files_in_partition(&self.stream_ctx.ranges, partition))
             .sum();
 
-        if total_max_files > MAX_CONCURRENT_FILES {
+        let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
+        if total_max_files > max_concurrent_files {
             return TooManyFilesToReadSnafu {
                 actual: total_max_files,
-                max: MAX_CONCURRENT_FILES,
+                max: max_concurrent_files,
             }
             .fail();
         }
