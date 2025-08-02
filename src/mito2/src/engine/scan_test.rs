@@ -156,8 +156,10 @@ async fn test_scan_with_min_sst_sequence() {
 #[tokio::test]
 async fn test_max_concurrent_scan_files() {
     let mut env = TestEnv::with_prefix("test_max_concurrent_scan_files").await;
-    let mut config = MitoConfig::default();
-    config.max_concurrent_scan_files = 2;
+    let config = MitoConfig {
+        max_concurrent_scan_files: 2,
+        ..Default::default()
+    };
     let engine = env.create_engine(config).await;
 
     let region_id = RegionId::new(1, 1);
