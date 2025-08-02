@@ -1233,13 +1233,21 @@ mod tests {
 
     fn build_test_flat_sst_schema() -> SchemaRef {
         let fields = vec![
-            Field::new("tag0", ArrowDataType::Int64, true),
-            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("tag0", ArrowDataType::Int64, true), // primary key columns first
             Field::new("tag1", ArrowDataType::Int64, true),
+            Field::new("field1", ArrowDataType::Int64, true), // then field columns
             Field::new("field0", ArrowDataType::Int64, true),
             Field::new(
                 "ts",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
                 false,
             ),
             Field::new("__sequence", ArrowDataType::UInt64, false),
@@ -1258,10 +1266,11 @@ mod tests {
     fn input_columns_for_flat_batch(num_rows: usize) -> Vec<ArrayRef> {
         vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
-            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag1
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![3; num_rows])), // field0
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // __primary_key
             Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; num_rows])), // sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ]
@@ -1272,7 +1281,8 @@ mod tests {
         let metadata = build_test_region_metadata();
         let format = FlatWriteFormat::new(metadata, &FlatSchemaOptions::default());
 
-        let columns: Vec<ArrayRef> = input_columns_for_flat_batch(4);
+        let num_rows = 4;
+        let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
         let batch = RecordBatch::try_new(build_test_flat_sst_schema(), columns.clone()).unwrap();
         let expect_record = RecordBatch::try_new(build_test_flat_sst_schema(), columns).unwrap();
 
@@ -1292,10 +1302,11 @@ mod tests {
 
         let expected_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag0
-            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![1; num_rows])), // tag1
+            Arc::new(Int64Array::from(vec![2; num_rows])), // field1
             Arc::new(Int64Array::from(vec![3; num_rows])), // field0
             Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4])), // ts
+            build_test_pk_array(&[(b"test".to_vec(), num_rows)]), // __primary_key
             Arc::new(UInt64Array::from(vec![415411; num_rows])), // overridden sequence
             Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; num_rows])), // op type
         ];
@@ -1309,17 +1320,23 @@ mod tests {
     #[test]
     fn test_flat_projection_indices() {
         let metadata = build_test_region_metadata();
-        // Only read tag1
+        // Based on flat format: tag0(0), tag1(1), field1(2), field0(3), ts(4), __primary_key(5), __sequence(6), __op_type(7)
+        // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
+
+        // Only read tag1 (column_id=3, index=1) + fixed columns
         let read_format = ReadFormat::new_flat(metadata.clone(), [3].iter().copied());
-        assert_eq!(&[2, 5, 6], read_format.projection_indices());
-        // Only read field1
+        assert_eq!(&[1, 4, 5, 6, 7], read_format.projection_indices());
+
+        // Only read field1 (column_id=4, index=2) + fixed columns
         let read_format = ReadFormat::new_flat(metadata.clone(), [4].iter().copied());
-        assert_eq!(&[1, 5, 6], read_format.projection_indices());
-        // Only read ts
+        assert_eq!(&[2, 4, 5, 6, 7], read_format.projection_indices());
+
+        // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
         let read_format = ReadFormat::new_flat(metadata.clone(), [5].iter().copied());
-        assert_eq!(&[4, 5, 6], read_format.projection_indices());
-        // Read field0, tag0, ts
+        assert_eq!(&[4, 5, 6, 7], read_format.projection_indices());
+
+        // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
         let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied());
-        assert_eq!(&[0, 3, 4, 5, 6], read_format.projection_indices());
+        assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
 }
