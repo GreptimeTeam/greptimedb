@@ -15,7 +15,7 @@
 //! A write-through cache for remote object stores.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -25,14 +25,13 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::access_layer::{
-    new_fs_cache_store, FilePathProvider, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
-    TempFileCleaner, WriteCachePathProvider,
+    new_fs_cache_store, FilePathProvider, Metrics, RegionFilePathFactory, SstInfoArray,
+    SstWriteRequest, TempFileCleaner, WriteCachePathProvider, WriteType,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::error::{self, Result};
 use crate::metrics::{
-    FLUSH_ELAPSED, UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
-    WRITE_CACHE_DOWNLOAD_ELAPSED,
+    UPLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL, WRITE_CACHE_DOWNLOAD_ELAPSED,
 };
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -107,11 +106,8 @@ impl WriteCache {
         write_request: SstWriteRequest,
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
-    ) -> Result<SstInfoArray> {
-        let timer = FLUSH_ELAPSED
-            .with_label_values(&["write_sst"])
-            .start_timer();
-
+        write_type: WriteType,
+    ) -> Result<(SstInfoArray, Metrics)> {
         let region_id = write_request.metadata.region_id;
 
         let store = self.file_cache.local_store();
@@ -137,6 +133,7 @@ impl WriteCache {
             write_request.metadata,
             indexer,
             path_provider.clone(),
+            Metrics::new(write_type),
         )
         .await
         .with_file_cleaner(cleaner);
@@ -144,12 +141,11 @@ impl WriteCache {
         let sst_info = writer
             .write_all(write_request.source, write_request.max_sequence, write_opts)
             .await?;
-
-        timer.stop_and_record();
+        let mut metrics = writer.into_metrics();
 
         // Upload sst file to remote object store.
         if sst_info.is_empty() {
-            return Ok(sst_info);
+            return Ok((sst_info, metrics));
         }
 
         let mut upload_tracker = UploadTracker::new(region_id);
@@ -160,10 +156,12 @@ impl WriteCache {
             let parquet_path = upload_request
                 .dest_path_provider
                 .build_sst_file_path(sst.file_id);
+            let start = Instant::now();
             if let Err(e) = self.upload(parquet_key, &parquet_path, remote_store).await {
                 err = Some(e);
                 break;
             }
+            metrics.upload_parquet += start.elapsed();
             upload_tracker.push_uploaded_file(parquet_path);
 
             if sst.index_metadata.file_size > 0 {
@@ -171,10 +169,12 @@ impl WriteCache {
                 let puffin_path = upload_request
                     .dest_path_provider
                     .build_index_file_path(sst.file_id);
+                let start = Instant::now();
                 if let Err(e) = self.upload(puffin_key, &puffin_path, remote_store).await {
                     err = Some(e);
                     break;
                 }
+                metrics.upload_puffin += start.elapsed();
                 upload_tracker.push_uploaded_file(puffin_path);
             }
         }
@@ -187,7 +187,7 @@ impl WriteCache {
             return Err(err);
         }
 
-        Ok(sst_info)
+        Ok((sst_info, metrics))
     }
 
     /// Removes a file from the cache by `index_key`.
@@ -297,13 +297,7 @@ impl WriteCache {
         let file_type = index_key.file_type;
         let cache_path = self.file_cache.cache_file_path(index_key);
 
-        let timer = FLUSH_ELAPSED
-            .with_label_values(&[match file_type {
-                FileType::Parquet => "upload_parquet",
-                FileType::Puffin => "upload_puffin",
-            }])
-            .start_timer();
-
+        let start = Instant::now();
         let cached_value = self
             .file_cache
             .local_store()
@@ -347,11 +341,11 @@ impl WriteCache {
         UPLOAD_BYTES_TOTAL.inc_by(bytes_written);
 
         debug!(
-            "Successfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}s",
+            "Successfully upload file to remote, region: {}, file: {}, upload_path: {}, cost: {:?}",
             region_id,
             file_id,
             upload_path,
-            timer.stop_and_record()
+            start.elapsed(),
         );
 
         let index_value = IndexValue {
@@ -493,11 +487,11 @@ mod tests {
         };
 
         // Write to cache and upload sst to mock remote store
-        let sst_info = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts)
+        let (mut sst_infos, _) = write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
             .await
-            .unwrap()
-            .remove(0); //todo(hl): we assume it only creates one file.
+            .unwrap();
+        let sst_info = sst_infos.remove(0);
 
         let file_id = sst_info.file_id;
         let sst_upload_path = path_provider.build_sst_file_path(file_id);
@@ -586,11 +580,11 @@ mod tests {
             remote_store: mock_store.clone(),
         };
 
-        let sst_info = write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts)
+        let (mut sst_infos, _) = write_cache
+            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
             .await
-            .unwrap()
-            .remove(0);
+            .unwrap();
+        let sst_info = sst_infos.remove(0);
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 
         // Read metadata from write cache
@@ -661,7 +655,7 @@ mod tests {
         };
 
         write_cache
-            .write_and_upload_sst(write_request, upload_request, &write_opts)
+            .write_and_upload_sst(write_request, upload_request, &write_opts, WriteType::Flush)
             .await
             .unwrap_err();
         let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);
