@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datatypes::arrow::array::UInt64Array;
+use datatypes::arrow::array::{ArrayRef, UInt64Array};
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use parquet::file::metadata::RowGroupMetaData;
@@ -104,7 +104,7 @@ pub(crate) fn sequence_column_index(num_columns: usize) -> usize {
     num_columns - 2
 }
 
-// TODO(yingwen): Support new_override_sequence_array().
+// TODO(yingwen): Add an option to skip reading internal columns.
 /// Helper for reading the flat SST format with projection.
 ///
 /// It only supports flat format that stores primary keys additionally.
@@ -120,6 +120,8 @@ pub struct FlatReadFormat {
     column_id_to_projected_index: HashMap<ColumnId, usize>,
     /// Column id to index in SST.
     column_id_to_sst_index: HashMap<ColumnId, usize>,
+    /// Sequence number to override the sequence read from the SST.
+    override_sequence: Option<SequenceNumber>,
 }
 
 impl FlatReadFormat {
@@ -147,7 +149,14 @@ impl FlatReadFormat {
             projection_indices: format_projection.projection_indices,
             column_id_to_projected_index: format_projection.column_id_to_projected_index,
             column_id_to_sst_index: id_to_index,
+            override_sequence: None,
         }
+    }
+
+    /// Sets the sequence number to override.
+    #[allow(dead_code)]
+    pub(crate) fn set_override_sequence(&mut self, sequence: Option<SequenceNumber>) {
+        self.override_sequence = sequence;
     }
 
     /// Index of a column in the projected batch by its column id.
@@ -204,6 +213,41 @@ impl FlatReadFormat {
     /// Gets sorted projection indices to read.
     pub(crate) fn projection_indices(&self) -> &[usize] {
         &self.projection_indices
+    }
+
+    /// Creates a sequence array to override.
+    #[allow(dead_code)]
+    pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
+        self.override_sequence
+            .map(|seq| Arc::new(UInt64Array::from_value(seq, length)) as ArrayRef)
+    }
+
+    /// Convert a record batch to apply override sequence array.
+    ///
+    /// Returns a new RecordBatch with the sequence column replaced by the override sequence array.
+    #[allow(dead_code)]
+    pub(crate) fn convert_batch(
+        &self,
+        record_batch: &RecordBatch,
+        override_sequence_array: Option<&ArrayRef>,
+    ) -> Result<RecordBatch> {
+        let Some(override_array) = override_sequence_array else {
+            return Ok(record_batch.clone());
+        };
+
+        let mut columns = record_batch.columns().to_vec();
+        let sequence_column_idx = sequence_column_index(record_batch.num_columns());
+
+        // Use the provided override sequence array, slicing if necessary to match batch length
+        let sequence_array = if override_array.len() > record_batch.num_rows() {
+            override_array.slice(0, record_batch.num_rows())
+        } else {
+            override_array.clone()
+        };
+
+        columns[sequence_column_idx] = sequence_array;
+
+        RecordBatch::try_new(record_batch.schema(), columns).context(NewRecordBatchSnafu)
     }
 
     fn get_stat_values(

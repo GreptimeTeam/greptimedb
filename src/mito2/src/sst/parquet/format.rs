@@ -1339,4 +1339,56 @@ mod tests {
         let read_format = ReadFormat::new_flat(metadata, [2, 1, 5].iter().copied());
         assert_eq!(&[0, 3, 4, 5, 6, 7], read_format.projection_indices());
     }
+
+    #[test]
+    fn test_flat_read_format_convert_batch() {
+        let metadata = build_test_region_metadata();
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let mut format = FlatReadFormat::new(
+            metadata,
+            arrow_schema.clone(),
+            std::iter::once(1), // Just read tag0
+        );
+
+        let num_rows = 4;
+        let original_sequence = 100u64;
+        let override_sequence = 200u64;
+
+        // Create a test record batch
+        let columns: Vec<ArrayRef> = input_columns_for_flat_batch(num_rows);
+        let mut test_columns = columns.clone();
+        // Replace sequence column with original sequence values
+        test_columns[6] = Arc::new(UInt64Array::from(vec![original_sequence; num_rows]));
+        let record_batch = RecordBatch::try_new(arrow_schema, test_columns).unwrap();
+
+        // Test without override sequence - should return clone
+        let result = format.convert_batch(&record_batch, None).unwrap();
+        let sequence_column = result.column(
+            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
+        );
+        let sequence_array = sequence_column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+
+        let expected_original = UInt64Array::from(vec![original_sequence; num_rows]);
+        assert_eq!(sequence_array, &expected_original);
+
+        // Set override sequence and test with new_override_sequence_array
+        format.set_override_sequence(Some(override_sequence));
+        let override_sequence_array = format.new_override_sequence_array(num_rows).unwrap();
+        let result = format
+            .convert_batch(&record_batch, Some(&override_sequence_array))
+            .unwrap();
+        let sequence_column = result.column(
+            crate::sst::parquet::flat_format::sequence_column_index(result.num_columns()),
+        );
+        let sequence_array = sequence_column
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+
+        let expected_override = UInt64Array::from(vec![override_sequence; num_rows]);
+        assert_eq!(sequence_array, &expected_override);
+    }
 }
