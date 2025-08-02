@@ -21,7 +21,7 @@ use common_catalog::format_full_table_name;
 use common_recordbatch::util;
 use common_telemetry::tracing;
 use datatypes::prelude::Value;
-use promql_parser::label::{Matcher, Matchers};
+use promql_parser::label::{MatchOp, Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
 use servers::prom_store::{DATABASE_LABEL, SCHEMA_LABEL};
@@ -118,7 +118,7 @@ impl Instance {
         let table_schema = matchers
             .iter()
             .find_map(|m| {
-                if m.name == SCHEMA_LABEL || m.name == DATABASE_LABEL {
+                if (m.name == SCHEMA_LABEL || m.name == DATABASE_LABEL) && m.op == MatchOp::Equal {
                     Some(m.value.clone())
                 } else {
                     None
