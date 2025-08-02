@@ -391,7 +391,7 @@ impl SeqScan {
     }
 
     /// Checks resource limit for the scanner.
-    fn check_scan_limit(&self) -> Result<()> {
+    pub(crate) fn check_scan_limit(&self) -> Result<()> {
         // Check max file count limit for all partitions since we scan them in parallel.
         let total_max_files: usize = self
             .properties

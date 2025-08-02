@@ -243,7 +243,7 @@ impl SeriesScan {
     }
 
     /// Checks resource limit for the scanner.
-    fn check_scan_limit(&self) -> Result<()> {
+    pub(crate) fn check_scan_limit(&self) -> Result<()> {
         // Sum the total number of files across all partitions
         let total_files: usize = self
             .properties
