@@ -35,11 +35,11 @@ use store_api::region_engine::{
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
-use crate::error::{PartitionOutOfRangeSnafu, Result};
+use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
-use crate::read::range::RangeBuilderList;
+use crate::read::range::{RangeBuilderList, RangeMeta};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     scan_file_ranges, scan_mem_ranges, PartitionMetrics, PartitionMetricsList,
@@ -47,6 +47,9 @@ use crate::read::scan_util::{
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{scan_util, Batch, BatchReader, BoxedBatchReader, ScannerMetrics, Source};
 use crate::region::options::MergeMode;
+
+/// Maximum number of files to read at the same time.
+const MAX_CONCURRENT_FILES: usize = 512;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -377,6 +380,39 @@ impl SeqScan {
 
         metrics
     }
+
+    /// Finds the maximum number of files to read in a single partition range.
+    fn max_files_in_partition(ranges: &[RangeMeta], partition_ranges: &[PartitionRange]) -> usize {
+        partition_ranges
+            .iter()
+            .map(|part_range| {
+                let range_meta = &ranges[part_range.identifier];
+                range_meta.indices.len()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Checks resource limit for the scanner.
+    fn check_scan_limit(&self) -> Result<()> {
+        // Check max file count limit for all partitions since we scan them in parallel.
+        let total_max_files: usize = self
+            .properties
+            .partitions
+            .iter()
+            .map(|partition| Self::max_files_in_partition(&self.stream_ctx.ranges, partition))
+            .sum();
+
+        if total_max_files > MAX_CONCURRENT_FILES {
+            return TooManyFilesToReadSnafu {
+                actual: total_max_files,
+                max: MAX_CONCURRENT_FILES,
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
 }
 
 impl RegionScanner for SeqScan {
@@ -404,6 +440,9 @@ impl RegionScanner for SeqScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
+
+        self.check_scan_limit().map_err(BoxedError::new)?;
+
         Ok(())
     }
 

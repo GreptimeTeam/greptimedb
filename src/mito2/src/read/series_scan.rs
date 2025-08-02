@@ -38,7 +38,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::{
     Error, InvalidSenderSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
-    ScanSeriesSnafu,
+    ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::range::RangeBuilderList;
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -46,6 +46,9 @@ use crate::read::scan_util::{PartitionMetrics, PartitionMetricsList, SeriesDistr
 use crate::read::seq_scan::{build_sources, SeqScan};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{Batch, ScannerMetrics};
+
+/// Maximum number of files to read at the same time.
+const MAX_CONCURRENT_FILES: usize = 512;
 
 /// Timeout to send a batch to a sender.
 const SEND_TIMEOUT: Duration = Duration::from_millis(10);
@@ -241,6 +244,31 @@ impl SeriesScan {
 
         Ok(Box::pin(futures::stream::iter(streams).flatten()))
     }
+
+    /// Checks resource limit for the scanner.
+    fn check_scan_limit(&self) -> Result<()> {
+        // Sum the total number of files across all partitions
+        let total_files: usize = self
+            .properties
+            .partitions
+            .iter()
+            .flat_map(|partition| partition.iter())
+            .map(|part_range| {
+                let range_meta = &self.stream_ctx.ranges[part_range.identifier];
+                range_meta.indices.len()
+            })
+            .sum();
+
+        if total_files > MAX_CONCURRENT_FILES {
+            return TooManyFilesToReadSnafu {
+                actual: total_files,
+                max: MAX_CONCURRENT_FILES,
+            }
+            .fail();
+        }
+
+        Ok(())
+    }
 }
 
 fn new_channel_list(num_partitions: usize) -> (SenderList, ReceiverList) {
@@ -278,6 +306,9 @@ impl RegionScanner for SeriesScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
+
+        self.check_scan_limit().map_err(BoxedError::new)?;
+
         Ok(())
     }
 
