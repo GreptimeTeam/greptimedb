@@ -34,7 +34,7 @@ use crate::http::PromValidationMode;
 use crate::pipeline::run_pipeline;
 use crate::prom_row_builder::{PromCtx, TablesBuilder};
 use crate::prom_store::{
-    DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES, PHYSICAL_TABLE_LABEL_BYTES,
+    DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES, PHYSICAL_TABLE_LABEL_BYTES, SCHEMA_LABEL_BYTES,
 };
 use crate::query_handler::PipelineHandlerRef;
 use crate::repeated_field::{Clear, RepeatedField};
@@ -199,8 +199,15 @@ impl PromTimeSeries {
                         self.table_name = decode_string(&label.value, prom_validation_mode)?;
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
-                    DATABASE_LABEL_BYTES => {
+                    SCHEMA_LABEL_BYTES => {
                         self.schema = Some(decode_string(&label.value, prom_validation_mode)?);
+                        self.labels.truncate(self.labels.len() - 1); // remove last label
+                    }
+                    DATABASE_LABEL_BYTES => {
+                        // Only set schema from __database__ if __schema__ hasn't been set yet
+                        if self.schema.is_none() {
+                            self.schema = Some(decode_string(&label.value, prom_validation_mode)?);
+                        }
                         self.labels.truncate(self.labels.len() - 1); // remove last label
                     }
                     PHYSICAL_TABLE_LABEL_BYTES => {

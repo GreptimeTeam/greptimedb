@@ -38,7 +38,7 @@ use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{write_cost_header_map, GREPTIME_DB_HEADER_METRICS};
 use crate::http::PromValidationMode;
-use crate::prom_store::{snappy_decompress, zstd_decompress};
+use crate::prom_store::{extract_schema_from_read_request, snappy_decompress, zstd_decompress};
 use crate::proto::{PromSeriesProcessor, PromWriteRequest};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -117,6 +117,7 @@ pub async fn remote_write(
     let is_zstd = content_encoding.contains(VM_ENCODING);
 
     let mut processor = PromSeriesProcessor::default_processor();
+
     if let Some(pipeline_name) = pipeline_info.pipeline_name {
         let pipeline_def = PipelineDefinition::from_name(
             &pipeline_name,
@@ -184,12 +185,18 @@ pub async fn remote_read(
 ) -> Result<PromStoreResponse> {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
+
+    let request = decode_remote_read_request(body).await?;
+
+    // Extract schema from special labels and set it in query context
+    if let Some(schema) = extract_schema_from_read_request(&request) {
+        query_ctx.set_current_schema(&schema);
+    }
+
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
-
-    let request = decode_remote_read_request(body).await?;
 
     state.prom_store_handler.read(request, query_ctx).await
 }
