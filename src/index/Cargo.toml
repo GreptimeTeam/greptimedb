@@ -22,7 +22,7 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
-jieba-rs = "0.7"
+jieba-rs = "0.8.0"
 lazy_static.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
@@ -34,8 +34,8 @@ roaring = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
-tantivy = { version = "0.22", features = ["zstd-compression"] }
-tantivy-jieba = "0.11.0"
+tantivy = { version = "0.24.2", features = ["zstd-compression"] }
+tantivy-jieba = "0.16.0"
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
