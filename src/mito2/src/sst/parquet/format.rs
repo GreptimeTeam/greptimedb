@@ -315,6 +315,14 @@ impl ReadFormat {
         });
         Some(Arc::new(UInt64Array::from_iter(values)))
     }
+
+    /// Creates a sequence array to override.
+    pub(crate) fn new_override_sequence_array(&self, length: usize) -> Option<ArrayRef> {
+        match self {
+            ReadFormat::PrimaryKey(format) => format.new_override_sequence_array(length),
+            ReadFormat::Flat(format) => format.new_override_sequence_array(length),
+        }
+    }
 }
 
 /// Helper for reading the SST format.
