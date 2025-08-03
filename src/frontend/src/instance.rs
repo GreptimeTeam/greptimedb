@@ -73,7 +73,7 @@ use query::query_engine::DescribeResult;
 use query::QueryEngineRef;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu,
+    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
 };
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
@@ -686,10 +686,39 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
-        let output = self
-            .statement_executor
-            .exec_plan(plan, query_ctx.clone())
+        let promql_query_str = if let QueryStatement::Promql(stmt) = stmt {
+            stmt.to_string()
+        } else {
+            // It should not happen. The query should always be promql.
+            return UnexpectedResultSnafu {
+                reason: "The query should always be promql.".to_string(),
+            }
+            .fail();
+        };
+
+        let ticket = self.process_manager.register_query(
+            query_ctx.current_catalog().to_string(),
+            vec![query_ctx.current_schema()],
+            promql_query_str,
+            query_ctx.conn_info().to_string(),
+            Some(query_ctx.process_id()),
+        );
+
+        let query_fut = self.statement_executor.exec_plan(plan, query_ctx.clone());
+
+        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
+            .map_err(|_| servers::error::CancelledSnafu.build())?
+            .map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
