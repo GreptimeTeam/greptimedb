@@ -46,6 +46,7 @@
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
 | `mysql.tls.key_path` | String | Unset | Private key file path. |
 | `mysql.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload |
+| `mysql.prepared_stmt_cache_capacity` | Integer | `10000` | Maximum number of entries in the Prepared Statement cache |
 | `postgres` | -- | -- | PostgresSQL server options. |
 | `postgres.enable` | Bool | `true` | Whether to enable |
 | `postgres.addr` | String | `127.0.0.1:4003` | The addr to bind the PostgresSQL server. |
