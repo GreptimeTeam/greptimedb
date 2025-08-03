@@ -26,7 +26,7 @@ check_dashboards_generation() {
   ./grafana/scripts/gen-dashboards.sh
 
   if [[ -n "$(git diff --name-only grafana/dashboards/metrics)" ]]; then
-    echo "Error: The dashboards are not generated correctly. You should execute the `make dashboards` command."
+    echo "Error: The dashboards are not generated correctly. You should execute the 'make dashboards' command."
     exit 1
   fi
 }
