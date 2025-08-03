@@ -191,7 +191,7 @@ fn test_load_metasrv_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
-            store_tls: Some(TlsOption {
+            backend_tls: Some(TlsOption {
                 mode: TlsMode::Prefer,
                 cert_path: String::new(),
                 key_path: String::new(),

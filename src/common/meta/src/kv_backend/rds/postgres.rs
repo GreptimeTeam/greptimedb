@@ -74,7 +74,7 @@ pub struct TlsOption {
 impl Default for TlsOption {
     fn default() -> Self {
         TlsOption {
-            mode: TlsMode::Disable,
+            mode: TlsMode::Prefer,
             cert_path: String::new(),
             key_path: String::new(),
             ca_cert_path: String::new(),

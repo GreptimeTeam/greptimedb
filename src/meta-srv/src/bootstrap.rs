@@ -317,7 +317,7 @@ pub async fn metasrv_builder(
             cfg.keepalives_idle = Some(Duration::from_secs(POSTGRES_KEEP_ALIVE_SECS));
             // We use a separate pool for election since we need a different session keep-alive idle time.
             let pool =
-                create_postgres_pool_with(&opts.store_addrs, cfg, opts.store_tls.clone()).await?;
+                create_postgres_pool_with(&opts.store_addrs, cfg, opts.backend_tls.clone()).await?;
 
             let election_client = ElectionPgClient::new(
                 pool,
@@ -336,7 +336,7 @@ pub async fn metasrv_builder(
             )
             .await?;
 
-            let pool = create_postgres_pool(&opts.store_addrs, opts.store_tls.clone()).await?;
+            let pool = create_postgres_pool(&opts.store_addrs, opts.backend_tls.clone()).await?;
             let kv_backend = PgStore::with_pg_pool(pool, &opts.meta_table_name, opts.max_txn_ops)
                 .await
                 .context(error::KvBackendSnafu)?;

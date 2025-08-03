@@ -105,10 +105,10 @@ pub struct MetasrvOptions {
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
     pub store_addrs: Vec<String>,
-    /// TLS configuration for store backend (PostgreSQL/MySQL)
+    /// TLS configuration for kv store backend (PostgreSQL/MySQL)
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
-    pub store_tls: Option<TlsOption>,
+    pub backend_tls: Option<TlsOption>,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -181,7 +181,7 @@ impl fmt::Debug for MetasrvOptions {
         let mut debug_struct = f.debug_struct("MetasrvOptions");
         debug_struct
             .field("store_addrs", &self.sanitize_store_addrs())
-            .field("store_tls", &self.store_tls)
+            .field("backend_tls", &self.backend_tls)
             .field("selector", &self.selector)
             .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
@@ -227,7 +227,7 @@ impl Default for MetasrvOptions {
             #[allow(deprecated)]
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
-            store_tls: None,
+            backend_tls: None,
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
