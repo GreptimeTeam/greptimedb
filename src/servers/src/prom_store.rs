@@ -42,7 +42,6 @@ pub const METRIC_NAME_LABEL: &str = "__name__";
 pub const METRIC_NAME_LABEL_BYTES: &[u8] = b"__name__";
 
 pub const DATABASE_LABEL: &str = "__database__";
-pub const SCHEMA_LABEL: &str = "__schema__";
 pub const DATABASE_LABEL_BYTES: &[u8] = b"__database__";
 
 pub const SCHEMA_LABEL: &str = "__schema__";
