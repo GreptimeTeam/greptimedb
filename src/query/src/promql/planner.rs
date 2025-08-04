@@ -1255,6 +1255,13 @@ impl PromPlanner {
     ) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
+            if matcher.name == SCHEMA_COLUMN_MATCHER
+                || matcher.name == DB_COLUMN_MATCHER
+                || matcher.name == FIELD_COLUMN_MATCHER
+            {
+                continue;
+            }
+
             let col = if table_schema
                 .field_with_unqualified_name(&matcher.name)
                 .is_err()
