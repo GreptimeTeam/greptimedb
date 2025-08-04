@@ -155,6 +155,7 @@ impl PromPlannerContext {
         self.field_columns = vec![];
         self.tag_columns = vec![];
         self.field_column_matcher = None;
+        self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
     }
