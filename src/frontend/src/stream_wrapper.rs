@@ -81,7 +81,7 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use catalog::process_manager::ProcessManager;
+    use catalog::process_manager::{ProcessManager, QueryStatement as CatalogQueryStatement};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
     use datatypes::data_type::ConcreteDataType;
@@ -89,6 +89,8 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::Int32Vector;
     use futures::{Stream, StreamExt};
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
     use tokio::time::{sleep, timeout};
 
     use super::CancellableStreamWrapper;
@@ -184,7 +186,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -207,7 +217,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -231,7 +249,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -258,7 +284,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -286,7 +320,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -316,7 +358,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );
@@ -344,7 +394,15 @@ mod tests {
         let ticket = process_manager.register_query(
             "catalog".to_string(),
             vec![],
-            "query".to_string(),
+            CatalogQueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client".to_string(),
             None,
         );

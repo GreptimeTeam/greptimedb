@@ -14,7 +14,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -24,7 +24,9 @@ use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_telemetry::{debug, info, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
+use promql_parser::parser::EvalStmt;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::statements::statement::Statement;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -42,6 +44,23 @@ pub struct ProcessManager {
     catalogs: RwLock<HashMap<String, HashMap<ProcessId, CancellableProcess>>>,
     /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
+}
+
+/// Represents a parsed query statement, functionally equivalent to [query::parser::QueryStatement].
+/// This enum is defined here to avoid cyclic dependencies with the query parser module.
+#[derive(Debug, Clone)]
+pub enum QueryStatement {
+    Sql(Statement),
+    Promql(EvalStmt),
+}
+
+impl Display for QueryStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
+            QueryStatement::Promql(eval_stmt) => write!(f, "{}", eval_stmt),
+        }
+    }
 }
 
 impl ProcessManager {
@@ -64,7 +83,7 @@ impl ProcessManager {
         self: &Arc<Self>,
         catalog: String,
         schemas: Vec<String>,
-        query: String,
+        query: QueryStatement,
         client: String,
         query_id: Option<ProcessId>,
     ) -> Ticket {
@@ -73,7 +92,7 @@ impl ProcessManager {
             id,
             catalog: catalog.clone(),
             schemas,
-            query,
+            query: query.to_string(),
             start_timestamp: current_time_millis(),
             client,
             frontend: self.server_addr.clone(),
@@ -267,15 +286,30 @@ impl Debug for CancellableProcess {
 mod tests {
     use std::sync::Arc;
 
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
+
+    use super::QueryStatement;
     use crate::process_manager::ProcessManager;
 
     #[tokio::test]
     async fn test_register_query() {
         let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
+        let sql_query = "SELECT * FROM test_table";
+        let sql_query_statement = QueryStatement::Sql(
+            ParserContext::create_with_dialect(
+                sql_query,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()[0]
+                .clone(),
+        );
+
         let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
-            "SELECT * FROM table".to_string(),
+            sql_query_statement,
             "".to_string(),
             None,
         );
@@ -284,7 +318,7 @@ mod tests {
         assert_eq!(running_processes.len(), 1);
         assert_eq!(&running_processes[0].frontend, "127.0.0.1:8000");
         assert_eq!(running_processes[0].id, ticket.id);
-        assert_eq!(&running_processes[0].query, "SELECT * FROM table");
+        assert_eq!(&running_processes[0].query, sql_query);
 
         drop(ticket);
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 0);
@@ -294,11 +328,20 @@ mod tests {
     async fn test_register_query_with_custom_id() {
         let process_manager = Arc::new(ProcessManager::new("127.0.0.1:8000".to_string(), None));
         let custom_id = 12345;
+        let sql_query_statement = QueryStatement::Sql(
+            ParserContext::create_with_dialect(
+                "SELECT * FROM test_table",
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()[0]
+                .clone(),
+        );
 
         let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
-            "SELECT * FROM table".to_string(),
+            sql_query_statement,
             "client1".to_string(),
             Some(custom_id),
         );
@@ -318,7 +361,15 @@ mod tests {
         let ticket1 = process_manager.clone().register_query(
             "public".to_string(),
             vec!["schema1".to_string()],
-            "SELECT * FROM table1".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM table1",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client1".to_string(),
             None,
         );
@@ -326,7 +377,15 @@ mod tests {
         let ticket2 = process_manager.clone().register_query(
             "public".to_string(),
             vec!["schema2".to_string()],
-            "SELECT * FROM table2".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM table2",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client2".to_string(),
             None,
         );
@@ -347,7 +406,15 @@ mod tests {
         let _ticket1 = process_manager.clone().register_query(
             "catalog1".to_string(),
             vec!["schema1".to_string()],
-            "SELECT * FROM table1".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM table1",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client1".to_string(),
             None,
         );
@@ -355,7 +422,15 @@ mod tests {
         let _ticket2 = process_manager.clone().register_query(
             "catalog2".to_string(),
             vec!["schema2".to_string()],
-            "SELECT * FROM table2".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM table2",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client2".to_string(),
             None,
         );
@@ -381,7 +456,15 @@ mod tests {
         let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
-            "SELECT * FROM table".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client1".to_string(),
             None,
         );
@@ -397,7 +480,15 @@ mod tests {
         let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
-            "SELECT * FROM table".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client1".to_string(),
             None,
         );
@@ -414,7 +505,15 @@ mod tests {
         let ticket = process_manager.clone().register_query(
             "public".to_string(),
             vec!["test".to_string()],
-            "SELECT * FROM table".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT * FROM test_table",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "client1".to_string(),
             None,
         );
@@ -459,7 +558,15 @@ mod tests {
         let _ticket = process_manager.clone().register_query(
             "test_catalog".to_string(),
             vec!["schema1".to_string(), "schema2".to_string()],
-            "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
+            QueryStatement::Sql(
+                ParserContext::create_with_dialect(
+                    "SELECT COUNT(*) FROM users WHERE age > 18",
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()[0]
+                    .clone(),
+            ),
             "test_client".to_string(),
             Some(42),
         );
@@ -485,7 +592,15 @@ mod tests {
             let _ticket = process_manager.clone().register_query(
                 "public".to_string(),
                 vec!["test".to_string()],
-                "SELECT * FROM table".to_string(),
+                QueryStatement::Sql(
+                    ParserContext::create_with_dialect(
+                        "SELECT * FROM test_table",
+                        &GreptimeDbDialect {},
+                        ParseOptions::default(),
+                    )
+                    .unwrap()[0]
+                        .clone(),
+                ),
                 "client1".to_string(),
                 None,
             );
