@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::ReconcileRequest;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
@@ -50,6 +51,17 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
         Ok(self
             .procedure_executor
             .migrate_region(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)?
+            .pid
+            .map(|pid| String::from_utf8_lossy(&pid.key).to_string()))
+    }
+
+    async fn reconcile(&self, request: ReconcileRequest) -> QueryResult<Option<String>> {
+        Ok(self
+            .procedure_executor
+            .reconcile(&ExecutorContext::default(), request)
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?

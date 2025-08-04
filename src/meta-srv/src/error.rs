@@ -107,6 +107,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init reconciliation manager"))]
+    InitReconciliationManager {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         #[snafu(implicit)]
@@ -137,6 +144,13 @@ pub enum Error {
 
     #[snafu(display("Failed to submit ddl task"))]
     SubmitDdlTask {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to submit reconcile procedure"))]
+    SubmitReconcileProcedure {
         #[snafu(implicit)]
         location: Location,
         source: common_meta::error::Error,
@@ -1029,7 +1043,8 @@ impl ErrorExt for Error {
             }
             Error::DowngradeLeader { source, .. } => source.status_code(),
             Error::RegisterProcedureLoader { source, .. } => source.status_code(),
-            Error::SubmitDdlTask { source, .. } => source.status_code(),
+            Error::SubmitDdlTask { source, .. }
+            | Error::SubmitReconcileProcedure { source, .. } => source.status_code(),
             Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
             | Error::RuntimeSwitchManager { source, .. }
@@ -1037,9 +1052,9 @@ impl ErrorExt for Error {
             | Error::UnexpectedLogicalRouteTable { source, .. }
             | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
 
-            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
-                source.status_code()
-            }
+            Error::InitMetadata { source, .. }
+            | Error::InitDdlManager { source, .. }
+            | Error::InitReconciliationManager { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
             Error::LookupPeer { source, .. } => source.status_code(),
