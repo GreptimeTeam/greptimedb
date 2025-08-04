@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use servers::http::result::error_result::ErrorResponse;
 use snafu::{ensure, ResultExt};
 
-use crate::error::{Result, RuntimeSwitchManagerSnafu, SetNextSequenceSnafu, UnexpectedSnafu};
+use crate::error::{
+    PeekSequenceSnafu, Result, RuntimeSwitchManagerSnafu, SetNextSequenceSnafu, UnexpectedSnafu,
+};
 
 pub type TableIdSequenceHandlerRef = Arc<TableIdSequenceHandler>;
 
@@ -50,6 +52,15 @@ impl TableIdSequenceHandler {
             .jump_to(next_table_id as u64)
             .await
             .context(SetNextSequenceSnafu)
+    }
+
+    async fn peek_table_id(&self) -> Result<u32> {
+        let next_table_id = self
+            .table_id_sequence
+            .peek()
+            .await
+            .context(PeekSequenceSnafu)?;
+        Ok(next_table_id as u32)
     }
 }
 
@@ -80,7 +91,10 @@ pub(crate) async fn set_next_table_id(
 pub(crate) async fn get_next_table_id(
     State(handler): State<TableIdSequenceHandlerRef>,
 ) -> Response {
-    let next_table_id = handler.table_id_sequence.peek().await as u32;
-
-    (StatusCode::OK, Json(NextTableIdResponse { next_table_id })).into_response()
+    match handler.peek_table_id().await {
+        Ok(next_table_id) => {
+            (StatusCode::OK, Json(NextTableIdResponse { next_table_id })).into_response()
+        }
+        Err(e) => ErrorResponse::from_error(e).into_response(),
+    }
 }
