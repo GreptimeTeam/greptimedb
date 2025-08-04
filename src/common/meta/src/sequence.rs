@@ -15,7 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use snafu::ensure;
 use tokio::sync::Mutex;
 
@@ -96,9 +96,9 @@ impl Sequence {
     }
 
     /// Returns the next value without incrementing the sequence.
-    pub async fn peek(&self) -> u64 {
+    pub async fn peek(&self) -> Result<u64> {
         let inner = self.inner.lock().await;
-        inner.next
+        inner.peek().await
     }
 
     /// Jumps to the given value.
@@ -136,6 +136,7 @@ impl Inner {
                     if range.contains(&self.next) {
                         let res = Ok(self.next);
                         self.next += 1;
+                        debug!("sequence {} next: {}", self.name, self.next);
                         return res;
                     }
                     self.range = None;
@@ -144,6 +145,10 @@ impl Inner {
                     let range = self.next_range().await?;
                     self.next = range.start;
                     self.range = Some(range);
+                    debug!(
+                        "sequence {} next: {}, range: {:?}",
+                        self.name, self.next, self.range
+                    );
                 }
             }
         }
@@ -152,6 +157,38 @@ impl Inner {
             err_msg: format!("{}.next()", &self.name),
         }
         .fail()
+    }
+
+    pub async fn peek(&self) -> Result<u64> {
+        if self.range.is_some() {
+            return Ok(self.next);
+        }
+
+        // If the range is not set, means the sequence is not initialized.
+        let key = self.name.as_bytes();
+        let value = self.generator.get(key).await?.map(|kv| kv.value);
+        let next = if let Some(value) = value {
+            let v: [u8; 8] = match value.try_into() {
+                Ok(a) => a,
+                Err(v) => {
+                    return error::UnexpectedSequenceValueSnafu {
+                        err_msg: format!("Not a valid u64 for '{}': {v:?}", self.name),
+                    }
+                    .fail()
+                }
+            };
+            let next = u64::from_le_bytes(v);
+            debug!("The next value of sequence {} is {}", self.name, next);
+            next
+        } else {
+            debug!(
+                "The next value of sequence {} is not set, use initial value {}",
+                self.name, self.initial
+            );
+            self.initial
+        };
+
+        Ok(next)
     }
 
     pub async fn next_range(&self) -> Result<Range<u64>> {
@@ -457,5 +494,27 @@ mod tests {
 
         let next = seq.next().await;
         assert!(next.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sequence_peek() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let seq = SequenceBuilder::new("test_seq", kv_backend.clone())
+            .step(10)
+            .initial(1024)
+            .build();
+        // The sequence value in the kv backend is not set, so the peek value should be the initial value.
+        assert_eq!(seq.peek().await.unwrap(), 1024);
+
+        for i in 0..11 {
+            let v = seq.next().await.unwrap();
+            assert_eq!(v, 1024 + i);
+        }
+        let seq = SequenceBuilder::new("test_seq", kv_backend)
+            .initial(1024)
+            .build();
+        // The sequence is not initialized, it will fetch the value from the kv backend.
+        assert_eq!(seq.peek().await.unwrap(), 1044);
     }
 }
