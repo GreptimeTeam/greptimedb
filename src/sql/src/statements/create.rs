@@ -436,7 +436,7 @@ impl Display for CreateFlow {
         writeln!(f, "{}", &self.flow_name)?;
         writeln!(f, "SINK TO {}", &self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
-            writeln!(f, "EXPIRE AFTER {} ", expire_after)?;
+            writeln!(f, "EXPIRE AFTER '{} s' ", expire_after)?;
         }
         if let Some(comment) = &self.comment {
             writeln!(f, "COMMENT '{}'", comment)?;

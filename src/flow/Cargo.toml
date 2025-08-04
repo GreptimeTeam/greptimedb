@@ -78,7 +78,7 @@ tonic.workspace = true
 [dev-dependencies]
 catalog.workspace = true
 common-catalog.workspace = true
-pretty_assertions = "1.4.0"
+pretty_assertions.workspace = true
 prost.workspace = true
 query.workspace = true
 serde_json = "1.0"
