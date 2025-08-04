@@ -572,13 +572,56 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        // plan should be prepared before exec
-        // we'll do check there
-        self.query_engine
-            .execute(plan.clone(), query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
+    async fn do_exec_plan(
+        &self,
+        stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        // Create a query ticket and slow query timer if the statement is a query.
+        if matches!(stmt, Some(Statement::Query(_))) {
+            // It's safe to unwrap here because we've already checked the type.
+            let stmt = stmt.unwrap();
+            let query = stmt.to_string();
+            let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+                recorder.start(CatalogQueryStatement::Sql(stmt), query_ctx.clone())
+            } else {
+                None
+            };
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                query,
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
+
+            let query_fut = self.query_engine.execute(plan.clone(), query_ctx);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
+                .context(ExecLogicalPlanSnafu)
+        } else {
+            // plan should be prepared before exec
+            // we'll do check there
+            self.query_engine
+                .execute(plan.clone(), query_ctx)
+                .await
+                .context(ExecLogicalPlanSnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]

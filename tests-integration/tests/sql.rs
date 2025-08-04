@@ -602,7 +602,7 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
         .unwrap();
 
     // The slow query will run at least longer than 1s.
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 as n, md5(random()) as hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500 ) SELECT COUNT(*) FROM slow_cte;";
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
 
     // Simulate a slow query.
     sqlx::query(slow_query).fetch_all(&pool).await.unwrap();

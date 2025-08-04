@@ -552,7 +552,7 @@ pub async fn test_http_sql_slow_query(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;
 
-    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 as n, md5(random()) as hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500 ) SELECT COUNT(*) FROM slow_cte";
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
     let encoded_slow_query = encode(slow_query);
 
     let query_params = format!("/v1/sql?sql={encoded_slow_query}");
