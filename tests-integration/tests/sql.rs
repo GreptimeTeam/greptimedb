@@ -75,6 +75,7 @@ macro_rules! sql_tests {
                 test_postgres_crud,
                 test_postgres_timezone,
                 test_postgres_bytea,
+                test_postgres_slow_query,
                 test_postgres_datestyle,
                 test_postgres_parameter_inference,
                 test_postgres_array_types,
@@ -702,6 +703,46 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
 
     drop(client);
     rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_slow_query(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_slow_query").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("postgres://{addr}/public"))
+        .await
+        .unwrap();
+
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let _ = sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!(
+        "SELECT {}, {}, {}, {} FROM {table}",
+        SLOW_QUERY_TABLE_COST_COLUMN_NAME,
+        SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+    );
+    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    let cost: i64 = row.get(0);
+    let threshold: i64 = row.get(1);
+    let query: String = row.get(2);
+    let is_promql: bool = row.get(3);
+
+    assert!(cost > 0 && threshold > 0 && cost > threshold);
+    assert_eq!(query, slow_query);
+    assert!(!is_promql);
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
