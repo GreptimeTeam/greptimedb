@@ -474,6 +474,9 @@ sst_write_buffer_size = "8MB"
 ## Capacity of the channel to send data from parallel scan tasks to the main task.
 parallel_scan_channel_size = 32
 
+## Maximum number of SST files to scan concurrently.
+max_concurrent_scan_files = 128
+
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 

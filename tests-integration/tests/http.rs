@@ -1142,6 +1142,7 @@ write_cache_path = ""
 write_cache_size = "5GiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
+max_concurrent_scan_files = 128
 allow_stale_entries = false
 min_compaction_interval = "0s"
 
