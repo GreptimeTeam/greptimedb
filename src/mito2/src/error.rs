@@ -1029,6 +1029,18 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Too many files to read concurrently: {}, max allowed: {}",
+        actual,
+        max
+    ))]
+    TooManyFilesToRead {
+        actual: usize,
+        max: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1189,6 +1201,8 @@ impl ErrorExt for Error {
             ScanExternalRange { source, .. } => source.status_code(),
 
             InconsistentTimestampLength { .. } => StatusCode::InvalidArguments,
+
+            TooManyFilesToRead { .. } => StatusCode::RateLimited,
         }
     }
 

@@ -39,7 +39,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
-use crate::config::DEFAULT_SCAN_CHANNEL_SIZE;
+use crate::config::{DEFAULT_MAX_CONCURRENT_SCAN_FILES, DEFAULT_SCAN_CHANNEL_SIZE};
 use crate::error::Result;
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -199,6 +199,8 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     parallel_scan_channel_size: usize,
+    /// Maximum number of SST files to scan concurrently.
+    max_concurrent_scan_files: usize,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -228,6 +230,7 @@ impl ScanRegion {
             request,
             cache_strategy,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -245,6 +248,16 @@ impl ScanRegion {
         parallel_scan_channel_size: usize,
     ) -> Self {
         self.parallel_scan_channel_size = parallel_scan_channel_size;
+        self
+    }
+
+    /// Sets maximum number of SST files to scan concurrently.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_scan_files(
+        mut self,
+        max_concurrent_scan_files: usize,
+    ) -> Self {
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
         self
     }
 
@@ -452,6 +465,7 @@ impl ScanRegion {
             .with_bloom_filter_index_applier(bloom_filter_applier)
             .with_fulltext_index_applier(fulltext_index_applier)
             .with_parallel_scan_channel_size(self.parallel_scan_channel_size)
+            .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -640,6 +654,8 @@ pub struct ScanInput {
     ignore_file_not_found: bool,
     /// Capacity of the channel to send data from parallel scan tasks to the main task.
     pub(crate) parallel_scan_channel_size: usize,
+    /// Maximum number of SST files to scan concurrently.
+    pub(crate) max_concurrent_scan_files: usize,
     /// Index appliers.
     inverted_index_applier: Option<InvertedIndexApplierRef>,
     bloom_filter_index_applier: Option<BloomFilterIndexApplierRef>,
@@ -674,6 +690,7 @@ impl ScanInput {
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             inverted_index_applier: None,
             bloom_filter_index_applier: None,
             fulltext_index_applier: None,
@@ -737,6 +754,16 @@ impl ScanInput {
         parallel_scan_channel_size: usize,
     ) -> Self {
         self.parallel_scan_channel_size = parallel_scan_channel_size;
+        self
+    }
+
+    /// Sets maximum number of SST files to scan concurrently.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_scan_files(
+        mut self,
+        max_concurrent_scan_files: usize,
+    ) -> Self {
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
         self
     }
 

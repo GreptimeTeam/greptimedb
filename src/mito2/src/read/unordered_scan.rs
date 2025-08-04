@@ -298,6 +298,7 @@ impl RegionScanner for UnorderedScan {
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
+        // UnorderedScan only scans one row group per partition so the resource requirement won't be too high.
         Ok(())
     }
 
