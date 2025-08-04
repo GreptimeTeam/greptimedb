@@ -24,11 +24,11 @@ use crate::sst::index::IndexOutput;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 pub(crate) mod file_range;
+pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub(crate) mod metadata;
 pub(crate) mod page_reader;
-pub mod plain_format;
 pub mod reader;
 pub mod row_group;
 pub mod row_selection;
@@ -117,7 +117,7 @@ mod tests {
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
     use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
     use crate::sst::index::{Indexer, IndexerBuilder, IndexerBuilderImpl};
-    use crate::sst::parquet::format::WriteFormat;
+    use crate::sst::parquet::format::PrimaryKeyWriteFormat;
     use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{location, DEFAULT_WRITE_CONCURRENCY};
@@ -523,7 +523,7 @@ mod tests {
 
         let writer_props = props_builder.build();
 
-        let write_format = WriteFormat::new(metadata);
+        let write_format = PrimaryKeyWriteFormat::new(metadata);
         let fields: Vec<_> = write_format
             .arrow_schema()
             .fields()

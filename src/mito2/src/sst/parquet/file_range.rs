@@ -308,8 +308,12 @@ impl RangeBase {
                     }
                 }
                 SemanticType::Field => {
-                    let Some(field_index) =
-                        self.read_format.field_index_by_id(filter_ctx.column_id())
+                    // Safety: Input is Batch so we are using primary key format.
+                    let Some(field_index) = self
+                        .read_format
+                        .as_primary_key()
+                        .unwrap()
+                        .field_index_by_id(filter_ctx.column_id())
                     else {
                         continue;
                     };

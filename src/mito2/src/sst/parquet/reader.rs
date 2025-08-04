@@ -56,7 +56,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::parquet::file_range::{FileRangeContext, FileRangeContextRef};
-use crate::sst::parquet::format::{need_override_sequence, ReadFormat};
+use crate::sst::parquet::format::{need_override_sequence, PrimaryKeyReadFormat, ReadFormat};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::row_selection::RowGroupSelection;
@@ -227,11 +227,11 @@ impl ParquetReaderBuilder {
         // Gets the metadata stored in the SST.
         let region_meta = Arc::new(Self::get_region_metadata(&file_path, key_value_meta)?);
         let mut read_format = if let Some(column_ids) = &self.projection {
-            ReadFormat::new(region_meta.clone(), column_ids.iter().copied())
+            PrimaryKeyReadFormat::new(region_meta.clone(), column_ids.iter().copied())
         } else {
             // Lists all column ids to read, we always use the expected metadata if possible.
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
-            ReadFormat::new(
+            PrimaryKeyReadFormat::new(
                 region_meta.clone(),
                 expected_meta
                     .column_metadatas
@@ -243,6 +243,7 @@ impl ParquetReaderBuilder {
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
+        let read_format = ReadFormat::PrimaryKey(read_format);
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
@@ -1254,12 +1255,14 @@ impl<T> RowGroupReaderBase<T>
 where
     T: RowGroupReaderContext,
 {
-    /// Creates a new reader.
+    /// Creates a new reader to read the primary key format.
     pub(crate) fn create(context: T, reader: ParquetRecordBatchReader) -> Self {
         // The batch length from the reader should be less than or equal to DEFAULT_READ_BATCH_SIZE.
         let override_sequence = context
             .read_format()
             .new_override_sequence_array(DEFAULT_READ_BATCH_SIZE);
+        assert!(context.read_format().as_primary_key().is_some());
+
         Self {
             context,
             reader,
@@ -1301,11 +1304,16 @@ where
             };
             self.metrics.num_record_batches += 1;
 
-            self.context.read_format().convert_record_batch(
-                &record_batch,
-                self.override_sequence.as_ref(),
-                &mut self.batches,
-            )?;
+            // Safety: We ensures the format is primary key in the RowGroupReaderBase::create().
+            self.context
+                .read_format()
+                .as_primary_key()
+                .unwrap()
+                .convert_record_batch(
+                    &record_batch,
+                    self.override_sequence.as_ref(),
+                    &mut self.batches,
+                )?;
             self.metrics.num_batches += self.batches.len();
         }
         let batch = self.batches.pop_front();
