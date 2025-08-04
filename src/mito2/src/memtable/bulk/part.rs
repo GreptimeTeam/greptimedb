@@ -887,7 +887,7 @@ mod tests {
 
     use super::*;
     use crate::memtable::bulk::context::BulkIterContext;
-    use crate::sst::parquet::format::ReadFormat;
+    use crate::sst::parquet::format::{PrimaryKeyReadFormat, ReadFormat};
     use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, metadata_with_primary_key,
@@ -995,7 +995,7 @@ mod tests {
         let (batch, _, _) = mutations_to_record_batch(&mutations, &metadata, &pk_encoder, dedup)
             .unwrap()
             .unwrap();
-        let read_format = ReadFormat::new_with_all_columns(metadata.clone());
+        let read_format = PrimaryKeyReadFormat::new_with_all_columns(metadata.clone());
         let mut batches = VecDeque::new();
         read_format
             .convert_record_batch(&batch, None, &mut batches)
