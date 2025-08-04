@@ -45,3 +45,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-datasource.workspace = true
+pretty_assertions.workspace = true
