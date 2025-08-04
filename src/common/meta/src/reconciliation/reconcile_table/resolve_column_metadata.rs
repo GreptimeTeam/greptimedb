@@ -33,12 +33,12 @@ use crate::reconciliation::utils::{
 /// Strategy for resolving column metadata inconsistencies.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
 pub enum ResolveStrategy {
-    /// Always uses the column metadata from metasrv.
-    UseMetasrv,
-
     #[default]
     /// Trusts the latest column metadata from datanode.
     UseLatest,
+
+    /// Always uses the column metadata from metasrv.
+    UseMetasrv,
 
     /// Aborts the resolution process if inconsistencies are detected.
     AbortOnConflict,
