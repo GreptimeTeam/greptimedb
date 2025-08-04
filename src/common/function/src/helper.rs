@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::ResolveStrategy;
-use common_query::error::{InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result};
+use common_query::error::{
+    InvalidFuncArgsSnafu, InvalidInputTypeSnafu, Result, UnsupportedInputDataTypeSnafu,
+};
 use common_query::prelude::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::cast::cast;
@@ -72,6 +74,25 @@ pub fn default_parallelism() -> u32 {
 /// Default resolve strategy for reconcile operations.
 pub fn default_resolve_strategy() -> ResolveStrategy {
     ResolveStrategy::UseLatest
+}
+
+/// Get the string value from the params.
+///
+/// # Errors
+/// Returns an error if the input type is not a string.
+pub fn get_string_from_params<'a>(
+    params: &'a [ValueRef<'a>],
+    index: usize,
+    fn_name: &'a str,
+) -> Result<&'a str> {
+    let ValueRef::String(s) = &params[index] else {
+        return UnsupportedInputDataTypeSnafu {
+            function: fn_name,
+            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+        }
+        .fail();
+    };
+    Ok(s)
 }
 
 #[cfg(test)]

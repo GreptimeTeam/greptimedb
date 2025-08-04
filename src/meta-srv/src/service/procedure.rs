@@ -18,10 +18,10 @@ use std::time::Duration;
 use api::v1::meta::reconcile_request::Target;
 use api::v1::meta::{
     procedure_service_server, DdlTaskRequest as PbDdlTaskRequest,
-    DdlTaskResponse as PbDdlTaskResponse, Error, MigrateRegionRequest, MigrateRegionResponse,
+    DdlTaskResponse as PbDdlTaskResponse, MigrateRegionRequest, MigrateRegionResponse,
     ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse, QueryProcedureRequest,
     ReconcileCatalog, ReconcileDatabase, ReconcileRequest, ReconcileResponse, ReconcileTable,
-    ResolveStrategy, ResponseHeader,
+    ResolveStrategy,
 };
 use common_meta::procedure_executor::ExecutorContext;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
@@ -29,14 +29,14 @@ use common_meta::rpc::procedure;
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use table::table_reference::TableReference;
-use tonic::{Request, Response};
+use tonic::Request;
 
-use crate::error;
 use crate::metasrv::Metasrv;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
 };
 use crate::service::GrpcResult;
+use crate::{check_leader, error};
 
 #[async_trait::async_trait]
 impl procedure_service_server::ProcedureService for Metasrv {
@@ -44,15 +44,12 @@ impl procedure_service_server::ProcedureService for Metasrv {
         &self,
         request: Request<QueryProcedureRequest>,
     ) -> GrpcResult<ProcedureStateResponse> {
-        if !self.is_leader() {
-            let resp = ProcedureStateResponse {
-                header: Some(ResponseHeader::failed(Error::is_not_leader())),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `query procedure state` request have reached the meta. Detail: {:?}.", request);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(
+            self,
+            request,
+            ProcedureStateResponse,
+            "`query procedure state`"
+        );
 
         let QueryProcedureRequest { header, pid, .. } = request.into_inner();
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
@@ -74,15 +71,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
     }
 
     async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
-        if !self.is_leader() {
-            let resp = PbDdlTaskResponse {
-                header: Some(ResponseHeader::failed(Error::is_not_leader())),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `ddl` request have reached the meta. Detail: {:?}.", request);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, request, PbDdlTaskResponse, "`ddl`");
 
         let PbDdlTaskRequest {
             header,
@@ -124,15 +113,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
         &self,
         request: Request<MigrateRegionRequest>,
     ) -> GrpcResult<MigrateRegionResponse> {
-        if !self.is_leader() {
-            let resp = MigrateRegionResponse {
-                header: Some(ResponseHeader::failed(Error::is_not_leader())),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `migrate` request have reached the meta. Detail: {:?}.", request);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, request, MigrateRegionResponse, "`migrate`");
 
         let MigrateRegionRequest {
             header,
@@ -173,17 +154,8 @@ impl procedure_service_server::ProcedureService for Metasrv {
     }
 
     async fn reconcile(&self, request: Request<ReconcileRequest>) -> GrpcResult<ReconcileResponse> {
-        if !self.is_leader() {
-            let resp = ReconcileResponse {
-                header: Some(ResponseHeader::failed(Error::is_not_leader())),
-                ..Default::default()
-            };
-            warn!(
-                "The current meta is not leader, but a `reconcile` request have reached the meta. Detail: {:?}.",
-                request
-            );
-            return Ok(Response::new(resp));
-        }
+        check_leader!(self, request, ReconcileResponse, "`reconcile`");
+
         let ReconcileRequest { header, target } = request.into_inner();
         let _header = header.context(error::MissingRequestHeaderSnafu)?;
         let target = target.context(error::MissingRequiredParameterSnafu { param: "target" })?;
@@ -248,15 +220,12 @@ impl procedure_service_server::ProcedureService for Metasrv {
         &self,
         request: Request<ProcedureDetailRequest>,
     ) -> GrpcResult<ProcedureDetailResponse> {
-        if !self.is_leader() {
-            let resp = ProcedureDetailResponse {
-                header: Some(ResponseHeader::failed(Error::is_not_leader())),
-                ..Default::default()
-            };
-
-            warn!("The current meta is not leader, but a `procedure details` request have reached the meta. Detail: {:?}.", request);
-            return Ok(Response::new(resp));
-        }
+        check_leader!(
+            self,
+            request,
+            ProcedureDetailResponse,
+            "`procedure details`"
+        );
 
         let ProcedureDetailRequest { header } = request.into_inner();
         let _header = header.context(error::MissingRequestHeaderSnafu)?;

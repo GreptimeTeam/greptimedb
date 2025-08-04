@@ -20,28 +20,17 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::debug;
+use common_telemetry::info;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::{
-    cast_u32, default_parallelism, default_resolve_strategy, parse_resolve_strategy,
+    cast_u32, default_parallelism, default_resolve_strategy, get_string_from_params,
+    parse_resolve_strategy,
 };
 
 const FN_NAME: &str = "reconcile_database";
-
-/// Get the string value from the params.
-fn get_string<'a>(params: &'a [ValueRef<'a>], index: usize) -> Result<&'a str> {
-    let ValueRef::String(s) = &params[index] else {
-        return UnsupportedInputDataTypeSnafu {
-            function: FN_NAME,
-            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
-        }
-        .fail();
-    };
-    Ok(s)
-}
 
 /// A function to reconcile a database.
 /// Returns the procedure id if success.
@@ -65,13 +54,13 @@ pub(crate) async fn reconcile_database(
 ) -> Result<Value> {
     let (database_name, resolve_strategy, parallelism) = match params.len() {
         1 => (
-            get_string(params, 0)?,
+            get_string_from_params(params, 0, FN_NAME)?,
             default_resolve_strategy(),
             default_parallelism(),
         ),
         2 => (
-            get_string(params, 0)?,
-            parse_resolve_strategy(get_string(params, 1)?)?,
+            get_string_from_params(params, 0, FN_NAME)?,
+            parse_resolve_strategy(get_string_from_params(params, 1, FN_NAME)?)?,
             default_parallelism(),
         ),
         3 => {
@@ -83,8 +72,8 @@ pub(crate) async fn reconcile_database(
                 .fail();
             };
             (
-                get_string(params, 0)?,
-                parse_resolve_strategy(get_string(params, 1)?)?,
+                get_string_from_params(params, 0, FN_NAME)?,
+                parse_resolve_strategy(get_string_from_params(params, 1, FN_NAME)?)?,
                 parallelism,
             )
         }
@@ -98,8 +87,8 @@ pub(crate) async fn reconcile_database(
             .fail();
         }
     };
-    debug!(
-        "reconcile database: {}, resolve_strategy: {:?}, parallelism: {}",
+    info!(
+        "Reconciling database: {}, resolve_strategy: {:?}, parallelism: {}",
         database_name, resolve_strategy, parallelism
     );
     let pid = procedure_service_handler

@@ -21,7 +21,7 @@ use common_query::error::{
     MissingProcedureServiceHandlerSnafu, Result, TableMutationSnafu, UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::debug;
+use common_telemetry::info;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 use session::table_name::table_name_to_full_name;
@@ -67,8 +67,8 @@ pub(crate) async fn reconcile_table(
     let (catalog_name, schema_name, table_name) = table_name_to_full_name(table_name, query_ctx)
         .map_err(BoxedError::new)
         .context(TableMutationSnafu)?;
-    debug!(
-        "reconcile table: {} with resolve_strategy: {:?}",
+    info!(
+        "Reconciling table: {} with resolve_strategy: {:?}",
         format_full_table_name(&catalog_name, &schema_name, &table_name),
         resolve_strategy
     );

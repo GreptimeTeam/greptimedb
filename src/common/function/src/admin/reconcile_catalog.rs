@@ -20,28 +20,17 @@ use common_query::error::{
     UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, TypeSignature, Volatility};
-use common_telemetry::debug;
+use common_telemetry::info;
 use datatypes::prelude::*;
 use session::context::QueryContextRef;
 
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::{
-    cast_u32, default_parallelism, default_resolve_strategy, parse_resolve_strategy,
+    cast_u32, default_parallelism, default_resolve_strategy, get_string_from_params,
+    parse_resolve_strategy,
 };
 
 const FN_NAME: &str = "reconcile_catalog";
-
-/// Get the string value from the params.
-fn get_string<'a>(params: &'a [ValueRef<'a>], index: usize) -> Result<&'a str> {
-    let ValueRef::String(s) = &params[index] else {
-        return UnsupportedInputDataTypeSnafu {
-            function: FN_NAME,
-            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
-        }
-        .fail();
-    };
-    Ok(s)
-}
 
 /// A function to reconcile a catalog.
 /// Returns the procedure id if success.
@@ -64,7 +53,7 @@ pub(crate) async fn reconcile_catalog(
     let (resolve_strategy, parallelism) = match params.len() {
         0 => (default_resolve_strategy(), default_parallelism()),
         1 => (
-            parse_resolve_strategy(get_string(params, 0)?)?,
+            parse_resolve_strategy(get_string_from_params(params, 0, FN_NAME)?)?,
             default_parallelism(),
         ),
         2 => {
@@ -75,7 +64,10 @@ pub(crate) async fn reconcile_catalog(
                 }
                 .fail();
             };
-            (parse_resolve_strategy(get_string(params, 0)?)?, parallelism)
+            (
+                parse_resolve_strategy(get_string_from_params(params, 0, FN_NAME)?)?,
+                parallelism,
+            )
         }
         size => {
             return InvalidFuncArgsSnafu {
@@ -87,8 +79,8 @@ pub(crate) async fn reconcile_catalog(
             .fail();
         }
     };
-    debug!(
-        "reconcile catalog with resolve_strategy: {:?}, parallelism: {}",
+    info!(
+        "Reconciling catalog with resolve_strategy: {:?}, parallelism: {}",
         resolve_strategy, parallelism
     );
     let pid = procedure_service_handler
