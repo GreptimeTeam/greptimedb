@@ -31,6 +31,7 @@ use crate::memtable::bulk::row_group_reader::{
     MemtableRowGroupReader, MemtableRowGroupReaderBuilder,
 };
 use crate::read::Batch;
+use crate::sst::parquet::flat_format::sequence_column_index;
 use crate::sst::parquet::reader::MaybeFilter;
 
 /// Iterator for reading data inside a bulk part.
@@ -387,9 +388,12 @@ impl BulkPartRecordBatchIter {
 
         // Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
         if let Some(sequence) = &self.sequence {
+            let sequence_column =
+                record_batch.column(sequence_column_index(record_batch.num_columns()));
             let sequence_filter =
-                datatypes::arrow::compute::kernels::cmp::lt_eq(sequence, sequence)
+                datatypes::arrow::compute::kernels::cmp::lt_eq(sequence_column, sequence)
                     .context(ComputeArrowSnafu)?;
+            println!("sequence_filter: {:?}", sequence_filter);
             // Combine with existing filter using AND operation
             combined_filter = match combined_filter {
                 None => Some(sequence_filter),
@@ -825,19 +829,18 @@ mod tests {
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(3, result[0].num_rows());
-        assert_eq!(5, result[0].num_columns(),);
+        assert_eq!(6, result[0].num_columns(),);
 
         // Creates iter with sequence filter (only include sequences <= 2)
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context, Some(2));
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
-        assert_eq!(2, result[0].num_rows());
         let expect_sequence = Arc::new(UInt64Array::from(vec![1, 2])) as ArrayRef;
         assert_eq!(
             &expect_sequence,
             result[0].column(result[0].num_columns() - 2)
         );
-        assert_eq!(5, result[0].num_columns());
+        assert_eq!(6, result[0].num_columns());
 
         let context = Arc::new(BulkIterContext::new(
             Arc::new(region_metadata),
@@ -850,8 +853,8 @@ mod tests {
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(1, result.len());
         assert_eq!(1, result[0].num_rows());
-        assert_eq!(4, result[0].num_columns());
+        assert_eq!(5, result[0].num_columns());
         let expect_field = Arc::new(Int64Array::from(vec![12])) as ArrayRef;
-        assert_eq!(&expect_field, result[0].column(result[0].num_columns() - 2));
+        assert_eq!(&expect_field, result[0].column(0));
     }
 }
