@@ -16,6 +16,12 @@ use std::collections::HashMap;
 
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
+use frontend::slow_query_recorder::{
+    SLOW_QUERY_TABLE_COST_COLUMN_NAME, SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
+    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+    SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+};
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::{Connection, Executor, Row};
@@ -64,6 +70,7 @@ macro_rules! sql_tests {
                 test_mysql_crud,
                 test_mysql_timezone,
                 test_mysql_async_timestamp,
+                test_mysql_slow_query,
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_timezone,
@@ -580,6 +587,56 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
+
+pub async fn test_mysql_slow_query(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (mut guard, fe_mysql_server) =
+        setup_mysql_server(store_type, "test_mysql_slow_query").await;
+    let addr = fe_mysql_server.bind_addr().unwrap().to_string();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    // The slow query will run at least longer than 1s.
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 as n, md5(random()) as hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500 ) SELECT COUNT(*) FROM slow_cte;";
+
+    // Simulate a slow query.
+    sqlx::query(slow_query).fetch_all(&pool).await.unwrap();
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!(
+        "SELECT {}, {}, {}, {} FROM {table}",
+        SLOW_QUERY_TABLE_COST_COLUMN_NAME,
+        SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
+        SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME
+    );
+
+    let rows = sqlx::query(&query).fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    // Check the results.
+    let row = &rows[0];
+    let cost: u64 = row.get(0);
+    let threshold: u64 = row.get(1);
+    let query: String = row.get(2);
+    let is_promql: bool = row.get(3);
+
+    assert!(cost > 0 && threshold > 0 && cost > threshold);
+    assert_eq!(query, slow_query);
+    assert!(!is_promql);
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_postgres_bytea(store_type: StorageType) {
     let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_bytea").await;
     let addr = fe_pg_server.bind_addr().unwrap().to_string();

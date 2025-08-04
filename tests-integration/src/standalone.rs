@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use cache::{
     build_datanode_cache_registry, build_fundamental_cache_registry,
@@ -41,6 +42,7 @@ use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_options_allocator::build_wal_options_allocator;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
+use common_telemetry::logging::SlowQueryOptions;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
@@ -327,6 +329,13 @@ impl GreptimeDbStandaloneBuilder {
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
+            // Enable slow query log with 1s threshold to run the slow query test.
+            slow_query: Some(SlowQueryOptions {
+                enable: true,
+                // Set the threshold to 1s to run the slow query test.
+                threshold: Some(Duration::from_secs(1)),
+                ..Default::default()
+            }),
             ..StandaloneOptions::default()
         };
 

@@ -38,16 +38,16 @@ use tokio::task::JoinHandle;
 
 use crate::error::{CatalogSnafu, Result, TableOperationSnafu};
 
-const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
-const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
-const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
-const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
-const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
-const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
-const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
-const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
-const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
-const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
+pub const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
+pub const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
+pub const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
+pub const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
+pub const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+pub const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
+pub const SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME: &str = "promql_start";
+pub const SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME: &str = "promql_end";
+pub const SLOW_QUERY_TABLE_PROMQL_RANGE_COLUMN_NAME: &str = "promql_range";
+pub const SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME: &str = "promql_step";
 
 const DEFAULT_SLOW_QUERY_TABLE_TTL: &str = "30d";
 const DEFAULT_SLOW_QUERY_EVENTS_CHANNEL_SIZE: usize = 1024;

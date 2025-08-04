@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use std::time::Duration;
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
@@ -23,10 +24,13 @@ use api::prom_store::remote::{
 use auth::user_provider_from_option;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use chrono::Utc;
-use common_catalog::consts::{trace_services_table_name, TRACE_TABLE_NAME};
+use common_catalog::consts::{
+    trace_services_table_name, DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME,
+};
 use common_error::status_code::StatusCode as ErrorCode;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use frontend::slow_query_recorder::{SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME};
 use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -55,6 +59,7 @@ use tests_integration::test_util::{
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     StorageType,
 };
+use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
 #[macro_export]
@@ -88,6 +93,7 @@ macro_rules! http_tests {
 
                 test_http_auth,
                 test_sql_api,
+                test_http_sql_slow_query,
                 test_prometheus_promql_api,
                 test_prom_http_api,
                 test_metrics_api,
@@ -539,6 +545,29 @@ pub async fn test_sql_api(store_type: StorageType) {
         .text()
         .await;
     assert!(res.contains("TIME_ZONE") && res.contains("UTC"));
+    guard.remove_all().await;
+}
+
+pub async fn test_http_sql_slow_query(store_type: StorageType) {
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
+    let client = TestClient::new(app).await;
+
+    let slow_query = "WITH RECURSIVE slow_cte AS (SELECT 1 as n, md5(random()) as hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500 ) SELECT COUNT(*) FROM slow_cte";
+    let encoded_slow_query = encode(slow_query);
+
+    let query_params = format!("/v1/sql?sql={encoded_slow_query}");
+    let res = client.get(&query_params).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Wait for the slow query to be recorded.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
+    let query = format!("SELECT {} FROM {table}", SLOW_QUERY_TABLE_QUERY_COLUMN_NAME);
+
+    let expected = format!(r#"[["{}"]]"#, slow_query);
+    validate_data("test_http_sql_slow_query", &client, &query, &expected).await;
+
     guard.remove_all().await;
 }
 
@@ -1305,7 +1334,7 @@ write_interval = "30s"
 [slow_query]
 enable = true
 record_type = "system_table"
-threshold = "30s"
+threshold = "1s"
 sample_ratio = 1.0
 ttl = "30d"
 

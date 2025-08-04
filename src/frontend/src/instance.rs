@@ -682,7 +682,7 @@ impl PrometheusHandler for Instance {
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
-        let query_statment = if let QueryStatement::Promql(eval_stmt) = stmt {
+        let query_statement = if let QueryStatement::Promql(eval_stmt) = stmt {
             CatalogQueryStatement::Promql(eval_stmt)
         } else {
             // It should not happen since the query is already parsed successfully.
@@ -693,7 +693,7 @@ impl PrometheusHandler for Instance {
         };
 
         let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(query_statment.clone(), query_ctx.clone())
+            recorder.start(query_statement.clone(), query_ctx.clone())
         } else {
             None
         };
@@ -701,7 +701,7 @@ impl PrometheusHandler for Instance {
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
-            query_statment.to_string(),
+            query_statement.to_string(),
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
             slow_query_timer,
