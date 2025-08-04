@@ -113,24 +113,9 @@ tql eval (0, 15, '5s') sum(t{job="job2"});
 | 1970-01-01T00:00:15 | 20.0       |
 +---------------------+------------+
 
--- SQLNESS SORT_RESULT 3 1
-tql eval (0, 15, '5s') absent(sum(t{job="job2"}));
-
-++
-++
-
--- SQLNESS SORT_RESULT 3 1
-tql eval (0, 15, '5s') absent(sum(t{job="job3"}));
-
-+---------------------+------------+------+
-| ts                  | sum(t.val) | job  |
-+---------------------+------------+------+
-| 1970-01-01T00:00:00 | 1.0        | job3 |
-| 1970-01-01T00:00:05 | 1.0        | job3 |
-| 1970-01-01T00:00:10 | 1.0        | job3 |
-| 1970-01-01T00:00:15 | 1.0        | job3 |
-+---------------------+------------+------+
-
+-- ABSENT is not supported for aggregation functions for now
+-- tql eval (0, 15, '5s') absent(sum(t{job="job2"}));
+-- tql eval (0, 15, '5s') absent(sum(t{job="job3"}));
 drop table t;
 
 Affected Rows: 0

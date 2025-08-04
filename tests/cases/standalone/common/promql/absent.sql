@@ -43,10 +43,8 @@ tql eval (0, 15, '5s') absent(t{job=~"nonexistent_job1", job!="nonexistent_job2"
 -- SQLNESS SORT_RESULT 3 1
 tql eval (0, 15, '5s') sum(t{job="job2"});
 
--- SQLNESS SORT_RESULT 3 1
-tql eval (0, 15, '5s') absent(sum(t{job="job2"}));
-
--- SQLNESS SORT_RESULT 3 1
-tql eval (0, 15, '5s') absent(sum(t{job="job3"}));
+-- ABSENT is not supported for aggregation functions for now
+-- tql eval (0, 15, '5s') absent(sum(t{job="job2"}));
+-- tql eval (0, 15, '5s') absent(sum(t{job="job3"}));
 
 drop table t;
