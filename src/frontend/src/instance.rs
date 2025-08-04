@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::process_manager::ProcessManagerRef;
+use catalog::process_manager::{ProcessManagerRef, QueryStatement as CatalogQueryStatement};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::cancellation::CancellableFuture;
@@ -229,7 +229,7 @@ impl Instance {
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
-            stmt.to_string(),
+            CatalogQueryStatement::Sql(stmt.clone()),
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
         );
@@ -686,10 +686,11 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
-        let promql_query_str = if let QueryStatement::Promql(stmt) = stmt {
-            stmt.to_string()
+        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
+        let query_statment = if let QueryStatement::Promql(eval_stmt) = stmt {
+            CatalogQueryStatement::Promql(eval_stmt)
         } else {
-            // It should not happen. The query should always be promql.
+            // It should not happen since the query is already parsed successfully.
             return UnexpectedResultSnafu {
                 reason: "The query should always be promql.".to_string(),
             }
@@ -699,7 +700,7 @@ impl PrometheusHandler for Instance {
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
-            promql_query_str,
+            query_statment,
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
         );

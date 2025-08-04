@@ -1659,6 +1659,7 @@ dependencies = [
  "partition",
  "paste",
  "prometheus",
+ "promql-parser",
  "rustc-hash 2.0.0",
  "serde_json",
  "session",
