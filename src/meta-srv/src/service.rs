@@ -23,6 +23,7 @@ mod heartbeat;
 pub mod mailbox;
 pub mod procedure;
 pub mod store;
+pub(crate) mod utils;
 
 pub type GrpcResult<T> = Result<Response<T>, Status>;
 pub type GrpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + Sync + 'static>>;

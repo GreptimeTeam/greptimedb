@@ -16,6 +16,9 @@ mod add_region_follower;
 mod flush_compact_region;
 mod flush_compact_table;
 mod migrate_region;
+mod reconcile_catalog;
+mod reconcile_database;
+mod reconcile_table;
 mod remove_region_follower;
 
 use std::sync::Arc;
@@ -24,6 +27,9 @@ use add_region_follower::AddRegionFollowerFunction;
 use flush_compact_region::{CompactRegionFunction, FlushRegionFunction};
 use flush_compact_table::{CompactTableFunction, FlushTableFunction};
 use migrate_region::MigrateRegionFunction;
+use reconcile_catalog::ReconcileCatalogFunction;
+use reconcile_database::ReconcileDatabaseFunction;
+use reconcile_table::ReconcileTableFunction;
 use remove_region_follower::RemoveRegionFollowerFunction;
 
 use crate::flush_flow::FlushFlowFunction;
@@ -43,5 +49,8 @@ impl AdminFunction {
         registry.register_async(Arc::new(FlushTableFunction));
         registry.register_async(Arc::new(CompactTableFunction));
         registry.register_async(Arc::new(FlushFlowFunction));
+        registry.register_async(Arc::new(ReconcileCatalogFunction));
+        registry.register_async(Arc::new(ReconcileDatabaseFunction));
+        registry.register_async(Arc::new(ReconcileTableFunction));
     }
 }
