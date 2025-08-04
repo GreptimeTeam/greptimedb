@@ -126,14 +126,12 @@ pub struct FlatReadFormat {
 
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and `column_ids` to read.
-    ///
-    /// The given `arrow_schema` is the schema created from the `metadata`
-    /// by [to_flat_sst_arrow_schema()].
     pub fn new(
         metadata: RegionMetadataRef,
-        arrow_schema: SchemaRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> FlatReadFormat {
+        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+
         // Creates a map to lookup index.
         let id_to_index = sst_column_id_indices(&metadata);
 
@@ -296,10 +294,8 @@ fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> 
 impl FlatReadFormat {
     /// Creates a helper with existing `metadata` and all columns.
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> FlatReadFormat {
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         Self::new(
             Arc::clone(&metadata),
-            arrow_schema,
             metadata.column_metadatas.iter().map(|c| c.column_id),
         )
     }

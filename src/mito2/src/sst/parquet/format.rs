@@ -51,7 +51,7 @@ use crate::error::{
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::{to_flat_sst_arrow_schema, to_sst_arrow_schema, FlatSchemaOptions};
+use crate::sst::to_sst_arrow_schema;
 
 /// Arrow array type for the primary key dictionary.
 pub(crate) type PrimaryKeyArray = DictionaryArray<UInt32Type>;
@@ -161,9 +161,7 @@ impl ReadFormat {
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
     ) -> Self {
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
-
-        ReadFormat::Flat(FlatReadFormat::new(metadata, arrow_schema, column_ids))
+        ReadFormat::Flat(FlatReadFormat::new(metadata, column_ids))
     }
 
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
@@ -1350,10 +1348,8 @@ mod tests {
     #[test]
     fn test_flat_read_format_convert_batch() {
         let metadata = build_test_region_metadata();
-        let arrow_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
         let mut format = FlatReadFormat::new(
             metadata,
-            arrow_schema.clone(),
             std::iter::once(1), // Just read tag0
         );
 
@@ -1366,7 +1362,8 @@ mod tests {
         let mut test_columns = columns.clone();
         // Replace sequence column with original sequence values
         test_columns[6] = Arc::new(UInt64Array::from(vec![original_sequence; num_rows]));
-        let record_batch = RecordBatch::try_new(arrow_schema, test_columns).unwrap();
+        let record_batch =
+            RecordBatch::try_new(format.arrow_schema().clone(), test_columns).unwrap();
 
         // Test without override sequence - should return clone
         let result = format.convert_batch(&record_batch, None).unwrap();
