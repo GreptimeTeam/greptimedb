@@ -1462,7 +1462,10 @@ mod tests {
         );
 
         let err = mock_region_server
-            .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::All),
+            )
             .await
             .unwrap_err();
 

@@ -66,10 +66,21 @@ pub struct RegionRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
-    /// Last WAL entry id of truncated data.
-    pub truncated_entry_id: EntryId,
-    // Last sequence number of truncated data.
-    pub truncated_sequence: SequenceNumber,
+    pub kind: TruncateKind,
+}
+
+/// The kind of truncate operation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum TruncateKind {
+    /// Truncate all data in the region, marked by all data before the given entry id&sequence.
+    All {
+        /// Last WAL entry id of truncated data.
+        truncated_entry_id: EntryId,
+        // Last sequence number of truncated data.
+        truncated_sequence: SequenceNumber,
+    },
+    /// Only remove certain files in the region.
+    Partial { files_to_remove: Vec<FileMeta> },
 }
 
 /// The region manifest data.
@@ -147,10 +158,22 @@ impl RegionManifestBuilder {
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
         self.manifest_version = manifest_version;
-        self.flushed_entry_id = truncate.truncated_entry_id;
-        self.flushed_sequence = truncate.truncated_sequence;
-        self.truncated_entry_id = Some(truncate.truncated_entry_id);
-        self.files.clear();
+        match truncate.kind {
+            TruncateKind::All {
+                truncated_entry_id,
+                truncated_sequence,
+            } => {
+                self.flushed_entry_id = truncated_entry_id;
+                self.flushed_sequence = truncated_sequence;
+                self.truncated_entry_id = Some(truncated_entry_id);
+                self.files.clear();
+            }
+            TruncateKind::Partial { files_to_remove } => {
+                for file in files_to_remove {
+                    self.files.remove(&file.file_id);
+                }
+            }
+        }
     }
 
     /// Check if the builder keeps a [RegionMetadata](store_api::metadata::RegionMetadata).

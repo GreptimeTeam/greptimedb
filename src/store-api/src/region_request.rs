@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 
-use api::helper::ColumnDataTypeWrapper;
+use api::helper::{from_pb_time_ranges, ColumnDataTypeWrapper};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    alter_request, compact_request, region_request, AlterRequest, AlterRequests, BulkInsertRequest,
-    CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest,
-    DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
+    alter_request, compact_request, region_request, truncate_request, AlterRequest, AlterRequests,
+    BulkInsertRequest, CloseRequest, CompactRequest, CreateRequest, CreateRequests, DeleteRequests,
+    DropRequest, DropRequests, FlushRequest, InsertRequests, OpenRequest, TruncateRequest,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -33,7 +33,7 @@ use api::v1::{
 pub use common_base::AffectedRows;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
-use common_time::TimeToLive;
+use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use serde::{Deserialize, Serialize};
@@ -42,9 +42,10 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::logstore::entry;
 use crate::metadata::{
-    ColumnMetadata, DecodeProtoSnafu, FlightCodecSnafu, InvalidIndexOptionSnafu,
-    InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, InvalidSetRegionOptionRequestSnafu,
-    InvalidUnsetRegionOptionRequestSnafu, MetadataError, RegionMetadata, Result, UnexpectedSnafu,
+    ColumnMetadata, ConvertTimeRangesSnafu, DecodeProtoSnafu, FlightCodecSnafu,
+    InvalidIndexOptionSnafu, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu,
+    InvalidSetRegionOptionRequestSnafu, InvalidUnsetRegionOptionRequestSnafu, MetadataError,
+    RegionMetadata, Result, UnexpectedSnafu,
 };
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
@@ -340,10 +341,24 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
 
 fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = truncate.region_id.into();
-    Ok(vec![(
-        region_id,
-        RegionRequest::Truncate(RegionTruncateRequest {}),
-    )])
+    match truncate.kind {
+        None => InvalidRawRegionRequestSnafu {
+            err: "missing kind in TruncateRequest".to_string(),
+        }
+        .fail(),
+        Some(truncate_request::Kind::All(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )]),
+        Some(truncate_request::Kind::TimeRanges(time_ranges)) => {
+            let time_ranges = from_pb_time_ranges(time_ranges).context(ConvertTimeRangesSnafu)?;
+
+            Ok(vec![(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
+            )])
+        }
+    }
 }
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
@@ -1312,7 +1327,16 @@ impl Default for RegionCompactRequest {
 
 /// Truncate region request.
 #[derive(Debug)]
-pub struct RegionTruncateRequest {}
+pub enum RegionTruncateRequest {
+    /// Truncate all data in the region.
+    All,
+    ByTimeRanges {
+        /// Time ranges to truncate. Both bound are inclusive.
+        /// only files that are fully contained in the time range will be truncated.
+        /// so no guarantee that all data in the time range will be truncated.
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+    },
+}
 
 /// Catchup region request.
 ///

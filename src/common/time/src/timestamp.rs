@@ -558,7 +558,7 @@ impl fmt::Debug for Timestamp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TimeUnit {
     Second,
     #[default]
