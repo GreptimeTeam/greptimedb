@@ -1243,6 +1243,7 @@ mod tests {
                     part.metadata.region_metadata.clone(),
                     &Some(projection.as_slice()),
                     None,
+                    false,
                 )),
                 None,
             )
@@ -1294,6 +1295,7 @@ mod tests {
             part.metadata.region_metadata.clone(),
             &None,
             predicate,
+            false,
         ));
         let mut reader = part
             .read(context, None)
@@ -1324,6 +1326,7 @@ mod tests {
             Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
                 datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
             )])),
+            false,
         ));
         assert!(part.read(context, None).unwrap().is_none());
 

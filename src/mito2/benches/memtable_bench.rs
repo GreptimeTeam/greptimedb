@@ -464,6 +464,7 @@ fn record_batch_iter(c: &mut Criterion) {
                 metadata.clone(),
                 &None,                   // No projection
                 Some(predicate.clone()), // With hostname filter
+                false,
             ));
 
             // Create and iterate over RecordBatchIter with filter
@@ -484,6 +485,7 @@ fn record_batch_iter(c: &mut Criterion) {
                 metadata.clone(),
                 &None, // No projection
                 None,  // No predicate
+                false,
             ));
 
             // Create and iterate over RecordBatchIter
@@ -533,6 +535,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                 metadata.clone(),
                 &None,                   // No projection
                 Some(predicate.clone()), // With hostname filter
+                true,
             ));
 
             // Create and iterate over BulkPartRecordBatchIter with filter
@@ -554,6 +557,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                 metadata.clone(),
                 &None, // No projection
                 None,  // No predicate
+                true,
             ));
 
             // Create and iterate over BulkPartRecordBatchIter

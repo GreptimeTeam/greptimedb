@@ -140,12 +140,16 @@ pub enum ReadFormat {
 }
 
 impl ReadFormat {
-    // TODO(yingwen): Add a flag to choose format type.
     pub(crate) fn new(
         metadata: RegionMetadataRef,
         column_ids: impl Iterator<Item = ColumnId>,
+        flat_format: bool,
     ) -> Self {
-        Self::new_primary_key(metadata, column_ids)
+        if flat_format {
+            Self::new_flat(metadata, column_ids)
+        } else {
+            Self::new_primary_key(metadata, column_ids)
+        }
     }
 
     /// Creates a helper to read the primary key format.
@@ -167,6 +171,13 @@ impl ReadFormat {
     pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyReadFormat> {
         match self {
             ReadFormat::PrimaryKey(format) => Some(format),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_flat(&self) -> Option<&FlatReadFormat> {
+        match self {
+            ReadFormat::Flat(format) => Some(format),
             _ => None,
         }
     }
@@ -1201,7 +1212,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format = ReadFormat::new(metadata, column_ids.iter().copied());
+        let read_format = ReadFormat::new(metadata, column_ids.iter().copied(), false);
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1

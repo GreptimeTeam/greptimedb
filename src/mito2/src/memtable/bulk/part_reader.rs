@@ -185,6 +185,8 @@ impl RecordBatchIter {
         context: BulkIterContextRef,
         sequence: Option<SequenceNumber>,
     ) -> Self {
+        assert!(context.read_format().as_primary_key().is_some());
+
         Self {
             record_batch: Some(record_batch),
             context,
@@ -236,8 +238,11 @@ impl RecordBatchIter {
         // Converts to Batch format and apply pruning and sequence filtering
         // Converts RecordBatch to Batch format using the context's read format
         let mut batches = VecDeque::new();
+        // Safety: We checked the format type in new().
         self.context
             .read_format()
+            .as_primary_key()
+            .unwrap()
             .convert_record_batch(&record_batch, None, &mut batches)?;
 
         // Applies pruning and sequence filtering to each converted batch
@@ -312,6 +317,8 @@ impl BulkPartRecordBatchIter {
         context: BulkIterContextRef,
         sequence: Option<SequenceNumber>,
     ) -> Self {
+        assert!(context.read_format().as_flat().is_some());
+
         let sequence = sequence.map(|seq| UInt64Array::new_scalar(seq));
 
         Self {
@@ -357,11 +364,13 @@ impl BulkPartRecordBatchIter {
                     MaybeFilter::Pruned => return Ok(None),
                 };
 
-                // FIXME(yingwen): Get column index from read format.
+                // Safety: We checked the format type in new().
                 let Some(column_index) = self
                     .context
                     .read_format()
-                    .field_index_by_id(filter_ctx.column_id())
+                    .as_flat()
+                    .unwrap()
+                    .sst_column_index_by_id(filter_ctx.column_id())
                 else {
                     continue;
                 };
@@ -525,6 +534,7 @@ mod tests {
             Arc::new(region_metadata),
             &None, // No projection
             None,  // No predicate
+            false,
         ));
 
         // Create iterator
@@ -608,6 +618,7 @@ mod tests {
             Arc::new(region_metadata),
             &None, // No projection
             None,  // No predicate
+            false,
         ));
 
         // Create iterator with sequence filter (only include sequences <= 5)
@@ -705,6 +716,7 @@ mod tests {
             Arc::new(region_metadata),
             &None,           // No projection
             Some(predicate), // With predicate
+            false,
         ));
 
         // Create iterator
@@ -806,6 +818,7 @@ mod tests {
             Arc::new(region_metadata.clone()),
             &None, // No projection
             None,  // No predicate
+            true,
         ));
         // Iterates all rows.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
@@ -830,6 +843,7 @@ mod tests {
             Arc::new(region_metadata),
             &Some(&[1, 2]),
             Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
+            true,
         ));
         // Creates iter with projection and predicate.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
