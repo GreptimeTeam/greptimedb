@@ -220,11 +220,9 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+        let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
             recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
-        } else {
-            None
-        };
+        });
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
@@ -583,11 +581,10 @@ impl SqlQueryHandler for Instance {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
             let query = stmt.to_string();
-            let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
+            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
                 recorder.start(CatalogQueryStatement::Sql(stmt), query_ctx.clone())
-            } else {
-                None
-            };
+            });
+
             let ticket = self.process_manager.register_query(
                 query_ctx.current_catalog().to_string(),
                 vec![query_ctx.current_schema()],
@@ -734,17 +731,17 @@ impl PrometheusHandler for Instance {
             }
             .fail();
         };
+        let query = query_statement.to_string();
 
-        let slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(query_statement.clone(), query_ctx.clone())
-        } else {
-            None
-        };
+        let slow_query_timer = self
+            .slow_query_recorder
+            .as_ref()
+            .and_then(|recorder| recorder.start(query_statement, query_ctx.clone()));
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
             vec![query_ctx.current_schema()],
-            query_statement.to_string(),
+            query,
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
             slow_query_timer,

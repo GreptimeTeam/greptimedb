@@ -56,6 +56,7 @@ pub mod tls;
 #[derive(Clone)]
 pub struct SqlPlan {
     query: String,
+    // Store the parsed statement to determine if it is a query and whether to track it.
     statement: Option<Statement>,
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
