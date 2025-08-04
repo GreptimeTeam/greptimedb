@@ -40,7 +40,7 @@ const RDS_STORE_OP_RANGE_DELETE: &str = "range_delete";
 const RDS_STORE_OP_BATCH_DELETE: &str = "batch_delete";
 
 #[cfg(feature = "pg_kvbackend")]
-mod postgres;
+pub mod postgres;
 #[cfg(feature = "pg_kvbackend")]
 pub use postgres::PgStore;
 
@@ -118,7 +118,7 @@ impl<T: Executor> ExecutorImpl<'_, T> {
         }
     }
 
-    #[warn(dead_code)] // Used in #[cfg(feature = "mysql_kvbackend")]
+    #[allow(dead_code)] // Used in #[cfg(feature = "mysql_kvbackend")]
     async fn execute(&mut self, query: &str, params: &Vec<&Vec<u8>>) -> Result<()> {
         match self {
             Self::Default(executor) => executor.execute(query, params).await,

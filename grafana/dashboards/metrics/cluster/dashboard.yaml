@@ -180,13 +180,18 @@ groups:
         - title: Datanode Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{instance=~"$datanode"}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{app="greptime-datanode"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Datanode CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -197,16 +202,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{app="greptime-datanode"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Frontend Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{instance=~"$frontend"}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{app="greptime-frontend"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Frontend CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -217,16 +232,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-cpu'
+            - expr: max(greptime_cpu_limit_in_millicores{app="greptime-frontend"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Metasrv Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{instance=~"$metasrv"}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]-resident'
+            - expr: max(greptime_memory_limit_in_bytes{app="greptime-metasrv"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Metasrv CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -237,16 +262,26 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{app="greptime-metasrv"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Flownode Memory per Instance
           type: timeseries
           description: Current memory usage by instance
-          unit: decbytes
+          unit: bytes
           queries:
             - expr: sum(process_resident_memory_bytes{instance=~"$flownode"}) by (instance, pod)
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_memory_limit_in_bytes{app="greptime-flownode"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
         - title: Flownode CPU Usage per Instance
           type: timeseries
           description: Current cpu usage by instance
@@ -257,6 +292,11 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{ instance }}]-[{{ pod }}]'
+            - expr: max(greptime_cpu_limit_in_millicores{app="greptime-flownode"})
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: limit
     - title: Frontend Requests
       panels:
         - title: HTTP QPS per Instance
@@ -642,6 +682,15 @@ groups:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: '[{{instance}}]-[{{pod}}]-[{{stage}}]-AVG'
+        - title: Cache Miss
+          type: timeseries
+          description: The local cache miss of the datanode.
+          queries:
+            - expr: sum by (instance,pod, type) (rate(greptime_mito_cache_miss{instance=~"$datanode"}[$__rate_interval]))
+              datasource:
+                type: prometheus
+                uid: ${metrics}
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]'
     - title: OpenDAL
       panels:
         - title: QPS per Instance

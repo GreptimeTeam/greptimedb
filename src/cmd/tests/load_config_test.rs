@@ -34,6 +34,7 @@ use query::options::QueryOptions;
 use servers::export_metrics::ExportMetricsOption;
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
+use servers::tls::{TlsMode, TlsOption};
 use store_api::path_utils::WAL_DIR;
 
 #[allow(deprecated)]
@@ -190,6 +191,13 @@ fn test_load_metasrv_example_config() {
                 remote_write: Some(Default::default()),
                 ..Default::default()
             },
+            backend_tls: Some(TlsOption {
+                mode: TlsMode::Prefer,
+                cert_path: String::new(),
+                key_path: String::new(),
+                ca_cert_path: String::new(),
+                watch: false,
+            }),
             ..Default::default()
         },
         ..Default::default()
@@ -299,6 +307,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
+
             ..Default::default()
         },
         ..Default::default()

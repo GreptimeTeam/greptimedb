@@ -86,7 +86,7 @@ nalgebra.workspace = true
 num = "0.4"
 num-traits = "0.2"
 paste.workspace = true
-pretty_assertions = "1.4.0"
+pretty_assertions.workspace = true
 rand.workspace = true
 session = { workspace = true, features = ["testing"] }
 statrs = "0.16"

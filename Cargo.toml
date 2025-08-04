@@ -140,7 +140,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f046902f73858a1ca0a0f52a76682c121a377ba5" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "082c149decff5f20d7abd2b074d1c456d9d34330" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -173,6 +173,7 @@ parking_lot = "0.12"
 parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
+pretty_assertions = "1.4.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
@@ -194,8 +195,7 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-# It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
-rustls = { version = "0.23.25", default-features = false }
+rustls = { version = "0.23.25", default-features = false } # It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
@@ -204,7 +204,7 @@ simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0cf6c04490d59435ee965edd2078e8855bd8471e", features = [
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "df6fcca80ce903f5beef7002cd2c1b062e7024f8", features = [
     "visitor",
     "serde",
 ] } # branch = "v0.54.x"

@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::{mpsc, watch};
 
-use crate::access_layer::{AccessLayerRef, OperationType, SstWriteRequest};
+use crate::access_layer::{AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType};
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -345,6 +345,7 @@ impl RegionFlushTask {
         let mut file_metas = Vec::with_capacity(memtables.len());
         let mut flushed_bytes = 0;
         let mut series_count = 0;
+        let mut flush_metrics = Metrics::new(WriteType::Flush);
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -399,14 +400,15 @@ impl RegionFlushTask {
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
             };
 
-            let ssts_written = self
+            let (ssts_written, metrics) = self
                 .access_layer
-                .write_sst(write_request, &write_opts)
+                .write_sst(write_request, &write_opts, WriteType::Flush)
                 .await?;
             if ssts_written.is_empty() {
                 // No data written.
                 continue;
             }
+            flush_metrics = flush_metrics.merge(metrics);
 
             file_metas.extend(ssts_written.into_iter().map(|sst_info| {
                 flushed_bytes += sst_info.file_size;
@@ -431,13 +433,15 @@ impl RegionFlushTask {
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}s",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, series count: {}, cost: {:?}, metrics: {:?}",
             self.region_id,
             self.reason.as_str(),
             file_ids,
             series_count,
             timer.stop_and_record(),
+            flush_metrics,
         );
+        flush_metrics.observe();
 
         let edit = RegionEdit {
             files_to_add: file_metas,

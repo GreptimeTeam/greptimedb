@@ -6,7 +6,16 @@ license.workspace = true
 
 [features]
 testing = []
-pg_kvbackend = ["dep:tokio-postgres", "dep:backon", "dep:deadpool-postgres", "dep:deadpool"]
+pg_kvbackend = [
+    "dep:tokio-postgres",
+    "dep:backon",
+    "dep:deadpool-postgres",
+    "dep:deadpool",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
+    "dep:rustls",
+]
 mysql_kvbackend = ["dep:sqlx", "dep:backon"]
 enterprise = []
 
@@ -58,6 +67,9 @@ prost.workspace = true
 rand.workspace = true
 regex.workspace = true
 rskafka.workspace = true
+rustls = { workspace = true, default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
+rustls-native-certs = { version = "0.7", optional = true }
+rustls-pemfile = { version = "2.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
@@ -69,6 +81,7 @@ strum.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio.workspace = true
 tokio-postgres = { workspace = true, optional = true }
+tokio-postgres-rustls = { version = "0.12", optional = true }
 tonic.workspace = true
 tracing.workspace = true
 typetag.workspace = true
