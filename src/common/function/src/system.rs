@@ -14,6 +14,7 @@
 
 mod build;
 mod database;
+mod partitionrule;
 mod pg_catalog;
 mod procedure_state;
 mod timezone;
@@ -26,6 +27,7 @@ use database::{
     ConnectionIdFunction, CurrentSchemaFunction, DatabaseFunction, PgBackendPidFunction,
     ReadPreferenceFunction, SessionUserFunction,
 };
+use partitionrule::GeneratePartitionRuleFunction;
 use pg_catalog::PGCatalogFunction;
 use procedure_state::ProcedureStateFunction;
 use timezone::TimezoneFunction;
@@ -48,5 +50,6 @@ impl SystemFunction {
         registry.register_scalar(TimezoneFunction);
         registry.register_async(Arc::new(ProcedureStateFunction));
         PGCatalogFunction::register(registry);
+        registry.register_scalar(GeneratePartitionRuleFunction);
     }
 }
