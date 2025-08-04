@@ -199,14 +199,13 @@ impl MysqlServer {
         spawn_ref: Arc<MysqlSpawnRef>,
         spawn_config: Arc<MysqlSpawnConfig>,
         process_id: u32,
-        prepared_stmt_cache_capacity: usize,
     ) -> Result<()> {
         let mut shim = MysqlInstanceShim::create(
             spawn_ref.query_handler(),
             spawn_ref.user_provider(),
             stream.peer_addr()?,
             process_id,
-            prepared_stmt_cache_capacity,
+            spawn_config.prepared_stmt_cache_capacity,
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
