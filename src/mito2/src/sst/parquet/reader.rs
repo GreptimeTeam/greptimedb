@@ -240,7 +240,6 @@ impl ParquetReaderBuilder {
             )
         };
         if need_override_sequence(&parquet_meta) {
-            // FIXME(yingwen): Support this in another format.
             read_format
                 .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
         }
@@ -1305,7 +1304,7 @@ where
             };
             self.metrics.num_record_batches += 1;
 
-            // Safety: We ensures the format is primary key in the constructor.
+            // Safety: We ensures the format is primary key in the RowGroupReaderBase::create().
             self.context
                 .read_format()
                 .as_primary_key()
