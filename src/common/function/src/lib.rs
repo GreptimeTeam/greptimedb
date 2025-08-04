@@ -14,6 +14,7 @@
 
 #![feature(let_chains)]
 #![feature(try_blocks)]
+#![feature(assert_matches)]
 
 mod admin;
 mod flush_flow;

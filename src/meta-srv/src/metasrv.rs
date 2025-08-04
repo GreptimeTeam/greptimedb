@@ -35,6 +35,7 @@ use common_meta::leadership_notifier::{
 };
 use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
+use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::sequence::SequenceRef;
@@ -455,6 +456,7 @@ pub struct Metasrv {
     leader_region_registry: LeaderRegionRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     table_id_sequence: SequenceRef,
+    reconciliation_manager: ReconciliationManagerRef,
 
     plugins: Plugins,
 }
@@ -728,6 +730,10 @@ impl Metasrv {
 
     pub fn table_id_sequence(&self) -> &SequenceRef {
         &self.table_id_sequence
+    }
+
+    pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {
+        &self.reconciliation_manager
     }
 
     pub fn plugins(&self) -> &Plugins {
