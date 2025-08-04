@@ -1035,6 +1035,13 @@ pub enum MetadataError {
         location: Location,
     },
 
+    #[snafu(display("Failed to convert TimeRanges"))]
+    ConvertTimeRanges {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid set region option request, key: {}, value: {}", key, value))]
     InvalidSetRegionOptionRequest {
         key: String,
