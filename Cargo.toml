@@ -173,6 +173,7 @@ parking_lot = "0.12"
 parquet = { version = "54.2", default-features = false, features = ["arrow", "async", "object_store"] }
 paste = "1.0"
 pin-project = "1.0"
+pretty_assertions = "1.4.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 promql-parser = { version = "0.6", features = ["ser"] }
 prost = { version = "0.13", features = ["no-recursion-limit"] }
@@ -194,9 +195,7 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-# It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
-pretty_assertions = "1.4.0"
-rustls = { version = "0.23.25", default-features = false }
+rustls = { version = "0.23.25", default-features = false } # It is worth noting that we should try to avoid using aws-lc-rs until it can be compiled on various platforms.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 serde_with = "3"
