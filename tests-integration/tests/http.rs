@@ -1081,6 +1081,7 @@ runtime_size = 8
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [mysql]
@@ -1093,6 +1094,7 @@ keep_alive = "0s"
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [postgres]
@@ -1105,6 +1107,7 @@ keep_alive = "0s"
 mode = "disable"
 cert_path = ""
 key_path = ""
+ca_cert_path = ""
 watch = false
 
 [opentsdb]

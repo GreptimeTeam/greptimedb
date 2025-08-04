@@ -65,6 +65,34 @@ node_max_idle_time = "24hours"
 ## The number of threads to execute the runtime for global write operations.
 #+ compact_rt_size = 4
 
+## TLS configuration for kv store backend (only applicable for PostgreSQL/MySQL backends)
+## When using PostgreSQL or MySQL as metadata store, you can configure TLS here
+[backend_tls]
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - "disable" - No TLS
+## - "prefer" (default) - Try TLS, fallback to plain
+## - "require" - Require TLS
+## - "verify_ca" - Require TLS and verify CA
+## - "verify_full" - Require TLS and verify hostname
+mode = "prefer"
+
+## Path to client certificate file (for client authentication)
+## Like "/path/to/client.crt"
+cert_path = ""
+
+## Path to client private key file (for client authentication)
+## Like "/path/to/client.key"
+key_path = ""
+
+## Path to CA certificate file (for server certificate verification)
+## Required when using custom CAs or self-signed certificates
+## Leave empty to use system root certificates only
+## Like "/path/to/ca.crt"
+ca_cert_path = ""
+
+## Watch for certificate file changes and auto reload
+watch = false
+
 ## The gRPC server options.
 [grpc]
 ## The address to bind the gRPC server.
