@@ -14,22 +14,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDef, ColumnSchema, CreateTableExpr, Row, RowInsertRequest,
     RowInsertRequests, Rows, SemanticType,
 };
+use catalog::process_manager::{QueryStatement as CatalogQueryStatement, SlowQueryTimer};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{default_engine, DEFAULT_PRIVATE_SCHEMA_NAME};
+use common_frontend::slow_query_event::SlowQueryEvent;
 use common_telemetry::logging::{SlowQueriesRecordType, SlowQueryOptions};
 use common_telemetry::{debug, error, info, slow};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
-use query::parser::QueryStatement;
-use rand::random;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
@@ -59,19 +58,6 @@ pub struct SlowQueryRecorder {
     tx: Sender<SlowQueryEvent>,
     slow_query_opts: SlowQueryOptions,
     _handle: Arc<JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-struct SlowQueryEvent {
-    cost: u64,
-    threshold: u64,
-    query: String,
-    is_promql: bool,
-    query_ctx: QueryContextRef,
-    promql_range: Option<u64>,
-    promql_step: Option<u64>,
-    promql_start: Option<i64>,
-    promql_end: Option<i64>,
 }
 
 impl SlowQueryRecorder {
@@ -115,18 +101,17 @@ impl SlowQueryRecorder {
     /// The timer sets the start time when created and calculates the elapsed duration when dropped.
     pub fn start(
         &self,
-        stmt: QueryStatement,
+        stmt: CatalogQueryStatement,
         query_ctx: QueryContextRef,
     ) -> Option<SlowQueryTimer> {
         if self.slow_query_opts.enable {
-            Some(SlowQueryTimer {
+            Some(SlowQueryTimer::new(
                 stmt,
                 query_ctx,
-                start: Instant::now(), // Set the initial start time.
-                threshold: self.slow_query_opts.threshold,
-                sample_ratio: self.slow_query_opts.sample_ratio,
-                tx: self.tx.clone(),
-            })
+                self.slow_query_opts.threshold,
+                self.slow_query_opts.sample_ratio,
+                self.tx.clone(),
+            ))
         } else {
             None
         }
@@ -445,87 +430,5 @@ impl SlowQueryEventHandler {
                 ..Default::default()
             },
         ]
-    }
-}
-
-/// SlowQueryTimer is used to log slow query when it's dropped.
-/// In drop(), it will check if the query is slow and send the slow query event to the handler.
-pub struct SlowQueryTimer {
-    start: Instant,
-    stmt: QueryStatement,
-    query_ctx: QueryContextRef,
-    threshold: Option<Duration>,
-    sample_ratio: Option<f64>,
-    tx: Sender<SlowQueryEvent>,
-}
-
-impl SlowQueryTimer {
-    fn send_slow_query_event(&self, elapsed: Duration, threshold: Duration) {
-        let mut slow_query_event = SlowQueryEvent {
-            cost: elapsed.as_millis() as u64,
-            threshold: threshold.as_millis() as u64,
-            query: "".to_string(),
-            query_ctx: self.query_ctx.clone(),
-
-            // The following fields are only used for PromQL queries.
-            is_promql: false,
-            promql_range: None,
-            promql_step: None,
-            promql_start: None,
-            promql_end: None,
-        };
-
-        match &self.stmt {
-            QueryStatement::Promql(stmt) => {
-                slow_query_event.is_promql = true;
-                slow_query_event.query = stmt.expr.to_string();
-                slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
-
-                let start = stmt
-                    .start
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-
-                let end = stmt
-                    .end
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-
-                slow_query_event.promql_range = Some((end - start) as u64);
-                slow_query_event.promql_start = Some(start);
-                slow_query_event.promql_end = Some(end);
-            }
-            QueryStatement::Sql(stmt) => {
-                slow_query_event.query = stmt.to_string();
-            }
-        }
-
-        // Send SlowQueryEvent to the handler.
-        if let Err(e) = self.tx.try_send(slow_query_event) {
-            error!(e; "Failed to send slow query event");
-        }
-    }
-}
-
-impl Drop for SlowQueryTimer {
-    fn drop(&mut self) {
-        if let Some(threshold) = self.threshold {
-            // Calculate the elaspsed duration since the timer is created.
-            let elapsed = self.start.elapsed();
-            if elapsed > threshold {
-                if let Some(ratio) = self.sample_ratio {
-                    // Only capture a portion of slow queries based on sample_ratio.
-                    // Generate a random number in [0, 1) and compare it with sample_ratio.
-                    if ratio >= 1.0 || random::<f64>() <= ratio {
-                        self.send_slow_query_event(elapsed, threshold);
-                    }
-                } else {
-                    // Captures all slow queries if sample_ratio is not set.
-                    self.send_slow_query_event(elapsed, threshold);
-                }
-            }
-        }
     }
 }
