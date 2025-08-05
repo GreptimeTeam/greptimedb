@@ -40,15 +40,17 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_logical_tables::reconciliation_start::ReconciliationStart;
-use crate::reconciliation::utils::Context;
+use crate::reconciliation::utils::{Context, ReconcileLogicalTableMetrics};
 
 pub struct ReconcileLogicalTablesContext {
     pub node_manager: NodeManagerRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     pub persistent_ctx: PersistentContext,
+    pub volatile_ctx: VolatileContext,
 }
 
 impl ReconcileLogicalTablesContext {
@@ -59,15 +61,28 @@ impl ReconcileLogicalTablesContext {
             table_metadata_manager: ctx.table_metadata_manager,
             cache_invalidator: ctx.cache_invalidator,
             persistent_ctx,
+            volatile_ctx: VolatileContext::default(),
         }
     }
 
+    /// Returns the physical table name.
     pub(crate) fn table_name(&self) -> &TableName {
         &self.persistent_ctx.table_name
     }
 
+    /// Returns the physical table id.
     pub(crate) fn table_id(&self) -> TableId {
         self.persistent_ctx.table_id
+    }
+
+    /// Returns a mutable reference to the metrics.
+    pub(crate) fn mut_metrics(&mut self) -> &mut ReconcileLogicalTableMetrics {
+        &mut self.volatile_ctx.metrics
+    }
+
+    /// Returns a reference to the metrics.
+    pub(crate) fn metrics(&self) -> &ReconcileLogicalTableMetrics {
+        &self.volatile_ctx.metrics
     }
 }
 
@@ -118,6 +133,11 @@ impl PersistentContext {
             is_subprocedure,
         }
     }
+}
+
+#[derive(Default)]
+pub(crate) struct VolatileContext {
+    pub(crate) metrics: ReconcileLogicalTableMetrics,
 }
 
 pub struct ReconcileLogicalTablesProcedure {
@@ -173,6 +193,10 @@ impl Procedure for ReconcileLogicalTablesProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        let name = state.name();
+        let _timer = metrics::METRIC_META_PROCEDURE_RECONCILE_LOGICAL_TABLES
+            .with_label_values(&[state.name()])
+            .start_timer();
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;
@@ -180,8 +204,14 @@ impl Procedure for ReconcileLogicalTablesProcedure {
             }
             Err(e) => {
                 if e.is_retry_later() {
+                    metrics::METRIC_META_PROCEDURE_RECONCILE_LOGICAL_TABLES_ERROR
+                        .with_label_values(&[name, metrics::ERROR_TYPE_RETRYABLE])
+                        .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
+                    metrics::METRIC_META_PROCEDURE_RECONCILE_LOGICAL_TABLES_ERROR
+                        .with_label_values(&[name, metrics::ERROR_TYPE_EXTERNAL])
+                        .inc();
                     Err(ProcedureError::external(e))
                 }
             }

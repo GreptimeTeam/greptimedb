@@ -21,11 +21,12 @@ pub(crate) mod utils;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
@@ -39,12 +40,13 @@ use crate::error::Result;
 use crate::key::table_name::TableNameValue;
 use crate::key::TableMetadataManagerRef;
 use crate::lock_key::{CatalogLock, SchemaLock};
+use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_database::start::ReconcileDatabaseStart;
-use crate::reconciliation::reconcile_database::utils::wait_for_inflight_subprocedures;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
-use crate::reconciliation::utils::Context;
-
+use crate::reconciliation::utils::{
+    wait_for_inflight_subprocedures, Context, ReconcileDatabaseMetrics, SubprocedureMeta,
+};
 pub(crate) const DEFAULT_PARALLELISM: usize = 64;
 
 pub(crate) struct ReconcileDatabaseContext {
@@ -66,21 +68,31 @@ impl ReconcileDatabaseContext {
         }
     }
 
+    /// Waits for inflight subprocedures to complete.
     pub(crate) async fn wait_for_inflight_subprocedures(
         &mut self,
         procedure_ctx: &ProcedureContext,
     ) -> Result<()> {
         if !self.volatile_ctx.inflight_subprocedures.is_empty() {
-            wait_for_inflight_subprocedures(
+            let result = wait_for_inflight_subprocedures(
                 procedure_ctx,
                 &self.volatile_ctx.inflight_subprocedures,
                 self.persistent_ctx.fail_fast,
             )
             .await?;
+
+            // Collects result into metrics
+            let metrics = result.into();
             self.volatile_ctx.inflight_subprocedures.clear();
+            self.volatile_ctx.metrics += metrics;
         }
 
         Ok(())
+    }
+
+    /// Returns the immutable metrics.
+    pub(crate) fn metrics(&self) -> &ReconcileDatabaseMetrics {
+        &self.volatile_ctx.metrics
     }
 }
 
@@ -114,7 +126,6 @@ impl PersistentContext {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct VolatileContext {
     /// Stores pending physical tables.
     pending_tables: Vec<(TableId, TableName)>,
@@ -124,9 +135,26 @@ pub(crate) struct VolatileContext {
     /// - Value: Vector of (TableId, TableName) tuples representing logical tables belonging to the physical table.
     pending_logical_tables: HashMap<TableId, Vec<(TableId, TableName)>>,
     /// Stores inflight subprocedures.
-    inflight_subprocedures: Vec<ProcedureId>,
+    inflight_subprocedures: Vec<SubprocedureMeta>,
     /// Stores the stream of tables.
     tables: Option<BoxStream<'static, Result<(String, TableNameValue)>>>,
+    /// The metrics of reconciling database.
+    metrics: ReconcileDatabaseMetrics,
+    /// The start time of the reconciliation.
+    start_time: Instant,
+}
+
+impl Default for VolatileContext {
+    fn default() -> Self {
+        Self {
+            pending_tables: vec![],
+            pending_logical_tables: HashMap::new(),
+            inflight_subprocedures: vec![],
+            tables: None,
+            metrics: ReconcileDatabaseMetrics::default(),
+            start_time: Instant::now(),
+        }
+    }
 }
 
 pub struct ReconcileDatabaseProcedure {
@@ -190,6 +218,10 @@ impl Procedure for ReconcileDatabaseProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        let name = state.name();
+        let _timer = metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE
+            .with_label_values(&[state.name()])
+            .start_timer();
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;
@@ -197,8 +229,14 @@ impl Procedure for ReconcileDatabaseProcedure {
             }
             Err(e) => {
                 if e.is_retry_later() {
+                    metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE_ERROR
+                        .with_label_values(&[name, metrics::ERROR_TYPE_RETRYABLE])
+                        .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
+                    metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE_ERROR
+                        .with_label_values(&[name, metrics::ERROR_TYPE_EXTERNAL])
+                        .inc();
                     Err(ProcedureError::external(e))
                 }
             }

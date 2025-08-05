@@ -15,6 +15,11 @@
 use lazy_static::lazy_static;
 use prometheus::*;
 
+pub const TABLE_TYPE_PHYSICAL: &str = "physical";
+pub const TABLE_TYPE_LOGICAL: &str = "logical";
+pub const ERROR_TYPE_RETRYABLE: &str = "retryable";
+pub const ERROR_TYPE_EXTERNAL: &str = "external";
+
 lazy_static! {
     pub static ref METRIC_META_TXN_REQUEST: HistogramVec = register_histogram_vec!(
         "greptime_meta_txn_request",
@@ -114,4 +119,116 @@ lazy_static! {
         &["backend", "result", "op", "type"]
     )
     .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_NO_REGION_METADATA: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_no_region_metadata",
+            "reconciliation no region metadata",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_REGION_NOT_OPEN: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_region_not_open",
+            "reconciliation region not open",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_LIST_REGION_METADATA_DURATION: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_reconciliation_list_region_metadata_duration",
+            "reconciliation list region metadata duration",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_COLUMN_METADATA_CONSISTENT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_column_metadata_consistent",
+            "reconciliation column metadata consistent",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_COLUMN_METADATA_INCONSISTENT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_column_metadata_inconsistent",
+            "reconciliation column metadata inconsistent",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_RESOLVED_COLUMN_METADATA: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_resolved_column_metadata",
+            "reconciliation resolved column metadata",
+            &["strategy"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_UPDATE_TABLE_INFO: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_update_table_info",
+            "reconciliation update table info",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_CREATE_TABLES: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_create_tables",
+            "reconciliation create tables",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_TABLE: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_procedure_reconcile_table",
+            "reconcile table procedure",
+            &["step"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_TABLE_ERROR: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_procedure_reconcile_table_error",
+            "reconcile table procedure error",
+            &["step", "error_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_LOGICAL_TABLES: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_procedure_reconcile_logical_tables",
+            "reconcile logical tables procedure",
+            &["step"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_LOGICAL_TABLES_ERROR: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_procedure_reconcile_logical_tables_error",
+            "reconcile logical tables procedure error",
+            &["step", "error_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_DATABASE: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_procedure_reconcile_database",
+            "reconcile database procedure",
+            &["step"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_DATABASE_ERROR: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_procedure_reconcile_database_error",
+            "reconcile database procedure error",
+            &["step", "error_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_CATALOG: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_procedure_reconcile_catalog",
+            "reconcile catalog procedure",
+            &["step"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_PROCEDURE_RECONCILE_CATALOG_ERROR: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_procedure_reconcile_catalog_error",
+            "reconcile catalog procedure error",
+            &["step", "error_type"]
+        )
+        .unwrap();
 }

@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -28,9 +29,16 @@ pub(crate) struct ReconcileCatalogEnd;
 impl State for ReconcileCatalogEnd {
     async fn next(
         &mut self,
-        _ctx: &mut ReconcileCatalogContext,
-        _procedure_ctx: &ProcedureContext,
+        ctx: &mut ReconcileCatalogContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        info!(
+            "Reconcile catalog completed. catalog: {}, procedure_id: {}, metrics: {}, elapsed: {:?}",
+            ctx.persistent_ctx.catalog,
+            procedure_ctx.procedure_id,
+            ctx.volatile_ctx.metrics,
+            ctx.volatile_ctx.start_time.elapsed()
+        );
         Ok((Box::new(ReconcileCatalogEnd), Status::done()))
     }
 

@@ -25,6 +25,7 @@ use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use crate::ddl::utils::table_id::get_all_table_ids_by_names;
 use crate::ddl::utils::table_info::all_logical_table_routes_have_same_physical_id;
 use crate::error::{self, Result};
+use crate::metrics;
 use crate::reconciliation::reconcile_logical_tables::resolve_table_metadatas::ResolveTableMetadatas;
 use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};
 use crate::reconciliation::utils::check_column_metadatas_consistent;
@@ -39,7 +40,7 @@ impl State for ReconciliationStart {
     async fn next(
         &mut self,
         ctx: &mut ReconcileLogicalTablesContext,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
@@ -58,35 +59,40 @@ impl State for ReconciliationStart {
             }
         );
 
-        info!(
-            "Starting reconciliation for logical table: table_id: {}, table_name: {}",
-            table_id, table_name
-        );
-
         let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
-        let region_metadatas = region_metadata_lister
-            .list(physical_table_id, &physical_table_route.region_routes)
-            .await?;
+        let region_metadatas = {
+            let _timer = metrics::METRIC_META_RECONCILIATION_LIST_REGION_METADATA_DURATION
+                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                .start_timer();
+            region_metadata_lister
+                .list(physical_table_id, &physical_table_route.region_routes)
+                .await?
+        };
 
-        ensure!(
-            !region_metadatas.is_empty(),
+        ensure!(!region_metadatas.is_empty(), {
+            metrics::METRIC_META_RECONCILIATION_NO_REGION_METADATA
+                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                .inc();
+
             error::UnexpectedSnafu {
                 err_msg: format!(
-                    "No region metadata found for table: {}, table_id: {}",
+                    "No region metadata found for physical table: {}, table_id: {}",
                     table_name, table_id
                 ),
             }
-        );
+        });
 
-        if region_metadatas.iter().any(|r| r.is_none()) {
-            return error::UnexpectedSnafu {
+        ensure!(region_metadatas.iter().all(|r| r.is_some()), {
+            metrics::METRIC_META_RECONCILIATION_REGION_NOT_OPEN
+                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                .inc();
+            error::UnexpectedSnafu {
                 err_msg: format!(
-                    "Some regions of the physical table are not open. Table: {}, table_id: {}",
+                    "Some regions of the physical table are not open. physical table: {}, table_id: {}",
                     table_name, table_id
                 ),
             }
-            .fail();
-        }
+        });
 
         // Safety: checked above
         let region_metadatas = region_metadatas
@@ -96,14 +102,13 @@ impl State for ReconciliationStart {
         let _region_metadata = check_column_metadatas_consistent(&region_metadatas).context(
             error::UnexpectedSnafu {
                 err_msg: format!(
-                    "Column metadatas are not consistent for table: {}, table_id: {}",
+                    "Column metadatas are not consistent for physical table: {}, table_id: {}",
                     table_name, table_id
                 ),
             },
         )?;
 
         // TODO(weny): ensure all columns in region metadata can be found in table info.
-
         // Validates the logical tables.
         Self::validate_schema(&ctx.persistent_ctx.logical_tables)?;
         let table_refs = ctx
@@ -118,6 +123,12 @@ impl State for ReconciliationStart {
         )
         .await?;
         Self::validate_logical_table_routes(ctx, &table_ids).await?;
+
+        let table_name = ctx.table_name();
+        info!(
+            "Starting reconciliation for logical tables: {:?}, physical_table_id: {}, table_name: {}, procedure_id: {}",
+            table_ids, table_id, table_name, procedure_ctx.procedure_id
+        );
 
         ctx.persistent_ctx.physical_table_route = Some(physical_table_route);
         ctx.persistent_ctx.logical_table_ids = table_ids;
