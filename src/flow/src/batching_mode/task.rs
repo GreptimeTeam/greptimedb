@@ -239,7 +239,7 @@ impl BatchingTask {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
             // also try truncate if needed before execute
-            self.try_truncate(
+            self.truncate_if_needed(
                 &new_query,
                 frontend_client,
                 self.config.flow_id.to_string().as_str(),
@@ -362,12 +362,14 @@ impl BatchingTask {
     }
 
     /// Try truncate the sink table if needed
-    async fn try_truncate(
+    async fn truncate_if_needed(
         &self,
         info: &PlanInfo,
         frontend_client: &Arc<FrontendClient>,
         flow_id_str: &str,
     ) -> Result<u32, Error> {
+        // Heuristic: trigger truncate if the total time range to process is larger
+        // than a single window size, indicating a significant catch-up operation is happening.
         if let Some(filter) = &info.filter
             && filter.total_window_length() > filter.window_size
             && !filter.time_ranges.is_empty()
@@ -555,7 +557,7 @@ impl BatchingTask {
 
             if let Some(info) = &new_query {
                 if let Err(err) = self
-                    .try_truncate(info, &frontend_client, &flow_id_str)
+                    .truncate_if_needed(info, &frontend_client, &flow_id_str)
                     .await
                 {
                     common_telemetry::error!(
