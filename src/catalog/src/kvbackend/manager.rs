@@ -23,7 +23,7 @@ use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
-    LayeredCacheRegistryRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
+    LayeredCacheRegistryRef, TableNameCacheRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
 };
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
@@ -319,6 +319,52 @@ impl CatalogManager for KvBackendCatalogManager {
                     .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
             {
                 return Ok(Some(table));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn table_id(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<TableId>> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        if let Some(table) =
+            self.system_catalog
+                .table(catalog_name, schema_name, table_name, query_ctx)
+        {
+            return Ok(Some(table.table_info().table_id()));
+        }
+
+        let table_cache: TableNameCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_name_cache",
+            })?;
+
+        let table = table_cache
+            .get_by_ref(&TableName {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name: table_name.to_string(),
+            })
+            .await
+            .context(GetTableCacheSnafu)?;
+
+        if let Some(table) = table {
+            return Ok(Some(table));
+        }
+
+        if channel == Channel::Postgres {
+            // falldown to pg_catalog
+            if let Some(table) =
+                self.system_catalog
+                    .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
+            {
+                return Ok(Some(table.table_info().table_id()));
             }
         }
 
