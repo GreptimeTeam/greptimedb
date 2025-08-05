@@ -369,6 +369,9 @@ impl PlanRewriter {
                             .collect::<Vec<_>>()
                             .join("\n")
                     );
+                    if let Some(new_child_plan) = &transformer_actions.new_child_plan {
+                        debug!("PlanRewriter: new child plan: {}", new_child_plan);
+                    }
                     if let Some(last_stage) = transformer_actions.extra_parent_plans.last() {
                         // update the column requirements from the last stage
                         // notice current plan's parent plan is where we need to apply the column requirements
@@ -501,12 +504,12 @@ impl PlanRewriter {
     }
 
     fn expand(&mut self, mut on_node: LogicalPlan) -> DfResult<LogicalPlan> {
+        // store schema before expand, new child plan might have a different schema, so not using it
+        let schema = on_node.schema().clone();
         if let Some(new_child_plan) = self.new_child_plan.take() {
             // if there is a new child plan, use it as the new root
             on_node = new_child_plan;
         }
-        // store schema before expand
-        let schema = on_node.schema().clone();
         let mut rewriter = EnforceDistRequirementRewriter::new(
             std::mem::take(&mut self.column_requirements),
             self.level,
@@ -514,7 +517,7 @@ impl PlanRewriter {
         debug!("PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}");
         on_node = on_node.rewrite(&mut rewriter)?.data;
         debug!(
-            "PlanRewriter: after enforced column requirements for node: {on_node} with rewriter: {rewriter:?}"
+            "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
         );
 
         // add merge scan as the new root
@@ -702,7 +705,10 @@ impl TreeNodeRewriter for PlanRewriter {
         // TODO(ruihang): avoid this clone
         if self.should_expand(&parent) {
             // TODO(ruihang): does this work for nodes with multiple children?;
-            debug!("PlanRewriter: should expand child:\n {node}\n Of Parent: {parent}");
+            debug!(
+                "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",
+                parent.display()
+            );
             let node = self.expand(node);
             debug!(
                 "PlanRewriter: expanded plan: {}",
