@@ -373,7 +373,7 @@ impl BatchingTask {
             && !filter.time_ranges.is_empty()
         {
             METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT
-                .with_label_values(&[&flow_id_str])
+                .with_label_values(&[flow_id_str])
                 .inc();
             debug!(
                 "Flow id = {:?} will truncate sink table {} with time ranges: {:?}",
