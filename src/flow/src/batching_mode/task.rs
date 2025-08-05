@@ -518,7 +518,9 @@ impl BatchingTask {
 
             if let Some(info) = &new_query {
                 if let Some(filter) = &info.filter {
-                    if filter.total_window_length() > filter.window_size {
+                    if filter.total_window_length() > filter.window_size
+                        && !filter.time_ranges.is_empty()
+                    {
                         if let Err(err) = self
                             .truncate_sink_table_with_ranges(
                                 filter.time_ranges.clone(),
