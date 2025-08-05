@@ -1,0 +1,105 @@
+CREATE TABLE monitor (host STRING, ts TIMESTAMP, cpu DOUBLE DEFAULT 0, memory DOUBLE, TIME INDEX (ts), PRIMARY KEY(host));
+
+Affected Rows: 0
+
+CREATE TABLE avg_1m_monitor (time_window TIMESTAMP, host STRING, cpu DOUBLE, memory DOUBLE, TIME INDEX (time_window), PRIMARY KEY(host));
+
+Affected Rows: 0
+
+CREATE FLOW avg_1m_flow SINK TO avg_1m_monitor AS
+SELECT date_bin('1 minute', ts) AS time_window, host, avg(cpu) AS cpu, avg(memory) AS memory FROM monitor
+GROUP BY time_window, host;
+
+Affected Rows: 0
+
+INSERT INTO monitor(ts, host, cpu, memory) VALUES
+("2021-07-01 00:00:00.200", 'host1', 66.6, 1024),
+("2021-07-01 00:00:01.200", 'host1', 66.6, 1024),
+("2021-07-01 00:00:02.200", 'host1', 66.6, 1024),
+("2021-07-01 00:00:03.200", 'host1', 77.7, 2048),
+("2021-07-01 00:00:04.200", 'host1', 77.7, 2048),
+("2021-07-01 00:00:05.200", 'host1', 77.7, 2048),
+("2021-07-01 00:00:06.200", 'host1', 88.8, 4096),
+("2021-07-01 00:00:07.200", 'host1', 88.8, 4096),
+("2021-07-01 00:00:08.200", 'host1', 88.8, 4096);
+
+Affected Rows: 9
+
+-- shouldn't truncate as window size is equal to total window length
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('avg_1m_flow');
+
++---------------------------------+
+| ADMIN FLUSH_FLOW('avg_1m_flow') |
++---------------------------------+
+|  FLOW_FLUSHED  |
++---------------------------------+
+
+ADMIN FLUSH_TABLE('avg_1m_monitor');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('avg_1m_monitor') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+SELECT * FROM avg_1m_monitor ORDER BY time_window, host;
+
++---------------------+-------+-------------------+--------------------+
+| time_window         | host  | cpu               | memory             |
++---------------------+-------+-------------------+--------------------+
+| 2021-07-01T00:00:00 | host1 | 77.69999999999999 | 2389.3333333333335 |
++---------------------+-------+-------------------+--------------------+
+
+INSERT INTO monitor(ts, host, cpu, memory) VALUES
+("2021-07-01 00:00:59.200", 'host1', 6.6, 224),
+("2021-07-01 00:01:01.200", 'host1', 6.6, 224),
+("2021-07-01 00:01:02.200", 'host1', 6.6, 224),
+("2021-07-01 00:01:03.200", 'host1', 7.7, 248),
+("2021-07-01 00:01:04.200", 'host1', 7.7, 248),
+("2021-07-01 00:01:05.200", 'host1', 7.7, 248),
+("2021-07-01 00:01:06.200", 'host1', 8.8, 296),
+("2021-07-01 00:01:07.200", 'host1', 8.8, 296),
+("2021-07-01 00:01:08.200", 'host1', 8.8, 296);
+
+Affected Rows: 9
+
+-- should truncate the old data before execute
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('avg_1m_flow');
+
++---------------------------------+
+| ADMIN FLUSH_FLOW('avg_1m_flow') |
++---------------------------------+
+|  FLOW_FLUSHED  |
++---------------------------------+
+
+ADMIN FLUSH_TABLE('avg_1m_monitor');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('avg_1m_monitor') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+SELECT * FROM avg_1m_monitor ORDER BY time_window, host;
+
++---------------------+-------+-------------------+--------+
+| time_window         | host  | cpu               | memory |
++---------------------+-------+-------------------+--------+
+| 2021-07-01T00:00:00 | host1 | 70.58999999999999 | 2172.8 |
+| 2021-07-01T00:01:00 | host1 | 7.837499999999999 | 260.0  |
++---------------------+-------+-------------------+--------+
+
+DROP FLOW avg_1m_flow;
+
+Affected Rows: 0
+
+DROP TABLE avg_1m_monitor;
+
+Affected Rows: 0
+
+DROP TABLE monitor;
+
+Affected Rows: 0
+
