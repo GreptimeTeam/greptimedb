@@ -179,7 +179,7 @@ impl Inner {
         let key = self.name.as_bytes();
         let value = self.generator.get(key).await?.map(|kv| kv.value);
         let next = if let Some(value) = value {
-            let next = self.parse_sequence_value(value)?;
+            let next = self.initial.max(self.parse_sequence_value(value)?);
             debug!("The next value of sequence {} is {}", self.name, next);
             next
         } else {
@@ -262,7 +262,7 @@ impl Inner {
         let current = self.generator.get(key).await?.map(|kv| kv.value);
 
         let curr_val = match &current {
-            Some(val) => self.parse_sequence_value(val.clone())?,
+            Some(val) => self.initial.max(self.parse_sequence_value(val.clone())?),
             None => self.initial,
         };
 
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sequence_out_of_rage() {
+    async fn test_sequence_out_of_range() {
         let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::default()))
             .initial(u64::MAX - 10)
             .step(10)
@@ -531,5 +531,78 @@ mod tests {
             .build();
         // The sequence is not initialized, it will fetch the value from the kv backend.
         assert_eq!(seq.peek().await.unwrap(), 1044);
+    }
+
+    #[tokio::test]
+    async fn test_sequence_peek_shared_storage() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let shared_seq = "shared_seq";
+
+        // Create two sequence instances with the SAME name but DIFFERENT configs
+        let seq1 = SequenceBuilder::new(shared_seq, kv_backend.clone())
+            .initial(100)
+            .step(5)
+            .build();
+        let seq2 = SequenceBuilder::new(shared_seq, kv_backend.clone())
+            .initial(200) // different initial
+            .step(3) // different step
+            .build();
+
+        // Initially both return their own initial values when no remote value exists
+        assert_eq!(seq1.peek().await.unwrap(), 100);
+        assert_eq!(seq2.peek().await.unwrap(), 200);
+
+        // seq1 calls next() to allocate range and update remote storage
+        assert_eq!(seq1.next().await.unwrap(), 100);
+        // After seq1.next(), remote storage has 100 + seq1.step(5) = 105
+
+        // seq2 should now see the updated remote value through peek(), not its own initial(200)
+        assert_eq!(seq1.peek().await.unwrap(), 105);
+        assert_eq!(seq2.peek().await.unwrap(), 200); // sees seq1's update, but use its own initial(200)
+
+        // seq2 calls next(), should start from its initial(200)
+        assert_eq!(seq2.next().await.unwrap(), 200);
+        // After seq2.next(), remote storage updated to 200 + seq2.step(3) = 203
+
+        // Both should see the new remote value (seq2's step was used)
+        assert_eq!(seq1.peek().await.unwrap(), 203);
+        assert_eq!(seq2.peek().await.unwrap(), 203);
+
+        // seq1 calls next(), should start from its next(105)
+        assert_eq!(seq1.next().await.unwrap(), 101);
+        assert_eq!(seq1.next().await.unwrap(), 102);
+        assert_eq!(seq1.next().await.unwrap(), 103);
+        assert_eq!(seq1.next().await.unwrap(), 104);
+        assert_eq!(seq1.next().await.unwrap(), 203);
+        // After seq1.next(), remote storage updated to 203 + seq1.step(5) = 208
+        assert_eq!(seq1.peek().await.unwrap(), 208);
+        assert_eq!(seq2.peek().await.unwrap(), 208);
+    }
+
+    #[tokio::test]
+    async fn test_sequence_peek_initial_max_logic() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+
+        // Manually set a small value in storage
+        let key = seq_name("test_max").into_bytes();
+        kv_backend
+            .put(
+                PutRequest::new()
+                    .with_key(key)
+                    .with_value(u64::to_le_bytes(50)),
+            )
+            .await
+            .unwrap();
+
+        // Create sequence with larger initial value
+        let seq = SequenceBuilder::new("test_max", kv_backend)
+            .initial(100) // larger than remote value (50)
+            .build();
+
+        // peek() should return max(initial, remote) = max(100, 50) = 100
+        assert_eq!(seq.peek().await.unwrap(), 100);
+
+        // next() should start from the larger initial value
+        assert_eq!(seq.next().await.unwrap(), 100);
     }
 }
