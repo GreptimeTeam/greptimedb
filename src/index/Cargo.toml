@@ -42,7 +42,12 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+criterion = "0.4"
 rand.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[[bench]]
+name = "tokenizer_bench"
+harness = false
