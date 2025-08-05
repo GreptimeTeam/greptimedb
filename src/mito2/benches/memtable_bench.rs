@@ -436,9 +436,8 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
         let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
         let mut converter = BulkPartConverter::new(&metadata, schema, 4096, codec, true);
 
-        for kvs in generator.iter() {
+        if let Some(kvs) = generator.iter().next() {
             converter.append_key_values(&kvs).unwrap();
-            break;
         }
 
         let bulk_part = converter.convert().unwrap();
@@ -463,11 +462,11 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             ));
 
             // Create and iterate over BulkPartRecordBatchIter with filter
-            let mut iter =
+            let iter =
                 BulkPartRecordBatchIter::new(record_batch_with_filter.clone(), context, None);
 
             // Consume all batches
-            while let Some(batch_result) = iter.next() {
+            for batch_result in iter {
                 let _batch = batch_result.unwrap();
             }
         });
@@ -485,11 +484,10 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
             ));
 
             // Create and iterate over BulkPartRecordBatchIter
-            let mut iter =
-                BulkPartRecordBatchIter::new(record_batch_no_filter.clone(), context, None);
+            let iter = BulkPartRecordBatchIter::new(record_batch_no_filter.clone(), context, None);
 
             // Consume all batches
-            while let Some(batch_result) = iter.next() {
+            for batch_result in iter {
                 let _batch = batch_result.unwrap();
             }
         });

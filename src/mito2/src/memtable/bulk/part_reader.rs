@@ -180,7 +180,7 @@ impl BulkPartRecordBatchIter {
     ) -> Self {
         assert!(context.read_format().as_flat().is_some());
 
-        let sequence = sequence.map(|seq| UInt64Array::new_scalar(seq));
+        let sequence = sequence.map(UInt64Array::new_scalar);
 
         Self {
             record_batch: Some(record_batch),
@@ -238,7 +238,7 @@ impl BulkPartRecordBatchIter {
                 };
                 let array = record_batch.column(column_index);
                 let result = filter
-                    .evaluate_array(&array)
+                    .evaluate_array(array)
                     .context(crate::error::RecordBatchSnafu)?;
 
                 mask = mask.bitand(&result);
