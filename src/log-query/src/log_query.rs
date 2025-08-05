@@ -326,14 +326,15 @@ pub enum ContentFilter {
         inclusive: bool,
     },
     In(Vec<String>),
-    // TODO(ruihang): arithmetic operations
+    IsTrue,
+    IsFalse,
 
     // Compound filters
-    Compound(Vec<ContentFilter>, BinaryOperator),
+    Compound(Vec<ContentFilter>, ConjunctionOperator),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum BinaryOperator {
+pub enum ConjunctionOperator {
     And,
     Or,
 }
