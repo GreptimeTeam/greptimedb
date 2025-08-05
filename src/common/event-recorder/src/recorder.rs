@@ -99,6 +99,14 @@ pub trait Event: Send + Sync + Debug {
     fn as_any(&self) -> &dyn Any;
 }
 
+/// Eventable trait defines the interface for objects that can be converted to [Event].
+pub trait Eventable: Send + Sync + Debug {
+    /// Converts the object to an [Event].
+    fn to_event(&self) -> Option<Box<dyn Event>> {
+        None
+    }
+}
+
 /// Returns the hints for the insert operation.
 pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
     vec![

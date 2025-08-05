@@ -34,5 +34,6 @@ pub use crate::procedure::{
     BoxedProcedure, BoxedProcedureLoader, Context, ContextProvider, ContextProviderRef, LockKey,
     Output, ParseIdError, PoisonKey, PoisonKeys, Procedure, ProcedureId, ProcedureInfo,
     ProcedureManager, ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, StringKey,
+    UserMetadata,
 };
 pub use crate::watcher::Watcher;

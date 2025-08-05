@@ -23,7 +23,7 @@ use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 
-use crate::procedure::region_migration::{Context, RegionMigrationTriggerReason};
+use crate::procedure::region_migration::{PersistentContext, RegionMigrationTriggerReason};
 
 pub const REGION_MIGRATION_EVENT_TYPE: &str = "region_migration";
 pub const EVENTS_TABLE_REGION_ID_COLUMN_NAME: &str = "region_id";
@@ -61,17 +61,17 @@ pub(crate) struct RegionMigrationEvent {
 }
 
 impl RegionMigrationEvent {
-    pub fn from_context(ctx: &Context) -> Self {
+    pub fn from_persistent_ctx(ctx: &PersistentContext) -> Self {
         Self {
-            region_id: ctx.persistent_ctx.region_id,
-            table_id: ctx.persistent_ctx.region_id.table_id(),
-            region_number: ctx.persistent_ctx.region_id.region_number(),
-            trigger_reason: ctx.persistent_ctx.trigger_reason,
-            src_node_id: ctx.persistent_ctx.from_peer.id,
-            src_peer_addr: ctx.persistent_ctx.from_peer.addr.clone(),
-            dst_node_id: ctx.persistent_ctx.to_peer.id,
-            dst_peer_addr: ctx.persistent_ctx.to_peer.addr.clone(),
-            timeout: ctx.persistent_ctx.timeout,
+            region_id: ctx.region_id,
+            table_id: ctx.region_id.table_id(),
+            region_number: ctx.region_id.region_number(),
+            trigger_reason: ctx.trigger_reason,
+            src_node_id: ctx.from_peer.id,
+            src_peer_addr: ctx.from_peer.addr.clone(),
+            dst_node_id: ctx.to_peer.id,
+            dst_peer_addr: ctx.to_peer.addr.clone(),
+            timeout: ctx.timeout,
         }
     }
 }

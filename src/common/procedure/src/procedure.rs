@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, Eventable};
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
@@ -216,9 +216,27 @@ pub trait Procedure: Send {
         PoisonKeys::default()
     }
 
-    /// Returns the [common_event_recorder::Event] that this procedure emits to the event recorder.
-    fn event(&self) -> Option<Arc<dyn Event>> {
+    /// Returns the user metadata of the procedure. If the metadata contains the eventable object, you can use [UserMetadata::to_event] to get the event and emit it to the event recorder.
+    fn user_metadata(&self) -> Option<UserMetadata> {
         None
+    }
+}
+
+#[derive(Clone, Debug)]
+/// The metadata of the procedure.
+pub struct UserMetadata {
+    event_object: Arc<dyn Eventable>,
+}
+
+impl UserMetadata {
+    /// Creates a new [UserMetadata] with the given event object.
+    pub fn new(event_object: Arc<dyn Eventable>) -> Self {
+        Self { event_object }
+    }
+
+    /// Returns the event of the procedure. It can be None if the procedure does not emit any event.
+    pub fn to_event(&self) -> Option<Box<dyn Event>> {
+        self.event_object.to_event()
     }
 }
 

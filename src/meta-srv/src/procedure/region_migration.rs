@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, Eventable};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
@@ -46,7 +46,9 @@ use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status, StringKey};
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, Status, StringKey, UserMetadata,
+};
 use common_telemetry::{error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
@@ -109,6 +111,12 @@ impl PersistentContext {
         ];
 
         lock_key
+    }
+}
+
+impl Eventable for PersistentContext {
+    fn to_event(&self) -> Option<Box<dyn Event>> {
+        Some(Box::new(RegionMigrationEvent::from_persistent_ctx(self)))
     }
 }
 
@@ -310,7 +318,7 @@ impl DefaultContextFactory {
 impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
-            persistent_ctx,
+            persistent_ctx: Arc::new(persistent_ctx),
             volatile_ctx: self.volatile_ctx,
             in_memory: self.in_memory_key,
             table_metadata_manager: self.table_metadata_manager,
@@ -325,7 +333,7 @@ impl ContextFactory for DefaultContextFactory {
 
 /// The context of procedure execution.
 pub struct Context {
-    pub(crate) persistent_ctx: PersistentContext,
+    persistent_ctx: Arc<PersistentContext>,
     volatile_ctx: VolatileContext,
     in_memory: ResettableKvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -542,6 +550,11 @@ impl Context {
             .await;
         Ok(())
     }
+
+    /// Returns the [PersistentContext] of the procedure.
+    pub fn persistent_ctx(&self) -> Arc<PersistentContext> {
+        self.persistent_ctx.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -747,8 +760,8 @@ impl Procedure for RegionMigrationProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(&self) -> Option<Arc<dyn Event>> {
-        Some(Arc::new(RegionMigrationEvent::from_context(&self.context)))
+    fn user_metadata(&self) -> Option<UserMetadata> {
+        Some(UserMetadata::new(self.context.persistent_ctx()))
     }
 }
 
