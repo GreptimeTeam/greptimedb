@@ -43,7 +43,6 @@ fn bytes_to_u64_vec(bytes: &Bytes) -> Vec<u64> {
 
     // Try fast path first: direct cast if aligned
     let u64_vec = if let Ok(u64_slice) = try_cast_slice::<u8, u64>(byte_slice) {
-        // Fast path: zero-copy conversion when properly aligned
         u64_slice.to_vec()
     } else {
         // Slow path: create aligned Vec<u64> and copy data
