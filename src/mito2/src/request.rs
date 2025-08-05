@@ -728,6 +728,38 @@ impl WorkerRequest {
         )
     }
 
+    /// Creates a request to enter staging mode.
+    pub(crate) fn new_enter_staging(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::EnterStaging,
+            }),
+            receiver,
+        )
+    }
+
+    /// Creates a request to exit staging mode.
+    pub(crate) fn new_exit_staging(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<Result<AffectedRows>>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::ExitStaging,
+            }),
+            receiver,
+        )
+    }
+
     pub(crate) fn new_sync_region_request(
         region_id: RegionId,
         manifest_version: ManifestVersion,

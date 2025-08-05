@@ -51,6 +51,19 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
 
+        // Check if region is in staging mode - reject ALTER operations
+        if region.is_staging() {
+            sender.send(Err(crate::error::RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: crate::region::RegionRoleState::Leader(
+                    crate::region::RegionLeaderState::Writable,
+                ),
+            }
+            .build()));
+            return;
+        }
+
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
         // Get the version before alter.

@@ -35,6 +35,10 @@ use crate::manifest::storage::{
     file_version, is_checkpoint_file, is_delta_file, ManifestObjectStore,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
+use crate::region::RegionRoleState;
+
+#[cfg(test)]
+use crate::region::RegionLeaderState;
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -434,7 +438,11 @@ impl RegionManifestManager {
     }
 
     /// Updates the manifest. Returns the current manifest version number.
-    pub async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
+    pub async fn update(
+        &mut self,
+        action_list: RegionMetaActionList,
+        region_state: RegionRoleState,
+    ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
             .start_timer();
@@ -474,7 +482,7 @@ impl RegionManifestManager {
         self.manifest = Arc::new(new_manifest);
 
         self.checkpointer
-            .maybe_do_checkpoint(self.manifest.as_ref());
+            .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
 
         Ok(version)
     }
@@ -657,7 +665,13 @@ mod test {
                 metadata: new_metadata.clone(),
             }));
 
-        let current_version = manager.update(action_list).await.unwrap();
+        let current_version = manager
+            .update(
+                action_list,
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -719,7 +733,13 @@ mod test {
                 metadata: new_metadata.clone(),
             }));
 
-        let current_version = manager.update(action_list).await.unwrap();
+        let current_version = manager
+            .update(
+                action_list,
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
         assert_eq!(current_version, 1);
         manager.validate_manifest(&new_metadata, 1);
 
@@ -730,15 +750,16 @@ mod test {
         // update 10 times nop_action to trigger checkpoint
         for _ in 0..10 {
             manager
-                .update(RegionMetaActionList::new(vec![RegionMetaAction::Edit(
-                    RegionEdit {
+                .update(
+                    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
                         files_to_add: vec![],
                         files_to_remove: vec![],
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
-                    },
-                )]))
+                    })]),
+                    RegionRoleState::Leader(RegionLeaderState::Writable),
+                )
                 .await
                 .unwrap();
         }

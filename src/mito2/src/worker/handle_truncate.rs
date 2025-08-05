@@ -35,6 +35,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
+
+        // Check if region is in staging mode - reject TRUNCATE operations
+        if region.is_staging() {
+            sender.send(Err(crate::error::RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: crate::region::RegionRoleState::Leader(
+                    crate::region::RegionLeaderState::Writable,
+                ),
+            }
+            .build()));
+            return;
+        }
+
         let version_data = region.version_control.current();
 
         match req {

@@ -70,6 +70,8 @@ impl RegionUsage {
 pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
+    /// The region is in staging mode - writable but no checkpoint/compaction.
+    Staging,
     /// The region is altering.
     Altering,
     /// The region is dropping.
@@ -200,7 +202,11 @@ impl MitoRegion {
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Staging)
+        )
     }
 
     /// Returns whether the region is flushable.
@@ -208,6 +214,7 @@ impl MitoRegion {
         matches!(
             self.manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Staging)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
     }
@@ -218,6 +225,12 @@ impl MitoRegion {
             self.manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
+    }
+
+    /// Returns whether the region is in staging mode.
+    #[allow(dead_code)]
+    pub(crate) fn is_staging(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -276,6 +289,26 @@ impl MitoRegion {
         self.compare_exchange_state(
             RegionLeaderState::Writable,
             RegionRoleState::Leader(RegionLeaderState::Editing),
+        )
+    }
+
+    /// Sets the staging state.
+    /// You should call this method in the worker loop.
+    /// Transitions from Writable to Staging state.
+    pub(crate) fn set_staging(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Staging),
+        )
+    }
+
+    /// Exits the staging state back to writable.
+    /// You should call this method in the worker loop.
+    /// Transitions from Staging to Writable state.
+    pub(crate) fn exit_staging(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Staging,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
         )
     }
 
@@ -390,6 +423,11 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Returns the current region role state.
+    pub(crate) fn current_state(&self) -> RegionRoleState {
+        self.state.load()
+    }
+
     /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
     /// Returns installed [RegionManifest].
@@ -485,7 +523,7 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        let version = manager.update(action_list).await.inspect_err(
+        let version = manager.update(action_list, current_state).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
@@ -830,11 +868,13 @@ impl ManifestStats {
 mod tests {
     use std::sync::Arc;
 
+    use common_datasource::compression::CompressionType;
     use crossbeam_utils::atomic::AtomicCell;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
-    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
 
@@ -891,6 +931,50 @@ mod tests {
         manifest_ctx.set_role(RegionRole::Leader, region_id);
         assert_eq!(
             manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_staging_state_validation() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+
+        // Create context with staging state using the correct pattern from SchedulerEnv
+        let staging_ctx = {
+            let manager = RegionManifestManager::new(
+                version_control.current().version.metadata.clone(),
+                RegionManifestOptions {
+                    manifest_dir: "".to_string(),
+                    object_store: env.access_layer.object_store().clone(),
+                    compress_type: CompressionType::Uncompressed,
+                    checkpoint_distance: 10,
+                },
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            Arc::new(ManifestContext::new(
+                manager,
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            ))
+        };
+
+        // Test staging state behavior
+        assert_eq!(
+            staging_ctx.current_state(),
+            RegionRoleState::Leader(RegionLeaderState::Staging)
+        );
+
+        // Test writable context for comparison
+        let writable_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+
+        assert_eq!(
+            writable_ctx.current_state(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
     }

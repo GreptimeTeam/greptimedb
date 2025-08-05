@@ -950,6 +950,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
+                DdlRequest::EnterStaging => self.handle_enter_staging_request(ddl.region_id).await,
+                DdlRequest::ExitStaging => self.handle_exit_staging_request(ddl.region_id).await,
             };
 
             ddl.sender.send(res);
@@ -1012,6 +1014,34 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);
+        }
+    }
+
+    /// Handles enter staging request.
+    async fn handle_enter_staging_request(&mut self, region_id: RegionId) -> Result<AffectedRows> {
+        if let Some(region) = self.regions.get_region(region_id) {
+            info!("Enter staging mode for region {}", region_id);
+            region.set_staging().map_err(|e| {
+                error!(e; "Failed to enter staging mode for region {}", region_id);
+                e
+            })?;
+            Ok(0)
+        } else {
+            error::RegionNotFoundSnafu { region_id }.fail()
+        }
+    }
+
+    /// Handles exit staging request.
+    async fn handle_exit_staging_request(&mut self, region_id: RegionId) -> Result<AffectedRows> {
+        if let Some(region) = self.regions.get_region(region_id) {
+            info!("Exit staging mode for region {}", region_id);
+            region.exit_staging().map_err(|e| {
+                error!(e; "Failed to exit staging mode for region {}", region_id);
+                e
+            })?;
+            Ok(0)
+        } else {
+            error::RegionNotFoundSnafu { region_id }.fail()
         }
     }
 }

@@ -44,6 +44,18 @@ where
     ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
+        // Check if region is in staging mode - reject DROP operations
+        if region.is_staging() {
+            return Err(crate::error::RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: crate::region::RegionRoleState::Leader(
+                    crate::region::RegionLeaderState::Writable,
+                ),
+            }
+            .build());
+        }
+
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
         // Marks the region as dropping.
