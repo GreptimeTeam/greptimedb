@@ -220,8 +220,7 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        // Create a query ticket and slow query timer if the statement is a query.
-        if matches!(stmt, Statement::Query(_)) {
+        if should_capture_statement(Some(&stmt)) {
             let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
                 recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
             });
@@ -582,8 +581,7 @@ impl SqlQueryHandler for Instance {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        // Create a query ticket and slow query timer if the statement is a query.
-        if matches!(stmt, Some(Statement::Query(_))) {
+        if should_capture_statement(stmt.as_ref()) {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
             let query = stmt.to_string();
@@ -989,6 +987,15 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
         .context(SqlExecInterceptedSnafu)
+}
+
+// Create a query ticket and slow query timer if the statement is a query or readonly statement.
+fn should_capture_statement(stmt: Option<&Statement>) -> bool {
+    if let Some(stmt) = stmt {
+        matches!(stmt, Statement::Query(_)) || stmt.is_readonly()
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
