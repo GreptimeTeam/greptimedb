@@ -18,9 +18,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
+use api::helper::to_pb_time_ranges;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{CreateTableExpr, QueryRequest};
+use api::v1::{CreateTableExpr, QueryRequest, TableId, TruncateTableExpr};
 use client::{Client, Database};
 use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -29,6 +30,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::store::RangeRequest;
 use common_query::Output;
 use common_telemetry::warn;
+use common_time::Timestamp;
 use meta_client::client::MetaClient;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::options::QueryOptions;
@@ -283,6 +285,38 @@ impl FrontendClient {
         self.handle(
             Request::Ddl(api::v1::DdlRequest {
                 expr: Some(api::v1::ddl_request::Expr::CreateTable(create)),
+            }),
+            catalog,
+            schema,
+            &mut None,
+        )
+        .await
+    }
+
+    /// Truncate by file's time ranges in a table
+    pub async fn truncate_file_ranges(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        table_id: u32,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+    ) -> Result<u32, Error> {
+        let expr = TruncateTableExpr {
+            catalog_name: catalog.to_string(),
+            schema_name: schema.to_string(),
+            table_name: table.to_string(),
+            table_id: Some(TableId { id: table_id }),
+            time_ranges: Some(
+                to_pb_time_ranges(&time_ranges)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?,
+            ),
+        };
+
+        self.handle(
+            Request::Ddl(api::v1::DdlRequest {
+                expr: Some(api::v1::ddl_request::Expr::TruncateTable(expr)),
             }),
             catalog,
             schema,
