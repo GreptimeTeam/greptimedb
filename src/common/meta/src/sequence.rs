@@ -95,13 +95,27 @@ impl Sequence {
         inner.initial..inner.max
     }
 
-    /// Returns the next value without incrementing the sequence.
+    /// Returns the current value stored in the remote storage without incrementing the sequence.
+    ///
+    /// This function always fetches the true current state from the remote storage (KV backend),
+    /// ignoring any local cache to provide the most accurate view of the sequence's remote state.
+    /// It does not consume or advance the sequence value.
+    ///
+    /// Note: Since this always queries the remote storage, it may be slower than `next()` but
+    /// provides the most accurate and up-to-date information about the sequence state.
     pub async fn peek(&self) -> Result<u64> {
         let inner = self.inner.lock().await;
         inner.peek().await
     }
 
     /// Jumps to the given value.
+    ///
+    /// The next value must be greater than both:
+    /// 1. The current local next value
+    /// 2. The current value stored in the remote storage (KV backend)
+    ///
+    /// This ensures the sequence can only move forward and maintains consistency
+    /// across different instances accessing the same sequence.
     pub async fn jump_to(&self, next: u64) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.jump_to(next).await
@@ -159,25 +173,13 @@ impl Inner {
         .fail()
     }
 
+    /// Returns the current value from remote storage without advancing the sequence.
+    /// If no value exists in remote storage, returns the initial value.
     pub async fn peek(&self) -> Result<u64> {
-        if self.range.is_some() {
-            return Ok(self.next);
-        }
-
-        // If the range is not set, means the sequence is not initialized.
         let key = self.name.as_bytes();
         let value = self.generator.get(key).await?.map(|kv| kv.value);
         let next = if let Some(value) = value {
-            let v: [u8; 8] = match value.try_into() {
-                Ok(a) => a,
-                Err(v) => {
-                    return error::UnexpectedSequenceValueSnafu {
-                        err_msg: format!("Not a valid u64 for '{}': {v:?}", self.name),
-                    }
-                    .fail()
-                }
-            };
-            let next = u64::from_le_bytes(v);
+            let next = self.parse_sequence_value(value)?;
             debug!("The next value of sequence {} is {}", self.name, next);
             next
         } else {
@@ -224,16 +226,7 @@ impl Inner {
 
             if !res.success {
                 if let Some(kv) = res.prev_kv {
-                    let v: [u8; 8] = match kv.value.clone().try_into() {
-                        Ok(a) => a,
-                        Err(v) => {
-                            return error::UnexpectedSequenceValueSnafu {
-                                err_msg: format!("Not a valid u64 for '{}': {v:?}", self.name),
-                            }
-                            .fail()
-                        }
-                    };
-                    let v = u64::from_le_bytes(v);
+                    let v = self.parse_sequence_value(kv.value.clone())?;
                     // If the existed value is smaller than the initial, we should start from the initial.
                     start = v.max(self.initial);
                     expect = kv.value;
@@ -257,25 +250,33 @@ impl Inner {
     }
 
     /// Jumps to the given value.
-    /// The next value must be greater than the current next value.
+    ///
+    /// The next value must be greater than both:
+    /// 1. The current local next value (self.next)
+    /// 2. The current value stored in the remote storage (KV backend)
+    ///
+    /// This ensures the sequence can only move forward and maintains consistency
+    /// across different instances accessing the same sequence.
     pub async fn jump_to(&mut self, next: u64) -> Result<()> {
+        let key = self.name.as_bytes();
+        let current = self.generator.get(key).await?.map(|kv| kv.value);
+
+        let curr_val = match &current {
+            Some(val) => self.parse_sequence_value(val.clone())?,
+            None => self.initial,
+        };
+
         ensure!(
-            next > self.next,
+            next > curr_val,
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "The next value {} is not greater than the current next value {}",
-                    next, self.next
+                    next, curr_val
                 ),
             }
         );
 
-        let key = self.name.as_bytes();
-        let expect = self
-            .generator
-            .get(key)
-            .await?
-            .map(|kv| kv.value)
-            .unwrap_or_default();
+        let expect = current.unwrap_or_default();
 
         let req = CompareAndPutRequest {
             key: key.to_vec(),
@@ -296,6 +297,20 @@ impl Inner {
         self.range = None;
 
         Ok(())
+    }
+
+    /// Converts a Vec<u8> to u64 with proper error handling for sequence values
+    fn parse_sequence_value(&self, value: Vec<u8>) -> Result<u64> {
+        let v: [u8; 8] = match value.try_into() {
+            Ok(a) => a,
+            Err(v) => {
+                return error::UnexpectedSequenceValueSnafu {
+                    err_msg: format!("Not a valid u64 for '{}': {v:?}", self.name),
+                }
+                .fail()
+            }
+        };
+        Ok(u64::from_le_bytes(v))
     }
 }
 
