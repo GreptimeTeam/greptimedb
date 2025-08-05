@@ -220,35 +220,41 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
-            recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
-        });
+        // Create a query ticket and slow query timer if the statement is a query.
+        if matches!(stmt, Statement::Query(_)) {
+            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
+                recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
+            });
 
-        let ticket = self.process_manager.register_query(
-            query_ctx.current_catalog().to_string(),
-            vec![query_ctx.current_schema()],
-            stmt.to_string(),
-            query_ctx.conn_info().to_string(),
-            Some(query_ctx.process_id()),
-            slow_query_timer,
-        );
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                stmt.to_string(),
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
 
-        let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
 
-        CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-            .await
-            .map_err(|_| error::CancelledSnafu.build())?
-            .map(|output| {
-                let Output { meta, data } = output;
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
 
-                let data = match data {
-                    OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                    }
-                    other => other,
-                };
-                Output { data, meta }
-            })
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
+        } else {
+            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
+                .await
+        }
     }
 
     async fn exec_statement_with_timeout(
