@@ -61,7 +61,7 @@ use crate::error::{
 use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME,
     METRIC_FLOW_BATCHING_ENGINE_SLOW_QUERY, METRIC_FLOW_BATCHING_ENGINE_START_QUERY_CNT,
-    METRIC_FLOW_ROWS,
+    METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT, METRIC_FLOW_ROWS,
 };
 use crate::{Error, FlowId};
 
@@ -521,6 +521,9 @@ impl BatchingTask {
                     if filter.total_window_length() > filter.window_size
                         && !filter.time_ranges.is_empty()
                     {
+                        METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT
+                            .with_label_values(&[&flow_id_str])
+                            .inc();
                         if let Err(err) = self
                             .truncate_sink_table_with_ranges(
                                 filter.time_ranges.clone(),
