@@ -234,6 +234,7 @@ impl VersionControl {
                 );
 
                 let mut version_data = self.data.write().unwrap();
+                // notice since it's partial, no need to mark all files as deleted
                 version_data.version = new_version;
             }
         };
