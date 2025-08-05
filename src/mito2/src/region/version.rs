@@ -209,27 +209,35 @@ impl VersionControl {
             next_memtable_id,
             Some(part_duration),
         ));
-        let new_version = match truncate_kind {
+        match truncate_kind {
             TruncateKind::All {
                 truncated_entry_id,
                 truncated_sequence,
-            } => Arc::new(
-                VersionBuilder::new(version.metadata.clone(), new_mutable)
-                    .flushed_entry_id(truncated_entry_id)
-                    .flushed_sequence(truncated_sequence)
-                    .truncated_entry_id(Some(truncated_entry_id))
-                    .build(),
-            ),
-            TruncateKind::Partial { files_to_remove } => Arc::new(
-                VersionBuilder::from_version(version)
-                    .remove_files(files_to_remove.into_iter())
-                    .build(),
-            ),
-        };
+            } => {
+                let new_version = Arc::new(
+                    VersionBuilder::new(version.metadata.clone(), new_mutable)
+                        .flushed_entry_id(truncated_entry_id)
+                        .flushed_sequence(truncated_sequence)
+                        .truncated_entry_id(Some(truncated_entry_id))
+                        .build(),
+                );
 
-        let mut version_data = self.data.write().unwrap();
-        version_data.version.ssts.mark_all_deleted();
-        version_data.version = new_version;
+                let mut version_data = self.data.write().unwrap();
+                version_data.version.ssts.mark_all_deleted();
+                version_data.version = new_version;
+            }
+            TruncateKind::Partial { files_to_remove } => {
+                let new_version = Arc::new(
+                    VersionBuilder::from_version(version)
+                        .remove_files(files_to_remove.into_iter())
+                        .build(),
+                );
+
+                let mut version_data = self.data.write().unwrap();
+                // notice since it's partial, no need to mark all files as deleted
+                version_data.version = new_version;
+            }
+        };
     }
 
     /// Overwrites the current version with a new version.
