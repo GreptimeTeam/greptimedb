@@ -87,6 +87,13 @@ lazy_static! {
             &["flow_id"],
         )
         .unwrap();
+    pub static ref METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_flow_batching_truncate_count",
+            "flow batching engine truncate action count per flow id",
+            &["flow_id"],
+        )
+        .unwrap();
     pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
         register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(
