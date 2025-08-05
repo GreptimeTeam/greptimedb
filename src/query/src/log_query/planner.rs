@@ -213,32 +213,21 @@ impl LogQueryPlanner {
                 Ok(Some(left.and(right)))
             }
             log_query::ContentFilter::GreatThan { value, inclusive } => {
-                if *inclusive {
-                    Ok(Some(
-                        col_expr
-                            .clone()
-                            .gt_eq(lit(ScalarValue::Utf8(Some(value.clone())))),
-                    ))
+                let comparison_expr = if *inclusive {
+                    col_expr.gt_eq(lit(ScalarValue::Utf8(Some(value.clone()))))
                 } else {
-                    Ok(Some(
-                        col_expr
-                            .clone()
-                            .gt(lit(ScalarValue::Utf8(Some(value.clone())))),
-                    ))
-                }
+                    col_expr.gt(lit(ScalarValue::Utf8(Some(value.clone()))))
+                };
+                Ok(Some(comparison_expr))
             }
             log_query::ContentFilter::LessThan { value, inclusive } => {
                 if *inclusive {
                     Ok(Some(
-                        col_expr
-                            .clone()
-                            .lt_eq(lit(ScalarValue::Utf8(Some(value.clone())))),
+                        col_expr.lt_eq(lit(ScalarValue::Utf8(Some(value.clone())))),
                     ))
                 } else {
                     Ok(Some(
-                        col_expr
-                            .clone()
-                            .lt(lit(ScalarValue::Utf8(Some(value.clone())))),
+                        col_expr.lt(lit(ScalarValue::Utf8(Some(value.clone())))),
                     ))
                 }
             }
@@ -247,7 +236,7 @@ impl LogQueryPlanner {
                     .iter()
                     .map(|v| lit(ScalarValue::Utf8(Some(v.clone()))))
                     .collect();
-                Ok(Some(col_expr.clone().in_list(values, false)))
+                Ok(Some(col_expr.in_list(values, false)))
             }
             log_query::ContentFilter::Compound(filters, op) => {
                 let exprs = filters
