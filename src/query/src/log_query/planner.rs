@@ -19,10 +19,10 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, lit, Expr, LogicalPlan, LogicalPlanBuilder};
+use datafusion_expr::{col, lit, BinaryExpr, Expr, LogicalPlan, LogicalPlanBuilder, Operator};
 use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
-use log_query::{LogExpr, LogQuery, TimeFilter};
+use log_query::{BinaryOperator, LogExpr, LogQuery, TimeFilter};
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -146,7 +146,9 @@ impl LogQueryPlanner {
         column_filter: &log_query::ColumnFilters,
         schema: &ArrowSchema,
     ) -> Result<Option<Expr>> {
-        let col_expr = self.log_expr_to_column_expr(&column_filter.expr, schema)?;
+        // Convert ArrowSchema to DFSchema for the more generic function
+        let df_schema = DFSchema::try_from(schema.clone()).context(DataFusionPlanningSnafu)?;
+        let col_expr = self.log_expr_to_df_expr(&column_filter.expr, &df_schema)?;
 
         let filter_exprs = column_filter
             .filters
@@ -280,38 +282,68 @@ impl LogQueryPlanner {
             })?;
         let args = args
             .iter()
-            .map(|expr| self.log_expr_to_column_expr(expr, schema.as_arrow()))
+            .map(|expr| self.log_expr_to_df_expr(expr, schema))
             .try_collect::<Vec<_>>()?;
         let group_exprs = by
             .iter()
-            .map(|expr| self.log_expr_to_column_expr(expr, schema.as_arrow()))
+            .map(|expr| self.log_expr_to_df_expr(expr, schema))
             .try_collect::<Vec<_>>()?;
         let aggr_expr = aggr_fn.call(args);
 
         Ok((aggr_expr, group_exprs))
     }
 
-    /// Converts a log expression to a column expression.
-    ///
-    /// A column expression here can be a column identifier, a positional identifier, or a literal.
-    /// They don't rely on the context of the query or other columns.
-    fn log_expr_to_column_expr(&self, expr: &LogExpr, schema: &ArrowSchema) -> Result<Expr> {
+    /// Converts a LogExpr to a DataFusion Expr, handling all expression types.
+    fn log_expr_to_df_expr(&self, expr: &LogExpr, schema: &DFSchema) -> Result<Expr> {
         match expr {
             LogExpr::NamedIdent(name) => Ok(col(name)),
             LogExpr::PositionalIdent(index) => Ok(col(schema.field(*index).name())),
             LogExpr::Literal(literal) => Ok(lit(ScalarValue::Utf8(Some(literal.clone())))),
-            _ => UnexpectedLogExprSnafu {
-                expr: expr.clone(),
-                expected: "named identifier, positional identifier, or literal",
+            LogExpr::BinaryOp { left, op, right } => {
+                let left_expr = self.log_expr_to_df_expr(left, schema)?;
+                let right_expr = self.log_expr_to_df_expr(right, schema)?;
+                let df_op = Self::binary_operator_to_df_operator(op)?;
+
+                Ok(Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(left_expr),
+                    op: df_op,
+                    right: Box::new(right_expr),
+                }))
             }
-            .fail(),
+            LogExpr::ScalarFunc { name, args, alias } => {
+                let df_args = args
+                    .iter()
+                    .map(|arg| self.log_expr_to_df_expr(arg, schema))
+                    .try_collect::<Vec<_>>()?;
+                let func = self.session_state.scalar_functions().get(name).context(
+                    UnknownScalarFunctionSnafu {
+                        name: name.to_string(),
+                    },
+                )?;
+                let mut expr = func.call(df_args);
+                if let Some(alias) = alias {
+                    expr = expr.alias(alias);
+                }
+                Ok(expr)
+            }
+            LogExpr::Alias { expr, alias } => {
+                let df_expr = self.log_expr_to_df_expr(expr, schema)?;
+                Ok(df_expr.alias(alias))
+            }
+            LogExpr::AggrFunc { .. } | LogExpr::Filter { .. } | LogExpr::Decompose { .. } => {
+                UnexpectedLogExprSnafu {
+                    expr: expr.clone(),
+                    expected: "not a typical expression",
+                }
+                .fail()
+            }
         }
     }
 
     fn build_scalar_func(&self, schema: &DFSchema, name: &str, args: &[LogExpr]) -> Result<Expr> {
         let args = args
             .iter()
-            .map(|expr| self.log_expr_to_column_expr(expr, schema.as_arrow()))
+            .map(|expr| self.log_expr_to_df_expr(expr, schema))
             .try_collect::<Vec<_>>()?;
         let func = self.session_state.scalar_functions().get(name).context(
             UnknownScalarFunctionSnafu {
@@ -321,6 +353,25 @@ impl LogQueryPlanner {
         let expr = func.call(args);
 
         Ok(expr)
+    }
+
+    /// Convert BinaryOperator to DataFusion's Operator.
+    fn binary_operator_to_df_operator(op: &BinaryOperator) -> Result<Operator> {
+        match op {
+            BinaryOperator::Eq => Ok(Operator::Eq),
+            BinaryOperator::Ne => Ok(Operator::NotEq),
+            BinaryOperator::Lt => Ok(Operator::Lt),
+            BinaryOperator::Le => Ok(Operator::LtEq),
+            BinaryOperator::Gt => Ok(Operator::Gt),
+            BinaryOperator::Ge => Ok(Operator::GtEq),
+            BinaryOperator::Plus => Ok(Operator::Plus),
+            BinaryOperator::Minus => Ok(Operator::Minus),
+            BinaryOperator::Multiply => Ok(Operator::Multiply),
+            BinaryOperator::Divide => Ok(Operator::Divide),
+            BinaryOperator::Modulo => Ok(Operator::Modulo),
+            BinaryOperator::And => Ok(Operator::And),
+            BinaryOperator::Or => Ok(Operator::Or),
+        }
     }
 
     /// Process LogExpr recursively.
@@ -373,10 +424,27 @@ impl LogQueryPlanner {
                 // nothing to do, return empty vec.
             }
             LogExpr::Alias { expr, alias } => {
-                let expr = self.log_expr_to_column_expr(expr, plan_builder.schema().as_arrow())?;
-                let aliased_expr = expr.alias(alias);
+                let schema = plan_builder.schema();
+                let df_expr = self.log_expr_to_df_expr(expr, schema)?;
+                let aliased_expr = df_expr.alias(alias);
                 plan_builder = plan_builder
                     .project([aliased_expr.clone()])
+                    .context(DataFusionPlanningSnafu)?;
+            }
+            LogExpr::BinaryOp { left, op, right } => {
+                let schema = plan_builder.schema();
+                let left_expr = self.log_expr_to_df_expr(left, schema)?;
+                let right_expr = self.log_expr_to_df_expr(right, schema)?;
+                let df_op = Self::binary_operator_to_df_operator(op)?;
+
+                let binary_expr = Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(left_expr),
+                    op: df_op,
+                    right: Box::new(right_expr),
+                });
+
+                plan_builder = plan_builder
+                    .project([binary_expr])
                     .context(DataFusionPlanningSnafu)?;
             }
             _ => {
@@ -1076,17 +1144,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_is_false_filter() {
+    async fn test_build_filter_with_scalar_fn() {
         let table_provider =
             build_test_table_provider(&[("public".to_string(), "test_table".to_string())]).await;
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = LogQueryPlanner::new(table_provider, session_state);
         let schema = mock_schema();
 
-        // Test IsFalse filter
         let column_filter = ColumnFilters {
-            expr: Box::new(LogExpr::NamedIdent("is_active".to_string())),
-            filters: vec![ContentFilter::IsFalse],
+            expr: Box::new(LogExpr::BinaryOp {
+                left: Box::new(LogExpr::ScalarFunc {
+                    name: "character_length".to_string(),
+                    args: vec![LogExpr::NamedIdent("message".to_string())],
+                    alias: None,
+                }),
+                op: BinaryOperator::Gt,
+                right: Box::new(LogExpr::Literal("100".to_string())),
+            }),
+            filters: vec![ContentFilter::IsTrue],
         };
 
         let expr_option = planner
@@ -1095,8 +1170,8 @@ mod tests {
         assert!(expr_option.is_some());
 
         let expr = expr_option.unwrap();
-        let expected_expr = col("is_active").eq(lit(ScalarValue::Boolean(Some(false))));
+        let expected_expr_string = "character_length(message) > Utf8(\"100\") IS TRUE";
 
-        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+        assert_eq!(format!("{}", expr), expected_expr_string);
     }
 }
