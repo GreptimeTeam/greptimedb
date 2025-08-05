@@ -27,9 +27,11 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
+use common_event_recorder::Event;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
@@ -58,6 +60,7 @@ use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Result};
+use crate::events::region_migration_event::RegionMigrationEvent;
 use crate::metrics::{
     METRIC_META_REGION_MIGRATION_ERROR, METRIC_META_REGION_MIGRATION_EXECUTE,
     METRIC_META_REGION_MIGRATION_STAGE_ELAPSED,
@@ -322,7 +325,7 @@ impl ContextFactory for DefaultContextFactory {
 
 /// The context of procedure execution.
 pub struct Context {
-    persistent_ctx: PersistentContext,
+    pub(crate) persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
     in_memory: ResettableKvBackendRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -564,8 +567,8 @@ pub(crate) trait State: Sync + Send + Debug {
 /// Persistent data of [RegionMigrationProcedure].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegionMigrationDataOwned {
-    pub(crate) persistent_ctx: PersistentContext,
-    pub(crate) state: Box<dyn State>,
+    persistent_ctx: PersistentContext,
+    state: Box<dyn State>,
 }
 
 /// Persistent data of [RegionMigrationProcedure].
@@ -742,6 +745,10 @@ impl Procedure for RegionMigrationProcedure {
 
     fn lock_key(&self) -> LockKey {
         LockKey::new(self.context.persistent_ctx.lock_key())
+    }
+
+    fn event(&self) -> Option<Arc<dyn Event>> {
+        Some(Arc::new(RegionMigrationEvent::from_context(&self.context)))
     }
 }
 

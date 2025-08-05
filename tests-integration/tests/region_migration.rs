@@ -23,6 +23,9 @@ use common_event_recorder::{
 };
 use common_meta::key::{RegionDistribution, RegionRoleSet, TableMetadataManagerRef};
 use common_meta::peer::Peer;
+use common_procedure::event::{
+    EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
+};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
@@ -40,8 +43,7 @@ use futures::future::BoxFuture;
 use meta_srv::error;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::events::region_migration_event::{
-    EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME, EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
-    EVENTS_TABLE_REGION_ID_COLUMN_NAME, EVENTS_TABLE_REGION_MIGRATION_STATUS_COLUMN_NAME,
+    EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME, EVENTS_TABLE_REGION_ID_COLUMN_NAME,
     EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME, EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME,
     REGION_MIGRATION_EVENT_TYPE,
 };
@@ -1287,16 +1289,16 @@ async fn run_sql(
 }
 
 enum RegionMigrationEvents {
+    ProcedureId,
+    Timestamp,
+    ProcedureState,
     Schema,
     Table,
     EventType,
     RegionMigrationTriggerReason,
-    RegionMigrationStatus,
-    ProcedureId,
     RegionId,
     SrcNodeId,
     DstNodeId,
-    Timestamp,
 }
 
 impl Iden for RegionMigrationEvents {
@@ -1305,15 +1307,15 @@ impl Iden for RegionMigrationEvents {
             s,
             "{}",
             match self {
+                Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
+                Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+                Self::ProcedureState => EVENTS_TABLE_PROCEDURE_STATE_COLUMN_NAME,
                 Self::Schema => DEFAULT_PRIVATE_SCHEMA_NAME,
                 Self::Table => DEFAULT_EVENTS_TABLE_NAME,
                 Self::EventType => EVENTS_TABLE_TYPE_COLUMN_NAME,
                 Self::RegionMigrationTriggerReason =>
                     EVENTS_TABLE_REGION_MIGRATION_TRIGGER_REASON_COLUMN_NAME,
-                Self::RegionMigrationStatus => EVENTS_TABLE_REGION_MIGRATION_STATUS_COLUMN_NAME,
-                Self::ProcedureId => EVENTS_TABLE_PROCEDURE_ID_COLUMN_NAME,
                 Self::RegionId => EVENTS_TABLE_REGION_ID_COLUMN_NAME,
-                Self::Timestamp => EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
                 Self::SrcNodeId => EVENTS_TABLE_SRC_NODE_ID_COLUMN_NAME,
                 Self::DstNodeId => EVENTS_TABLE_DST_NODE_ID_COLUMN_NAME,
             }
@@ -1333,7 +1335,7 @@ async fn check_region_migration_events_system_table(
     tokio::time::sleep(DEFAULT_FLUSH_INTERVAL_SECONDS * 2).await;
 
     // The query is equivalent to the following SQL:
-    //   SELECT region_migration_trigger_reason, region_migration_status FROM greptime_private.events WHERE
+    //   SELECT region_migration_trigger_reason, procedure_state FROM greptime_private.events WHERE
     //       type = 'region_migration' AND
     //       procedure_id = '${procedure_id}' AND
     //       table_id = ${table_id} AND
@@ -1343,7 +1345,7 @@ async fn check_region_migration_events_system_table(
     //       ORDER BY timestamp ASC
     let query = Query::select()
         .column(RegionMigrationEvents::RegionMigrationTriggerReason)
-        .column(RegionMigrationEvents::RegionMigrationStatus)
+        .column(RegionMigrationEvents::ProcedureState)
         .from((RegionMigrationEvents::Schema, RegionMigrationEvents::Table))
         .and_where(Expr::col(RegionMigrationEvents::EventType).eq(REGION_MIGRATION_EVENT_TYPE))
         .and_where(Expr::col(RegionMigrationEvents::ProcedureId).eq(procedure_id))
@@ -1359,11 +1361,11 @@ async fn check_region_migration_events_system_table(
         .remove(0);
 
     let expected = "\
-+---------------------------------+-------------------------+
-| region_migration_trigger_reason | region_migration_status |
-+---------------------------------+-------------------------+
-| Manual                          | Running                 |
-| Manual                          | Done                    |
-+---------------------------------+-------------------------+";
++---------------------------------+-----------------+
+| region_migration_trigger_reason | procedure_state |
++---------------------------------+-----------------+
+| Manual                          | Running         |
+| Manual                          | Done            |
++---------------------------------+-----------------+";
     check_output_stream(result.unwrap().data, expected).await;
 }

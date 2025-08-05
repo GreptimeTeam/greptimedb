@@ -44,14 +44,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize event"))]
-    DeserializeEvent {
-        #[snafu(source)]
-        error: serde_json::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to insert events"))]
     InsertEvents {
         // BoxedError is utilized here to prevent introducing a circular dependency that would arise from directly referencing `client::error::Error`.
@@ -74,11 +66,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MismatchedSchema { .. } => StatusCode::InvalidArguments,
+            Error::MismatchedSchema { .. } | Error::SerializeEvent { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::NoAvailableFrontend { .. }
             | Error::InsertEvents { .. }
             | Error::KvBackend { .. } => StatusCode::Internal,
-            Error::SerializeEvent { .. } | Error::DeserializeEvent { .. } => StatusCode::Internal,
         }
     }
 

@@ -2628,6 +2628,7 @@ dependencies = [
 name = "common-procedure"
 version = "0.16.0"
 dependencies = [
+ "api",
  "async-stream",
  "async-trait",
  "backon",

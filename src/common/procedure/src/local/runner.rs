@@ -428,7 +428,7 @@ impl Runner {
             procedure.poison_keys(),
             procedure.type_name(),
             self.event_recorder.clone(),
-            procedure.dump().unwrap_or_default(),
+            procedure.event().clone(),
         ));
         let runner = Runner {
             meta: meta.clone(),

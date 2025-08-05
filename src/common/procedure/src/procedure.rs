@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_event_recorder::Event;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
@@ -213,6 +214,11 @@ pub trait Procedure: Send {
     /// Returns the [PoisonKeys] that may cause this procedure to become poisoned during execution.
     fn poison_keys(&self) -> PoisonKeys {
         PoisonKeys::default()
+    }
+
+    /// Returns the [common_event_recorder::Event] that this procedure emits to the event recorder.
+    fn event(&self) -> Option<Arc<dyn Event>> {
+        None
     }
 }
 

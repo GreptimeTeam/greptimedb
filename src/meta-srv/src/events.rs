@@ -24,12 +24,10 @@ use common_event_recorder::error::{
 use common_event_recorder::{build_row_inserts_request, insert_hints, Event, EventHandler};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
-use common_procedure::event::ProcedureEvent;
 use common_telemetry::debug;
 use snafu::{ensure, ResultExt};
 
 use crate::cluster::MetaPeerClientRef;
-use crate::events::region_migration_event::RegionMigrationEvent;
 use crate::lease::MetaPeerLookupService;
 
 pub mod region_migration_event;
@@ -52,29 +50,9 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        let region_migration_events: Box<Vec<Box<dyn Event>>> = Box::new(
-            events
-                .iter()
-                .filter_map(|event| {
-                    event
-                        .as_any()
-                        .downcast_ref::<ProcedureEvent>()
-                        .and_then(|procedure_event| {
-                            RegionMigrationEvent::new_from_procedure_event(procedure_event)
-                                .ok()
-                                .flatten()
-                                .map(|event| Box::new(event) as Box<dyn Event>)
-                        })
-                })
-                .collect(),
-        );
-
         self.build_database_client()
             .await?
-            .row_inserts_with_hints(
-                build_row_inserts_request(&region_migration_events)?,
-                &insert_hints(),
-            )
+            .row_inserts_with_hints(build_row_inserts_request(events)?, &insert_hints())
             .await
             .map_err(BoxedError::new)
             .context(InsertEventsSnafu)?;
