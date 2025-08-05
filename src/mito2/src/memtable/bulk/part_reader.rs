@@ -161,8 +161,7 @@ impl PruneReader {
     }
 }
 
-/// Iterator returns RecordBatch directly instead of Batch.
-/// Uses non-encoded primary key columns for filtering instead of encoded ones.
+/// Iterator for a record batch in a bulk part.
 pub struct BulkPartRecordBatchIter {
     /// The RecordBatch to read from
     record_batch: Option<RecordBatch>,
@@ -173,12 +172,7 @@ pub struct BulkPartRecordBatchIter {
 }
 
 impl BulkPartRecordBatchIter {
-    /// Creates a new [BulkPartRecordBatchIter] from a RecordBatch and non-encoded primary key columns.
-    ///
-    /// # Arguments
-    /// * `record_batch` - The RecordBatch to iterate over
-    /// * `context` - Context for filtering
-    /// * `sequence` - Optional sequence filter
+    /// Creates a new [BulkPartRecordBatchIter] from a RecordBatch.
     pub fn new(
         record_batch: RecordBatch,
         context: BulkIterContextRef,
@@ -207,6 +201,7 @@ impl BulkPartRecordBatchIter {
             .context(ComputeArrowSnafu)
     }
 
+    // TODO(yingwen): Supports sparse encoding which doesn't have decoded primary key columns.
     /// Applies both predicate filtering and sequence filtering in a single pass.
     /// Returns None if the filtered batch is empty.
     fn apply_combined_filters(
@@ -259,7 +254,6 @@ impl BulkPartRecordBatchIter {
             let sequence_filter =
                 datatypes::arrow::compute::kernels::cmp::lt_eq(sequence_column, sequence)
                     .context(ComputeArrowSnafu)?;
-            println!("sequence_filter: {:?}", sequence_filter);
             // Combine with existing filter using AND operation
             combined_filter = match combined_filter {
                 None => Some(sequence_filter),
