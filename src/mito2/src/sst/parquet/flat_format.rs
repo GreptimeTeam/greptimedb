@@ -248,11 +248,6 @@ impl FlatReadFormat {
         RecordBatch::try_new(record_batch.schema(), columns).context(NewRecordBatchSnafu)
     }
 
-    /// Returns the column index in SST of the column with `column_id`.
-    pub(crate) fn sst_column_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
-        self.column_id_to_sst_index.get(&column_id).copied()
-    }
-
     fn get_stat_values(
         &self,
         row_groups: &[impl Borrow<RowGroupMetaData>],

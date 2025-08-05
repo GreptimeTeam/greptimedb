@@ -232,7 +232,7 @@ impl BulkPartRecordBatchIter {
                     .read_format()
                     .as_flat()
                     .unwrap()
-                    .sst_column_index_by_id(filter_ctx.column_id())
+                    .projected_index_by_id(filter_ctx.column_id())
                 else {
                     continue;
                 };
@@ -290,14 +290,14 @@ impl BulkPartRecordBatchIter {
     }
 
     fn process_batch(&mut self, record_batch: RecordBatch) -> error::Result<Option<RecordBatch>> {
+        // Apply projection first.
+        let projected_batch = self.apply_projection(record_batch)?;
         // Apply combined filtering (both predicate and sequence filters)
-        let Some(filtered_batch) = self.apply_combined_filters(record_batch)? else {
+        let Some(filtered_batch) = self.apply_combined_filters(projected_batch)? else {
             return Ok(None);
         };
-        // Apply projection last
-        let projected_batch = self.apply_projection(filtered_batch)?;
 
-        Ok(Some(projected_batch))
+        Ok(Some(filtered_batch))
     }
 }
 
@@ -366,7 +366,14 @@ mod tests {
 
         let record_batch = RecordBatch::try_new(
             schema,
-            vec![key1, field1, timestamp, primary_key, sequence, op_type],
+            vec![
+                key1,
+                field1,
+                timestamp,
+                primary_key.clone(),
+                sequence,
+                op_type,
+            ],
         )
         .unwrap();
 
@@ -431,7 +438,7 @@ mod tests {
 
         let context = Arc::new(BulkIterContext::new(
             Arc::new(region_metadata),
-            &Some(&[1, 2]),
+            &Some(&[0, 2]),
             Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
             true,
         ));
@@ -441,7 +448,10 @@ mod tests {
         assert_eq!(1, result.len());
         assert_eq!(1, result[0].num_rows());
         assert_eq!(5, result[0].num_columns());
-        let expect_field = Arc::new(Int64Array::from(vec![12])) as ArrayRef;
-        assert_eq!(&expect_field, result[0].column(0));
+        let expect_sequence = Arc::new(UInt64Array::from(vec![2])) as ArrayRef;
+        assert_eq!(
+            &expect_sequence,
+            result[0].column(result[0].num_columns() - 2)
+        );
     }
 }
