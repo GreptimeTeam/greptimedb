@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 asynchronous-codec = "0.7.0"
-bytemuck.workspace = true
+bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
 bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
