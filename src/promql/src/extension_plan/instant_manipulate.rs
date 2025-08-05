@@ -389,14 +389,30 @@ impl InstantManipulateStream {
                 )
             })?;
 
+        // Early return for empty input
+        if ts_column.is_empty() {
+            return Ok(input);
+        }
+
         // field column for staleness check
         let field_column = self
             .field_index
             .and_then(|index| input.column(index).as_any().downcast_ref::<Float64Array>());
 
+        // Optimize iteration range based on actual data bounds
+        let first_ts = ts_column.value(0);
+        let last_ts = ts_column.value(ts_column.len() - 1);
+        let last_useful = last_ts + self.lookback_delta;
+
+        let max_start = first_ts.max(self.start);
+        let min_end = last_useful.min(self.end);
+
+        let aligned_start = self.start + (max_start - self.start) / self.interval * self.interval;
+        let aligned_end = self.end - (self.end - min_end) / self.interval * self.interval;
+
         let mut cursor = 0;
 
-        let aligned_ts_iter = (self.start..=self.end).step_by(self.interval as usize);
+        let aligned_ts_iter = (aligned_start..=aligned_end).step_by(self.interval as usize);
         let mut aligned_ts = vec![];
 
         // calculate the offsets to take
@@ -809,6 +825,14 @@ mod test {
             \n| 1970-01-01T00:02:00.001 | 12.0  |\
             \n+-------------------------+-------+",
         );
-        do_normalize_test(1, 900_000_000_000_000, 10_000, 10_000, expected, true).await;
+        do_normalize_test(
+            -900_000_000_000_000 + 1,
+            900_000_000_000_000,
+            10_000,
+            10_000,
+            expected,
+            true,
+        )
+        .await;
     }
 }
