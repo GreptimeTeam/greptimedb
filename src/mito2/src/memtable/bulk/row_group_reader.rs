@@ -118,10 +118,7 @@ impl RowGroupReaderContext for BulkIterContextRef {
     }
 }
 
-pub(crate) type MemtableRowGroupReader = RowGroupReaderBase<BulkIterContextRef>;
-
 pub(crate) struct MemtableRowGroupReaderBuilder {
-    context: BulkIterContextRef,
     projection: ProjectionMask,
     parquet_metadata: Arc<ParquetMetaData>,
     field_levels: FieldLevels,
@@ -130,7 +127,7 @@ pub(crate) struct MemtableRowGroupReaderBuilder {
 
 impl MemtableRowGroupReaderBuilder {
     pub(crate) fn try_new(
-        context: BulkIterContextRef,
+        context: &BulkIterContextRef,
         projection: ProjectionMask,
         parquet_metadata: Arc<ParquetMetaData>,
         data: Bytes,
@@ -141,7 +138,6 @@ impl MemtableRowGroupReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection.clone(), hint)
                 .context(ReadDataPartSnafu)?;
         Ok(Self {
-            context,
             projection,
             parquet_metadata,
             field_levels,
@@ -154,7 +150,7 @@ impl MemtableRowGroupReaderBuilder {
         &self,
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
-    ) -> error::Result<MemtableRowGroupReader> {
+    ) -> error::Result<ParquetRecordBatchReader> {
         let mut row_group = MemtableRowGroupPageFetcher::create(
             row_group_idx,
             &self.parquet_metadata,
@@ -165,13 +161,12 @@ impl MemtableRowGroupReaderBuilder {
 
         // Builds the parquet reader.
         // Now the row selection is None.
-        let reader = ParquetRecordBatchReader::try_new_with_row_groups(
+        ParquetRecordBatchReader::try_new_with_row_groups(
             &self.field_levels,
             &row_group,
             DEFAULT_READ_BATCH_SIZE,
             row_selection,
         )
-        .context(ReadDataPartSnafu)?;
-        Ok(MemtableRowGroupReader::create(self.context.clone(), reader))
+        .context(ReadDataPartSnafu)
     }
 }
