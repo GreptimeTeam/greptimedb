@@ -23,7 +23,8 @@ use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
-    LayeredCacheRegistryRef, TableNameCacheRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
+    LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRoute, TableRouteCacheRef,
+    ViewInfoCacheRef,
 };
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
@@ -41,7 +42,7 @@ use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use table::dist_table::DistTable;
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
@@ -369,6 +370,17 @@ impl CatalogManager for KvBackendCatalogManager {
         }
 
         Ok(None)
+    }
+
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
+        let table_info_cache: TableInfoCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_info_cache",
+            })?;
+        table_info_cache
+            .get_by_ref(&table_id)
+            .await
+            .context(GetTableCacheSnafu)
     }
 
     async fn tables_by_ids(
