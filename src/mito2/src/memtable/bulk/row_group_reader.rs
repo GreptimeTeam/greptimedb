@@ -28,7 +28,7 @@ use crate::error;
 use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::sst::parquet::format::ReadFormat;
-use crate::sst::parquet::reader::{RowGroupReaderBase, RowGroupReaderContext};
+use crate::sst::parquet::reader::RowGroupReaderContext;
 use crate::sst::parquet::row_group::{ColumnChunkIterator, RowGroupBase};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 

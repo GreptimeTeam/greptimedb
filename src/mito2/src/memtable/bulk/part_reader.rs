@@ -26,10 +26,9 @@ use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
-use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu, ReadDataPartSnafu};
+use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
-use crate::read::Batch;
 use crate::sst::parquet::flat_format::sequence_column_index;
 use crate::sst::parquet::reader::{MaybeFilter, RowGroupReaderContext};
 
@@ -367,7 +366,6 @@ mod tests {
             Arc::new(region_metadata.clone()),
             &None, // No projection
             None,  // No predicate
-            true,
         ));
         // Iterates all rows.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
@@ -391,7 +389,6 @@ mod tests {
             Arc::new(region_metadata),
             &Some(&[0, 2]),
             Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
-            true,
         ));
         // Creates iter with projection and predicate.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
