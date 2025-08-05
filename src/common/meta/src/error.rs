@@ -987,6 +987,39 @@ pub enum Error {
         table_name: String,
         table_id: TableId,
     },
+
+    #[snafu(display(
+        "Column not found in column metadata, column_name: {}, column_id: {}",
+        column_name,
+        column_id
+    ))]
+    ColumnNotFound { column_name: String, column_id: u32 },
+
+    #[snafu(display(
+        "Column id mismatch, column_name: {}, expected column_id: {}, actual column_id: {}",
+        column_name,
+        expected_column_id,
+        actual_column_id
+    ))]
+    ColumnIdMismatch {
+        column_name: String,
+        expected_column_id: u32,
+        actual_column_id: u32,
+    },
+
+    #[snafu(display(
+        "Timestamp column mismatch, expected column_name: {}, expected column_id: {}, actual column_name: {}, actual column_id: {}",
+        expected_column_name,
+        expected_column_id,
+        actual_column_name,
+        actual_column_id,
+    ))]
+    TimestampMismatch {
+        expected_column_name: String,
+        expected_column_id: u32,
+        actual_column_name: String,
+        actual_column_id: u32,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1012,7 +1045,10 @@ impl ErrorExt for Error {
             | MissingColumnIds { .. }
             | MissingColumnInColumnMetadata { .. }
             | MismatchColumnId { .. }
-            | ColumnMetadataConflicts { .. } => StatusCode::Unexpected,
+            | ColumnMetadataConflicts { .. }
+            | ColumnNotFound { .. }
+            | ColumnIdMismatch { .. }
+            | TimestampMismatch { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,

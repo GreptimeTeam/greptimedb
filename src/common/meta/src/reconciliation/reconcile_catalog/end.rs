@@ -33,7 +33,7 @@ impl State for ReconcileCatalogEnd {
         procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         info!(
-            "Reconcile catalog completed. catalog: {}, procedure_id: {}, metrics: {}, elapsed: {:?}",
+            "Catalog reconciliation completed. catalog: {}, procedure_id: {}, metrics: {}, elapsed: {:?}",
             ctx.persistent_ctx.catalog,
             procedure_ctx.procedure_id,
             ctx.volatile_ctx.metrics,

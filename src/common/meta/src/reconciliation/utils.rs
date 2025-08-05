@@ -31,8 +31,10 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{
-    MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, ProcedureStateReceiverNotFoundSnafu,
-    ProcedureStateReceiverSnafu, Result, UnexpectedSnafu, WaitProcedureSnafu,
+    ColumnIdMismatchSnafu, ColumnNotFoundSnafu, MismatchColumnIdSnafu,
+    MissingColumnInColumnMetadataSnafu, ProcedureStateReceiverNotFoundSnafu,
+    ProcedureStateReceiverSnafu, Result, TimestampMismatchSnafu, UnexpectedSnafu,
+    WaitProcedureSnafu,
 };
 use crate::key::TableMetadataManagerRef;
 use crate::metrics;
@@ -53,20 +55,6 @@ impl<'a> From<&'a RegionMetadata> for PartialRegionMetadata<'a> {
             primary_key: &region_metadata.primary_key,
             table_id: region_metadata.region_id.table_id(),
         }
-    }
-}
-
-/// A display wrapper for [`ColumnMetadata`] that formats the column metadata in a more readable way.
-struct ColumnMetadataDisplay<'a>(pub &'a ColumnMetadata);
-
-impl<'a> fmt::Debug for ColumnMetadataDisplay<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let col = self.0;
-        write!(
-            f,
-            "Column {{ name: {}, id: {}, semantic_type: {:?}, data_type: {:?} }}",
-            col.column_schema.name, col.column_id, col.semantic_type, col.column_schema.data_type,
-        )
     }
 }
 
@@ -118,21 +106,7 @@ pub(crate) fn resolve_column_metadatas_with_metasrv(
     let mut regions_ids = vec![];
     for region_metadata in region_metadatas {
         if region_metadata.column_metadatas != column_metadatas {
-            let is_invariant_preserved = check_column_metadata_invariants(
-                column_metadatas,
-                &region_metadata.column_metadatas,
-            );
-            ensure!(
-                is_invariant_preserved,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column metadata invariants violated for region {}. Resolved column metadata: {:?}, region column metadata: {:?}",
-                        region_metadata.region_id,
-                        column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                        region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                    )
-                }
-            );
+            check_column_metadata_invariants(column_metadatas, &region_metadata.column_metadatas)?;
             regions_ids.push(region_metadata.region_id);
         }
     }
@@ -171,21 +145,10 @@ pub(crate) fn resolve_column_metadatas_with_latest(
     let mut region_ids = vec![];
     for region_metadata in region_metadatas {
         if PartialRegionMetadata::from(region_metadata) != latest_column_metadatas {
-            let is_invariant_preserved = check_column_metadata_invariants(
+            check_column_metadata_invariants(
                 &latest_region_metadata.column_metadatas,
                 &region_metadata.column_metadatas,
-            );
-            ensure!(
-                is_invariant_preserved,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column metadata invariants violated for region {}. Resolved column metadata: {:?}, region column metadata: {:?}",
-                        region_metadata.region_id,
-                        latest_column_metadatas.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                        region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>()
-                    )
-                }
-            );
+            )?;
             region_ids.push(region_metadata.region_id);
         }
     }
@@ -247,7 +210,7 @@ pub(crate) fn build_column_metadata_from_table_info(
 pub(crate) fn check_column_metadata_invariants(
     new_column_metadatas: &[ColumnMetadata],
     column_metadatas: &[ColumnMetadata],
-) -> bool {
+) -> Result<()> {
     let new_primary_keys = new_column_metadatas
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
@@ -260,22 +223,50 @@ pub(crate) fn check_column_metadata_invariants(
         .map(|c| (c.column_schema.name.as_str(), c.column_id));
 
     for (name, id) in old_primary_keys {
-        if new_primary_keys.get(name) != Some(&id) {
-            return false;
-        }
+        let column_id = new_primary_keys
+            .get(name)
+            .cloned()
+            .context(ColumnNotFoundSnafu {
+                column_name: name.to_string(),
+                column_id: id,
+            })?;
+
+        ensure!(
+            column_id == id,
+            ColumnIdMismatchSnafu {
+                column_name: name,
+                expected_column_id: id,
+                actual_column_id: column_id,
+            }
+        );
     }
 
     let new_ts_column = new_column_metadatas
         .iter()
         .find(|c| c.semantic_type == SemanticType::Timestamp)
-        .map(|c| (c.column_schema.name.as_str(), c.column_id));
+        .map(|c| (c.column_schema.name.as_str(), c.column_id))
+        .context(UnexpectedSnafu {
+            err_msg: "Timestamp column not found in new column metadata",
+        })?;
 
     let old_ts_column = column_metadatas
         .iter()
         .find(|c| c.semantic_type == SemanticType::Timestamp)
-        .map(|c| (c.column_schema.name.as_str(), c.column_id));
+        .map(|c| (c.column_schema.name.as_str(), c.column_id))
+        .context(UnexpectedSnafu {
+            err_msg: "Timestamp column not found in column metadata",
+        })?;
+    ensure!(
+        new_ts_column == old_ts_column,
+        TimestampMismatchSnafu {
+            expected_column_name: old_ts_column.0,
+            expected_column_id: old_ts_column.1,
+            actual_column_name: new_ts_column.0,
+            actual_column_id: new_ts_column.1,
+        }
+    );
 
-    new_ts_column == old_ts_column
+    Ok(())
 }
 
 /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
@@ -1165,10 +1156,7 @@ mod tests {
             semantic_type: SemanticType::Field,
             column_id: 3,
         });
-        assert!(check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap();
     }
 
     #[test]
@@ -1176,18 +1164,12 @@ mod tests {
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
         new_column_metadatas.retain(|c| c.semantic_type != SemanticType::Timestamp);
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
 
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
         new_column_metadatas.retain(|c| c.semantic_type != SemanticType::Tag);
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
     }
 
     #[test]
@@ -1200,10 +1182,7 @@ mod tests {
         {
             col.column_id = 100;
         }
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
 
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
@@ -1213,10 +1192,7 @@ mod tests {
         {
             col.column_id = 100;
         }
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
     }
 
     #[test]

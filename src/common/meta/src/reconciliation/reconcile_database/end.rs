@@ -38,7 +38,7 @@ impl State for ReconcileDatabaseEnd {
             ctx.persistent_ctx.catalog,
             procedure_ctx.procedure_id,
             ctx.metrics(),
-            ctx.volatile_ctx.start_time.elapsed().as_secs()
+            ctx.volatile_ctx.start_time.elapsed(),
         );
         Ok((Box::new(ReconcileDatabaseEnd), Status::done()))
     }
