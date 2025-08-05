@@ -242,7 +242,7 @@ impl DirtyTimeWindows {
         window_cnt: usize,
         flow_id: FlowId,
         task_ctx: Option<&BatchingTask>,
-    ) -> Result<Option<datafusion_expr::Expr>, Error> {
+    ) -> Result<Option<FilterExprInfo>, Error> {
         ensure!(
             window_size.num_seconds() > 0,
             UnexpectedSnafu {
@@ -372,7 +372,15 @@ impl DirtyTimeWindows {
             .with_label_values(&[flow_id.to_string().as_str()])
             .observe(stalled_time_range.num_seconds() as f64);
 
+        let std_window_size = window_size.to_std().map_err(|e| {
+            InternalSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
+
         let mut expr_lst = vec![];
+        let mut time_ranges = vec![];
         for (start, end) in to_be_query.into_iter() {
             // align using time window exprs
             let (start, end) = if let Some(ctx) = task_ctx {
@@ -386,26 +394,31 @@ impl DirtyTimeWindows {
             } else {
                 (start, end)
             };
+            let end = end.unwrap_or(start.add_duration(std_window_size).context(TimeSnafu)?);
+            time_ranges.push((start, end));
+
             debug!(
                 "Time window start: {:?}, end: {:?}",
                 start.to_iso8601_string(),
-                end.map(|t| t.to_iso8601_string())
+                end.to_iso8601_string()
             );
 
             use datafusion_expr::{col, lit};
             let lower = to_df_literal(start)?;
-            let upper = end.map(to_df_literal).transpose()?;
-            let expr = if let Some(upper) = upper {
-                col(col_name)
-                    .gt_eq(lit(lower))
-                    .and(col(col_name).lt(lit(upper)))
-            } else {
-                col(col_name).gt_eq(lit(lower))
-            };
+            let upper = to_df_literal(end)?;
+            let expr = col(col_name)
+                .gt_eq(lit(lower))
+                .and(col(col_name).lt(lit(upper)));
             expr_lst.push(expr);
         }
         let expr = expr_lst.into_iter().reduce(|a, b| a.or(b));
-        Ok(expr)
+        let ret = expr.map(|expr| FilterExprInfo {
+            expr,
+            col_name: col_name.to_string(),
+            time_ranges,
+            window_size,
+        });
+        Ok(ret)
     }
 
     fn align_time_window(
@@ -517,6 +530,25 @@ fn to_df_literal(value: Timestamp) -> Result<datafusion_common::ScalarValue, Err
 enum ExecState {
     Idle,
     Executing,
+}
+
+/// Filter Expression's information
+#[derive(Debug, Clone)]
+pub struct FilterExprInfo {
+    pub expr: datafusion_expr::Expr,
+    pub col_name: String,
+    pub time_ranges: Vec<(Timestamp, Timestamp)>,
+    pub window_size: chrono::Duration,
+}
+
+impl FilterExprInfo {
+    pub fn total_window_length(&self) -> chrono::Duration {
+        self.time_ranges
+            .iter()
+            .fold(chrono::Duration::zero(), |acc, (start, end)| {
+                acc + end.sub(start).unwrap_or(chrono::Duration::zero())
+            })
+    }
 }
 
 #[cfg(test)]
@@ -707,7 +739,7 @@ mod test {
             let unparser = datafusion::sql::unparser::Unparser::default();
             let to_sql = filter_expr
                 .as_ref()
-                .map(|e| unparser.expr_to_sql(e).unwrap().to_string());
+                .map(|e| unparser.expr_to_sql(&e.expr).unwrap().to_string());
             assert_eq!(expected_filter_expr, to_sql.as_deref());
         }
     }
