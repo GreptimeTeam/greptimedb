@@ -166,6 +166,7 @@ impl LogQueryPlanner {
     }
 
     /// Builds filter expression from a single ContentFilter using a provided column expression
+    #[allow(clippy::only_used_in_recursion)]
     fn build_content_filter_with_expr(
         &self,
         col_expr: Expr,
