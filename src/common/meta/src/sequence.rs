@@ -605,4 +605,44 @@ mod tests {
         // next() should start from the larger initial value
         assert_eq!(seq.next().await.unwrap(), 100);
     }
+
+    #[tokio::test]
+    async fn test_sequence_initial_greater_than_storage() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+
+        // Test sequence behavior when initial > storage value
+        // This verifies the max(storage, initial) logic works correctly
+
+        // Step 1: Establish a low value in storage
+        let seq1 = SequenceBuilder::new("max_test", kv_backend.clone())
+            .initial(10)
+            .step(5)
+            .build();
+        assert_eq!(seq1.next().await.unwrap(), 10); // storage: 15
+
+        // Step 2: Create sequence with much larger initial
+        let seq2 = SequenceBuilder::new("max_test", kv_backend.clone())
+            .initial(100) // much larger than storage (15)
+            .step(5)
+            .build();
+
+        // seq2 should start from max(15, 100) = 100 (its initial value)
+        assert_eq!(seq2.next().await.unwrap(), 100); // storage updated to: 105
+        assert_eq!(seq2.peek().await.unwrap(), 105);
+
+        // Step 3: Verify subsequent sequences continue from updated storage
+        let seq3 = SequenceBuilder::new("max_test", kv_backend)
+            .initial(50) // smaller than current storage (105)
+            .step(1)
+            .build();
+
+        // seq3 should use max(105, 50) = 105 (storage value)
+        assert_eq!(seq3.peek().await.unwrap(), 105);
+        assert_eq!(seq3.next().await.unwrap(), 105); // storage: 106
+
+        // This demonstrates the correct max(storage, initial) behavior:
+        // - Sequences never generate values below their initial requirement
+        // - Storage always reflects the highest allocated value
+        // - Value gaps (15-99) are acceptable to maintain minimum constraints
+    }
 }
