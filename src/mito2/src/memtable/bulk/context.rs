@@ -24,22 +24,24 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
 use crate::sst::parquet::file_range::RangeBase;
+use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::sst::parquet::stats::RowGroupPruningStats;
 
 pub(crate) type BulkIterContextRef = Arc<BulkIterContext>;
 
-pub(crate) struct BulkIterContext {
+pub struct BulkIterContext {
     pub(crate) base: RangeBase,
     pub(crate) predicate: Option<Predicate>,
 }
 
 impl BulkIterContext {
-    pub(crate) fn new(
+    pub fn new(
         region_metadata: RegionMetadataRef,
         projection: &Option<&[ColumnId]>,
         predicate: Option<Predicate>,
+        flat_format: bool,
     ) -> Self {
         let codec = build_primary_key_codec(&region_metadata);
 
@@ -54,7 +56,7 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = build_read_format(region_metadata, projection);
+        let read_format = build_read_format(region_metadata, projection, flat_format);
 
         Self {
             base: RangeBase {
@@ -99,9 +101,10 @@ impl BulkIterContext {
 fn build_read_format(
     region_metadata: RegionMetadataRef,
     projection: &Option<&[ColumnId]>,
+    flat_format: bool,
 ) -> ReadFormat {
     let read_format = if let Some(column_ids) = &projection {
-        ReadFormat::new(region_metadata, column_ids.iter().copied())
+        ReadFormat::new(region_metadata, column_ids.iter().copied(), flat_format)
     } else {
         // No projection, lists all column ids to read.
         ReadFormat::new(
@@ -110,6 +113,7 @@ fn build_read_format(
                 .column_metadatas
                 .iter()
                 .map(|col| col.column_id),
+            flat_format,
         )
     };
 
