@@ -238,6 +238,13 @@ impl BatchingTask {
     ) -> Result<Option<(u32, Duration)>, Error> {
         if let Some(new_query) = self.gen_insert_plan(engine, max_window_cnt).await? {
             debug!("Generate new query: {}", new_query.plan);
+            // also try truncate if needed before execute
+            self.try_truncate(
+                &new_query,
+                frontend_client,
+                self.config.flow_id.to_string().as_str(),
+            )
+            .await?;
             self.execute_logical_plan(frontend_client, &new_query.plan)
                 .await
         } else {
@@ -351,6 +358,36 @@ impl BatchingTask {
                 name: self.config.sink_table_name.join("."),
             }
             .fail()
+        }
+    }
+
+    /// Try truncate the sink table if needed
+    async fn try_truncate(
+        &self,
+        info: &PlanInfo,
+        frontend_client: &Arc<FrontendClient>,
+        flow_id_str: &str,
+    ) -> Result<u32, Error> {
+        if let Some(filter) = &info.filter
+            && filter.total_window_length() > filter.window_size
+            && !filter.time_ranges.is_empty()
+        {
+            METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT
+                .with_label_values(&[&flow_id_str])
+                .inc();
+            debug!(
+                "Flow id = {:?} will truncate sink table {} with time ranges: {:?}",
+                self.config.flow_id,
+                self.config.sink_table_name.join(","),
+                filter.time_ranges
+            );
+            self.truncate_sink_table_with_ranges(
+                filter.time_ranges.clone(),
+                frontend_client.clone(),
+            )
+            .await
+        } else {
+            Ok(0)
         }
     }
 
@@ -517,23 +554,17 @@ impl BatchingTask {
             };
 
             if let Some(info) = &new_query {
-                if let Some(filter) = &info.filter {
-                    if filter.total_window_length() > filter.window_size
-                        && !filter.time_ranges.is_empty()
-                    {
-                        METRIC_FLOW_BATCHING_ENGINE_TRUNCATE_CNT
-                            .with_label_values(&[&flow_id_str])
-                            .inc();
-                        if let Err(err) = self
-                            .truncate_sink_table_with_ranges(
-                                filter.time_ranges.clone(),
-                                frontend_client.clone(),
-                            )
-                            .await
-                        {
-                            common_telemetry::error!(err; "Failed to truncate sink table for flow={}, time_ranges={:?}", self.config.flow_id, filter.time_ranges);
-                        }
-                    }
+                if let Err(err) = self
+                    .try_truncate(info, &frontend_client, &flow_id_str)
+                    .await
+                {
+                    common_telemetry::error!(
+                        err;
+                        "Failed to truncate sink table {} for flow={}, time_ranges={:?}",
+                        self.config.flow_id,
+                        self.config.sink_table_name.join(","),
+                        info.filter.as_ref().map(|filter|&filter.time_ranges)
+                    );
                 }
             }
 
