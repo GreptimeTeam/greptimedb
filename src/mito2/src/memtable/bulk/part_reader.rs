@@ -282,10 +282,6 @@ impl BulkPartRecordBatchIter {
             datatypes::arrow::compute::filter_record_batch(&record_batch, &filter_array)
                 .context(ComputeArrowSnafu)?;
 
-        if filtered_batch.num_rows() == 0 {
-            return Ok(None);
-        }
-
         Ok(Some(filtered_batch))
     }
 
