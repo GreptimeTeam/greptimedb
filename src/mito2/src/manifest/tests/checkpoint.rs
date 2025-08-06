@@ -25,6 +25,7 @@ use crate::manifest::action::{
     RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
 use crate::manifest::manager::RegionManifestManager;
+use crate::manifest::storage::CheckpointMetadata;
 use crate::manifest::tests::utils::basic_region_metadata;
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::sst::file::{FileId, FileMeta};
@@ -72,6 +73,7 @@ fn nop_action() -> RegionMetaActionList {
     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
         files_to_add: vec![],
         files_to_remove: vec![],
+        timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
@@ -178,9 +180,11 @@ async fn manager_with_checkpoint_distance_1() {
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
-    let expected_json =
-        "{\"size\":901,\"version\":10,\"checksum\":2571452538,\"extend_metadata\":{}}";
-    assert_eq!(expected_json, raw_json);
+    let checkpoint_metadata: CheckpointMetadata =
+        serde_json::from_str(raw_json).expect("Failed to parse checkpoint metadata");
+
+    // size and checksum vary due to different machine time, so we only check version
+    assert_eq!(checkpoint_metadata.version, 10);
 
     // reopen the manager
     manager.stop().await;
@@ -261,6 +265,7 @@ async fn checkpoint_with_different_compression_types() {
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -323,6 +328,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,

@@ -1041,6 +1041,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Duration out of range: {input:?}"))]
+    DurationOutOfRange {
+        input: std::time::Duration,
+        #[snafu(source)]
+        error: chrono::OutOfRangeError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -1098,7 +1107,8 @@ impl ErrorExt for Error {
             | InvalidRegionOptions { .. }
             | InvalidWalReadRequest { .. }
             | PartitionOutOfRange { .. }
-            | ParseJobId { .. } => StatusCode::InvalidArguments,
+            | ParseJobId { .. }
+            | DurationOutOfRange { .. } => StatusCode::InvalidArguments,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
