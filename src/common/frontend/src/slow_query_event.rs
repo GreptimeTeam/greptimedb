@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use session::context::QueryContextRef;
 
-pub mod error;
-pub mod frontend;
-pub mod heartbeat;
-pub mod instance;
-pub(crate) mod limiter;
-pub(crate) mod metrics;
-pub mod server;
-pub mod service_config;
-pub mod slow_query_recorder;
-mod stream_wrapper;
+#[derive(Debug)]
+pub struct SlowQueryEvent {
+    pub cost: u64,
+    pub threshold: u64,
+    pub query: String,
+    pub is_promql: bool,
+    pub query_ctx: QueryContextRef,
+    pub promql_range: Option<u64>,
+    pub promql_step: Option<u64>,
+    pub promql_start: Option<i64>,
+    pub promql_end: Option<i64>,
+}
