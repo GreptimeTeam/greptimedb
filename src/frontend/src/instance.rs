@@ -32,13 +32,16 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::process_manager::{ProcessManagerRef, QueryStatement as CatalogQueryStatement};
+use catalog::process_manager::{
+    ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
+};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::cancellation::CancellableFuture;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::{BoxedError, ErrorExt};
+use common_event_recorder::EventRecorderRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::table_name::TableNameKey;
@@ -99,7 +102,6 @@ use crate::error::{
     StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::limiter::LimiterRef;
-use crate::slow_query_recorder::SlowQueryRecorder;
 use crate::stream_wrapper::CancellableStreamWrapper;
 
 lazy_static! {
@@ -119,7 +121,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
-    slow_query_recorder: Option<SlowQueryRecorder>,
+    event_recorder: Option<EventRecorderRef>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
 
@@ -222,9 +224,16 @@ impl Instance {
         let query_interceptor = query_interceptor.as_ref();
 
         if should_capture_statement(Some(&stmt)) {
-            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
-                recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
-            });
+            let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
+                Some(SlowQueryTimer::new(
+                    CatalogQueryStatement::Sql(stmt.clone()),
+                    Some(Duration::from_secs(1)),
+                    Some(1.0),
+                    event_recorder,
+                ))
+            } else {
+                None
+            };
 
             let ticket = self.process_manager.register_query(
                 query_ctx.current_catalog().to_string(),
@@ -586,9 +595,16 @@ impl SqlQueryHandler for Instance {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
             let query = stmt.to_string();
-            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
-                recorder.start(CatalogQueryStatement::Sql(stmt), query_ctx.clone())
-            });
+            let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
+                Some(SlowQueryTimer::new(
+                    CatalogQueryStatement::Sql(stmt.clone()),
+                    Some(Duration::from_secs(1)),
+                    Some(1.0),
+                    event_recorder,
+                ))
+            } else {
+                None
+            };
 
             let ticket = self.process_manager.register_query(
                 query_ctx.current_catalog().to_string(),
@@ -738,10 +754,16 @@ impl PrometheusHandler for Instance {
         };
         let query = query_statement.to_string();
 
-        let slow_query_timer = self
-            .slow_query_recorder
-            .as_ref()
-            .and_then(|recorder| recorder.start(query_statement, query_ctx.clone()));
+        let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
+            Some(SlowQueryTimer::new(
+                query_statement,
+                Some(Duration::from_secs(1)),
+                Some(1.0),
+                event_recorder,
+            ))
+        } else {
+            None
+        };
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),

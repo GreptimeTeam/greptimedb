@@ -1666,6 +1666,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-event-recorder",
  "common-frontend",
  "common-macro",
  "common-meta",
@@ -2359,13 +2360,17 @@ dependencies = [
 name = "common-frontend"
 version = "0.17.0"
 dependencies = [
+ "api",
  "async-trait",
  "common-error",
+ "common-event-recorder",
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-time",
  "greptime-proto",
  "meta-client",
+ "serde",
  "session",
  "snafu 0.8.5",
  "tokio",
@@ -4878,6 +4883,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-event-recorder",
  "common-frontend",
  "common-function",
  "common-grpc",

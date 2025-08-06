@@ -21,17 +21,16 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
+use common_event_recorder::EventRecorderRef;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_frontend::slow_query_event::SlowQueryEvent;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{debug, info, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
 use rand::random;
-use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::statement::Statement;
-use tokio::sync::mpsc::Sender;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -249,6 +248,8 @@ pub struct Ticket {
     pub(crate) manager: ProcessManagerRef,
     pub(crate) id: ProcessId,
     pub cancellation_handle: Arc<CancellationHandle>,
+
+    // Keep the handle of the slow query timer to ensure it will trigger the event recording when dropped.
     _slow_query_timer: Option<SlowQueryTimer>,
 }
 
@@ -295,27 +296,24 @@ impl Debug for CancellableProcess {
 pub struct SlowQueryTimer {
     start: Instant,
     stmt: QueryStatement,
-    query_ctx: QueryContextRef,
     threshold: Option<Duration>,
     sample_ratio: Option<f64>,
-    tx: Sender<SlowQueryEvent>,
+    recorder: EventRecorderRef,
 }
 
 impl SlowQueryTimer {
     pub fn new(
         stmt: QueryStatement,
-        query_ctx: QueryContextRef,
         threshold: Option<Duration>,
         sample_ratio: Option<f64>,
-        tx: Sender<SlowQueryEvent>,
+        recorder: EventRecorderRef,
     ) -> Self {
         Self {
             start: Instant::now(),
             stmt,
-            query_ctx,
             threshold,
             sample_ratio,
-            tx,
+            recorder,
         }
     }
 }
@@ -326,7 +324,6 @@ impl SlowQueryTimer {
             cost: elapsed.as_millis() as u64,
             threshold: threshold.as_millis() as u64,
             query: "".to_string(),
-            query_ctx: self.query_ctx.clone(),
 
             // The following fields are only used for PromQL queries.
             is_promql: false,
@@ -363,10 +360,7 @@ impl SlowQueryTimer {
             }
         }
 
-        // Send SlowQueryEvent to the handler.
-        if let Err(e) = self.tx.try_send(slow_query_event) {
-            error!(e; "Failed to send slow query event");
-        }
+        self.recorder.record(Box::new(slow_query_event));
     }
 }
 
