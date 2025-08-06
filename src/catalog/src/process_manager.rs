@@ -14,17 +14,24 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::v1::frontend::{KillProcessRequest, ListProcessRequest, ProcessInfo};
 use common_base::cancellation::CancellationHandle;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
-use common_telemetry::{debug, info, warn};
+use common_frontend::slow_query_event::SlowQueryEvent;
+use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
+use promql_parser::parser::EvalStmt;
+use rand::random;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::statements::statement::Statement;
+use tokio::sync::mpsc::Sender;
 
 use crate::error;
 use crate::metrics::{PROCESS_KILL_COUNT, PROCESS_LIST_COUNT};
@@ -42,6 +49,23 @@ pub struct ProcessManager {
     catalogs: RwLock<HashMap<String, HashMap<ProcessId, CancellableProcess>>>,
     /// Frontend selector to locate frontend nodes.
     frontend_selector: Option<MetaClientSelector>,
+}
+
+/// Represents a parsed query statement, functionally equivalent to [query::parser::QueryStatement].
+/// This enum is defined here to avoid cyclic dependencies with the query parser module.
+#[derive(Debug, Clone)]
+pub enum QueryStatement {
+    Sql(Statement),
+    Promql(EvalStmt),
+}
+
+impl Display for QueryStatement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryStatement::Sql(stmt) => write!(f, "{}", stmt),
+            QueryStatement::Promql(eval_stmt) => write!(f, "{}", eval_stmt),
+        }
+    }
 }
 
 impl ProcessManager {
@@ -67,6 +91,7 @@ impl ProcessManager {
         query: String,
         client: String,
         query_id: Option<ProcessId>,
+        _slow_query_timer: Option<SlowQueryTimer>,
     ) -> Ticket {
         let id = query_id.unwrap_or_else(|| self.next_id.fetch_add(1, Ordering::Relaxed));
         let process = ProcessInfo {
@@ -93,6 +118,7 @@ impl ProcessManager {
             manager: self.clone(),
             id,
             cancellation_handle,
+            _slow_query_timer,
         }
     }
 
@@ -223,6 +249,7 @@ pub struct Ticket {
     pub(crate) manager: ProcessManagerRef,
     pub(crate) id: ProcessId,
     pub cancellation_handle: Arc<CancellationHandle>,
+    _slow_query_timer: Option<SlowQueryTimer>,
 }
 
 impl Drop for Ticket {
@@ -263,6 +290,107 @@ impl Debug for CancellableProcess {
     }
 }
 
+/// SlowQueryTimer is used to log slow query when it's dropped.
+/// In drop(), it will check if the query is slow and send the slow query event to the handler.
+pub struct SlowQueryTimer {
+    start: Instant,
+    stmt: QueryStatement,
+    query_ctx: QueryContextRef,
+    threshold: Option<Duration>,
+    sample_ratio: Option<f64>,
+    tx: Sender<SlowQueryEvent>,
+}
+
+impl SlowQueryTimer {
+    pub fn new(
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+        threshold: Option<Duration>,
+        sample_ratio: Option<f64>,
+        tx: Sender<SlowQueryEvent>,
+    ) -> Self {
+        Self {
+            start: Instant::now(),
+            stmt,
+            query_ctx,
+            threshold,
+            sample_ratio,
+            tx,
+        }
+    }
+}
+
+impl SlowQueryTimer {
+    fn send_slow_query_event(&self, elapsed: Duration, threshold: Duration) {
+        let mut slow_query_event = SlowQueryEvent {
+            cost: elapsed.as_millis() as u64,
+            threshold: threshold.as_millis() as u64,
+            query: "".to_string(),
+            query_ctx: self.query_ctx.clone(),
+
+            // The following fields are only used for PromQL queries.
+            is_promql: false,
+            promql_range: None,
+            promql_step: None,
+            promql_start: None,
+            promql_end: None,
+        };
+
+        match &self.stmt {
+            QueryStatement::Promql(stmt) => {
+                slow_query_event.is_promql = true;
+                slow_query_event.query = stmt.expr.to_string();
+                slow_query_event.promql_step = Some(stmt.interval.as_millis() as u64);
+
+                let start = stmt
+                    .start
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                let end = stmt
+                    .end
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
+                slow_query_event.promql_range = Some((end - start) as u64);
+                slow_query_event.promql_start = Some(start);
+                slow_query_event.promql_end = Some(end);
+            }
+            QueryStatement::Sql(stmt) => {
+                slow_query_event.query = stmt.to_string();
+            }
+        }
+
+        // Send SlowQueryEvent to the handler.
+        if let Err(e) = self.tx.try_send(slow_query_event) {
+            error!(e; "Failed to send slow query event");
+        }
+    }
+}
+
+impl Drop for SlowQueryTimer {
+    fn drop(&mut self) {
+        if let Some(threshold) = self.threshold {
+            // Calculate the elaspsed duration since the timer is created.
+            let elapsed = self.start.elapsed();
+            if elapsed > threshold {
+                if let Some(ratio) = self.sample_ratio {
+                    // Only capture a portion of slow queries based on sample_ratio.
+                    // Generate a random number in [0, 1) and compare it with sample_ratio.
+                    if ratio >= 1.0 || random::<f64>() <= ratio {
+                        self.send_slow_query_event(elapsed, threshold);
+                    }
+                } else {
+                    // Captures all slow queries if sample_ratio is not set.
+                    self.send_slow_query_event(elapsed, threshold);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -277,6 +405,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "".to_string(),
+            None,
             None,
         );
 
@@ -301,6 +430,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             Some(custom_id),
+            None,
         );
 
         assert_eq!(ticket.id, custom_id);
@@ -321,6 +451,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let ticket2 = process_manager.clone().register_query(
@@ -328,6 +459,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -350,6 +482,7 @@ mod tests {
             "SELECT * FROM table1".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
 
         let _ticket2 = process_manager.clone().register_query(
@@ -357,6 +490,7 @@ mod tests {
             vec!["schema2".to_string()],
             "SELECT * FROM table2".to_string(),
             "client2".to_string(),
+            None,
             None,
         );
 
@@ -384,6 +518,7 @@ mod tests {
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
             None,
+            None,
         );
         assert_eq!(process_manager.local_processes(None).unwrap().len(), 1);
         process_manager.deregister_query("public".to_string(), ticket.id);
@@ -399,6 +534,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
 
@@ -416,6 +552,7 @@ mod tests {
             vec!["test".to_string()],
             "SELECT * FROM table".to_string(),
             "client1".to_string(),
+            None,
             None,
         );
         assert!(!ticket.cancellation_handle.is_cancelled());
@@ -462,6 +599,7 @@ mod tests {
             "SELECT COUNT(*) FROM users WHERE age > 18".to_string(),
             "test_client".to_string(),
             Some(42),
+            None,
         );
 
         let processes = process_manager.local_processes(None).unwrap();
@@ -487,6 +625,7 @@ mod tests {
                 vec!["test".to_string()],
                 "SELECT * FROM table".to_string(),
                 "client1".to_string(),
+                None,
                 None,
             );
 

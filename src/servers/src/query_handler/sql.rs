@@ -41,6 +41,7 @@ pub trait SqlQueryHandler {
 
     async fn do_exec_plan(
         &self,
+        stmt: Option<Statement>,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error>;
@@ -88,9 +89,14 @@ where
             .collect()
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn do_exec_plan(
+        &self,
+        stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         self.0
-            .do_exec_plan(plan, query_ctx)
+            .do_exec_plan(stmt, plan, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecutePlanSnafu)
