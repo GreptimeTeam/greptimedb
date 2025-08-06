@@ -547,7 +547,7 @@ impl MitoRegion {
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region.
-    manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
@@ -779,10 +779,8 @@ impl ManifestContext {
             }
         }
     }
-}
 
-#[cfg(test)]
-impl ManifestContext {
+    #[cfg(test)]
     pub(crate) async fn manifest(&self) -> Arc<crate::manifest::action::RegionManifest> {
         self.manifest_manager.read().await.manifest()
     }
@@ -1129,6 +1127,7 @@ mod tests {
                     object_store: env.access_layer.object_store().clone(),
                     compress_type: CompressionType::Uncompressed,
                     checkpoint_distance: 10,
+                    remove_file_options: Default::default(),
                 },
                 Default::default(),
                 Default::default(),
@@ -1193,6 +1192,7 @@ mod tests {
                 object_store: access_layer.object_store().clone(),
                 compress_type: CompressionType::Uncompressed,
                 checkpoint_distance: 10,
+                remove_file_options: Default::default(),
             },
             Default::default(),
             Default::default(),
