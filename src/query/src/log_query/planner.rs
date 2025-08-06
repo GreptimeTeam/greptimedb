@@ -1138,9 +1138,10 @@ mod tests {
         assert!(expr_option.is_some());
 
         let expr = expr_option.unwrap();
-        let expected_expr = col("is_active").eq(lit(ScalarValue::Boolean(Some(true))));
+        let expected_expr_string =
+            "IsTrue(Column(Column { relation: None, name: \"is_active\" }))".to_string();
 
-        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+        assert_eq!(format!("{:?}", expr), expected_expr_string);
     }
 
     #[tokio::test]
