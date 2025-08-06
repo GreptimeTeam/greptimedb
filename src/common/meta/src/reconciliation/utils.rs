@@ -39,7 +39,9 @@ use crate::error::{
 use crate::key::TableMetadataManagerRef;
 use crate::metrics;
 use crate::node_manager::NodeManagerRef;
+use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
+use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PartialRegionMetadata<'a> {
@@ -756,6 +758,11 @@ impl Default for ReconcileLogicalTableMetrics {
     }
 }
 
+const CREATE_TABLES: &str = "create_tables";
+const UPDATE_TABLE_INFO: &str = "update_table_info";
+const COLUMN_METADATA_CONSISTENT: &str = "column_metadata_consistent";
+const COLUMN_METADATA_INCONSISTENT: &str = "column_metadata_inconsistent";
+
 impl ReconcileLogicalTableMetrics {
     /// The total number of tables that have been reconciled.
     pub fn total_table_count(&self) -> usize {
@@ -767,17 +774,30 @@ impl ReconcileLogicalTableMetrics {
 
 impl Drop for ReconcileLogicalTableMetrics {
     fn drop(&mut self) {
-        metrics::METRIC_META_RECONCILIATION_CREATE_TABLES
-            .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
+        let procedure_name = ReconcileLogicalTablesProcedure::TYPE_NAME;
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[procedure_name, metrics::TABLE_TYPE_LOGICAL, CREATE_TABLES])
             .inc_by(self.create_tables_count as u64);
-        metrics::METRIC_META_RECONCILIATION_UPDATE_TABLE_INFO
-            .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                UPDATE_TABLE_INFO,
+            ])
             .inc_by(self.update_table_info_count as u64);
-        metrics::METRIC_META_RECONCILIATION_COLUMN_METADATA_CONSISTENT
-            .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                COLUMN_METADATA_CONSISTENT,
+            ])
             .inc_by(self.column_metadata_consistent_count as u64);
-        metrics::METRIC_META_RECONCILIATION_COLUMN_METADATA_INCONSISTENT
-            .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                COLUMN_METADATA_INCONSISTENT,
+            ])
             .inc_by(self.column_metadata_inconsistent_count as u64);
     }
 }
@@ -854,13 +874,21 @@ impl Drop for ReconcileTableMetrics {
         if let Some(resolve_column_metadata_result) = self.resolve_column_metadata_result {
             match resolve_column_metadata_result {
                 ResolveColumnMetadataResult::Consistent => {
-                    metrics::METRIC_META_RECONCILIATION_COLUMN_METADATA_CONSISTENT
-                        .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                    metrics::METRIC_META_RECONCILIATION_STATS
+                        .with_label_values(&[
+                            ReconcileTableProcedure::TYPE_NAME,
+                            metrics::TABLE_TYPE_PHYSICAL,
+                            COLUMN_METADATA_CONSISTENT,
+                        ])
                         .inc_by(1);
                 }
                 ResolveColumnMetadataResult::Inconsistent(strategy) => {
-                    metrics::METRIC_META_RECONCILIATION_COLUMN_METADATA_INCONSISTENT
-                        .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                    metrics::METRIC_META_RECONCILIATION_STATS
+                        .with_label_values(&[
+                            ReconcileTableProcedure::TYPE_NAME,
+                            metrics::TABLE_TYPE_PHYSICAL,
+                            COLUMN_METADATA_INCONSISTENT,
+                        ])
                         .inc_by(1);
                     metrics::METRIC_META_RECONCILIATION_RESOLVED_COLUMN_METADATA
                         .with_label_values(&[strategy.as_ref()])
@@ -869,8 +897,12 @@ impl Drop for ReconcileTableMetrics {
             }
         }
         if self.update_table_info {
-            metrics::METRIC_META_RECONCILIATION_UPDATE_TABLE_INFO
-                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    UPDATE_TABLE_INFO,
+                ])
                 .inc_by(1);
         }
     }

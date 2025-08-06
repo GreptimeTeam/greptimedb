@@ -217,9 +217,10 @@ impl Procedure for ReconcileDatabaseProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
-        let name = state.name();
-        let _timer = metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE
-            .with_label_values(&[state.name()])
+        let procedure_name = Self::TYPE_NAME;
+        let step = state.name();
+        let _timer = metrics::METRIC_META_RECONCILIATION_PROCEDURE
+            .with_label_values(&[procedure_name, step])
             .start_timer();
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
@@ -228,13 +229,13 @@ impl Procedure for ReconcileDatabaseProcedure {
             }
             Err(e) => {
                 if e.is_retry_later() {
-                    metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE_ERROR
-                        .with_label_values(&[name, metrics::ERROR_TYPE_RETRYABLE])
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_RETRYABLE])
                         .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
-                    metrics::METRIC_META_PROCEDURE_RECONCILE_DATABASE_ERROR
-                        .with_label_values(&[name, metrics::ERROR_TYPE_EXTERNAL])
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_EXTERNAL])
                         .inc();
                     Err(ProcedureError::external(e))
                 }

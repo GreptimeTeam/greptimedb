@@ -24,7 +24,9 @@ use crate::ddl::utils::table_info::get_all_table_info_values_by_table_ids;
 use crate::error::{self, Result};
 use crate::metrics;
 use crate::reconciliation::reconcile_logical_tables::reconcile_regions::ReconcileRegions;
-use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};
+use crate::reconciliation::reconcile_logical_tables::{
+    ReconcileLogicalTablesContext, ReconcileLogicalTablesProcedure, State,
+};
 use crate::reconciliation::utils::{
     check_column_metadatas_consistent, need_update_logical_table_info,
 };
@@ -80,8 +82,12 @@ impl State for ResolveTableMetadatas {
             };
 
             ensure!(!region_metadatas.is_empty(), {
-                metrics::METRIC_META_RECONCILIATION_NO_REGION_METADATA
-                    .with_label_values(&[metrics::TABLE_TYPE_LOGICAL])
+                metrics::METRIC_META_RECONCILIATION_STATS
+                    .with_label_values(&[
+                        ReconcileLogicalTablesProcedure::TYPE_NAME,
+                        metrics::TABLE_TYPE_LOGICAL,
+                        metrics::STATS_TYPE_NO_REGION_METADATA,
+                    ])
                     .inc();
 
                 error::UnexpectedSnafu {

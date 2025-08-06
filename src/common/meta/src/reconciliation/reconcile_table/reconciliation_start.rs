@@ -23,7 +23,9 @@ use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
 use crate::error::{self, Result};
 use crate::metrics::{self};
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
-use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
+use crate::reconciliation::reconcile_table::{
+    ReconcileTableContext, ReconcileTableProcedure, State,
+};
 
 /// The start state of the reconciliation procedure.
 ///
@@ -79,8 +81,12 @@ impl State for ReconciliationStart {
         };
 
         ensure!(!region_metadatas.is_empty(), {
-            metrics::METRIC_META_RECONCILIATION_NO_REGION_METADATA
-                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_NO_REGION_METADATA,
+                ])
                 .inc();
 
             error::UnexpectedSnafu {
@@ -92,8 +98,12 @@ impl State for ReconciliationStart {
         });
 
         ensure!(region_metadatas.iter().all(|r| r.is_some()), {
-            metrics::METRIC_META_RECONCILIATION_REGION_NOT_OPEN
-                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_REGION_NOT_OPEN,
+                ])
                 .inc();
 
             error::UnexpectedSnafu {

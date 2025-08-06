@@ -27,7 +27,9 @@ use crate::ddl::utils::table_info::all_logical_table_routes_have_same_physical_i
 use crate::error::{self, Result};
 use crate::metrics;
 use crate::reconciliation::reconcile_logical_tables::resolve_table_metadatas::ResolveTableMetadatas;
-use crate::reconciliation::reconcile_logical_tables::{ReconcileLogicalTablesContext, State};
+use crate::reconciliation::reconcile_logical_tables::{
+    ReconcileLogicalTablesContext, ReconcileLogicalTablesProcedure, State,
+};
 use crate::reconciliation::utils::check_column_metadatas_consistent;
 
 /// The start state of the reconciliation procedure.
@@ -70,8 +72,12 @@ impl State for ReconciliationStart {
         };
 
         ensure!(!region_metadatas.is_empty(), {
-            metrics::METRIC_META_RECONCILIATION_NO_REGION_METADATA
-                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileLogicalTablesProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_NO_REGION_METADATA,
+                ])
                 .inc();
 
             error::UnexpectedSnafu {
@@ -83,8 +89,12 @@ impl State for ReconciliationStart {
         });
 
         ensure!(region_metadatas.iter().all(|r| r.is_some()), {
-            metrics::METRIC_META_RECONCILIATION_REGION_NOT_OPEN
-                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileLogicalTablesProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_REGION_NOT_OPEN,
+                ])
                 .inc();
             error::UnexpectedSnafu {
                 err_msg: format!(
