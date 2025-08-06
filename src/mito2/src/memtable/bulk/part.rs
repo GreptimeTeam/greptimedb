@@ -58,7 +58,7 @@ use crate::error::{
     EncodeSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::BulkIterContextRef;
-use crate::memtable::bulk::part_reader::BulkPartIter;
+use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::BoxedBatchIterator;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
@@ -520,7 +520,7 @@ impl EncodedBulkPart {
             return Ok(None);
         }
 
-        let iter = BulkPartIter::try_new(
+        let iter = EncodedBulkPartIter::try_new(
             context,
             row_groups_to_read,
             self.metadata.parquet_metadata.clone(),
@@ -1243,6 +1243,7 @@ mod tests {
                     part.metadata.region_metadata.clone(),
                     &Some(projection.as_slice()),
                     None,
+                    false,
                 )),
                 None,
             )
@@ -1294,6 +1295,7 @@ mod tests {
             part.metadata.region_metadata.clone(),
             &None,
             predicate,
+            false,
         ));
         let mut reader = part
             .read(context, None)
@@ -1324,6 +1326,7 @@ mod tests {
             Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
                 datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
             )])),
+            false,
         ));
         assert!(part.read(context, None).unwrap().is_none());
 

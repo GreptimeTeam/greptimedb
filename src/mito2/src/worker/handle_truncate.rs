@@ -37,7 +37,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         let version_data = region.version_control.current();
 
-        let truncate = match req {
+        match req {
             RegionTruncateRequest::All => {
                 info!("Try to fully truncate region {}", region_id);
 
@@ -45,13 +45,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let truncated_sequence = version_data.committed_sequence;
 
                 // Write region truncated to manifest.
-                RegionTruncate {
+                let truncate = RegionTruncate {
                     region_id,
                     kind: TruncateKind::All {
                         truncated_entry_id,
                         truncated_sequence,
                     },
-                }
+                };
+
+                self.handle_manifest_truncate_action(region, truncate, sender);
             }
             RegionTruncateRequest::ByTimeRanges { time_ranges } => {
                 info!(
@@ -79,16 +81,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     files_to_truncate.len(),
                     region_id
                 );
-                RegionTruncate {
+
+                // this could happen if all files are not fully contained in the time ranges
+                if files_to_truncate.is_empty() {
+                    info!("No files to truncate in region {}", region_id);
+                    // directly send success back as no files to truncate
+                    // and no background notify is needed
+                    sender.send(Ok(0));
+                    return;
+                }
+                let truncate = RegionTruncate {
                     region_id,
                     kind: TruncateKind::Partial {
                         files_to_remove: files_to_truncate,
                     },
-                }
+                };
+                self.handle_manifest_truncate_action(region, truncate, sender);
             }
         };
-
-        self.handle_manifest_truncate_action(region, truncate, sender);
     }
 
     /// Handles truncate result.
