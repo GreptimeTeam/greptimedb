@@ -639,3 +639,305 @@ impl Ord for IterNode {
         other.cursor.cmp(&self.cursor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::OpType;
+    use datatypes::arrow::array::builder::BinaryDictionaryBuilder;
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
+    use datatypes::arrow::record_batch::RecordBatch;
+
+    use super::*;
+
+    /// Creates a test RecordBatch with the specified data.
+    fn create_test_record_batch(
+        primary_keys: &[&[u8]],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        field_values: &[i64],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        let field1 = Arc::new(Int64Array::from_iter_values(field_values.iter().copied()));
+        let timestamp = Arc::new(TimestampMillisecondArray::from_iter_values(
+            timestamps.iter().copied(),
+        ));
+
+        // Create primary key dictionary array using BinaryDictionaryBuilder
+        let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for &key in primary_keys {
+            builder.append(key).unwrap();
+        }
+        let primary_key = Arc::new(builder.finish());
+
+        let sequence = Arc::new(UInt64Array::from_iter_values(sequences.iter().copied()));
+        let op_type = Arc::new(UInt8Array::from_iter_values(
+            op_types.iter().map(|&v| v as u8),
+        ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![field1, timestamp, primary_key, sequence, op_type],
+        )
+        .unwrap()
+    }
+
+    fn new_test_iter(batches: Vec<RecordBatch>) -> BoxedRecordBatchIterator {
+        Box::new(batches.into_iter().map(Ok))
+    }
+
+    /// Helper function to check if two record batches are equivalent.
+    fn assert_record_batches_eq(expected: &[RecordBatch], actual: &[RecordBatch]) {
+        for (exp, act) in expected.iter().zip(actual.iter()) {
+            assert_eq!(exp, act,);
+        }
+    }
+
+    /// Helper function to collect all batches from a MergeIterator.
+    fn collect_merge_iterator_batches(
+        mut iter: MergeIterator,
+    ) -> crate::error::Result<Vec<RecordBatch>> {
+        let mut batches = Vec::new();
+        while let Some(batch) = iter.next_batch()? {
+            batches.push(batch);
+        }
+        Ok(batches)
+    }
+
+    #[test]
+    fn test_merge_iterator_empty() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+
+        let mut merge_iter = MergeIterator::new(schema, vec![], 1024).unwrap();
+        assert!(merge_iter.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_merge_iterator_single_batch() {
+        let batch = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+
+        let schema = batch.schema();
+        let iter = Box::new(new_test_iter(vec![batch.clone()]));
+
+        let merge_iter = MergeIterator::new(schema, vec![iter], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_record_batches_eq(&[batch], &result);
+    }
+
+    #[test]
+    fn test_merge_iterator_non_overlapping() {
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let batch2 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[4000, 5000],
+            &[24, 25],
+            &[OpType::Put, OpType::Put],
+            &[14, 15],
+        );
+        let batch3 = create_test_record_batch(
+            &[b"k2", b"k2"],
+            &[2000, 3000],
+            &[22, 23],
+            &[OpType::Delete, OpType::Put],
+            &[12, 13],
+        );
+
+        let schema = batch1.schema();
+        let iter1 = Box::new(new_test_iter(vec![batch1.clone(), batch3.clone()]));
+        let iter2 = Box::new(new_test_iter(vec![batch2.clone()]));
+
+        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+
+        // Results should be sorted by primary key, timestamp, sequence desc
+        let expected = vec![batch1, batch2, batch3];
+        assert_record_batches_eq(&expected, &result);
+    }
+
+    #[test]
+    fn test_merge_iterator_overlapping_timestamps() {
+        // Create batches with overlapping timestamps but different sequences
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[21, 22],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let batch2 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1500, 2500],
+            &[31, 32],
+            &[OpType::Put, OpType::Put],
+            &[15, 25],
+        );
+
+        let schema = batch1.schema();
+        let iter1 = Box::new(new_test_iter(vec![batch1]));
+        let iter2 = Box::new(new_test_iter(vec![batch2]));
+
+        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+
+        let expected = vec![
+            create_test_record_batch(
+                &[b"k1", b"k1", b"k1", b"k1"],
+                &[1000, 1500, 2000, 2500],
+                &[21, 31, 22, 32],
+                &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+                &[11, 15, 12, 25],
+            ),
+            create_test_record_batch(&[b"k1"], &[2000], &[22], &[OpType::Put], &[12]),
+            create_test_record_batch(&[b"k1"], &[2500], &[32], &[OpType::Put], &[25]),
+        ];
+        assert_record_batches_eq(&expected, &result);
+    }
+
+    #[test]
+    fn test_merge_iterator_duplicate_keys_sequences() {
+        // Test with same primary key and timestamp but different sequences
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 1000],
+            &[20, 10],
+            &[OpType::Put, OpType::Put],
+            &[1, 2],
+        );
+        let batch2 = create_test_record_batch(
+            &[b"k1"],
+            &[1000],
+            &[15], // Middle sequence
+            &[OpType::Put],
+            &[3],
+        );
+
+        let schema = batch1.schema();
+        let iter1 = Box::new(new_test_iter(vec![batch1]));
+        let iter2 = Box::new(new_test_iter(vec![batch2]));
+
+        let merge_iter = MergeIterator::new(schema, vec![iter1, iter2], 1024).unwrap();
+        let result = collect_merge_iterator_batches(merge_iter).unwrap();
+
+        // Should be sorted by sequence descending for same key/timestamp
+        let expected = vec![
+            create_test_record_batch(
+                &[b"k1", b"k1"],
+                &[1000, 1000],
+                &[20, 15],
+                &[OpType::Put, OpType::Put],
+                &[1, 3],
+            ),
+            create_test_record_batch(&[b"k1"], &[1000], &[10], &[OpType::Put], &[2]),
+        ];
+        assert_record_batches_eq(&expected, &result);
+    }
+
+    #[test]
+    fn test_batch_builder_basic() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("field1", DataType::Int64, false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+
+        let mut builder = BatchBuilder::new(schema.clone(), 2, 1024);
+        assert!(builder.is_empty());
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000])),
+            ],
+        )
+        .unwrap();
+
+        builder.push_batch(0, batch);
+        builder.push_row(0);
+        builder.push_row(0);
+
+        assert!(!builder.is_empty());
+        assert_eq!(builder.len(), 2);
+
+        let result_batch = builder.build_record_batch().unwrap().unwrap();
+        assert_eq!(result_batch.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_row_cursor_comparison() {
+        // Create test batches for cursor comparison
+        let batch1 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[22, 21],
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+        let batch2 = create_test_record_batch(
+            &[b"k1", b"k1"],
+            &[1000, 2000],
+            &[23, 20], // Different sequences
+            &[OpType::Put, OpType::Put],
+            &[11, 12],
+        );
+
+        let columns1 = SortColumns::new(&batch1);
+        let columns2 = SortColumns::new(&batch2);
+
+        let cursor1 = RowCursor::new(columns1);
+        let cursor2 = RowCursor::new(columns2);
+
+        // cursors with same pk and timestamp should be ordered by sequence desc
+        // cursor1 has sequence 22, cursor2 has sequence 23, so cursor2 < cursor1 (higher sequence comes first)
+        assert!(cursor2 < cursor1);
+    }
+}
