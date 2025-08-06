@@ -40,10 +40,13 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::lock_key::{CatalogLock, SchemaLock, TableNameLock};
+use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_table::reconciliation_start::ReconciliationStart;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
-use crate::reconciliation::utils::{build_table_meta_from_column_metadatas, Context};
+use crate::reconciliation::utils::{
+    build_table_meta_from_column_metadatas, Context, ReconcileTableMetrics,
+};
 
 pub struct ReconcileTableContext {
     pub node_manager: NodeManagerRef,
@@ -65,12 +68,45 @@ impl ReconcileTableContext {
         }
     }
 
+    /// Returns the physical table name.
     pub(crate) fn table_name(&self) -> &TableName {
         &self.persistent_ctx.table_name
     }
 
+    /// Returns the physical table id.
     pub(crate) fn table_id(&self) -> TableId {
         self.persistent_ctx.table_id
+    }
+
+    /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
+    pub(crate) fn build_table_meta(
+        &self,
+        column_metadatas: &[ColumnMetadata],
+    ) -> Result<RawTableMeta> {
+        // Safety: The table info value is set in `ReconciliationStart` state.
+        let table_info_value = self.persistent_ctx.table_info_value.as_ref().unwrap();
+        let table_id = self.table_id();
+        let table_ref = self.table_name().table_ref();
+        let name_to_ids = table_info_value.table_info.name_to_ids();
+        let table_meta = build_table_meta_from_column_metadatas(
+            table_id,
+            table_ref,
+            &table_info_value.table_info.meta,
+            name_to_ids,
+            column_metadatas,
+        )?;
+
+        Ok(table_meta)
+    }
+
+    /// Returns a mutable reference to the metrics.
+    pub(crate) fn mut_metrics(&mut self) -> &mut ReconcileTableMetrics {
+        &mut self.volatile_ctx.metrics
+    }
+
+    /// Returns a reference to the metrics.
+    pub(crate) fn metrics(&self) -> &ReconcileTableMetrics {
+        &self.volatile_ctx.metrics
     }
 }
 
@@ -110,29 +146,7 @@ impl PersistentContext {
 #[derive(Default)]
 pub(crate) struct VolatileContext {
     pub(crate) table_meta: Option<RawTableMeta>,
-}
-
-impl ReconcileTableContext {
-    /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
-    pub(crate) fn build_table_meta(
-        &self,
-        column_metadatas: &[ColumnMetadata],
-    ) -> Result<RawTableMeta> {
-        // Safety: The table info value is set in `ReconciliationStart` state.
-        let table_info_value = self.persistent_ctx.table_info_value.as_ref().unwrap();
-        let table_id = self.table_id();
-        let table_ref = self.table_name().table_ref();
-        let name_to_ids = table_info_value.table_info.name_to_ids();
-        let table_meta = build_table_meta_from_column_metadatas(
-            table_id,
-            table_ref,
-            &table_info_value.table_info.meta,
-            name_to_ids,
-            column_metadatas,
-        )?;
-
-        Ok(table_meta)
-    }
+    pub(crate) metrics: ReconcileTableMetrics,
 }
 
 pub struct ReconcileTableProcedure {
@@ -191,6 +205,11 @@ impl Procedure for ReconcileTableProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        let procedure_name = Self::TYPE_NAME;
+        let step = state.name();
+        let _timer = metrics::METRIC_META_RECONCILIATION_PROCEDURE
+            .with_label_values(&[procedure_name, step])
+            .start_timer();
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;
@@ -198,8 +217,14 @@ impl Procedure for ReconcileTableProcedure {
             }
             Err(e) => {
                 if e.is_retry_later() {
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_RETRYABLE])
+                        .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_EXTERNAL])
+                        .inc();
                     Err(ProcedureError::external(e))
                 }
             }

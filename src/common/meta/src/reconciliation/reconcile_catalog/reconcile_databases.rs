@@ -23,7 +23,7 @@ use crate::error::Result;
 use crate::reconciliation::reconcile_catalog::end::ReconcileCatalogEnd;
 use crate::reconciliation::reconcile_catalog::{ReconcileCatalogContext, State};
 use crate::reconciliation::reconcile_database::ReconcileDatabaseProcedure;
-use crate::reconciliation::utils::Context;
+use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReconcileDatabases;
@@ -83,13 +83,18 @@ impl ReconcileDatabases {
         let procedure = ReconcileDatabaseProcedure::new(
             context,
             ctx.persistent_ctx.catalog.clone(),
-            schema,
+            schema.clone(),
             ctx.persistent_ctx.fast_fail,
             ctx.persistent_ctx.parallelism,
             ctx.persistent_ctx.resolve_strategy,
             true,
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        ctx.volatile_ctx.inflight_subprocedure = Some(SubprocedureMeta::new_reconcile_database(
+            procedure_with_id.id,
+            ctx.persistent_ctx.catalog.clone(),
+            schema,
+        ));
 
         Ok((
             Box::new(ReconcileDatabases),

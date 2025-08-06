@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -28,9 +29,21 @@ pub struct ReconciliationEnd;
 impl State for ReconciliationEnd {
     async fn next(
         &mut self,
-        _ctx: &mut ReconcileLogicalTablesContext,
-        _procedure_ctx: &ProcedureContext,
+        ctx: &mut ReconcileLogicalTablesContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        let table_id = ctx.table_id();
+        let table_name = ctx.table_name();
+        let metrics = ctx.metrics();
+
+        info!(
+            "Logical tables reconciliation completed. logical tables: {:?}, physical_table_id: {}, table_name: {}, procedure_id: {}, metrics: {}",
+            ctx.persistent_ctx.logical_table_ids,
+            table_id,
+            table_name,
+            procedure_ctx.procedure_id,
+            metrics
+        );
         Ok((Box::new(ReconciliationEnd), Status::done()))
     }
 
