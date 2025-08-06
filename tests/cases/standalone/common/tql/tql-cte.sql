@@ -125,6 +125,7 @@ WITH time_shifted AS (
 SELECT * FROM time_shifted;
 
 -- TQL CTE with JOIN between TQL and regular table
+-- SQLNESS SORT_RESULT 3 1
 WITH tql_summary(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
 )
