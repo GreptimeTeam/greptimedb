@@ -22,6 +22,7 @@ use std::time::Duration;
 
 pub use bulk::part::EncodedBulkPart;
 use common_time::Timestamp;
+use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::key_values::KeyValue;
 pub use mito_codec::key_values::KeyValues;
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,8 @@ impl MemtableStats {
 }
 
 pub type BoxedBatchIterator = Box<dyn Iterator<Item = Result<Batch>> + Send>;
+
+pub type BoxedRecordBatchIterator = Box<dyn Iterator<Item = Result<RecordBatch>> + Send>;
 
 /// Ranges in a memtable.
 #[derive(Default)]

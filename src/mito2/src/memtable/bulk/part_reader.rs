@@ -20,26 +20,26 @@ use bytes::Bytes;
 use datatypes::arrow::array::{BooleanArray, Scalar, UInt64Array};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::ProjectionMask;
 use parquet::file::metadata::ParquetMetaData;
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
-use crate::error::{self, ComputeArrowSnafu};
-use crate::memtable::bulk::context::BulkIterContextRef;
-use crate::memtable::bulk::row_group_reader::{
-    MemtableRowGroupReader, MemtableRowGroupReaderBuilder,
-};
-use crate::read::Batch;
+use crate::error::{self, ComputeArrowSnafu, DecodeArrowRowGroupSnafu};
+use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
+use crate::memtable::bulk::row_group_reader::MemtableRowGroupReaderBuilder;
 use crate::sst::parquet::flat_format::sequence_column_index;
-use crate::sst::parquet::reader::MaybeFilter;
+use crate::sst::parquet::reader::{MaybeFilter, RowGroupReaderContext};
 
 /// Iterator for reading data inside a bulk part.
 pub struct EncodedBulkPartIter {
+    context: BulkIterContextRef,
     row_groups_to_read: VecDeque<usize>,
-    current_reader: Option<PruneReader>,
+    current_reader: Option<ParquetRecordBatchReader>,
     builder: MemtableRowGroupReaderBuilder,
-    sequence: Option<SequenceNumber>,
+    /// Sequence number filter.
+    sequence: Option<Scalar<UInt64Array>>,
 }
 
 impl EncodedBulkPartIter {
@@ -51,24 +51,23 @@ impl EncodedBulkPartIter {
         data: Bytes,
         sequence: Option<SequenceNumber>,
     ) -> error::Result<Self> {
+        assert!(context.read_format().as_flat().is_some());
+
+        let sequence = sequence.map(UInt64Array::new_scalar);
+
         let projection_mask = ProjectionMask::roots(
             parquet_meta.file_metadata().schema_descr(),
             context.read_format().projection_indices().iter().copied(),
         );
-
-        let builder = MemtableRowGroupReaderBuilder::try_new(
-            context.clone(),
-            projection_mask,
-            parquet_meta,
-            data,
-        )?;
+        let builder =
+            MemtableRowGroupReaderBuilder::try_new(&context, projection_mask, parquet_meta, data)?;
 
         let init_reader = row_groups_to_read
             .pop_front()
             .map(|first_row_group| builder.build_row_group_reader(first_row_group, None))
-            .transpose()?
-            .map(|r| PruneReader::new(context, r));
+            .transpose()?;
         Ok(Self {
+            context,
             row_groups_to_read,
             current_reader: init_reader,
             builder,
@@ -76,88 +75,42 @@ impl EncodedBulkPartIter {
         })
     }
 
-    pub(crate) fn next_batch(&mut self) -> error::Result<Option<Batch>> {
+    /// Fetches next non-empty record batch.
+    pub(crate) fn next_record_batch(&mut self) -> error::Result<Option<RecordBatch>> {
         let Some(current) = &mut self.current_reader else {
             // All row group exhausted.
             return Ok(None);
         };
 
-        if let Some(mut batch) = current.next_batch()? {
-            batch.filter_by_sequence(self.sequence)?;
-            return Ok(Some(batch));
+        for batch in current {
+            let batch = batch.context(DecodeArrowRowGroupSnafu)?;
+            if let Some(batch) = apply_combined_filters(&self.context, &self.sequence, batch)? {
+                return Ok(Some(batch));
+            }
         }
 
         // Previous row group exhausted, read next row group
         while let Some(next_row_group) = self.row_groups_to_read.pop_front() {
-            current.reset(self.builder.build_row_group_reader(next_row_group, None)?);
-            if let Some(mut next_batch) = current.next_batch()? {
-                next_batch.filter_by_sequence(self.sequence)?;
-                return Ok(Some(next_batch));
+            let next_reader = self.builder.build_row_group_reader(next_row_group, None)?;
+            let current = self.current_reader.insert(next_reader);
+
+            for batch in current {
+                let batch = batch.context(DecodeArrowRowGroupSnafu)?;
+                if let Some(batch) = apply_combined_filters(&self.context, &self.sequence, batch)? {
+                    return Ok(Some(batch));
+                }
             }
         }
+
         Ok(None)
     }
 }
 
 impl Iterator for EncodedBulkPartIter {
-    type Item = error::Result<Batch>;
+    type Item = error::Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_batch().transpose()
-    }
-}
-
-struct PruneReader {
-    context: BulkIterContextRef,
-    row_group_reader: MemtableRowGroupReader,
-}
-
-//todo(hl): maybe we also need to support lastrow mode here.
-impl PruneReader {
-    fn new(context: BulkIterContextRef, reader: MemtableRowGroupReader) -> Self {
-        Self {
-            context,
-            row_group_reader: reader,
-        }
-    }
-
-    /// Iterates current inner reader until exhausted.
-    fn next_batch(&mut self) -> error::Result<Option<Batch>> {
-        while let Some(b) = self.row_group_reader.next_inner()? {
-            match self.prune(b)? {
-                Some(b) => {
-                    return Ok(Some(b));
-                }
-                None => {
-                    continue;
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// Prunes batch according to filters.
-    fn prune(&mut self, batch: Batch) -> error::Result<Option<Batch>> {
-        //todo(hl): add metrics.
-
-        // fast path
-        if self.context.base.filters.is_empty() {
-            return Ok(Some(batch));
-        }
-
-        let Some(batch_filtered) = self.context.base.precise_filter(batch)? else {
-            // the entire batch is filtered out
-            return Ok(None);
-        };
-        if !batch_filtered.is_empty() {
-            Ok(Some(batch_filtered))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn reset(&mut self, reader: MemtableRowGroupReader) {
-        self.row_group_reader = reader;
+        self.next_record_batch().transpose()
     }
 }
 
@@ -201,95 +154,13 @@ impl BulkPartRecordBatchIter {
             .context(ComputeArrowSnafu)
     }
 
-    // TODO(yingwen): Supports sparse encoding which doesn't have decoded primary key columns.
-    /// Applies both predicate filtering and sequence filtering in a single pass.
-    /// Returns None if the filtered batch is empty.
-    fn apply_combined_filters(
-        &self,
-        record_batch: RecordBatch,
-    ) -> error::Result<Option<RecordBatch>> {
-        let num_rows = record_batch.num_rows();
-        let mut combined_filter = None;
-
-        // First, apply predicate filters.
-        if !self.context.base.filters.is_empty() {
-            let num_rows = record_batch.num_rows();
-            let mut mask = BooleanBuffer::new_set(num_rows);
-
-            // Run filter one by one and combine them result, similar to RangeBase::precise_filter
-            for filter_ctx in &self.context.base.filters {
-                let filter = match filter_ctx.filter() {
-                    MaybeFilter::Filter(f) => f,
-                    // Column matches.
-                    MaybeFilter::Matched => continue,
-                    // Column doesn't match, filter the entire batch.
-                    MaybeFilter::Pruned => return Ok(None),
-                };
-
-                // Safety: We checked the format type in new().
-                let Some(column_index) = self
-                    .context
-                    .read_format()
-                    .as_flat()
-                    .unwrap()
-                    .projected_index_by_id(filter_ctx.column_id())
-                else {
-                    continue;
-                };
-                let array = record_batch.column(column_index);
-                let result = filter
-                    .evaluate_array(array)
-                    .context(crate::error::RecordBatchSnafu)?;
-
-                mask = mask.bitand(&result);
-            }
-            // Convert the mask to BooleanArray
-            combined_filter = Some(BooleanArray::from(mask));
-        }
-
-        // Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
-        if let Some(sequence) = &self.sequence {
-            let sequence_column =
-                record_batch.column(sequence_column_index(record_batch.num_columns()));
-            let sequence_filter =
-                datatypes::arrow::compute::kernels::cmp::lt_eq(sequence_column, sequence)
-                    .context(ComputeArrowSnafu)?;
-            // Combine with existing filter using AND operation
-            combined_filter = match combined_filter {
-                None => Some(sequence_filter),
-                Some(existing_filter) => {
-                    let and_result =
-                        datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
-                            .context(ComputeArrowSnafu)?;
-                    Some(and_result)
-                }
-            };
-        }
-
-        // Apply the combined filter if any filters were applied
-        let Some(filter_array) = combined_filter else {
-            // No filters applied, return original batch
-            return Ok(Some(record_batch));
-        };
-        let select_count = filter_array.true_count();
-        if select_count == 0 {
-            return Ok(None);
-        }
-        if select_count == num_rows {
-            return Ok(Some(record_batch));
-        }
-        let filtered_batch =
-            datatypes::arrow::compute::filter_record_batch(&record_batch, &filter_array)
-                .context(ComputeArrowSnafu)?;
-
-        Ok(Some(filtered_batch))
-    }
-
     fn process_batch(&mut self, record_batch: RecordBatch) -> error::Result<Option<RecordBatch>> {
         // Apply projection first.
         let projected_batch = self.apply_projection(record_batch)?;
         // Apply combined filtering (both predicate and sequence filters)
-        let Some(filtered_batch) = self.apply_combined_filters(projected_batch)? else {
+        let Some(filtered_batch) =
+            apply_combined_filters(&self.context, &self.sequence, projected_batch)?
+        else {
             return Ok(None);
         };
 
@@ -305,6 +176,89 @@ impl Iterator for BulkPartRecordBatchIter {
 
         self.process_batch(record_batch).transpose()
     }
+}
+
+// TODO(yingwen): Supports sparse encoding which doesn't have decoded primary key columns.
+/// Applies both predicate filtering and sequence filtering in a single pass.
+/// Returns None if the filtered batch is empty.
+fn apply_combined_filters(
+    context: &BulkIterContext,
+    sequence: &Option<Scalar<UInt64Array>>,
+    record_batch: RecordBatch,
+) -> error::Result<Option<RecordBatch>> {
+    let num_rows = record_batch.num_rows();
+    let mut combined_filter = None;
+
+    // First, apply predicate filters.
+    if !context.base.filters.is_empty() {
+        let num_rows = record_batch.num_rows();
+        let mut mask = BooleanBuffer::new_set(num_rows);
+
+        // Run filter one by one and combine them result, similar to RangeBase::precise_filter
+        for filter_ctx in &context.base.filters {
+            let filter = match filter_ctx.filter() {
+                MaybeFilter::Filter(f) => f,
+                // Column matches.
+                MaybeFilter::Matched => continue,
+                // Column doesn't match, filter the entire batch.
+                MaybeFilter::Pruned => return Ok(None),
+            };
+
+            // Safety: We checked the format type in new().
+            let Some(column_index) = context
+                .read_format()
+                .as_flat()
+                .unwrap()
+                .projected_index_by_id(filter_ctx.column_id())
+            else {
+                continue;
+            };
+            let array = record_batch.column(column_index);
+            let result = filter
+                .evaluate_array(array)
+                .context(crate::error::RecordBatchSnafu)?;
+
+            mask = mask.bitand(&result);
+        }
+        // Convert the mask to BooleanArray
+        combined_filter = Some(BooleanArray::from(mask));
+    }
+
+    // Filters rows by the given `sequence`. Only preserves rows with sequence less than or equal to `sequence`.
+    if let Some(sequence) = sequence {
+        let sequence_column =
+            record_batch.column(sequence_column_index(record_batch.num_columns()));
+        let sequence_filter =
+            datatypes::arrow::compute::kernels::cmp::lt_eq(sequence_column, sequence)
+                .context(ComputeArrowSnafu)?;
+        // Combine with existing filter using AND operation
+        combined_filter = match combined_filter {
+            None => Some(sequence_filter),
+            Some(existing_filter) => {
+                let and_result = datatypes::arrow::compute::and(&existing_filter, &sequence_filter)
+                    .context(ComputeArrowSnafu)?;
+                Some(and_result)
+            }
+        };
+    }
+
+    // Apply the combined filter if any filters were applied
+    let Some(filter_array) = combined_filter else {
+        // No filters applied, return original batch
+        return Ok(Some(record_batch));
+    };
+    let select_count = filter_array.true_count();
+    if select_count == 0 {
+        return Ok(None);
+    }
+    if select_count == num_rows {
+        return Ok(Some(record_batch));
+    }
+    let filtered_batch =
+        datatypes::arrow::compute::filter_record_batch(&record_batch, &filter_array)
+            .context(ComputeArrowSnafu)?;
+
+    Ok(Some(filtered_batch))
 }
 
 #[cfg(test)]
@@ -412,7 +366,6 @@ mod tests {
             Arc::new(region_metadata.clone()),
             &None, // No projection
             None,  // No predicate
-            true,
         ));
         // Iterates all rows.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
@@ -436,7 +389,6 @@ mod tests {
             Arc::new(region_metadata),
             &Some(&[0, 2]),
             Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
-            true,
         ));
         // Creates iter with projection and predicate.
         let iter = BulkPartRecordBatchIter::new(record_batch.clone(), context.clone(), None);
