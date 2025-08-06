@@ -28,3 +28,4 @@ pub mod util;
 
 pub use parsers::create_parser::{ENGINE, MAXVALUE};
 pub use parsers::tql_parser::TQL;
+pub use parsers::with_tql_parser::{CteContent, HybridCteWith};
