@@ -227,7 +227,7 @@ pub(crate) fn check_column_metadata_invariants(
             .get(name)
             .cloned()
             .context(ColumnNotFoundSnafu {
-                column_name: name.to_string(),
+                column_name: name,
                 column_id: id,
             })?;
 
