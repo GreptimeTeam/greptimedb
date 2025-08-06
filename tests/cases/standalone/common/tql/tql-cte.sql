@@ -48,7 +48,7 @@ SELECT sum(val) FROM filtered;
 WITH tql_agg(ts, summary) AS (
     TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
 )
-SELECT avg(summary) as avg_sum FROM tql_agg;
+SELECT round(avg(summary)) as avg_sum FROM tql_agg;
 
 -- TQL CTE with label selectors
 WITH host_metrics AS (
@@ -117,6 +117,25 @@ WITH
         SELECT * FROM processed WHERE percent > 200
     )
 SELECT count(*) as high_values FROM final;
+
+-- TQL CTE with time-based functions
+WITH time_shifted AS (
+    TQL EVAL (0, 40, '10s') metric offset 50s
+)
+SELECT * FROM time_shifted;
+
+-- TQL CTE with JOIN between TQL and regular table
+WITH tql_summary(ts, host, cpu) AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
+)
+SELECT 
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+LIMIT 5;
 
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (
