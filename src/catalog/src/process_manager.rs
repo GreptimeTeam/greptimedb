@@ -216,6 +216,10 @@ impl ProcessManager {
             Ok(false)
         }
     }
+
+    pub fn server_addr(&self) -> &str {
+        &self.server_addr
+    }
 }
 
 pub struct Ticket {

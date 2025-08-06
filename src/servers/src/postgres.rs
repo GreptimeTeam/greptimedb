@@ -30,11 +30,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ::auth::UserProviderRef;
+use auth::UserProviderRef;
+use catalog::process_manager::ProcessManagerRef;
 use derive_builder::Builder;
-use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::{ClientInfo, PgWireServerHandlers};
+use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::cancel::CancelHandler;
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;
@@ -72,6 +74,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
+    process_manager: ProcessManagerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -83,6 +86,7 @@ pub struct PostgresServerHandlerInner {
 #[derive(Builder)]
 pub(crate) struct MakePostgresServerHandler {
     query_handler: ServerSqlQueryHandlerRef,
+    process_manager: ProcessManagerRef,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -92,43 +96,40 @@ pub(crate) struct MakePostgresServerHandler {
 pub(crate) struct PostgresServerHandler(Arc<PostgresServerHandlerInner>);
 
 impl PgWireServerHandlers for PostgresServerHandler {
-    type StartupHandler = PostgresServerHandlerInner;
-    type SimpleQueryHandler = PostgresServerHandlerInner;
-    type ExtendedQueryHandler = PostgresServerHandlerInner;
-    type CopyHandler = NoopCopyHandler;
-    type ErrorHandler = PostgresServerHandlerInner;
-
-    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
         self.0.clone()
     }
 
-    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
         self.0.clone()
     }
 
-    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+    fn startup_handler(&self) -> Arc<impl StartupHandler> {
         self.0.clone()
     }
 
-    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
-        Arc::new(NoopCopyHandler)
+    fn error_handler(&self) -> Arc<impl ErrorHandler> {
+        self.0.clone()
     }
 
-    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+    fn cancel_handler(&self) -> Arc<impl CancelHandler> {
         self.0.clone()
     }
 }
 
 impl MakePostgresServerHandler {
-    fn make(&self, addr: Option<SocketAddr>, process_id: u32) -> PostgresServerHandler {
-        let session = Arc::new(Session::new(
-            addr,
-            Channel::Postgres,
-            Default::default(),
-            process_id,
-        ));
+    fn make(&self, addr: Option<SocketAddr>) -> PostgresServerHandler {
+        let process_id = self.process_manager.next_id();
+        let secret_key = rand::random();
+
+        let session = Arc::new(
+            Session::new(addr, Channel::Postgres, Default::default(), process_id)
+                .with_secret_key(secret_key),
+        );
+
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
+            process_manager: self.process_manager.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),

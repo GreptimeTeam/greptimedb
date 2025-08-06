@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::UserProviderRef;
+use catalog::process_manager::ProcessManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::Builder as RuntimeBuilder;
@@ -71,7 +72,7 @@ fn create_postgres_server(
         0,
         io_runtime,
         user_provider,
-        None,
+        Arc::new(ProcessManager::new("127.0.0.1".to_string(), None)),
     )))
 }
 
