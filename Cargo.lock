@@ -5946,6 +5946,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
+ "criterion 0.4.0",
  "fastbloom",
  "fst",
  "futures",
