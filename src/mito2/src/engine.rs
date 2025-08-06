@@ -393,6 +393,7 @@ fn is_valid_region_edit(edit: &RegionEdit) -> bool {
             RegionEdit {
                 files_to_add: _,
                 files_to_remove: _,
+                timestamp_ms: _,
                 compaction_time_window: None,
                 flushed_entry_id: None,
                 flushed_sequence: None,
@@ -939,6 +940,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -949,6 +951,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -959,6 +962,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![FileMeta::default()],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -969,6 +973,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: Some(Duration::from_secs(1)),
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -977,6 +982,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: Some(1),
             flushed_sequence: None,
@@ -985,6 +991,7 @@ mod tests {
         let edit = RegionEdit {
             files_to_add: vec![FileMeta::default()],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: Some(1),
