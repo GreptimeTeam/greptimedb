@@ -564,8 +564,8 @@ impl IterNode {
     /// Returns the fetched new batch.
     fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
         let batch = self.advance_inner_iter()?;
-        let columns = batch.as_ref().map(|rb| SortColumns::new(rb));
-        self.cursor = columns.map(|c| RowCursor::new(c));
+        let columns = batch.as_ref().map(SortColumns::new);
+        self.cursor = columns.map(RowCursor::new);
 
         Ok(batch)
     }
