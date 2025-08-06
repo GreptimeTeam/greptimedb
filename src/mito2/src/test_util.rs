@@ -557,6 +557,7 @@ impl TestEnv {
             object_store,
             compress_type,
             checkpoint_distance,
+            remove_file_options: Default::default(),
         };
 
         if let Some(metadata) = initial_metadata {

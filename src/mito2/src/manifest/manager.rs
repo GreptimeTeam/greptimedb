@@ -47,6 +47,28 @@ pub struct RegionManifestOptions {
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
     /// Set to 0 to disable checkpoint.
     pub checkpoint_distance: u64,
+    pub remove_file_options: RemoveFileOptions,
+}
+
+/// Options for updating `removed_files` field in [RegionManifest].
+#[derive(Debug, Clone)]
+pub struct RemoveFileOptions {
+    /// Number of removed files to keep in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
+    pub keep_count: usize,
+    /// Duration to keep removed files in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
+    pub keep_ttl: std::time::Duration,
+}
+
+#[cfg(any(test, feature = "test"))]
+impl Default for RemoveFileOptions {
+    fn default() -> Self {
+        Self {
+            keep_count: 256,
+            keep_ttl: std::time::Duration::from_secs(3600),
+        }
+    }
 }
 
 // rewrite note:
@@ -481,7 +503,10 @@ impl RegionManifestManager {
             }
         }
         let new_manifest = manifest_builder.try_build()?;
-        self.manifest = Arc::new(new_manifest);
+        let updated_manifest = self
+            .checkpointer
+            .update_manifest_removed_files(new_manifest)?;
+        self.manifest = Arc::new(updated_manifest);
 
         self.checkpointer
             .maybe_do_checkpoint(self.manifest.as_ref(), region_state);
@@ -565,6 +590,10 @@ impl RegionManifestManager {
         }
     }
 
+    pub fn store(&self) -> ManifestObjectStore {
+        self.store.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn checkpointer(&self) -> &Checkpointer {
         &self.checkpointer
@@ -578,10 +607,6 @@ impl RegionManifestManager {
         assert_eq!(manifest.metadata, *expect);
         assert_eq!(self.manifest.manifest_version, self.last_version());
         assert_eq!(last_version, self.last_version());
-    }
-
-    pub fn store(&self) -> ManifestObjectStore {
-        self.store.clone()
     }
 }
 
@@ -786,6 +811,7 @@ mod test {
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
                         files_to_add: vec![],
                         files_to_remove: vec![],
+                        timestamp_ms: None,
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,
