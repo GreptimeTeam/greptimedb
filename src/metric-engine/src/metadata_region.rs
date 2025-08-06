@@ -29,6 +29,7 @@ use futures_util::stream::BoxStream;
 use futures_util::TryStreamExt;
 use mito2::engine::MitoEngine;
 use moka::future::Cache;
+use moka::policy::EvictionPolicy;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
@@ -85,6 +86,7 @@ impl MetadataRegion {
     pub fn new(mito: MitoEngine) -> Self {
         let cache = Cache::builder()
             .max_capacity(MAX_CACHE_SIZE)
+            .eviction_policy(EvictionPolicy::lru())
             .time_to_live(Duration::from_secs(60))
             .weigher(|_, v: &RegionMetadataCacheEntry| v.size as u32)
             .build();
