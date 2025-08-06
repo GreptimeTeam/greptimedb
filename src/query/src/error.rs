@@ -323,6 +323,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Column schema mismatch in CTE {}, original: {:?}, expected: {:?}",
+        cte_name,
+        original,
+        expected,
+    ))]
+    CteColumnSchemaMismatch {
+        cte_name: String,
+        original: Vec<String>,
+        expected: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -345,7 +359,8 @@ impl ErrorExt for Error {
             | AddSystemTimeOverflow { .. }
             | ColumnSchemaIncompatible { .. }
             | UnsupportedVariable { .. }
-            | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
+            | ColumnSchemaNoDefault { .. }
+            | CteColumnSchemaMismatch { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 

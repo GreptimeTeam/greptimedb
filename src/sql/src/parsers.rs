@@ -32,4 +32,4 @@ pub(crate) mod show_parser;
 pub(crate) mod tql_parser;
 pub(crate) mod truncate_parser;
 pub(crate) mod utils;
-pub(crate) mod with_tql_parser;
+pub mod with_tql_parser;
