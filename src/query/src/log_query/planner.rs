@@ -311,22 +311,7 @@ impl LogQueryPlanner {
                 }))
             }
             LogExpr::ScalarFunc { name, args, alias } => {
-                let df_args = args
-                    .iter()
-                    .map(|arg| self.log_expr_to_df_expr(arg, schema))
-                    .try_collect::<Vec<_>>()?;
-                let func = self
-                    .session_state
-                    .scalar_functions()
-                    .get(name)
-                    .with_context(|| UnknownScalarFunctionSnafu {
-                        name: name.to_string(),
-                    })?;
-                let mut expr = func.call(df_args);
-                if let Some(alias) = alias {
-                    expr = expr.alias(alias);
-                }
-                Ok(expr)
+                self.build_scalar_func(schema, name, args, alias)
             }
             LogExpr::Alias { expr, alias } => {
                 let df_expr = self.log_expr_to_df_expr(expr, schema)?;
@@ -342,7 +327,13 @@ impl LogQueryPlanner {
         }
     }
 
-    fn build_scalar_func(&self, schema: &DFSchema, name: &str, args: &[LogExpr]) -> Result<Expr> {
+    fn build_scalar_func(
+        &self,
+        schema: &DFSchema,
+        name: &str,
+        args: &[LogExpr],
+        alias: &Option<String>,
+    ) -> Result<Expr> {
         let args = args
             .iter()
             .map(|expr| self.log_expr_to_df_expr(expr, schema))
@@ -354,7 +345,11 @@ impl LogQueryPlanner {
         )?;
         let expr = func.call(args);
 
-        Ok(expr)
+        if let Some(alias) = alias {
+            Ok(expr.alias(alias))
+        } else {
+            Ok(expr)
+        }
     }
 
     /// Convert BinaryOperator to DataFusion's Operator.
@@ -414,12 +409,9 @@ impl LogQueryPlanner {
             }
             LogExpr::ScalarFunc { name, args, alias } => {
                 let schema = plan_builder.schema();
-                let mut expr = self.build_scalar_func(schema, name, args)?;
-                if let Some(alias) = alias {
-                    expr = expr.alias(alias);
-                }
+                let expr = self.build_scalar_func(schema, name, args, alias)?;
                 plan_builder = plan_builder
-                    .project([expr.clone()])
+                    .project([expr])
                     .context(DataFusionPlanningSnafu)?;
             }
             LogExpr::NamedIdent(_) | LogExpr::PositionalIdent(_) => {
@@ -433,17 +425,9 @@ impl LogQueryPlanner {
                     .project([aliased_expr.clone()])
                     .context(DataFusionPlanningSnafu)?;
             }
-            LogExpr::BinaryOp { left, op, right } => {
+            LogExpr::BinaryOp { .. } => {
                 let schema = plan_builder.schema();
-                let left_expr = self.log_expr_to_df_expr(left, schema)?;
-                let right_expr = self.log_expr_to_df_expr(right, schema)?;
-                let df_op = Self::binary_operator_to_df_operator(op);
-
-                let binary_expr = Expr::BinaryExpr(BinaryExpr {
-                    left: Box::new(left_expr),
-                    op: df_op,
-                    right: Box::new(right_expr),
-                });
+                let binary_expr = self.log_expr_to_df_expr(expr, schema)?;
 
                 plan_builder = plan_builder
                     .project([binary_expr])
