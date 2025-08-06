@@ -222,8 +222,8 @@ pub trait Procedure: Send {
     }
 }
 
+/// The user metadata injected by the procedure caller. It can be used to emit events to the event recorder.
 #[derive(Clone, Debug)]
-/// The metadata of the procedure.
 pub struct UserMetadata {
     event_object: Arc<dyn Eventable>,
 }
