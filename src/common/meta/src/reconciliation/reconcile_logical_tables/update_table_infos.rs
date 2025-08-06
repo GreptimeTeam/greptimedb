@@ -96,6 +96,7 @@ impl State for UpdateTableInfos {
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
 
+        let updated_table_info_num = table_info_values_to_update.len();
         batch_update_table_info_values(&ctx.table_metadata_manager, table_info_values_to_update)
             .await?;
 
@@ -122,6 +123,9 @@ impl State for UpdateTableInfos {
             .await?;
 
         ctx.persistent_ctx.update_table_infos.clear();
+        // Update metrics.
+        let metrics = ctx.mut_metrics();
+        metrics.update_table_info_count = updated_table_info_num;
         Ok((Box::new(ReconciliationEnd), Status::executing(false)))
     }
 

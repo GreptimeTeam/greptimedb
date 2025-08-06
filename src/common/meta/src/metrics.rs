@@ -15,6 +15,13 @@
 use lazy_static::lazy_static;
 use prometheus::*;
 
+pub const TABLE_TYPE_PHYSICAL: &str = "physical";
+pub const TABLE_TYPE_LOGICAL: &str = "logical";
+pub const ERROR_TYPE_RETRYABLE: &str = "retryable";
+pub const ERROR_TYPE_EXTERNAL: &str = "external";
+pub const STATS_TYPE_NO_REGION_METADATA: &str = "no_region_metadata";
+pub const STATS_TYPE_REGION_NOT_OPEN: &str = "region_not_open";
+
 lazy_static! {
     pub static ref METRIC_META_TXN_REQUEST: HistogramVec = register_histogram_vec!(
         "greptime_meta_txn_request",
@@ -114,4 +121,39 @@ lazy_static! {
         &["backend", "result", "op", "type"]
     )
     .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_LIST_REGION_METADATA_DURATION: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_reconciliation_list_region_metadata_duration",
+            "reconciliation list region metadata duration",
+            &["table_type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_RESOLVED_COLUMN_METADATA: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_resolved_column_metadata",
+            "reconciliation resolved column metadata",
+            &["strategy"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_STATS: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_stats",
+            "reconciliation stats",
+            &["procedure_name", "table_type", "type"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_PROCEDURE: HistogramVec =
+        register_histogram_vec!(
+            "greptime_meta_reconciliation_procedure",
+            "reconcile table procedure",
+            &["procedure_name", "step"]
+        )
+        .unwrap();
+    pub static ref METRIC_META_RECONCILIATION_PROCEDURE_ERROR: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_meta_reconciliation_procedure_error",
+            "reconciliation procedure error",
+            &["procedure_name", "step", "error_type"]
+        )
+        .unwrap();
 }

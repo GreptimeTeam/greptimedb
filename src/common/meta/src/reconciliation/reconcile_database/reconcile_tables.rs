@@ -27,7 +27,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::reconciliation::reconcile_database::reconcile_logical_tables::ReconcileLogicalTables;
 use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
 use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
-use crate::reconciliation::utils::Context;
+use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReconcileTables;
@@ -104,14 +104,14 @@ impl ReconcileTables {
         ctx: &mut ReconcileDatabaseContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let tables = std::mem::take(&mut ctx.volatile_ctx.pending_tables);
-        let subprocedures = Self::build_reconcile_table_procedures(ctx, tables);
-        ctx.volatile_ctx
-            .inflight_subprocedures
-            .extend(subprocedures.iter().map(|p| p.id));
-
+        let (procedures, meta): (Vec<_>, Vec<_>) =
+            Self::build_reconcile_table_procedures(ctx, tables)
+                .into_iter()
+                .unzip();
+        ctx.volatile_ctx.inflight_subprocedures.extend(meta);
         Ok((
             Box::new(ReconcileTables),
-            Status::suspended(subprocedures, false),
+            Status::suspended(procedures, false),
         ))
     }
 
@@ -125,7 +125,7 @@ impl ReconcileTables {
     fn build_reconcile_table_procedures(
         ctx: &ReconcileDatabaseContext,
         tables: Vec<(TableId, TableName)>,
-    ) -> Vec<ProcedureWithId> {
+    ) -> Vec<(ProcedureWithId, SubprocedureMeta)> {
         let mut procedures = Vec::with_capacity(tables.len());
         for (table_id, table_name) in tables {
             let context = Context {
@@ -141,11 +141,13 @@ impl ReconcileTables {
                 true,
             );
             let procedure = ProcedureWithId::with_random_id(Box::new(procedure));
+            let meta =
+                SubprocedureMeta::new_physical_table(procedure.id, table_id, table_name.clone());
             info!(
                 "Reconcile table: {}, table_id: {}, procedure_id: {}",
                 table_name, table_id, procedure.id
             );
-            procedures.push(procedure)
+            procedures.push((procedure, meta));
         }
 
         procedures
