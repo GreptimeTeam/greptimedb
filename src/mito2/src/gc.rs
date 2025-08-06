@@ -64,7 +64,7 @@ impl LocalGcWorker {
                             - chrono::Duration::from_std(self.lingering_time).unwrap())
                 } else {
                     // if last modified is not set, we consider it as old enough
-                    return true;
+                    true
                 }
             })
             .collect::<Vec<_>>();
@@ -88,7 +88,7 @@ impl LocalGcWorker {
         // in use filenames, include sst and index files
         let in_use_filenames = in_used
             .iter()
-            .map(|id| {
+            .flat_map(|id| {
                 [
                     location::sst_file_path(
                         self.access_layer.table_dir(),
@@ -102,7 +102,6 @@ impl LocalGcWorker {
                     ),
                 ]
             })
-            .flatten()
             .collect::<HashSet<_>>();
 
         let region_dir = self.access_layer.build_region_dir(region_id);
