@@ -25,7 +25,7 @@ use common_catalog::consts::{INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME};
 use futures::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::TableRef;
 
 use crate::error::Result;
@@ -88,6 +88,23 @@ pub trait CatalogManager: Send + Sync {
         table_name: &str,
         query_ctx: Option<&QueryContext>,
     ) -> Result<Option<TableRef>>;
+
+    /// Returns the table id of provided table ident.
+    async fn table_id(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<TableId>> {
+        Ok(self
+            .table(catalog, schema, table_name, query_ctx)
+            .await?
+            .map(|t| t.table_info().ident.table_id))
+    }
+
+    /// Returns the table of provided id.
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>>;
 
     /// Returns the tables by table ids.
     async fn tables_by_ids(
