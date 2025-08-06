@@ -827,11 +827,11 @@ mod tests {
 
         let expected = vec![
             create_test_record_batch(
-                &[b"k1", b"k1", b"k1", b"k1"],
-                &[1000, 1500, 2000, 2500],
-                &[21, 31, 22, 32],
-                &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
-                &[11, 15, 12, 25],
+                &[b"k1", b"k1"],
+                &[1000, 1500],
+                &[21, 31],
+                &[OpType::Put, OpType::Put],
+                &[11, 15],
             ),
             create_test_record_batch(&[b"k1"], &[2000], &[22], &[OpType::Put], &[12]),
             create_test_record_batch(&[b"k1"], &[2500], &[32], &[OpType::Put], &[25]),

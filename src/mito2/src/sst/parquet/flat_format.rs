@@ -106,12 +106,12 @@ pub(crate) fn sequence_column_index(num_columns: usize) -> usize {
 
 /// Returns the position of the time index column.
 pub(crate) fn time_index_column_index(num_columns: usize) -> usize {
-    num_columns - 3
+    num_columns - 4
 }
 
 /// Returns the position of the primary key column.
 pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
-    num_columns - 4
+    num_columns - 3
 }
 
 // TODO(yingwen): Add an option to skip reading internal columns.
