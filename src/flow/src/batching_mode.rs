@@ -57,6 +57,9 @@ pub struct BatchingModeOptions {
     pub experimental_time_window_merge_threshold: usize,
     /// Read preference of the Frontend client.
     pub read_preference: ReadPreference,
+    /// Experimental: A duration to truncate the time window of repetitive data to improve performance
+    #[serde(with = "humantime_serde")]
+    pub experimental_truncate_duration: Duration,
 }
 
 impl Default for BatchingModeOptions {
@@ -72,6 +75,7 @@ impl Default for BatchingModeOptions {
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
             read_preference: Default::default(),
+            experimental_truncate_duration: Duration::from_secs(600),
         }
     }
 }

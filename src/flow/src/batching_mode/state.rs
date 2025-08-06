@@ -41,9 +41,12 @@ pub struct TaskState {
     /// Query context
     pub(crate) query_ctx: QueryContextRef,
     /// last query complete time
-    last_update_time: Instant,
+    pub(crate) last_update_time: Instant,
     /// last time query duration
-    last_query_duration: Duration,
+    pub(crate) last_query_duration: Duration,
+    /// last truncate time
+    /// if `None`, means no truncate happened yet
+    pub(crate) last_truncate_time: Option<Instant>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -59,6 +62,7 @@ impl TaskState {
             query_ctx,
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
+            last_truncate_time: None,
             dirty_time_windows: Default::default(),
             exec_state: ExecState::Idle,
             shutdown_rx,

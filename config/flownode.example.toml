@@ -32,6 +32,8 @@ node_id = 14
 #+experimental_time_window_merge_threshold=3
 ## Read preference of the Frontend client.
 #+read_preference="Leader"
+## Experimental: A duration to truncate the time window of repetitive data to improve performance
+#+experimental_truncate_duration="10min"
 
 ## The gRPC server options.
 [grpc]
