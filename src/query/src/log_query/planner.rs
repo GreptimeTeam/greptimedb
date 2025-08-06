@@ -302,7 +302,7 @@ impl LogQueryPlanner {
             LogExpr::BinaryOp { left, op, right } => {
                 let left_expr = self.log_expr_to_df_expr(left, schema)?;
                 let right_expr = self.log_expr_to_df_expr(right, schema)?;
-                let df_op = Self::binary_operator_to_df_operator(op)?;
+                let df_op = Self::binary_operator_to_df_operator(op);
 
                 Ok(Expr::BinaryExpr(BinaryExpr {
                     left: Box::new(left_expr),
@@ -315,11 +315,13 @@ impl LogQueryPlanner {
                     .iter()
                     .map(|arg| self.log_expr_to_df_expr(arg, schema))
                     .try_collect::<Vec<_>>()?;
-                let func = self.session_state.scalar_functions().get(name).with_context(||
-                    UnknownScalarFunctionSnafu {
+                let func = self
+                    .session_state
+                    .scalar_functions()
+                    .get(name)
+                    .with_context(|| UnknownScalarFunctionSnafu {
                         name: name.to_string(),
-                    },
-                )?;
+                    })?;
                 let mut expr = func.call(df_args);
                 if let Some(alias) = alias {
                     expr = expr.alias(alias);
@@ -356,21 +358,21 @@ impl LogQueryPlanner {
     }
 
     /// Convert BinaryOperator to DataFusion's Operator.
-    fn binary_operator_to_df_operator(op: &BinaryOperator) -> Result<Operator> {
+    fn binary_operator_to_df_operator(op: &BinaryOperator) -> Operator {
         match op {
-            BinaryOperator::Eq => Ok(Operator::Eq),
-            BinaryOperator::Ne => Ok(Operator::NotEq),
-            BinaryOperator::Lt => Ok(Operator::Lt),
-            BinaryOperator::Le => Ok(Operator::LtEq),
-            BinaryOperator::Gt => Ok(Operator::Gt),
-            BinaryOperator::Ge => Ok(Operator::GtEq),
-            BinaryOperator::Plus => Ok(Operator::Plus),
-            BinaryOperator::Minus => Ok(Operator::Minus),
-            BinaryOperator::Multiply => Ok(Operator::Multiply),
-            BinaryOperator::Divide => Ok(Operator::Divide),
-            BinaryOperator::Modulo => Ok(Operator::Modulo),
-            BinaryOperator::And => Ok(Operator::And),
-            BinaryOperator::Or => Ok(Operator::Or),
+            BinaryOperator::Eq => Operator::Eq,
+            BinaryOperator::Ne => Operator::NotEq,
+            BinaryOperator::Lt => Operator::Lt,
+            BinaryOperator::Le => Operator::LtEq,
+            BinaryOperator::Gt => Operator::Gt,
+            BinaryOperator::Ge => Operator::GtEq,
+            BinaryOperator::Plus => Operator::Plus,
+            BinaryOperator::Minus => Operator::Minus,
+            BinaryOperator::Multiply => Operator::Multiply,
+            BinaryOperator::Divide => Operator::Divide,
+            BinaryOperator::Modulo => Operator::Modulo,
+            BinaryOperator::And => Operator::And,
+            BinaryOperator::Or => Operator::Or,
         }
     }
 
@@ -435,7 +437,7 @@ impl LogQueryPlanner {
                 let schema = plan_builder.schema();
                 let left_expr = self.log_expr_to_df_expr(left, schema)?;
                 let right_expr = self.log_expr_to_df_expr(right, schema)?;
-                let df_op = Self::binary_operator_to_df_operator(op)?;
+                let df_op = Self::binary_operator_to_df_operator(op);
 
                 let binary_expr = Expr::BinaryExpr(BinaryExpr {
                     left: Box::new(left_expr),
