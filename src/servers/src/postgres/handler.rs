@@ -209,6 +209,7 @@ impl QueryParser for DefaultQueryParser {
         if sql.is_empty() || fixtures::matches(sql) {
             return Ok(SqlPlan {
                 query: sql.to_owned(),
+                statement: None,
                 plan: None,
                 schema: None,
             });
@@ -229,7 +230,7 @@ impl QueryParser for DefaultQueryParser {
 
             let describe_result = self
                 .query_handler
-                .do_describe(stmt, query_ctx)
+                .do_describe(stmt.clone(), query_ctx)
                 .await
                 .map_err(convert_err)?;
 
@@ -245,6 +246,7 @@ impl QueryParser for DefaultQueryParser {
 
             Ok(SqlPlan {
                 query: sql.to_owned(),
+                statement: Some(stmt),
                 plan,
                 schema,
             })
@@ -300,7 +302,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
                 .context(DataFusionSnafu)
                 .map_err(convert_err)?;
             self.query_handler
-                .do_exec_plan(plan, query_ctx.clone())
+                .do_exec_plan(sql_plan.statement.clone(), plan, query_ctx.clone())
                 .await
         } else {
             // manually replace variables in prepared statement when no

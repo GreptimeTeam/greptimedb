@@ -20,6 +20,7 @@
 
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::Schema;
+use sql::statements::statement::Statement;
 
 pub mod addrs;
 pub mod configurator;
@@ -55,6 +56,8 @@ pub mod tls;
 #[derive(Clone)]
 pub struct SqlPlan {
     query: String,
+    // Store the parsed statement to determine if it is a query and whether to track it.
+    statement: Option<Statement>,
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
 }

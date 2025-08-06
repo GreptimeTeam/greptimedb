@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::process_manager::ProcessManagerRef;
+use catalog::process_manager::{ProcessManagerRef, QueryStatement as CatalogQueryStatement};
 use catalog::CatalogManagerRef;
 use client::OutputData;
 use common_base::cancellation::CancellableFuture;
@@ -73,7 +73,7 @@ use query::query_engine::DescribeResult;
 use query::QueryEngineRef;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu,
+    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
 };
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
@@ -221,36 +221,40 @@ impl Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(QueryStatement::Sql(stmt.clone()), query_ctx.clone())
+        if should_capture_statement(Some(&stmt)) {
+            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
+                recorder.start(CatalogQueryStatement::Sql(stmt.clone()), query_ctx.clone())
+            });
+
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                stmt.to_string(),
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
+
+            let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
         } else {
-            None
-        };
-
-        let ticket = self.process_manager.register_query(
-            query_ctx.current_catalog().to_string(),
-            vec![query_ctx.current_schema()],
-            stmt.to_string(),
-            query_ctx.conn_info().to_string(),
-            Some(query_ctx.process_id()),
-        );
-
-        let query_fut = self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor);
-
-        CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-            .await
-            .map_err(|_| error::CancelledSnafu.build())?
-            .map(|output| {
-                let Output { meta, data } = output;
-
-                let data = match data {
-                    OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                    }
-                    other => other,
-                };
-                Output { data, meta }
-            })
+            self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor)
+                .await
+        }
     }
 
     async fn exec_statement_with_timeout(
@@ -572,13 +576,54 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        // plan should be prepared before exec
-        // we'll do check there
-        self.query_engine
-            .execute(plan.clone(), query_ctx)
-            .await
-            .context(ExecLogicalPlanSnafu)
+    async fn do_exec_plan(
+        &self,
+        stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        if should_capture_statement(stmt.as_ref()) {
+            // It's safe to unwrap here because we've already checked the type.
+            let stmt = stmt.unwrap();
+            let query = stmt.to_string();
+            let slow_query_timer = self.slow_query_recorder.as_ref().and_then(|recorder| {
+                recorder.start(CatalogQueryStatement::Sql(stmt), query_ctx.clone())
+            });
+
+            let ticket = self.process_manager.register_query(
+                query_ctx.current_catalog().to_string(),
+                vec![query_ctx.current_schema()],
+                query,
+                query_ctx.conn_info().to_string(),
+                Some(query_ctx.process_id()),
+                slow_query_timer,
+            );
+
+            let query_fut = self.query_engine.execute(plan.clone(), query_ctx);
+
+            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                .await
+                .map_err(|_| error::CancelledSnafu.build())?
+                .map(|output| {
+                    let Output { meta, data } = output;
+
+                    let data = match data {
+                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                            CancellableStreamWrapper::new(stream, ticket),
+                        )),
+                        other => other,
+                    };
+                    Output { data, meta }
+                })
+                .context(ExecLogicalPlanSnafu)
+        } else {
+            // plan should be prepared before exec
+            // we'll do check there
+            self.query_engine
+                .execute(plan.clone(), query_ctx)
+                .await
+                .context(ExecLogicalPlanSnafu)
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -672,12 +717,6 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
-        let _slow_query_timer = if let Some(recorder) = &self.slow_query_recorder {
-            recorder.start(stmt.clone(), query_ctx.clone())
-        } else {
-            None
-        };
-
         let plan = self
             .statement_executor
             .plan(&stmt, query_ctx.clone())
@@ -687,10 +726,47 @@ impl PrometheusHandler for Instance {
 
         interceptor.pre_execute(query, Some(&plan), query_ctx.clone())?;
 
-        let output = self
-            .statement_executor
-            .exec_plan(plan, query_ctx.clone())
+        // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
+        let query_statement = if let QueryStatement::Promql(eval_stmt) = stmt {
+            CatalogQueryStatement::Promql(eval_stmt)
+        } else {
+            // It should not happen since the query is already parsed successfully.
+            return UnexpectedResultSnafu {
+                reason: "The query should always be promql.".to_string(),
+            }
+            .fail();
+        };
+        let query = query_statement.to_string();
+
+        let slow_query_timer = self
+            .slow_query_recorder
+            .as_ref()
+            .and_then(|recorder| recorder.start(query_statement, query_ctx.clone()));
+
+        let ticket = self.process_manager.register_query(
+            query_ctx.current_catalog().to_string(),
+            vec![query_ctx.current_schema()],
+            query,
+            query_ctx.conn_info().to_string(),
+            Some(query_ctx.process_id()),
+            slow_query_timer,
+        );
+
+        let query_fut = self.statement_executor.exec_plan(plan, query_ctx.clone());
+
+        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
+            .map_err(|_| servers::error::CancelledSnafu.build())?
+            .map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
@@ -912,6 +988,15 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
     validate_catalog_and_schema(&catalog, &schema, query_ctx)
         .map_err(BoxedError::new)
         .context(SqlExecInterceptedSnafu)
+}
+
+// Create a query ticket and slow query timer if the statement is a query or readonly statement.
+fn should_capture_statement(stmt: Option<&Statement>) -> bool {
+    if let Some(stmt) = stmt {
+        matches!(stmt, Statement::Query(_)) || stmt.is_readonly()
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]

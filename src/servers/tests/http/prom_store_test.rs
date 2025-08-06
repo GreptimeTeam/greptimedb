@@ -35,6 +35,7 @@ use servers::prom_store::{snappy_compress, Metrics};
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -87,6 +88,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_exec_plan(
         &self,
+        _stmt: Option<Statement>,
         _plan: LogicalPlan,
         _query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error> {
