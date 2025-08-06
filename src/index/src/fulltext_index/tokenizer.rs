@@ -73,7 +73,7 @@ impl Tokenizer for EnglishTokenizer {
 
             tokens
         } else {
-            text.split(|c: char| !c.is_alphanumeric() || c == '_')
+            text.split(|c: char| !c.is_alphanumeric() && c != '_')
                 .filter(|s| !s.is_empty())
                 .collect()
         }
@@ -138,11 +138,11 @@ mod tests {
     #[test]
     fn test_english_tokenizer() {
         let tokenizer = EnglishTokenizer;
-        let text = "Hello, world!!! This is å ----++   test012345+67890";
+        let text = "Hello, world!!! This is a----++   test012_345+67890";
         let tokens = tokenizer.tokenize(text);
         assert_eq!(
             tokens,
-            vec!["Hello", "world", "This", "is", "test012345", "67890"]
+            vec!["Hello", "world", "This", "is", "a", "test012_345", "67890"]
         );
     }
 
@@ -172,10 +172,7 @@ mod tests {
         // Test all ASCII values in a single loop
         for c in 0u8..=255u8 {
             let is_valid = VALID_ASCII_TOKEN[c as usize];
-            let should_be_valid = (c >= b'A' && c <= b'Z') || // A-Z
-                                  (c >= b'a' && c <= b'z') || // a-z
-                                  (c >= b'0' && c <= b'9') || // 0-9
-                                  (c == b'_'); // underscore
+            let should_be_valid = (c as char).is_ascii_alphanumeric() || c == b'_';
 
             assert_eq!(
                 is_valid,
