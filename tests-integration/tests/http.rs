@@ -1240,6 +1240,7 @@ experimental_frontend_scan_timeout = "30s"
 experimental_frontend_activity_timeout = "1m"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
+experimental_truncate_duration = "10m"
 
 [logging]
 max_log_files = 720
