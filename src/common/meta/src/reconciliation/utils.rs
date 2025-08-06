@@ -880,7 +880,7 @@ impl Drop for ReconcileTableMetrics {
                             metrics::TABLE_TYPE_PHYSICAL,
                             COLUMN_METADATA_CONSISTENT,
                         ])
-                        .inc_by(1);
+                        .inc();
                 }
                 ResolveColumnMetadataResult::Inconsistent(strategy) => {
                     metrics::METRIC_META_RECONCILIATION_STATS
@@ -889,10 +889,10 @@ impl Drop for ReconcileTableMetrics {
                             metrics::TABLE_TYPE_PHYSICAL,
                             COLUMN_METADATA_INCONSISTENT,
                         ])
-                        .inc_by(1);
+                        .inc();
                     metrics::METRIC_META_RECONCILIATION_RESOLVED_COLUMN_METADATA
                         .with_label_values(&[strategy.as_ref()])
-                        .inc_by(1);
+                        .inc();
                 }
             }
         }
@@ -903,7 +903,7 @@ impl Drop for ReconcileTableMetrics {
                     metrics::TABLE_TYPE_PHYSICAL,
                     UPDATE_TABLE_INFO,
                 ])
-                .inc_by(1);
+                .inc();
         }
     }
 }
