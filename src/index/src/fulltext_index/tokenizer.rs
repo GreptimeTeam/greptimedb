@@ -162,6 +162,28 @@ mod tests {
     }
 
     #[test]
+    fn test_valid_ascii_token_lookup_table() {
+        // Test all ASCII values in a single loop
+        for c in 0u8..=255u8 {
+            let is_valid = VALID_ASCII_TOKEN[c as usize];
+            let should_be_valid = (c >= b'A' && c <= b'Z') || // A-Z
+                                  (c >= b'a' && c <= b'z') || // a-z
+                                  (c >= b'0' && c <= b'9') || // 0-9
+                                  (c == b'_');                // underscore
+            
+            assert_eq!(
+                is_valid, 
+                should_be_valid,
+                "Character '{}' (byte {}) validity mismatch: expected {}, got {}",
+                if c.is_ascii() && !c.is_ascii_control() { c as char } else { '?' },
+                c,
+                should_be_valid,
+                is_valid
+            );
+        }
+    }
+
+    #[test]
     fn test_analyzer() {
         let tokenizer = EnglishTokenizer;
         let analyzer = Analyzer::new(Box::new(tokenizer), false);
