@@ -55,7 +55,7 @@ pub struct LogQuery {
 }
 
 /// Expression to calculate on log after filtering.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LogExpr {
     NamedIdent(String),
     PositionalIdent(usize),
@@ -282,7 +282,7 @@ impl TimeFilter {
 }
 
 /// Represents an expression with filters to query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnFilters {
     /// Expression to apply filters to. Can be a column reference or any other LogExpr.
     pub expr: Box<LogExpr>,
@@ -290,7 +290,7 @@ pub struct ColumnFilters {
     pub filters: Vec<ContentFilter>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ContentFilter {
     // Search-based filters
     /// Only match the exact content.
@@ -333,14 +333,14 @@ pub enum ContentFilter {
     Compound(Vec<ContentFilter>, ConjunctionOperator),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConjunctionOperator {
     And,
     Or,
 }
 
 /// Binary operators for LogExpr::BinaryOp.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BinaryOperator {
     // Comparison operators
     Eq,
