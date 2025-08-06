@@ -42,7 +42,13 @@ uuid.workspace = true
 
 [dev-dependencies]
 common-test-util.workspace = true
+criterion = "0.4"
 rand.workspace = true
+rand_chacha = "0.9"
 tempfile.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[[bench]]
+name = "bytes_to_u64_vec"
+harness = false
