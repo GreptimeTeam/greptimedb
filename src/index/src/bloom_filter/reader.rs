@@ -36,7 +36,7 @@ pub const DEFAULT_PREFETCH_SIZE: u64 = 8192; // 8KiB
 
 /// Safely converts bytes to Vec<u64> using bytemuck for optimal performance.
 /// Faster than chunking and converting each piece individually.
-fn bytes_to_u64_vec(bytes: &Bytes) -> Vec<u64> {
+pub fn bytes_to_u64_vec(bytes: &Bytes) -> Vec<u64> {
     // drop tailing things, this keeps the same behavior with `chunks_exact`.
     let aligned_length = bytes.len() - bytes.len().rem(std::mem::size_of::<u64>());
     let byte_slice = &bytes[..aligned_length];
