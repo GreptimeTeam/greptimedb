@@ -953,6 +953,7 @@ mod tests {
             state_store,
             poison_manager,
             None,
+            None,
         ));
 
         let _ = DdlManager::try_new(

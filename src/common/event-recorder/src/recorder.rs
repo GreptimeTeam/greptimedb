@@ -81,7 +81,9 @@ pub trait Event: Send + Sync + Debug {
     }
 
     /// Returns the JSON bytes of the event as the payload. It will use JSON type to store the payload.
-    fn json_payload(&self) -> Result<String>;
+    fn json_payload(&self) -> Result<String> {
+        Ok("".to_string())
+    }
 
     /// Add the extra schema to the event with the default schema.
     fn extra_schema(&self) -> Vec<ColumnSchema> {
@@ -95,6 +97,14 @@ pub trait Event: Send + Sync + Debug {
 
     /// Returns the event as any type.
     fn as_any(&self) -> &dyn Any;
+}
+
+/// Eventable trait defines the interface for objects that can be converted to [Event].
+pub trait Eventable: Send + Sync + Debug {
+    /// Converts the object to an [Event].
+    fn to_event(&self) -> Option<Box<dyn Event>> {
+        None
+    }
 }
 
 /// Returns the hints for the insert operation.
@@ -199,7 +209,7 @@ fn validate_events(events: &[&Box<dyn Event>]) -> Result<()> {
 }
 
 /// EventRecorder trait defines the interface for recording events.
-pub trait EventRecorder: Send + Sync + 'static {
+pub trait EventRecorder: Send + Sync + Debug + 'static {
     /// Records an event for persistence and processing by [EventHandler].
     fn record(&self, event: Box<dyn Event>);
 
@@ -231,6 +241,7 @@ impl Default for EventRecorderOptions {
 }
 
 /// Implementation of [EventRecorder] that records the events and processes them in the background by the [EventHandler].
+#[derive(Debug)]
 pub struct EventRecorderImpl {
     // The channel to send the events to the background processor.
     tx: Sender<Box<dyn Event>>,
