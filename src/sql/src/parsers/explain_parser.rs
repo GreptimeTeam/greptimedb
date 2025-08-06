@@ -31,7 +31,9 @@ impl ParserContext<'_> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        Ok(Statement::Explain(Explain::try_from(explain_statement)?))
+        Ok(Statement::Explain(Box::new(Explain::try_from(
+            explain_statement,
+        )?)))
     }
 }
 
@@ -118,6 +120,6 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(stmts[0], Statement::Explain(explain))
+        assert_eq!(stmts[0], Statement::Explain(Box::new(explain)))
     }
 }
