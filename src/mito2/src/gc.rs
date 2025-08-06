@@ -57,6 +57,7 @@ impl LocalGcWorker {
         let old_unused_files = unused_files
             .into_iter()
             .filter(|e| {
+                // TODO(discord9): is use last_modified time correct?
                 if let Some(last_modified) = e.metadata().last_modified() {
                     last_modified
                         < (chrono::Utc::now()
@@ -68,10 +69,16 @@ impl LocalGcWorker {
             })
             .collect::<Vec<_>>();
 
-        todo!("delete old_unused_files: {:?}", old_unused_files);
+        self.access_layer
+            .object_store()
+            .delete_iter(old_unused_files.iter().map(|e| e.name()))
+            .await
+            .context(OpenDalSnafu)
     }
 
     /// Concurrently list unused files in the region dir
+    /// because there may be a lot of files in the region dir
+    /// and listing them may take a long time.
     pub async fn list_unused_files(
         &self,
         region_id: RegionId,
@@ -226,6 +233,12 @@ mod tests {
 
         let partitions = gen_partition_from_concurrency(8);
         assert_eq!(partitions, vec!["2", "4", "6", "8", "a", "c", "e"]);
+
+        let partitions = gen_partition_from_concurrency(16);
+        assert_eq!(
+            partitions,
+            vec!["1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+        );
 
         let partitions = gen_partition_from_concurrency(32);
         assert_eq!(
