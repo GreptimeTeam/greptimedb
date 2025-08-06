@@ -149,7 +149,7 @@ mod tests {
             tokens,
             // Don't care what happens to non-ASCII characters.
             // It's kind of a misconfiguration to use EnglishTokenizer on non-ASCII text.
-            vec!["unfold", "the", "纸巾", "and", "gently", "清洁表", "面"]
+            vec!["unfold", "the", "and", "gently"]
         );
     }
 
