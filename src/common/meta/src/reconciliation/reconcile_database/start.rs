@@ -33,7 +33,7 @@ impl State for ReconcileDatabaseStart {
     async fn next(
         &mut self,
         ctx: &mut ReconcileDatabaseContext,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let exists = ctx
             .table_metadata_manager
@@ -51,8 +51,8 @@ impl State for ReconcileDatabaseStart {
             },
         );
         info!(
-            "Reconcile database: {}, catalog: {}",
-            ctx.persistent_ctx.schema, ctx.persistent_ctx.catalog
+            "Reconcile database: {}, catalog: {}, procedure_id: {}",
+            ctx.persistent_ctx.schema, ctx.persistent_ctx.catalog, procedure_ctx.procedure_id,
         );
         Ok((Box::new(ReconcileTables), Status::executing(true)))
     }

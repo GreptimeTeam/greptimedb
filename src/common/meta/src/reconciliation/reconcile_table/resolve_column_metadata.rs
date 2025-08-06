@@ -20,6 +20,7 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadata;
+use strum::AsRefStr;
 
 use crate::error::{self, MissingColumnIdsSnafu, Result};
 use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
@@ -28,10 +29,11 @@ use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
 use crate::reconciliation::utils::{
     build_column_metadata_from_table_info, check_column_metadatas_consistent,
     resolve_column_metadatas_with_latest, resolve_column_metadatas_with_metasrv,
+    ResolveColumnMetadataResult,
 };
 
 /// Strategy for resolving column metadata inconsistencies.
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, AsRefStr)]
 pub enum ResolveStrategy {
     #[default]
     /// Trusts the latest column metadata from datanode.
@@ -98,6 +100,10 @@ impl State for ResolveColumnMetadata {
                 "Column metadatas are consistent for table: {}, table_id: {}.",
                 table_name, table_id
             );
+
+            // Update metrics.
+            ctx.mut_metrics().resolve_column_metadata_result =
+                Some(ResolveColumnMetadataResult::Consistent);
             return Ok((
                 Box::new(UpdateTableInfo::new(table_info_value, column_metadatas)),
                 Status::executing(false),
@@ -119,6 +125,11 @@ impl State for ResolveColumnMetadata {
 
                 let region_ids =
                     resolve_column_metadatas_with_metasrv(&column_metadata, &self.region_metadata)?;
+
+                // Update metrics.
+                let metrics = ctx.mut_metrics();
+                metrics.resolve_column_metadata_result =
+                    Some(ResolveColumnMetadataResult::Inconsistent(self.strategy));
                 Ok((
                     Box::new(ReconcileRegions::new(column_metadata, region_ids)),
                     Status::executing(true),
@@ -127,16 +138,29 @@ impl State for ResolveColumnMetadata {
             ResolveStrategy::UseLatest => {
                 let (column_metadatas, region_ids) =
                     resolve_column_metadatas_with_latest(&self.region_metadata)?;
+
+                // Update metrics.
+                let metrics = ctx.mut_metrics();
+                metrics.resolve_column_metadata_result =
+                    Some(ResolveColumnMetadataResult::Inconsistent(self.strategy));
                 Ok((
                     Box::new(ReconcileRegions::new(column_metadatas, region_ids)),
                     Status::executing(true),
                 ))
             }
-            ResolveStrategy::AbortOnConflict => error::ColumnMetadataConflictsSnafu {
-                table_name: table_name.to_string(),
-                table_id,
+            ResolveStrategy::AbortOnConflict => {
+                let table_name = table_name.to_string();
+
+                // Update metrics.
+                let metrics = ctx.mut_metrics();
+                metrics.resolve_column_metadata_result =
+                    Some(ResolveColumnMetadataResult::Inconsistent(self.strategy));
+                error::ColumnMetadataConflictsSnafu {
+                    table_name,
+                    table_id,
+                }
+                .fail()
             }
-            .fail(),
         }
     }
 
