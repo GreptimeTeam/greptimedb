@@ -82,7 +82,7 @@ pub enum LogExpr {
     },
     BinaryOp {
         left: Box<LogExpr>,
-        op: String,
+        op: BinaryOperator,
         right: Box<LogExpr>,
     },
     Alias {
@@ -326,14 +326,38 @@ pub enum ContentFilter {
         inclusive: bool,
     },
     In(Vec<String>),
-    // TODO(ruihang): arithmetic operations
+    IsTrue,
+    IsFalse,
 
     // Compound filters
-    Compound(Vec<ContentFilter>, BinaryOperator),
+    Compound(Vec<ContentFilter>, ConjunctionOperator),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConjunctionOperator {
+    And,
+    Or,
+}
+
+/// Binary operators for LogExpr::BinaryOp.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
+    // Comparison operators
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+
+    // Arithmetic operators
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulo,
+
+    // Logical operators
     And,
     Or,
 }
