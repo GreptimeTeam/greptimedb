@@ -121,7 +121,8 @@ impl GrpcQueryHandler for Instance {
                             .await
                             .context(SubstraitDecodeLogicalPlanSnafu)?;
                         let output =
-                            SqlQueryHandler::do_exec_plan(self, logical_plan, ctx.clone()).await?;
+                            SqlQueryHandler::do_exec_plan(self, None, logical_plan, ctx.clone())
+                                .await?;
 
                         attach_timer(output, timer)
                     }
@@ -402,7 +403,7 @@ impl Instance {
             .context(common_query::error::GeneralDataFusionSnafu)
             .context(SubstraitDecodeLogicalPlanSnafu)?;
 
-        let output = SqlQueryHandler::do_exec_plan(self, optimized_plan, ctx.clone()).await?;
+        let output = SqlQueryHandler::do_exec_plan(self, None, optimized_plan, ctx.clone()).await?;
 
         Ok(attach_timer(output, timer))
     }

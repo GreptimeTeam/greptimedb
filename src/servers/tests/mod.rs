@@ -68,7 +68,12 @@ impl SqlQueryHandler for DummyInstance {
         vec![Ok(output)]
     }
 
-    async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn do_exec_plan(
+        &self,
+        _stmt: Option<Statement>,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         Ok(self.query_engine.execute(plan, query_ctx).await.unwrap())
     }
 
