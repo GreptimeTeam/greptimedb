@@ -54,6 +54,9 @@ pub struct BatchingModeOptions {
     pub experimental_max_filter_num_per_query: usize,
     /// Time window merge distance
     pub experimental_time_window_merge_threshold: usize,
+    /// Experimental: A duration to truncate the time window of repetitive data to improve performance
+    #[serde(with = "humantime_serde")]
+    pub experimental_truncate_duration: Duration,
 }
 
 impl Default for BatchingModeOptions {
@@ -68,6 +71,7 @@ impl Default for BatchingModeOptions {
             experimental_frontend_activity_timeout: Duration::from_secs(60),
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
+            experimental_truncate_duration: Duration::from_secs(600),
         }
     }
 }

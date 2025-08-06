@@ -368,6 +368,25 @@ impl BatchingTask {
         frontend_client: &Arc<FrontendClient>,
         flow_id_str: &str,
     ) -> Result<u32, Error> {
+        if let Some(last_trunc_time) = self.state.read().unwrap().last_truncate_time {
+            // if last truncate time is not None, then we have already truncated before
+            // so no need to truncate again
+            if last_trunc_time.elapsed() < self.config.batch_opts.experimental_truncate_duration {
+                debug!(
+                    "Flow id = {:?} skip truncate since last truncate time is {:?} and elapsed time is less than experimental_truncate_duration",
+                    self.config.flow_id, last_trunc_time.elapsed()
+                );
+                return Ok(0);
+            } else {
+                // update last truncate time to now
+                self.state.write().unwrap().last_truncate_time = Some(Instant::now());
+            }
+        } else {
+            // if last truncate time is None, then we have never truncated before
+            // so we can proceed with truncation
+            self.state.write().unwrap().last_truncate_time = Some(Instant::now());
+        }
+
         // Heuristic: trigger truncate if the total time range to process is larger
         // than a single window size, indicating a significant catch-up operation is happening.
         if let Some(filter) = &info.filter
