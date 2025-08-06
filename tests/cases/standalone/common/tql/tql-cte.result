@@ -234,6 +234,7 @@ SELECT * FROM time_shifted;
 +----+-----+
 
 -- TQL CTE with JOIN between TQL and regular table
+-- SQLNESS SORT_RESULT 3 1
 WITH tql_summary(ts, host, cpu) AS (
     TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
 )
@@ -244,16 +245,17 @@ SELECT
 FROM tql_summary t
 JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
 WHERE l.host = 'host1'
+ORDER BY t.ts
 LIMIT 5;
 
 +---------------------+-----------+-------+
 | ts                  | avg_value | host  |
 +---------------------+-----------+-------+
-| 1970-01-01T00:00:20 | host1     | host1 |
-| 1970-01-01T00:00:20 | host2     | host1 |
-| 1970-01-01T00:00:40 | host1     | host1 |
-| 1970-01-01T00:00:40 | host2     | host1 |
+| 1970-01-01T00:00:00 | host1     | host1 |
+| 1970-01-01T00:00:00 | host2     | host1 |
 | 1970-01-01T00:00:10 | host1     | host1 |
+| 1970-01-01T00:00:10 | host2     | host1 |
+| 1970-01-01T00:00:20 | host2     | host1 |
 +---------------------+-----------+-------+
 
 -- Error case - TQL ANALYZE should fail
