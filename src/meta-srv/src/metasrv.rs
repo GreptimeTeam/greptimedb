@@ -23,6 +23,7 @@ use clap::ValueEnum;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
+use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
@@ -179,6 +180,8 @@ pub struct MetasrvOptions {
     pub meta_election_lock_id: u64,
     #[serde(with = "humantime_serde")]
     pub node_max_idle_time: Duration,
+    /// The event recorder options.
+    pub event_recorder: EventRecorderOptions,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -269,6 +272,7 @@ impl Default for MetasrvOptions {
             #[cfg(feature = "pg_kvbackend")]
             meta_election_lock_id: common_meta::kv_backend::DEFAULT_META_ELECTION_LOCK_ID,
             node_max_idle_time: Duration::from_secs(24 * 60 * 60),
+            event_recorder: EventRecorderOptions::default(),
         }
     }
 }

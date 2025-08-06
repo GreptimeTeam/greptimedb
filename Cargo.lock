@@ -2341,10 +2341,8 @@ dependencies = [
  "api",
  "async-trait",
  "backon",
- "client",
  "common-error",
  "common-macro",
- "common-meta",
  "common-telemetry",
  "common-time",
  "serde",
@@ -2630,11 +2628,13 @@ dependencies = [
 name = "common-procedure"
 version = "0.16.0"
 dependencies = [
+ "api",
  "async-stream",
  "async-trait",
  "backon",
  "common-base",
  "common-error",
+ "common-event-recorder",
  "common-macro",
  "common-runtime",
  "common-telemetry",
@@ -6235,6 +6235,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "inherent"
+version = "1.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c38228f24186d9cc68c729accb4d413be9eaed6ad07ff79e0270d9e56f3de13"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "inotify"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7370,6 +7381,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-event-recorder",
  "common-greptimedb-telemetry",
  "common-grpc",
  "common-macro",
@@ -11258,6 +11270,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "sea-query"
+version = "0.32.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64c91783d1514b99754fc6a4079081dcc2c587dadbff65c48c7f62297443536a"
+dependencies = [
+ "inherent",
+ "sea-query-derive",
+]
+
+[[package]]
+name = "sea-query-derive"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae0cbad6ab996955664982739354128c58d16e126114fe88c2a493642502aab"
+dependencies = [
+ "darling 0.20.10",
+ "heck 0.4.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+ "thiserror 2.0.12",
+]
+
+[[package]]
 name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13017,6 +13053,7 @@ dependencies = [
  "common-catalog",
  "common-config",
  "common-error",
+ "common-event-recorder",
  "common-grpc",
  "common-meta",
  "common-procedure",
@@ -13059,6 +13096,7 @@ dependencies = [
  "rand 0.9.0",
  "rstest",
  "rstest_reuse",
+ "sea-query",
  "serde_json",
  "servers",
  "session",

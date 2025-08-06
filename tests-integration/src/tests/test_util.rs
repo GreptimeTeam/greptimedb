@@ -97,7 +97,7 @@ impl MockInstanceBuilder {
                 MockInstanceImpl::Standalone(builder.build().await)
             }
             MockInstanceBuilder::Distributed(builder) => {
-                MockInstanceImpl::Distributed(builder.build().await)
+                MockInstanceImpl::Distributed(builder.build(false).await)
             }
         }
     }
@@ -131,7 +131,9 @@ impl MockInstanceBuilder {
                     ..
                 } = instance;
 
-                MockInstanceImpl::Distributed(builder.build_with(datanode_options, guards).await)
+                MockInstanceImpl::Distributed(
+                    builder.build_with(datanode_options, false, guards).await,
+                )
             }
         }
     }
@@ -207,7 +209,7 @@ pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockIns
     let cluster = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_store_providers(storage_types)
-        .build()
+        .build(false)
         .await;
     Arc::new(MockDistributedInstance(cluster))
 }
