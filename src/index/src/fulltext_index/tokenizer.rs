@@ -55,22 +55,28 @@ pub struct EnglishTokenizer;
 
 impl Tokenizer for EnglishTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        let mut tokens = Vec::new();
-        let mut start = 0;
-        for (i, &byte) in text.as_bytes().iter().enumerate() {
-            if !VALID_ASCII_TOKEN[byte as usize] {
-                if start < i {
-                    tokens.push(&text[start..i]);
+        if text.is_ascii() {
+            let mut tokens = Vec::new();
+            let mut start = 0;
+            for (i, &byte) in text.as_bytes().iter().enumerate() {
+                if !VALID_ASCII_TOKEN[byte as usize] {
+                    if start < i {
+                        tokens.push(&text[start..i]);
+                    }
+                    start = i + 1;
                 }
-                start = i + 1;
             }
-        }
 
-        if start < text.len() {
-            tokens.push(&text[start..]);
-        }
+            if start < text.len() {
+                tokens.push(&text[start..]);
+            }
 
-        tokens
+            tokens
+        } else {
+            text.split(|c: char| !c.is_alphanumeric() || c == '_')
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
     }
 }
 
@@ -149,7 +155,7 @@ mod tests {
             tokens,
             // Don't care what happens to non-ASCII characters.
             // It's kind of a misconfiguration to use EnglishTokenizer on non-ASCII text.
-            vec!["unfold", "the", "and", "gently"]
+            vec!["unfold", "the", "纸巾", "and", "gently", "清洁表", "面"]
         );
     }
 
@@ -169,13 +175,17 @@ mod tests {
             let should_be_valid = (c >= b'A' && c <= b'Z') || // A-Z
                                   (c >= b'a' && c <= b'z') || // a-z
                                   (c >= b'0' && c <= b'9') || // 0-9
-                                  (c == b'_');                // underscore
-            
+                                  (c == b'_'); // underscore
+
             assert_eq!(
-                is_valid, 
+                is_valid,
                 should_be_valid,
                 "Character '{}' (byte {}) validity mismatch: expected {}, got {}",
-                if c.is_ascii() && !c.is_ascii_control() { c as char } else { '?' },
+                if c.is_ascii() && !c.is_ascii_control() {
+                    c as char
+                } else {
+                    '?'
+                },
                 c,
                 should_be_valid,
                 is_valid
