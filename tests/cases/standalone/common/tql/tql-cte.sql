@@ -38,18 +38,17 @@ WITH
     filtered AS (SELECT * FROM tql_data WHERE val > 5)
 SELECT count(*) FROM filtered;
 
--- TODO(ruihang): The following tests are not supported yet, need to fix parser first.
 -- TQL CTE with complex PromQL expressions
--- WITH 
---     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
---     filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
--- SELECT sum(val) FROM filtered;
+WITH 
+    tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
+    filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
+SELECT sum(val) FROM filtered;
 
 -- TQL CTE with aggregation functions
--- WITH tql_agg AS (
---     TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
--- )
--- SELECT avg(val) as avg_sum FROM tql_agg;
+WITH tql_agg(ts, summary) AS (
+    TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
+)
+SELECT avg(summary) as avg_sum FROM tql_agg;
 
 -- TQL CTE with label selectors
 WITH host_metrics AS (
