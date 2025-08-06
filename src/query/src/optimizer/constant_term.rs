@@ -179,7 +179,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
 
                                     // For debugging purpose. Not really precise but enough for most cases.
                                     let probes = term
-                                        .split(|c: char| !c.is_alphanumeric())
+                                        .split(|c: char| !c.is_alphanumeric() && c != '_')
                                         .filter(|s| !s.is_empty())
                                         .map(|s| s.to_string())
                                         .collect();
@@ -408,7 +408,7 @@ mod tests {
     async fn test_matches_term_optimization_from_sql() {
         let sql = "WITH base AS (
         SELECT text, timestamp FROM test 
-        WHERE MATCHES_TERM(text, 'hello world') 
+        WHERE MATCHES_TERM(text, 'hello wo_rld') 
         AND timestamp > '2025-01-01 00:00:00'
     ),
     subquery1 AS (
@@ -468,7 +468,7 @@ mod tests {
         let plan_str = get_plan_string(&physical_plan).join("\n");
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
         assert!(plan_str.contains(
-            "MatchesConstTerm(text@0, term: \"hello world\", probes: [\"hello\", \"world\"]"
+            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo_rld\"]"
         ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
         assert!(plan_str
