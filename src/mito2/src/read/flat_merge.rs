@@ -297,7 +297,7 @@ impl SortColumns {
     /// Creates a new [SortColumns] from a [RecordBatch] and the position of the time index column.
     ///
     /// # Panics
-    /// Panics if the input batch doesn't have corrent internal columns.
+    /// Panics if the input batch doesn't have correct internal columns.
     fn new(batch: &RecordBatch) -> Self {
         let num_columns = batch.num_columns();
         let primary_key = batch
