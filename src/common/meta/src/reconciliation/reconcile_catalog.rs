@@ -65,7 +65,7 @@ impl ReconcileCatalogContext {
         procedure_ctx: &ProcedureContext,
     ) -> Result<()> {
         if let Some(subprocedure) = self.volatile_ctx.inflight_subprocedure.take() {
-            let subprocedures = vec![subprocedure];
+            let subprocedures = [subprocedure];
             let result = wait_for_inflight_subprocedures(
                 procedure_ctx,
                 &subprocedures,
