@@ -315,7 +315,7 @@ impl LogQueryPlanner {
                     .iter()
                     .map(|arg| self.log_expr_to_df_expr(arg, schema))
                     .try_collect::<Vec<_>>()?;
-                let func = self.session_state.scalar_functions().get(name).context(
+                let func = self.session_state.scalar_functions().get(name).with_context(||
                     UnknownScalarFunctionSnafu {
                         name: name.to_string(),
                     },
