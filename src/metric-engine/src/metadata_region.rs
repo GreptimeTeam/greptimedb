@@ -446,16 +446,16 @@ impl MetadataRegion {
 
     /// Delete the given keys. For performance consideration, this method
     /// doesn't check if those keys exist or not.
-    async fn delete(&self, region_id: RegionId, keys: &[String]) -> Result<()> {
+    async fn delete(&self, metadata_region_id: RegionId, keys: &[String]) -> Result<()> {
         let delete_request = Self::build_delete_request(keys);
         self.mito
             .handle_request(
-                region_id,
+                metadata_region_id,
                 store_api::region_request::RegionRequest::Delete(delete_request),
             )
             .await
             .context(MitoWriteOperationSnafu)?;
-        self.cache.invalidate(&region_id).await;
+        self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
     }
@@ -546,7 +546,7 @@ impl MetadataRegion {
         write_region_id: bool,
         logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
     ) -> Result<()> {
-        let region_id = utils::to_metadata_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let iter = logical_regions
             .into_iter()
             .flat_map(|(logical_region_id, column_metadatas)| {
@@ -573,12 +573,12 @@ impl MetadataRegion {
         let put_request = MetadataRegion::build_put_request_from_iter(iter.into_iter());
         self.mito
             .handle_request(
-                region_id,
+                metadata_region_id,
                 store_api::region_request::RegionRequest::Put(put_request),
             )
             .await
             .context(MitoWriteOperationSnafu)?;
-        self.cache.invalidate(&region_id).await;
+        self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
     }
