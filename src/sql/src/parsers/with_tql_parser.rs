@@ -256,6 +256,8 @@ impl ParserContext<'_> {
             match consumed.token {
                 Token::LParen => paren_depth += 1,
                 Token::RParen => {
+                    // This RParen must belong to a nested expression since
+                    // `paren_depth > 0` here. Decrease depth accordingly.
                     paren_depth = paren_depth.saturating_sub(1);
                 }
                 _ => {}
