@@ -23,6 +23,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
 use common_query::prelude::GREPTIME_VALUE;
+use common_telemetry::debug;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -661,10 +662,30 @@ impl PromPlanner {
                     }
                     Ok(binary_expr)
                 };
+
+                fn optimize(plan: &LogicalPlan) -> LogicalPlan {
+                    use datafusion_optimizer::OptimizerRule;
+                    let new_plan =
+                        datafusion::optimizer::optimize_projections::OptimizeProjections::new()
+                            .rewrite(
+                                plan.clone(),
+                                &datafusion::optimizer::OptimizerContext::default(),
+                            )
+                            .unwrap()
+                            .data;
+                    if new_plan != *plan {
+                        debug!(
+                            "Optimized projection plan: {new_plan:#?}\n From old plan: {plan:#?}"
+                        );
+                    }
+                    new_plan
+                }
+
                 if is_comparison_op && !should_return_bool {
                     self.filter_on_field_column(join_plan, bin_expr_builder)
                 } else {
                     self.projection_for_each_field_column(join_plan, bin_expr_builder)
+                        .map(|p| optimize(&p))
                 }
             }
         }
