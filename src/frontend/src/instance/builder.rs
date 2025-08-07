@@ -199,6 +199,7 @@ impl FrontendBuilder {
             Box::new(EventHandlerImpl::new(
                 inserter.clone(),
                 statement_executor.clone(),
+                self.options.slow_query.clone().unwrap_or_default(),
             )),
             EventRecorderOptions::default(),
         ));

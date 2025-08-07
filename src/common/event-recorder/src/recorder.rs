@@ -216,12 +216,48 @@ pub trait EventRecorder: Send + Sync + Debug + 'static {
     fn close(&self);
 }
 
+/// EventHandlerOptions is the options for the event handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventHandlerOptions {
+    /// TTL for the events table that will be used to store the events.
+    pub ttl: String,
+    /// Append mode for the events table that will be used to store the events.
+    pub append_mode: bool,
+}
+
+impl Default for EventHandlerOptions {
+    fn default() -> Self {
+        Self {
+            ttl: DEFAULT_EVENTS_TABLE_TTL.to_string(),
+            append_mode: true,
+        }
+    }
+}
+
+impl EventHandlerOptions {
+    /// Converts the options to the hints for the insert operation.
+    pub fn to_hints(&self) -> Vec<(&str, &str)> {
+        vec![
+            (TTL_KEY, self.ttl.as_str()),
+            (
+                APPEND_MODE_KEY,
+                if self.append_mode { "true" } else { "false" },
+            ),
+        ]
+    }
+}
+
 /// EventHandler trait defines the interface for how to handle the event.
 #[async_trait]
 pub trait EventHandler: Send + Sync + 'static {
     /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
     /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
+
+    /// Returns the options for the event handler.
+    fn options(&self, _event: &Box<dyn Event>) -> EventHandlerOptions {
+        EventHandlerOptions::default()
+    }
 }
 
 /// Configuration options for the event recorder.

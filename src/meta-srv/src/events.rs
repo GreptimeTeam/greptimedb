@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use common_event_recorder::error::{
     InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result,
 };
-use common_event_recorder::{build_row_inserts_request, insert_hints, Event, EventHandler};
+use common_event_recorder::{build_row_inserts_request, Event, EventHandler};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::debug;
@@ -52,7 +52,10 @@ impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         self.build_database_client()
             .await?
-            .row_inserts_with_hints(build_row_inserts_request(events)?, &insert_hints())
+            .row_inserts_with_hints(
+                build_row_inserts_request(events)?,
+                &self.options(&events[0]).to_hints(),
+            )
             .await
             .map_err(BoxedError::new)
             .context(InsertEventsSnafu)?;
