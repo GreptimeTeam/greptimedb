@@ -224,6 +224,7 @@ impl FrontendBuilder {
             limiter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
+            slow_query_options: self.options.slow_query.clone().unwrap_or_default(),
         })
     }
 }

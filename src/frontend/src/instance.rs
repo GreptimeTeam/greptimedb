@@ -56,6 +56,7 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_recordbatch::error::StreamTimeoutSnafu;
 use common_recordbatch::RecordBatchStreamWrapper;
+use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, info, tracing};
 use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
@@ -124,6 +125,7 @@ pub struct Instance {
     event_recorder: Option<EventRecorderRef>,
     limiter: Option<LimiterRef>,
     process_manager: ProcessManagerRef,
+    slow_query_options: SlowQueryOptions,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -224,16 +226,19 @@ impl Instance {
         let query_interceptor = query_interceptor.as_ref();
 
         if should_capture_statement(Some(&stmt)) {
-            let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
-                Some(SlowQueryTimer::new(
-                    CatalogQueryStatement::Sql(stmt.clone()),
-                    Some(Duration::from_secs(1)),
-                    Some(1.0),
-                    event_recorder,
-                ))
-            } else {
-                None
-            };
+            let slow_query_timer = self
+                .slow_query_options
+                .enable
+                .then(|| self.event_recorder.clone())
+                .flatten()
+                .map(|event_recorder| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Sql(stmt.clone()),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        event_recorder,
+                    )
+                });
 
             let ticket = self.process_manager.register_query(
                 query_ctx.current_catalog().to_string(),
@@ -595,16 +600,19 @@ impl SqlQueryHandler for Instance {
             // It's safe to unwrap here because we've already checked the type.
             let stmt = stmt.unwrap();
             let query = stmt.to_string();
-            let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
-                Some(SlowQueryTimer::new(
-                    CatalogQueryStatement::Sql(stmt.clone()),
-                    Some(Duration::from_secs(1)),
-                    Some(1.0),
-                    event_recorder,
-                ))
-            } else {
-                None
-            };
+            let slow_query_timer = self
+                .slow_query_options
+                .enable
+                .then(|| self.event_recorder.clone())
+                .flatten()
+                .map(|event_recorder| {
+                    SlowQueryTimer::new(
+                        CatalogQueryStatement::Sql(stmt.clone()),
+                        self.slow_query_options.threshold,
+                        self.slow_query_options.sample_ratio,
+                        event_recorder,
+                    )
+                });
 
             let ticket = self.process_manager.register_query(
                 query_ctx.current_catalog().to_string(),
@@ -754,16 +762,19 @@ impl PrometheusHandler for Instance {
         };
         let query = query_statement.to_string();
 
-        let slow_query_timer = if let Some(event_recorder) = self.event_recorder.clone() {
-            Some(SlowQueryTimer::new(
-                query_statement,
-                Some(Duration::from_secs(1)),
-                Some(1.0),
-                event_recorder,
-            ))
-        } else {
-            None
-        };
+        let slow_query_timer = self
+            .slow_query_options
+            .enable
+            .then(|| self.event_recorder.clone())
+            .flatten()
+            .map(|event_recorder| {
+                SlowQueryTimer::new(
+                    query_statement,
+                    self.slow_query_options.threshold,
+                    self.slow_query_options.sample_ratio,
+                    event_recorder,
+                )
+            });
 
         let ticket = self.process_manager.register_query(
             query_ctx.current_catalog().to_string(),
