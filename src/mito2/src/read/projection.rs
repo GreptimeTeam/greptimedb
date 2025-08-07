@@ -33,7 +33,7 @@ use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result};
-use crate::read::plain_projection::PlainProjectionMapper;
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::Batch;
 
 /// Only cache vector when its length `<=` this value.
@@ -43,8 +43,8 @@ const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
 pub enum ProjectionMapper {
     /// Projection mapper for primary key format.
     PrimaryKey(PrimaryKeyProjectionMapper),
-    /// Projection mapper for plain format.
-    Plain(PlainProjectionMapper),
+    /// Projection mapper for flat format.
+    Flat(FlatProjectionMapper),
 }
 
 impl ProjectionMapper {
@@ -52,10 +52,10 @@ impl ProjectionMapper {
     pub fn new(
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize> + Clone,
-        plain_format: bool,
+        flat_format: bool,
     ) -> Result<Self> {
-        if plain_format {
-            Ok(ProjectionMapper::Plain(PlainProjectionMapper::new(
+        if flat_format {
+            Ok(ProjectionMapper::Flat(FlatProjectionMapper::new(
                 metadata, projection,
             )?))
         } else {
@@ -66,11 +66,9 @@ impl ProjectionMapper {
     }
 
     /// Returns a new mapper without projection.
-    pub fn all(metadata: &RegionMetadataRef, plain_format: bool) -> Result<Self> {
-        if plain_format {
-            Ok(ProjectionMapper::Plain(PlainProjectionMapper::all(
-                metadata,
-            )?))
+    pub fn all(metadata: &RegionMetadataRef, flat_format: bool) -> Result<Self> {
+        if flat_format {
+            Ok(ProjectionMapper::Flat(FlatProjectionMapper::all(metadata)?))
         } else {
             Ok(ProjectionMapper::PrimaryKey(
                 PrimaryKeyProjectionMapper::all(metadata)?,
@@ -82,7 +80,7 @@ impl ProjectionMapper {
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.metadata(),
-            ProjectionMapper::Plain(m) => m.metadata(),
+            ProjectionMapper::Flat(m) => m.metadata(),
         }
     }
 
@@ -91,7 +89,7 @@ impl ProjectionMapper {
     pub(crate) fn column_ids(&self) -> &[ColumnId] {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.column_ids(),
-            ProjectionMapper::Plain(m) => m.column_ids(),
+            ProjectionMapper::Flat(m) => m.column_ids(),
         }
     }
 
@@ -99,7 +97,7 @@ impl ProjectionMapper {
     pub(crate) fn output_schema(&self) -> SchemaRef {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.output_schema(),
-            ProjectionMapper::Plain(m) => m.output_schema(),
+            ProjectionMapper::Flat(m) => m.output_schema(),
         }
     }
 
@@ -107,15 +105,15 @@ impl ProjectionMapper {
     pub fn as_primary_key(&self) -> Option<&PrimaryKeyProjectionMapper> {
         match self {
             ProjectionMapper::PrimaryKey(m) => Some(m),
-            ProjectionMapper::Plain(_) => None,
+            ProjectionMapper::Flat(_) => None,
         }
     }
 
     /// Returns the plain projection mapper or None if this is not a plain mapper.
-    pub fn as_plain(&self) -> Option<&PlainProjectionMapper> {
+    pub fn as_plain(&self) -> Option<&FlatProjectionMapper> {
         match self {
             ProjectionMapper::PrimaryKey(_) => None,
-            ProjectionMapper::Plain(m) => Some(m),
+            ProjectionMapper::Flat(m) => Some(m),
         }
     }
 
@@ -123,7 +121,7 @@ impl ProjectionMapper {
     pub(crate) fn empty_record_batch(&self) -> RecordBatch {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.empty_record_batch(),
-            ProjectionMapper::Plain(m) => m.empty_record_batch(),
+            ProjectionMapper::Flat(m) => m.empty_record_batch(),
         }
     }
 }
