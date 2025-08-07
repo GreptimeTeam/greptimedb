@@ -8,6 +8,7 @@ insert into t1 values ("a", 1000, 1.0), ("b", 2000, 2.0), ("c", 3000, 3.0);
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a = "a" };
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -16,6 +17,7 @@ tql analyze (1, 3, '1s') t1{ a = "a" };
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -24,6 +26,7 @@ tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 
 drop table t1;

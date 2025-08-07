@@ -20,7 +20,7 @@ mod interval;
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
@@ -843,9 +843,9 @@ pub(super) fn parameters_to_scalar_values(
                 let data = portal.parameter::<NaiveDate>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
                     match server_type {
-                        ConcreteDataType::Date(_) => ScalarValue::Date32(data.map(|d| {
-                            (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
-                        })),
+                        ConcreteDataType::Date(_) => ScalarValue::Date32(
+                            data.map(|d| (d - DateTime::UNIX_EPOCH.date_naive()).num_days() as i32),
+                        ),
                         _ => {
                             return Err(invalid_parameter_error(
                                 "invalid_parameter_type",
@@ -854,9 +854,9 @@ pub(super) fn parameters_to_scalar_values(
                         }
                     }
                 } else {
-                    ScalarValue::Date32(data.map(|d| {
-                        (d - NaiveDate::from(NaiveDateTime::UNIX_EPOCH)).num_days() as i32
-                    }))
+                    ScalarValue::Date32(
+                        data.map(|d| (d - DateTime::UNIX_EPOCH.date_naive()).num_days() as i32),
+                    )
                 }
             }
             &Type::INTERVAL => {

@@ -53,7 +53,7 @@ mod tests {
             quote_style: None,
             span: Span::empty(),
         };
-        let trigger_name = ObjectName(vec![ident]);
+        let trigger_name = ObjectName::from(vec![ident]);
 
         let drop_trigger = DropTrigger::new(trigger_name.clone(), true);
         assert_eq!(

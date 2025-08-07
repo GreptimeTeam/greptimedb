@@ -398,7 +398,7 @@ impl DataFusionExprConverter {
                 };
                 Ok(Operand::Column(column_name))
             }
-            Expr::Literal(scalar_value) => {
+            Expr::Literal(scalar_value, _) => {
                 let value = Value::try_from(scalar_value.clone()).unwrap();
                 Ok(Operand::Value(value))
             }

@@ -26,6 +26,7 @@ use datafusion::common::stats::Precision;
 use datafusion::common::{
     DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics, TableReference,
 };
+use datafusion::datasource::{provider_as_source, MemTable};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::{SessionState, TaskContext};
 use datafusion::logical_expr::{ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -38,6 +39,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::{col, lit, Expr};
+use datafusion_expr::LogicalPlanBuilder;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -60,6 +62,12 @@ pub struct EmptyMetric {
     time_index_schema: DFSchemaRef,
     /// Schema of the output record batch
     result_schema: DFSchemaRef,
+    // This dummy input's sole purpose is to provide a schema for use in DataFusion's
+    // `SimplifyExpressions`. Otherwise it may report a "no field name ..." error.
+    // The error is caused by an optimization that tries to rewrite "A = A", during
+    // which will find the field in plan's schema. However, the schema is empty if the
+    // plan does not have an input.
+    dummy_input: LogicalPlan,
 }
 
 impl EmptyMetric {
@@ -83,6 +91,11 @@ impl EmptyMetric {
         }
         let schema = Arc::new(DFSchema::new_with_metadata(fields, HashMap::new())?);
 
+        let table = MemTable::try_new(Arc::new(schema.as_arrow().clone()), vec![vec![]])?;
+        let source = provider_as_source(Arc::new(table));
+        let dummy_input =
+            LogicalPlanBuilder::scan("dummy", source, None).and_then(|x| x.build())?;
+
         Ok(Self {
             start,
             end,
@@ -90,6 +103,7 @@ impl EmptyMetric {
             time_index_schema: Arc::new(ts_only_schema),
             result_schema: schema,
             expr: field_expr,
+            dummy_input,
         })
     }
 
@@ -135,7 +149,7 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
+        vec![&self.dummy_input]
     }
 
     fn schema(&self) -> &DFSchemaRef {
@@ -170,6 +184,7 @@ impl UserDefinedLogicalNodeCore for EmptyMetric {
             expr: exprs.into_iter().next(),
             time_index_schema: self.time_index_schema.clone(),
             result_schema: self.result_schema.clone(),
+            dummy_input: self.dummy_input.clone(),
         })
     }
 }
@@ -258,7 +273,11 @@ impl ExecutionPlan for EmptyMetricExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        if partition.is_some() {
+            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+        }
+
         let estimated_row_num = if self.end > self.start {
             (self.end - self.start) as f64 / self.interval as f64
         } else {
@@ -281,7 +300,9 @@ impl ExecutionPlan for EmptyMetricExec {
 impl DisplayAs for EmptyMetricExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => write!(
                 f,
                 "EmptyMetric: range=[{}..{}], interval=[{}]",
                 self.start, self.end, self.interval,
@@ -328,7 +349,7 @@ impl Stream for EmptyMetricStream {
             let num_rows = time_array.len();
             let input_record_batch =
                 RecordBatch::try_new(self.time_index_schema.clone(), vec![time_array.clone()])
-                    .map_err(|e| DataFusionError::ArrowError(e, None))?;
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let mut result_arrays: Vec<ArrayRef> = vec![time_array];
 
             // evaluate the field expr and get the result
@@ -342,7 +363,7 @@ impl Stream for EmptyMetricStream {
 
             // assemble the output record batch
             let batch = RecordBatch::try_new(self.result_schema.clone(), result_arrays)
-                .map_err(|e| DataFusionError::ArrowError(e, None));
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
 
             Poll::Ready(Some(batch))
         } else {

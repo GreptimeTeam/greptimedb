@@ -31,7 +31,7 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
 use table::requests::{validate_database_option, validate_table_option};
 
-use crate::ast::{ColumnDef, Ident};
+use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidIntervalSnafu,
     InvalidSqlSnafu, InvalidTableOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
@@ -612,11 +612,6 @@ impl<'a> ParserContext<'a> {
         );
 
         let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-        let collation = if parser.parse_keyword(Keyword::COLLATE) {
-            Some(parser.parse_object_name(false).context(SyntaxSnafu)?)
-        } else {
-            None
-        };
         let mut options = vec![];
         let mut extensions = ColumnExtensions::default();
         loop {
@@ -643,7 +638,6 @@ impl<'a> ParserContext<'a> {
             column_def: ColumnDef {
                 name: Self::canonicalize_identifier(name),
                 data_type,
-                collation,
                 options,
             },
             extensions,
@@ -713,7 +707,7 @@ impl<'a> ParserContext<'a> {
     ) -> Result<bool> {
         if let DataType::Custom(name, tokens) = column_type
             && name.0.len() == 1
-            && &name.0[0].value.to_uppercase() == "VECTOR"
+            && &name.0[0].to_string_unquoted().to_uppercase() == "VECTOR"
         {
             ensure!(
                 tokens.len() == 1,
@@ -1007,7 +1001,9 @@ fn validate_time_index(columns: &[Column], constraints: &[TableConstraint]) -> R
 fn get_unalias_type(data_type: &DataType) -> DataType {
     match data_type {
         DataType::Custom(name, tokens) if name.0.len() == 1 && tokens.is_empty() => {
-            if let Some(real_type) = get_data_type_by_alias_name(name.0[0].value.as_str()) {
+            if let Some(real_type) =
+                get_data_type_by_alias_name(name.0[0].to_string_unquoted().as_str())
+            {
                 real_type
             } else {
                 data_type.clone()
@@ -1308,7 +1304,7 @@ mod tests {
         let stmts = result.unwrap();
         match &stmts.last().unwrap() {
             Statement::CreateDatabase(c) => {
-                assert_eq!(c.name, ObjectName(vec![Ident::with_quote('`', "fOo")]));
+                assert_eq!(c.name, vec![Ident::with_quote('`', "fOo")].into());
                 assert!(!c.if_not_exists);
             }
             _ => unreachable!(),
@@ -1369,8 +1365,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1389,8 +1385,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1409,8 +1405,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1429,8 +1425,8 @@ COMMENT 'test comment'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::new("task_1")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::new("task_1")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1448,8 +1444,8 @@ EXPIRE AFTER '1 month 2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
-                    flow_name: ObjectName(vec![Ident::with_quote('`', "task_2")]),
-                    sink_table_name: ObjectName(vec![
+                    flow_name: ObjectName::from(vec![Ident::with_quote('`', "task_2")]),
+                    sink_table_name: ObjectName::from(vec![
                         Ident::new("schema_1"),
                         Ident::new("table_1"),
                     ]),
@@ -1501,8 +1497,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
 
         let expected = CreateFlow {
-            flow_name: ObjectName(vec![Ident::new("task_1")]),
-            sink_table_name: ObjectName(vec![Ident::new("schema_1"), Ident::new("table_1")]),
+            flow_name: vec![Ident::new("task_1")].into(),
+            sink_table_name: vec![Ident::new("schema_1"), Ident::new("table_1")].into(),
             or_replace: true,
             if_not_exists: true,
             expire_after: Some(300),
@@ -1607,15 +1603,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::LtEq,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "hz".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("hz".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("1000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("1000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1626,24 +1624,26 @@ ENGINE=mito";
                             left: Box::new(Expr::BinaryOp {
                                 left: Box::new(Expr::Identifier("idc".into())),
                                 op: BinaryOperator::Gt,
-                                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                    "hz".to_string()
-                                )))
+                                right: Box::new(Expr::Value(
+                                    Value::SingleQuotedString("hz".to_string()).into()
+                                ))
                             }),
                             op: BinaryOperator::And,
                             right: Box::new(Expr::BinaryOp {
                                 left: Box::new(Expr::Identifier("idc".into())),
                                 op: BinaryOperator::LtEq,
-                                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                    "sh".to_string()
-                                )))
+                                right: Box::new(Expr::Value(
+                                    Value::SingleQuotedString("sh".to_string()).into()
+                                ))
                             })
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("2000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("2000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1653,15 +1653,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::Gt,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "sh".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("sh".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::Lt,
-                            right: Box::new(Expr::Value(Value::Number("3000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("3000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -1671,15 +1673,17 @@ ENGINE=mito";
                         left: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("idc".into())),
                             op: BinaryOperator::Gt,
-                            right: Box::new(Expr::Value(Value::SingleQuotedString(
-                                "sh".to_string()
-                            )))
+                            right: Box::new(Expr::Value(
+                                Value::SingleQuotedString("sh".to_string()).into()
+                            ))
                         }),
                         op: BinaryOperator::And,
                         right: Box::new(Expr::BinaryOp {
                             left: Box::new(Expr::Identifier("host_id".into())),
                             op: BinaryOperator::GtEq,
-                            right: Box::new(Expr::Value(Value::Number("3000".to_string(), false)))
+                            right: Box::new(Expr::Value(
+                                Value::Number("3000".to_string(), false).into()
+                            ))
                         })
                     }
                 );
@@ -2467,10 +2471,8 @@ CREATE TABLE log (
         let tokens = tokenizer.tokenize().unwrap();
         let mut parser = Parser::new(&dialect).with_tokens(tokens);
         let name = Ident::new("vec_col");
-        let data_type = DataType::Custom(
-            ObjectName(vec![Ident::new("VECTOR")]),
-            vec!["128".to_string()],
-        );
+        let data_type =
+            DataType::Custom(vec![Ident::new("VECTOR")].into(), vec!["128".to_string()]);
         let mut extensions = ColumnExtensions::default();
 
         let result =
@@ -2489,7 +2491,7 @@ CREATE TABLE log (
         let tokens = tokenizer.tokenize().unwrap();
         let mut parser = Parser::new(&dialect).with_tokens(tokens);
         let name = Ident::new("vec_col");
-        let data_type = DataType::Custom(ObjectName(vec![Ident::new("VECTOR")]), vec![]);
+        let data_type = DataType::Custom(vec![Ident::new("VECTOR")].into(), vec![]);
         let mut extensions = ColumnExtensions::default();
 
         let result =

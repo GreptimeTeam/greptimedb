@@ -26,7 +26,7 @@ use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::{
     Accumulator, AccumulatorFactoryFunction, AggregateUDF as DfAggregateUdf, AggregateUDFImpl,
 };
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, FieldRef};
 use datatypes::data_type::DataType;
 
 use crate::function::{
@@ -129,14 +129,14 @@ impl AggregateUDFImpl for DfUdafAdapter {
         (self.accumulator)(acc_args)
     }
 
-    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         let state_types = self.creator.state_types()?;
         let fields = state_types
             .into_iter()
             .enumerate()
             .map(|(i, t)| {
                 let name = format!("{}_{i}", args.name);
-                Field::new(name, t.as_arrow_type(), true)
+                Arc::new(Field::new(name, t.as_arrow_type(), true))
             })
             .collect::<Vec<_>>();
         Ok(fields)

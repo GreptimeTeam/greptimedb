@@ -16,12 +16,12 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datafusion::common::{Constraints, Statistics};
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvConfig, CsvOpener, FileScanConfig, FileStream, JsonOpener,
+    CsvSource, FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource, FileStream,
+    JsonOpener, JsonSource,
 };
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use object_store::services::Fs;
@@ -68,21 +68,20 @@ pub fn test_basic_schema() -> SchemaRef {
     Arc::new(schema)
 }
 
-pub fn scan_config(file_schema: SchemaRef, limit: Option<usize>, filename: &str) -> FileScanConfig {
+pub(crate) fn scan_config(
+    file_schema: SchemaRef,
+    limit: Option<usize>,
+    filename: &str,
+    file_source: Arc<dyn FileSource>,
+) -> FileScanConfig {
     // object_store only recognize the Unix style path, so make it happy.
     let filename = &filename.replace('\\', "/");
-    let statistics = Statistics::new_unknown(file_schema.as_ref());
-    FileScanConfig {
-        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-        file_schema,
-        file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-        constraints: Constraints::empty(),
-        statistics,
-        projection: None,
-        limit,
-        table_partition_cols: vec![],
-        output_ordering: vec![],
-    }
+    let file_group = FileGroup::new(vec![PartitionedFile::new(filename.to_string(), 4096)]);
+
+    FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_schema, file_source)
+        .with_file_group(file_group)
+        .with_limit(limit)
+        .build()
 }
 
 pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
@@ -99,9 +98,14 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
 
     let size = store.read(origin_path).await.unwrap().len();
 
-    let config = scan_config(schema.clone(), None, origin_path);
-
-    let stream = FileStream::new(&config, 0, json_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+    let config = scan_config(schema, None, origin_path, Arc::new(JsonSource::new()));
+    let stream = FileStream::new(
+        &config,
+        0,
+        Arc::new(json_opener),
+        &ExecutionPlanMetricsSet::new(),
+    )
+    .unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_json");
 
@@ -127,24 +131,17 @@ pub async fn setup_stream_to_csv_test(origin_path: &str, threshold: impl Fn(usiz
 
     let schema = test_basic_schema();
 
-    let csv_config = Arc::new(CsvConfig::new(
-        TEST_BATCH_SIZE,
-        schema.clone(),
-        None,
-        true,
-        b',',
-        b'"',
-        None,
-        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
-        None,
-    ));
-
-    let csv_opener = CsvOpener::new(csv_config, FileCompressionType::UNCOMPRESSED);
-
+    let csv_source = CsvSource::new(true, b',', b'"')
+        .with_schema(schema.clone())
+        .with_batch_size(TEST_BATCH_SIZE);
+    let config = scan_config(schema, None, origin_path, csv_source.clone());
     let size = store.read(origin_path).await.unwrap().len();
 
-    let config = scan_config(schema.clone(), None, origin_path);
-
+    let csv_opener = csv_source.create_file_opener(
+        Arc::new(object_store_opendal::OpendalStore::new(store.clone())),
+        &config,
+        0,
+    );
     let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");

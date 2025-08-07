@@ -18,6 +18,7 @@ use arrow_schema::{ArrowError, Schema, SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
 use common_recordbatch::adapter::RecordBatchStreamTypeAdapter;
+use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion::error::{DataFusionError, Result as DfResult};
 use futures::future::BoxFuture;
@@ -119,7 +120,7 @@ impl OrcOpener {
 }
 
 impl FileOpener for OrcOpener {
-    fn open(&self, meta: FileMeta) -> DfResult<FileOpenFuture> {
+    fn open(&self, meta: FileMeta, _: PartitionedFile) -> DfResult<FileOpenFuture> {
         let object_store = self.object_store.clone();
         let projected_schema = if let Some(projection) = &self.projection {
             let projected_schema = self

@@ -31,16 +31,16 @@ macro_rules! between_string {
             left: Box::new(Expr::BinaryOp {
                 op: BinaryOperator::GtEq,
                 left: Box::new($col.clone()),
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    $left_incl.to_string(),
-                ))),
+                right: Box::new(Expr::Value(
+                    Value::SingleQuotedString($left_incl.to_string()).into(),
+                )),
             }),
             right: Box::new(Expr::BinaryOp {
                 op: BinaryOperator::Lt,
                 left: Box::new($col.clone()),
-                right: Box::new(Expr::Value(Value::SingleQuotedString(
-                    $right_excl.to_string(),
-                ))),
+                right: Box::new(Expr::Value(
+                    Value::SingleQuotedString($right_excl.to_string()).into(),
+                )),
             }),
         }
     };
@@ -90,20 +90,18 @@ fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Result<Vec<Expr>
             rules.push(Expr::BinaryOp {
                 left: Box::new(ident_expr.clone()),
                 op: BinaryOperator::Lt,
-                right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
-                    "{:0hex_length$x}",
-                    end
-                )))),
+                right: Box::new(Expr::Value(
+                    Value::SingleQuotedString(format!("{:0hex_length$x}", end)).into(),
+                )),
             });
         } else if i == partition_num - 1 {
             // Create the rightmost rule, for example: trace_id >= 'f'.
             rules.push(Expr::BinaryOp {
                 left: Box::new(ident_expr.clone()),
                 op: BinaryOperator::GtEq,
-                right: Box::new(Expr::Value(Value::SingleQuotedString(format!(
-                    "{:0hex_length$x}",
-                    start
-                )))),
+                right: Box::new(Expr::Value(
+                    Value::SingleQuotedString(format!("{:0hex_length$x}", start)).into(),
+                )),
             });
         } else {
             // Create the middle rules, for example: trace_id >= '1' AND trace_id < '2'.
@@ -124,7 +122,7 @@ fn partition_rules_for_uuid(partition_num: u32, ident: &str) -> Result<Vec<Expr>
 mod tests {
     use std::collections::HashMap;
 
-    use sqlparser::ast::Expr;
+    use sqlparser::ast::{Expr, ValueWithSpan};
     use sqlparser::dialect::GenericDialect;
     use sqlparser::parser::Parser;
     use uuid::Uuid;
@@ -220,14 +218,22 @@ mod tests {
             if let Expr::BinaryOp { left, op: _, right } = rule {
                 if i == 0 {
                     // Hit the leftmost rule.
-                    if let Expr::Value(Value::SingleQuotedString(leftmost)) = *right.clone() {
+                    if let Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(leftmost),
+                        ..
+                    }) = *right.clone()
+                    {
                         if uuid < leftmost {
                             return i;
                         }
                     }
                 } else if i == rules.len() - 1 {
                     // Hit the rightmost rule.
-                    if let Expr::Value(Value::SingleQuotedString(rightmost)) = *right.clone() {
+                    if let Expr::Value(ValueWithSpan {
+                        value: Value::SingleQuotedString(rightmost),
+                        ..
+                    }) = *right.clone()
+                    {
                         if uuid >= rightmost {
                             return i;
                         }
@@ -240,7 +246,10 @@ mod tests {
                         right: inner_right,
                     } = *left.clone()
                     {
-                        if let Expr::Value(Value::SingleQuotedString(lower)) = *inner_right.clone()
+                        if let Expr::Value(ValueWithSpan {
+                            value: Value::SingleQuotedString(lower),
+                            ..
+                        }) = *inner_right.clone()
                         {
                             if let Expr::BinaryOp {
                                 left: _,
@@ -248,8 +257,10 @@ mod tests {
                                 right: inner_right,
                             } = *right.clone()
                             {
-                                if let Expr::Value(Value::SingleQuotedString(upper)) =
-                                    *inner_right.clone()
+                                if let Expr::Value(ValueWithSpan {
+                                    value: Value::SingleQuotedString(upper),
+                                    ..
+                                }) = *inner_right.clone()
                                 {
                                     if uuid >= lower && uuid < upper {
                                         return i;

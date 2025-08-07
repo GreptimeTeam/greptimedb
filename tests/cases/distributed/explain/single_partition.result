@@ -13,11 +13,12 @@ EXPLAIN SELECT COUNT(*) FROM single_partition;
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: count(*)_|
-|_|_Aggregate: groupBy=[[]], aggr=[[count(single_partition.j) AS count(*)]] |
+|_| Projection: count(Int64(1)) AS count(*)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[count(single_partition.j) AS count(Int64(1))]] |
 |_|_TableScan: single_partition_|
 |_| ]]_|
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
@@ -36,7 +37,8 @@ EXPLAIN SELECT SUM(i) FROM single_partition;
 |_|_Aggregate: groupBy=[[]], aggr=[[sum(single_partition.i)]] |
 |_|_TableScan: single_partition_|
 |_| ]]_|
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
@@ -55,7 +57,8 @@ EXPLAIN SELECT * FROM single_partition ORDER BY i DESC;
 |_|_Projection: single_partition.i, single_partition.j, single_partition.k |
 |_|_TableScan: single_partition_|
 |_| ]]_|
-| physical_plan | MergeScanExec: REDACTED
+| physical_plan | CooperativeExec_|
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

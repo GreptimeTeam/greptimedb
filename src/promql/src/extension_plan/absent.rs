@@ -23,7 +23,9 @@ use datafusion::arrow::array::Array;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{
+    EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::Column as ColumnExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -278,8 +280,8 @@ impl ExecutionPlan for AbsentExec {
         vec![Distribution::SinglePartition]
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
-        vec![Some(LexRequirement::new(vec![PhysicalSortRequirement {
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        let requirement: LexRequirement = [PhysicalSortRequirement {
             expr: Arc::new(
                 ColumnExpr::new_with_schema(&self.time_index_column, &self.input.schema()).unwrap(),
             ),
@@ -287,7 +289,9 @@ impl ExecutionPlan for AbsentExec {
                 descending: false,
                 nulls_first: false,
             }),
-        }]))]
+        }]
+        .into();
+        vec![Some(OrderingRequirements::new(requirement))]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -358,7 +362,9 @@ impl ExecutionPlan for AbsentExec {
 impl DisplayAs for AbsentExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "PromAbsentExec: start={}, end={}, step={}",
@@ -509,7 +515,8 @@ mod tests {
 
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::catalog::memory::DataSourceExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
 
@@ -532,7 +539,9 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema.clone(), vec![timestamp_array, value_array]).unwrap();
 
-        let memory_exec = MemoryExec::try_new(&[vec![batch]], schema, None).unwrap();
+        let memory_exec = DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        ));
 
         let output_schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -599,7 +608,9 @@ mod tests {
         ]));
 
         // Empty input
-        let memory_exec = MemoryExec::try_new(&[vec![]], schema, None).unwrap();
+        let memory_exec = DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![]], schema, None).unwrap(),
+        ));
 
         let output_schema = Arc::new(Schema::new(vec![
             Field::new(

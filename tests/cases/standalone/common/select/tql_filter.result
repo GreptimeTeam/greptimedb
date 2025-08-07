@@ -12,15 +12,22 @@ Affected Rows: 3
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a = "a" };
 
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -32,15 +39,22 @@ tql analyze (1, 3, '1s') t1{ a = "a" };
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 6_|
@@ -52,15 +66,22 @@ tql analyze (1, 3, '1s') t1{ a =~ ".*" };
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
 tql analyze (1, 3, '1s') t1{ a =~ "a.*" };
 
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_MergeScanExec: REDACTED
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_PromInstantManipulateExec: range=[1000..3000], lookback=[300000], interval=[1000], time index=[b] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a"] REDACTED
+|_|_|_SortExec: expr=[a@0 ASC, b@1 ASC], preserve_partitioning=[true] REDACTED
+|_|_|_CoalesceBatchesExec: target_batch_size=8192 REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|

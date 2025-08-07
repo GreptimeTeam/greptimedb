@@ -44,11 +44,9 @@ use tonic::service::Routes;
 use tonic::transport::server::TcpIncoming;
 use tonic::transport::ServerTlsConfig;
 use tonic::{Request, Response, Status};
-use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
+use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
-use crate::error::{
-    AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
-};
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
 use crate::query_handler::OpenTelemetryProtocolHandlerRef;
@@ -298,8 +296,7 @@ impl Server for GrpcServer {
                 .await
                 .context(TcpBindSnafu { addr })?;
             let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
-            let incoming =
-                TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
+            let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
             info!("gRPC server is bound to {}", addr);
 
             *shutdown_tx = Some(tx);

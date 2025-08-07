@@ -41,10 +41,11 @@ use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use snafu::ResultExt;
-use sqlparser::ast::{ExactNumberInfo, Ident, ObjectName};
+use sqlparser::ast::{ExactNumberInfo, Ident};
 
 use crate::ast::{
-    ColumnDef, ColumnOption, DataType as SqlDataType, TimezoneInfo, Value as SqlValue,
+    ColumnDef, ColumnOption, DataType as SqlDataType, ObjectNamePartExt, TimezoneInfo,
+    Value as SqlValue,
 };
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
@@ -201,15 +202,15 @@ pub fn sql_column_def_to_grpc_column_def(
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
-        SqlDataType::UnsignedBigInt(_) => Ok(ConcreteDataType::uint64_datatype()),
+        SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
         SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(ConcreteDataType::int32_datatype()),
-        SqlDataType::UnsignedInt(_) | SqlDataType::UnsignedInteger(_) => {
+        SqlDataType::IntUnsigned(_) | SqlDataType::UnsignedInteger => {
             Ok(ConcreteDataType::uint32_datatype())
         }
         SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
-        SqlDataType::UnsignedSmallInt(_) => Ok(ConcreteDataType::uint16_datatype()),
+        SqlDataType::SmallIntUnsigned(_) => Ok(ConcreteDataType::uint16_datatype()),
         SqlDataType::TinyInt(_) | SqlDataType::Int8(_) => Ok(ConcreteDataType::int8_datatype()),
-        SqlDataType::UnsignedTinyInt(_) | SqlDataType::UnsignedInt8(_) => {
+        SqlDataType::TinyIntUnsigned(_) | SqlDataType::Int8Unsigned(_) => {
             Ok(ConcreteDataType::uint8_datatype())
         }
         SqlDataType::Char(_)
@@ -254,7 +255,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         // Vector type
         SqlDataType::Custom(name, d)
             if name.0.as_slice().len() == 1
-                && name.0.as_slice()[0].value.to_ascii_uppercase() == VECTOR_TYPE_NAME
+                && name.0.as_slice()[0]
+                    .to_string_unquoted()
+                    .to_ascii_uppercase()
+                    == VECTOR_TYPE_NAME
                 && d.len() == 1 =>
         {
             let dim = d[0].parse().map_err(|e| {
@@ -275,13 +279,13 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
 pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Result<SqlDataType> {
     match data_type {
         ConcreteDataType::Int64(_) => Ok(SqlDataType::BigInt(None)),
-        ConcreteDataType::UInt64(_) => Ok(SqlDataType::UnsignedBigInt(None)),
+        ConcreteDataType::UInt64(_) => Ok(SqlDataType::BigIntUnsigned(None)),
         ConcreteDataType::Int32(_) => Ok(SqlDataType::Int(None)),
-        ConcreteDataType::UInt32(_) => Ok(SqlDataType::UnsignedInt(None)),
+        ConcreteDataType::UInt32(_) => Ok(SqlDataType::IntUnsigned(None)),
         ConcreteDataType::Int16(_) => Ok(SqlDataType::SmallInt(None)),
-        ConcreteDataType::UInt16(_) => Ok(SqlDataType::UnsignedSmallInt(None)),
+        ConcreteDataType::UInt16(_) => Ok(SqlDataType::SmallIntUnsigned(None)),
         ConcreteDataType::Int8(_) => Ok(SqlDataType::TinyInt(None)),
-        ConcreteDataType::UInt8(_) => Ok(SqlDataType::UnsignedTinyInt(None)),
+        ConcreteDataType::UInt8(_) => Ok(SqlDataType::TinyIntUnsigned(None)),
         ConcreteDataType::String(_) => Ok(SqlDataType::String(None)),
         ConcreteDataType::Float32(_) => Ok(SqlDataType::Float(None)),
         ConcreteDataType::Float64(_) => Ok(SqlDataType::Double(ExactNumberInfo::None)),
@@ -302,7 +306,7 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         )),
         ConcreteDataType::Json(_) => Ok(SqlDataType::JSON),
         ConcreteDataType::Vector(v) => Ok(SqlDataType::Custom(
-            ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+            vec![Ident::new(VECTOR_TYPE_NAME)].into(),
             vec![v.dim.to_string()],
         )),
         ConcreteDataType::Duration(_)
@@ -380,19 +384,19 @@ mod tests {
             ConcreteDataType::binary_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedBigInt(None),
+            SqlDataType::BigIntUnsigned(None),
             ConcreteDataType::uint64_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedInt(None),
+            SqlDataType::IntUnsigned(None),
             ConcreteDataType::uint32_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedSmallInt(None),
+            SqlDataType::SmallIntUnsigned(None),
             ConcreteDataType::uint16_datatype(),
         );
         check_type(
-            SqlDataType::UnsignedTinyInt(None),
+            SqlDataType::TinyIntUnsigned(None),
             ConcreteDataType::uint8_datatype(),
         );
         check_type(
@@ -406,7 +410,7 @@ mod tests {
         check_type(SqlDataType::JSON, ConcreteDataType::json_datatype());
         check_type(
             SqlDataType::Custom(
-                ObjectName(vec![Ident::new(VECTOR_TYPE_NAME)]),
+                vec![Ident::new(VECTOR_TYPE_NAME)].into(),
                 vec!["3".to_string()],
             ),
             ConcreteDataType::vector_datatype(3),
@@ -419,7 +423,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![],
         };
 
@@ -435,7 +438,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::NotNull,
@@ -449,7 +451,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::Unique {
@@ -469,12 +470,11 @@ mod tests {
             name: "col".into(),
             // MILLISECOND
             data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
-                option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
-                    "2024-01-30T00:01:01".to_string(),
-                ))),
+                option: ColumnOption::Default(Expr::Value(
+                    SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
+                )),
             }],
         };
 
@@ -522,7 +522,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![],
         };
         assert!(!has_primary_key_option(&column_def));
@@ -530,7 +529,6 @@ mod tests {
         let column_def = ColumnDef {
             name: "col".into(),
             data_type: SqlDataType::Double(ExactNumberInfo::None),
-            collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
                 option: ColumnOption::Unique {
@@ -548,7 +546,6 @@ mod tests {
             column_def: ColumnDef {
                 name: "col".into(),
                 data_type: SqlDataType::Double(ExactNumberInfo::None),
-                collation: None,
                 options: vec![],
             },
             extensions: ColumnExtensions::default(),
@@ -578,7 +575,6 @@ mod tests {
             column_def: ColumnDef {
                 name: "col2".into(),
                 data_type: SqlDataType::String(None),
-                collation: None,
                 options: vec![
                     ColumnOptionDef {
                         name: None,
@@ -612,12 +608,11 @@ mod tests {
                 name: "col".into(),
                 // MILLISECOND
                 data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-                collation: None,
                 options: vec![ColumnOptionDef {
                     name: None,
-                    option: ColumnOption::Default(Expr::Value(SqlValue::SingleQuotedString(
-                        "2024-01-30T00:01:01".to_string(),
-                    ))),
+                    option: ColumnOption::Default(Expr::Value(
+                        SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
+                    )),
                 }],
             },
             extensions: ColumnExtensions::default(),
@@ -668,7 +663,6 @@ mod tests {
             column_def: ColumnDef {
                 name: "col".into(),
                 data_type: SqlDataType::Text,
-                collation: None,
                 options: vec![],
             },
             extensions: ColumnExtensions {

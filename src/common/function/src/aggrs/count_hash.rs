@@ -41,7 +41,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, Int64Array, ListArray, UInt64Array,
 };
 use datatypes::arrow::buffer::{OffsetBuffer, ScalarBuffer};
-use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::arrow::datatypes::{DataType, Field, FieldRef};
 
 use crate::function_registry::FunctionRegistry;
 
@@ -94,14 +94,14 @@ impl AggregateUDFImpl for CountHash {
         false
     }
 
-    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Field>> {
-        Ok(vec![Field::new_list(
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
+        Ok(vec![Arc::new(Field::new_list(
             format_state_name(args.name, "count_hash"),
             Field::new_list_field(DataType::UInt64, true),
             // For count_hash accumulator, null list item stands for an
             // empty value set (i.e., all NULL value so far for that group).
             true,
-        )])
+        ))])
     }
 
     fn accumulator(&self, acc_args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
