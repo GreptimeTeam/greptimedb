@@ -73,6 +73,11 @@ const DEFAULT_MAX_RETRY_TIMES: u64 = 3;
 ///
 /// The event can also add the extra schema and row to the event by overriding the `extra_schema` and `extra_row` methods.
 pub trait Event: Send + Sync + Debug {
+    /// Returns the table name of the event.
+    fn table_name(&self) -> &str {
+        DEFAULT_EVENTS_TABLE_NAME
+    }
+
     /// Returns the type of the event.
     fn event_type(&self) -> &str;
 
@@ -177,7 +182,7 @@ pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertR
             .collect::<Result<Vec<_>>>()?;
 
         row_insert_requests.inserts.push(RowInsertRequest {
-            table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+            table_name: event.table_name().to_string(),
             rows: Some(Rows { schema, rows }),
         });
     }

@@ -54,6 +54,10 @@ pub struct SlowQueryEvent {
 }
 
 impl Event for SlowQueryEvent {
+    fn table_name(&self) -> &str {
+        SLOW_QUERY_TABLE_NAME
+    }
+
     fn event_type(&self) -> &str {
         SLOW_QUERY_EVENT_TYPE
     }
