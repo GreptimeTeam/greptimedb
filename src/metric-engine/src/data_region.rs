@@ -214,8 +214,11 @@ impl DataRegion {
         match request.kind {
             AlterKind::SetRegionOptions { options: _ }
             | AlterKind::UnsetRegionOptions { keys: _ }
-            | AlterKind::SetIndex { options: _ }
-            | AlterKind::UnsetIndex { options: _ } => {
+            | AlterKind::SetIndexes { options: _ }
+            | AlterKind::UnsetIndexes { options: _ }
+            | AlterKind::SyncColumns {
+                column_metadatas: _,
+            } => {
                 let region_id = utils::to_data_region_id(region_id);
                 self.mito
                     .handle_request(region_id, RegionRequest::Alter(request))

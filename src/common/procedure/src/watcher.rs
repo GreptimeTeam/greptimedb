@@ -83,7 +83,7 @@ mod tests {
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let poison_manager = Arc::new(InMemoryPoisonStore::default());
-        let manager = LocalManager::new(config, state_store, poison_manager);
+        let manager = LocalManager::new(config, state_store, poison_manager, None);
         manager.start().await.unwrap();
 
         #[derive(Debug)]

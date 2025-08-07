@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_procedure::ProcedureId;
 use common_wal::options::WalOptions;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
@@ -136,6 +137,21 @@ pub enum Error {
     #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get procedure state receiver, procedure id: {procedure_id}"))]
+    ProcedureStateReceiver {
+        procedure_id: ProcedureId,
+        #[snafu(implicit)]
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Procedure state receiver not found: {procedure_id}"))]
+    ProcedureStateReceiverNotFound {
+        procedure_id: ProcedureId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -383,6 +399,13 @@ pub enum Error {
     #[snafu(display("Schema nod found, schema: {}", table_schema))]
     SchemaNotFound {
         table_schema: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Catalog not found, catalog: {}", catalog))]
+    CatalogNotFound {
+        catalog: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -877,6 +900,93 @@ pub enum Error {
         #[snafu(source)]
         error: object_store::Error,
     },
+
+    #[snafu(display("Missing column ids"))]
+    MissingColumnIds {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Missing column in column metadata: {}, table: {}, table_id: {}",
+        column_name,
+        table_name,
+        table_id,
+    ))]
+    MissingColumnInColumnMetadata {
+        column_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        table_name: String,
+        table_id: TableId,
+    },
+
+    #[snafu(display(
+        "Mismatch column id: column_name: {}, column_id: {}, table: {}, table_id: {}",
+        column_name,
+        column_id,
+        table_name,
+        table_id,
+    ))]
+    MismatchColumnId {
+        column_name: String,
+        column_id: u32,
+        #[snafu(implicit)]
+        location: Location,
+        table_name: String,
+        table_id: TableId,
+    },
+
+    #[snafu(display("Failed to convert column def, column: {}", column))]
+    ConvertColumnDef {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
+        "Column metadata inconsistencies found in table: {}, table_id: {}",
+        table_name,
+        table_id
+    ))]
+    ColumnMetadataConflicts {
+        table_name: String,
+        table_id: TableId,
+    },
+
+    #[snafu(display(
+        "Column not found in column metadata, column_name: {}, column_id: {}",
+        column_name,
+        column_id
+    ))]
+    ColumnNotFound { column_name: String, column_id: u32 },
+
+    #[snafu(display(
+        "Column id mismatch, column_name: {}, expected column_id: {}, actual column_id: {}",
+        column_name,
+        expected_column_id,
+        actual_column_id
+    ))]
+    ColumnIdMismatch {
+        column_name: String,
+        expected_column_id: u32,
+        actual_column_id: u32,
+    },
+
+    #[snafu(display(
+        "Timestamp column mismatch, expected column_name: {}, expected column_id: {}, actual column_name: {}, actual column_id: {}",
+        expected_column_name,
+        expected_column_id,
+        actual_column_name,
+        actual_column_id,
+    ))]
+    TimestampMismatch {
+        expected_column_name: String,
+        expected_column_id: u32,
+        actual_column_name: String,
+        actual_column_id: u32,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -896,7 +1006,16 @@ impl ErrorExt for Error {
             | DeserializeFromJson { .. } => StatusCode::Internal,
 
             NoLeader { .. } => StatusCode::TableUnavailable,
-            ValueNotExist { .. } | ProcedurePoisonConflict { .. } => StatusCode::Unexpected,
+            ValueNotExist { .. }
+            | ProcedurePoisonConflict { .. }
+            | ProcedureStateReceiverNotFound { .. }
+            | MissingColumnIds { .. }
+            | MissingColumnInColumnMetadata { .. }
+            | MismatchColumnId { .. }
+            | ColumnMetadataConflicts { .. }
+            | ColumnNotFound { .. }
+            | ColumnIdMismatch { .. }
+            | TimestampMismatch { .. } => StatusCode::Unexpected,
 
             Unsupported { .. } => StatusCode::Unsupported,
             WriteObject { .. } | ReadObject { .. } => StatusCode::StorageUnavailable,
@@ -980,10 +1099,13 @@ impl ErrorExt for Error {
             AbortProcedure { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
             PutPoison { source, .. } => source.status_code(),
+            ConvertColumnDef { source, .. } => source.status_code(),
+            ProcedureStateReceiver { source, .. } => source.status_code(),
 
             ParseProcedureId { .. }
             | InvalidNumTopics { .. }
             | SchemaNotFound { .. }
+            | CatalogNotFound { .. }
             | InvalidNodeInfoKey { .. }
             | InvalidStatKey { .. }
             | ParseNum { .. }

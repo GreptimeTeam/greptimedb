@@ -29,6 +29,7 @@ itertools.workspace = true
 lazy_static = "1.4"
 mito-codec.workspace = true
 mito2.workspace = true
+moka.workspace = true
 mur3 = "0.1"
 object-store.workspace = true
 prometheus.workspace = true
@@ -40,5 +41,6 @@ store-api.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 mito2 = { workspace = true, features = ["test"] }

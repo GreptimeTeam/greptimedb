@@ -27,9 +27,6 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 use crate::error::Result;
 use crate::metasrv::MetasrvNodeInfo;
 
-pub const ELECTION_KEY: &str = "__metasrv_election";
-pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
-
 pub(crate) const CANDIDATE_LEASE_SECS: u64 = 600;
 const KEEP_ALIVE_INTERVAL_SECS: u64 = CANDIDATE_LEASE_SECS / 2;
 

@@ -24,7 +24,7 @@ mod util;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use api::v1::meta::{ProcedureDetailResponse, Role};
+use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse, Role};
 pub use ask_leader::{AskLeader, LeaderProvider, LeaderProviderRef};
 use cluster::Client as ClusterClient;
 pub use cluster::ClusterKvBackend;
@@ -34,12 +34,12 @@ use common_meta::cluster::{
     ClusterInfo, MetasrvStatus, NodeInfo, NodeInfoKey, NodeStatus, Role as ClusterRole,
 };
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, RegionStat};
-use common_meta::ddl::{ExecutorContext, ProcedureExecutor};
 use common_meta::error::{
     self as meta_error, ExternalSnafu, Result as MetaResult, UnsupportedSnafu,
 };
 use common_meta::key::flow::flow_state::{FlowStat, FlowStateManager};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::procedure::{
@@ -270,6 +270,17 @@ impl ProcedureExecutor for MetaClient {
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
         self.migrate_region(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
+    async fn reconcile(
+        &self,
+        _ctx: &ExecutorContext,
+        request: ReconcileRequest,
+    ) -> MetaResult<ReconcileResponse> {
+        self.reconcile(request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -609,6 +620,11 @@ impl MetaClient {
                 request.timeout,
             )
             .await
+    }
+
+    /// Reconcile the procedure state.
+    pub async fn reconcile(&self, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        self.procedure_client()?.reconcile(request).await
     }
 
     /// Submit a DDL task

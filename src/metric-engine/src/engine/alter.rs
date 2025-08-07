@@ -66,7 +66,7 @@ impl MetricEngineInner {
                 let mut manifest_infos = Vec::with_capacity(1);
                 self.alter_logical_regions(physical_region_id, requests, extension_return_value)
                     .await?;
-                append_manifest_info(&self.mito, region_id, &mut manifest_infos);
+                append_manifest_info(&self.mito, physical_region_id, &mut manifest_infos);
                 encode_manifest_info_to_extensions(&manifest_infos, extension_return_value)?;
             } else {
                 let grouped_requests =
@@ -222,13 +222,17 @@ mod test {
     use std::time::Duration;
 
     use api::v1::SemanticType;
-    use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::ColumnMetadata;
-    use store_api::region_request::{AddColumn, SetRegionOption};
+    use common_meta::ddl::test_util::assert_column_name_and_id;
+    use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
+    use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{
+        AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption,
+    };
+    use store_api::storage::consts::ReservedColumnId;
+    use store_api::storage::RegionId;
 
-    use super::*;
-    use crate::test_util::TestEnv;
+    use crate::test_util::{alter_logical_region_request, create_logical_region_request, TestEnv};
 
     #[tokio::test]
     async fn test_alter_region() {
@@ -239,22 +243,7 @@ mod test {
 
         // alter physical region
         let physical_region_id = env.default_physical_region_id();
-        let request = RegionAlterRequest {
-            kind: AlterKind::AddColumns {
-                columns: vec![AddColumn {
-                    column_metadata: ColumnMetadata {
-                        column_id: 0,
-                        semantic_type: SemanticType::Tag,
-                        column_schema: ColumnSchema::new(
-                            "tag1",
-                            ConcreteDataType::string_datatype(),
-                            false,
-                        ),
-                    },
-                    location: None,
-                }],
-            },
-        };
+        let request = alter_logical_region_request(&["tag1"]);
 
         let result = engine_inner
             .alter_physical_region(physical_region_id, request.clone())
@@ -287,14 +276,18 @@ mod test {
         assert!(!is_column_exist);
 
         let region_id = env.default_logical_region_id();
-        engine_inner
-            .alter_logical_regions(
-                physical_region_id,
-                vec![(region_id, request)],
-                &mut HashMap::new(),
-            )
+        let response = env
+            .metric()
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                region_id,
+                request.clone(),
+            )]))
             .await
             .unwrap();
+        let manifest_infos = parse_manifest_infos_from_extensions(&response.extensions).unwrap();
+        assert_eq!(manifest_infos[0].0, physical_region_id);
+        assert!(manifest_infos[0].1.is_metric());
+
         let semantic_type = metadata_region
             .column_semantic_type(physical_region_id, logical_region_id, "tag1")
             .await
@@ -307,5 +300,77 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(timestamp_index, SemanticType::Timestamp);
+        let column_metadatas =
+            parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        assert_column_name_and_id(
+            &column_metadatas,
+            &[
+                ("greptime_timestamp", 0),
+                ("greptime_value", 1),
+                ("__table_id", ReservedColumnId::table_id()),
+                ("__tsid", ReservedColumnId::tsid()),
+                ("job", 2),
+                ("tag1", 3),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_alter_logical_regions() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id1 = RegionId::new(1024, 0);
+        let physical_region_id2 = RegionId::new(1024, 1);
+        let logical_region_id1 = RegionId::new(1025, 0);
+        let logical_region_id2 = RegionId::new(1025, 1);
+        env.create_physical_region(physical_region_id1, "/test_dir1")
+            .await;
+        env.create_physical_region(physical_region_id2, "/test_dir2")
+            .await;
+
+        let region_create_request1 = crate::test_util::create_logical_region_request(
+            &["job"],
+            physical_region_id1,
+            "logical1",
+        );
+        let region_create_request2 =
+            create_logical_region_request(&["job"], physical_region_id2, "logical2");
+        engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Create(vec![
+                (logical_region_id1, region_create_request1),
+                (logical_region_id2, region_create_request2),
+            ]))
+            .await
+            .unwrap();
+
+        let region_alter_request1 = alter_logical_region_request(&["tag1"]);
+        let region_alter_request2 = alter_logical_region_request(&["tag1"]);
+        let response = engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![
+                (logical_region_id1, region_alter_request1),
+                (logical_region_id2, region_alter_request2),
+            ]))
+            .await
+            .unwrap();
+
+        let manifest_infos = parse_manifest_infos_from_extensions(&response.extensions).unwrap();
+        assert_eq!(manifest_infos.len(), 2);
+        let region_ids = manifest_infos.into_iter().map(|i| i.0).collect::<Vec<_>>();
+        assert!(region_ids.contains(&physical_region_id1));
+        assert!(region_ids.contains(&physical_region_id2));
+
+        let column_metadatas =
+            parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        assert_column_name_and_id(
+            &column_metadatas,
+            &[
+                ("greptime_timestamp", 0),
+                ("greptime_value", 1),
+                ("__table_id", ReservedColumnId::table_id()),
+                ("__tsid", ReservedColumnId::tsid()),
+                ("job", 2),
+                ("tag1", 3),
+            ],
+        );
     }
 }

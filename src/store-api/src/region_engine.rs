@@ -460,7 +460,7 @@ pub struct RegionStatistic {
 }
 
 /// The manifest info of a region.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RegionManifestInfo {
     Mito {
         manifest_version: u64,
@@ -703,6 +703,7 @@ pub trait RegionEngine: Send + Sync {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 

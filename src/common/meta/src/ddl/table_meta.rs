@@ -122,6 +122,7 @@ impl TableMetadataAllocator {
         );
 
         let peers = self.peer_allocator.alloc(regions).await?;
+        debug!("Allocated peers {:?} for table {}", peers, table_id);
         let region_routes = task
             .partitions
             .iter()
@@ -173,6 +174,10 @@ impl TableMetadataAllocator {
             table_route,
             region_wal_options,
         })
+    }
+
+    pub fn table_id_sequence(&self) -> SequenceRef {
+        self.table_id_sequence.clone()
     }
 }
 

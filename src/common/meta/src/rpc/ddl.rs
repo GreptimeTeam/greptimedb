@@ -1358,6 +1358,7 @@ mod tests {
             options: Default::default(),
             created_on: Default::default(),
             partition_key_indices: Default::default(),
+            column_ids: Default::default(),
         };
 
         // construct RawTableInfo
@@ -1423,6 +1424,6 @@ mod tests {
             create_table_task.table_info.meta.primary_key_indices,
             vec![2]
         );
-        assert_eq!(create_table_task.table_info.meta.value_indices, vec![1]);
+        assert_eq!(create_table_task.table_info.meta.value_indices, vec![0, 1]);
     }
 }

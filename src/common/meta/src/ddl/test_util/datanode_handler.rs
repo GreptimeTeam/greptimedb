@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use api::region::RegionResponse;
+use api::v1::region::region_request::Body;
 use api::v1::region::RegionRequest;
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
@@ -20,6 +24,8 @@ use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use snafu::{ResultExt, Snafu};
+use store_api::metadata::RegionMetadata;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::error::{self, Error, Result};
@@ -32,6 +38,7 @@ impl MockDatanodeHandler for () {
         Ok(RegionResponse {
             affected_rows: 0,
             extensions: Default::default(),
+            metadata: Vec::new(),
         })
     }
 
@@ -44,10 +51,13 @@ impl MockDatanodeHandler for () {
     }
 }
 
+type RegionRequestHandler =
+    Arc<dyn Fn(Peer, RegionRequest) -> Result<RegionResponse> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct DatanodeWatcher {
     sender: mpsc::Sender<(Peer, RegionRequest)>,
-    handler: Option<fn(Peer, RegionRequest) -> Result<RegionResponse>>,
+    handler: Option<RegionRequestHandler>,
 }
 
 impl DatanodeWatcher {
@@ -60,9 +70,9 @@ impl DatanodeWatcher {
 
     pub fn with_handler(
         mut self,
-        user_handler: fn(Peer, RegionRequest) -> Result<RegionResponse>,
+        user_handler: impl Fn(Peer, RegionRequest) -> Result<RegionResponse> + Send + Sync + 'static,
     ) -> Self {
-        self.handler = Some(user_handler);
+        self.handler = Some(Arc::new(user_handler));
         self
     }
 }
@@ -75,7 +85,7 @@ impl MockDatanodeHandler for DatanodeWatcher {
             .send((peer.clone(), request.clone()))
             .await
             .unwrap();
-        if let Some(handler) = self.handler {
+        if let Some(handler) = self.handler.as_ref() {
             handler(peer.clone(), request)
         } else {
             Ok(RegionResponse::new(0))
@@ -262,6 +272,50 @@ impl MockDatanodeHandler for AllFailureDatanodeHandler {
             }
             .fail()
         }
+    }
+
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
+        unreachable!()
+    }
+}
+
+#[derive(Clone)]
+pub struct ListMetadataDatanodeHandler {
+    pub region_metadatas: HashMap<RegionId, Option<RegionMetadata>>,
+}
+
+impl ListMetadataDatanodeHandler {
+    pub fn new(region_metadatas: HashMap<RegionId, Option<RegionMetadata>>) -> Self {
+        Self { region_metadatas }
+    }
+}
+
+#[async_trait::async_trait]
+impl MockDatanodeHandler for ListMetadataDatanodeHandler {
+    async fn handle(&self, _peer: &Peer, request: RegionRequest) -> Result<RegionResponse> {
+        let Some(Body::ListMetadata(req)) = request.body else {
+            unreachable!()
+        };
+        let mut response = RegionResponse::new(0);
+
+        let mut output = Vec::with_capacity(req.region_ids.len());
+        for region_id in req.region_ids {
+            match self.region_metadatas.get(&RegionId::from_u64(region_id)) {
+                Some(metadata) => {
+                    output.push(metadata.clone());
+                }
+                None => {
+                    output.push(None);
+                }
+            }
+        }
+
+        response.metadata = serde_json::to_vec(&output).unwrap();
+        Ok(response)
     }
 
     async fn handle_query(

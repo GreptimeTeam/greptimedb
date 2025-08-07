@@ -25,9 +25,9 @@ use common_base::Plugins;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
-use common_meta::ddl::ProcedureExecutorRef;
+use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::distributed_time_constants;
-use common_meta::key::maintenance::MaintenanceModeManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::leadership_notifier::{
@@ -35,8 +35,10 @@ use common_meta::leadership_notifier::{
 };
 use common_meta::node_expiry_listener::NodeExpiryListener;
 use common_meta::peer::Peer;
+use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
+use common_meta::sequence::SequenceRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_procedure::options::ProcedureConfig;
@@ -425,10 +427,10 @@ pub struct Metasrv {
     election: Option<ElectionRef>,
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
-    procedure_executor: ProcedureExecutorRef,
+    ddl_manager: DdlManagerRef,
     wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    maintenance_mode_manager: MaintenanceModeManagerRef,
+    runtime_switch_manager: RuntimeSwitchManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
@@ -436,6 +438,8 @@ pub struct Metasrv {
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
+    table_id_sequence: SequenceRef,
+    reconciliation_manager: ReconciliationManagerRef,
 
     plugins: Plugins,
 }
@@ -675,8 +679,8 @@ impl Metasrv {
         &self.mailbox
     }
 
-    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
-        &self.procedure_executor
+    pub fn ddl_manager(&self) -> &DdlManagerRef {
+        &self.ddl_manager
     }
 
     pub fn procedure_manager(&self) -> &ProcedureManagerRef {
@@ -687,8 +691,8 @@ impl Metasrv {
         &self.table_metadata_manager
     }
 
-    pub fn maintenance_mode_manager(&self) -> &MaintenanceModeManagerRef {
-        &self.maintenance_mode_manager
+    pub fn runtime_switch_manager(&self) -> &RuntimeSwitchManagerRef {
+        &self.runtime_switch_manager
     }
 
     pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {
@@ -705,6 +709,14 @@ impl Metasrv {
 
     pub fn subscription_manager(&self) -> Option<SubscriptionManagerRef> {
         self.plugins.get::<SubscriptionManagerRef>()
+    }
+
+    pub fn table_id_sequence(&self) -> &SequenceRef {
+        &self.table_id_sequence
+    }
+
+    pub fn reconciliation_manager(&self) -> &ReconciliationManagerRef {
+        &self.reconciliation_manager
     }
 
     pub fn plugins(&self) -> &Plugins {

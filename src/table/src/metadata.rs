@@ -35,9 +35,10 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId, Re
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOptions, TableOptions,
-    UnsetIndexOptions,
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetIndexOption, TableOptions,
+    UnsetIndexOption,
 };
+use crate::table_reference::TableReference;
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -134,6 +135,8 @@ pub struct TableMeta {
     pub created_on: DateTime<Utc>,
     #[builder(default = "Vec::new()")]
     pub partition_key_indices: Vec<usize>,
+    #[builder(default = "Vec::new()")]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl TableMetaBuilder {
@@ -150,6 +153,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -178,6 +182,7 @@ impl TableMetaBuilder {
             options: None,
             created_on: None,
             partition_key_indices: None,
+            column_ids: None,
         }
     }
 }
@@ -231,39 +236,8 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetIndex { options } => match options {
-                SetIndexOptions::Fulltext {
-                    column_name,
-                    options,
-                } => self.change_column_fulltext_options(
-                    table_name,
-                    column_name,
-                    true,
-                    Some(options),
-                ),
-                SetIndexOptions::Inverted { column_name } => {
-                    self.change_column_modify_inverted_index(table_name, column_name, true)
-                }
-                SetIndexOptions::Skipping {
-                    column_name,
-                    options,
-                } => self.change_column_skipping_index_options(
-                    table_name,
-                    column_name,
-                    Some(options),
-                ),
-            },
-            AlterKind::UnsetIndex { options } => match options {
-                UnsetIndexOptions::Fulltext { column_name } => {
-                    self.change_column_fulltext_options(table_name, column_name, false, None)
-                }
-                UnsetIndexOptions::Inverted { column_name } => {
-                    self.change_column_modify_inverted_index(table_name, column_name, false)
-                }
-                UnsetIndexOptions::Skipping { column_name } => {
-                    self.change_column_skipping_index_options(table_name, column_name, None)
-                }
-            },
+            AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
+            AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
         }
     }
@@ -305,30 +279,38 @@ impl TableMeta {
         self.set_table_options(&requests)
     }
 
-    /// Creates a [TableMetaBuilder] with modified column inverted index.
-    fn change_column_modify_inverted_index(
+    fn set_indexes(
         &self,
         table_name: &str,
-        column_name: &str,
-        value: bool,
+        requests: &[SetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut meta_builder = self.new_meta_builder();
-
-        let mut columns: Vec<ColumnSchema> =
-            Vec::with_capacity(table_schema.column_schemas().len());
-
-        for column_schema in table_schema.column_schemas().iter() {
-            if column_schema.name == column_name {
-                let mut new_column_schema = column_schema.clone();
-                new_column_schema.set_inverted_index(value);
-                columns.push(new_column_schema);
-            } else {
-                columns.push(column_schema.clone());
-            }
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::new();
+        for request in requests {
+            let column_name = request.column_name();
+            table_schema
+                .column_index_by_name(column_name)
+                .with_context(|| error::ColumnNotExistsSnafu {
+                    column_name,
+                    table_name,
+                })?;
+            set_index_options
+                .entry(column_name)
+                .or_default()
+                .push(request);
         }
 
-        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut meta_builder = self.new_meta_builder();
+        let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
+        for mut column in table_schema.column_schemas().iter().cloned() {
+            if let Some(request) = set_index_options.get(column.name.as_str()) {
+                for request in request {
+                    self.set_index(&mut column, request)?;
+                }
+            }
+            columns.push(column);
+        }
+
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
                 msg: format!("Failed to convert column schemas into schema for table {table_name}"),
@@ -339,12 +321,17 @@ impl TableMeta {
             builder = builder.add_metadata(k, v);
         }
 
-        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!(
-                "Table {table_name} cannot change fulltext options for column {column_name}",
-            ),
+        let new_schema = builder.build().with_context(|_| {
+            let column_names = requests
+                .iter()
+                .map(|request| request.column_name())
+                .collect::<Vec<_>>();
+            error::SchemaBuildSnafu {
+                msg: format!(
+                    "Table {table_name} cannot set index options with columns {column_names:?}",
+                ),
+            }
         })?;
-
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
@@ -352,68 +339,38 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
-    /// Creates a [TableMetaBuilder] with modified column fulltext options.
-    fn change_column_fulltext_options(
+    fn unset_indexes(
         &self,
         table_name: &str,
-        column_name: &str,
-        enable: bool,
-        options: Option<&FulltextOptions>,
+        requests: &[UnsetIndexOption],
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let mut meta_builder = self.new_meta_builder();
-
-        let column = &table_schema
-            .column_schema_by_name(column_name)
-            .with_context(|| error::ColumnNotExistsSnafu {
-                column_name,
-                table_name,
-            })?;
-
-        ensure!(
-            column.data_type.is_string(),
-            error::InvalidColumnOptionSnafu {
-                column_name,
-                msg: "FULLTEXT index only supports string type",
-            }
-        );
-
-        let current_fulltext_options = column
-            .fulltext_options()
-            .context(error::SetFulltextOptionsSnafu { column_name })?;
-
-        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
-        for column_schema in table_schema.column_schemas() {
-            if column_schema.name == column_name {
-                let mut new_column_schema = column_schema.clone();
-                if enable {
-                    ensure!(
-                        options.is_some(),
-                        error::InvalidColumnOptionSnafu {
-                            column_name,
-                            msg: "FULLTEXT index options must be provided",
-                        }
-                    );
-                    set_column_fulltext_options(
-                        &mut new_column_schema,
-                        column_name,
-                        options.unwrap(),
-                        current_fulltext_options.clone(),
-                    )?
-                } else {
-                    unset_column_fulltext_options(
-                        &mut new_column_schema,
-                        column_name,
-                        current_fulltext_options.clone(),
-                    )?
-                }
-                columns.push(new_column_schema);
-            } else {
-                columns.push(column_schema.clone());
-            }
+        let mut set_index_options: HashMap<&str, Vec<_>> = HashMap::new();
+        for request in requests {
+            let column_name = request.column_name();
+            table_schema
+                .column_index_by_name(column_name)
+                .with_context(|| error::ColumnNotExistsSnafu {
+                    column_name,
+                    table_name,
+                })?;
+            set_index_options
+                .entry(column_name)
+                .or_default()
+                .push(request);
         }
 
-        // TODO(CookiePieWw): This part for all alter table operations is similar. We can refactor it.
+        let mut meta_builder = self.new_meta_builder();
+        let mut columns: Vec<_> = Vec::with_capacity(table_schema.column_schemas().len());
+        for mut column in table_schema.column_schemas().iter().cloned() {
+            if let Some(request) = set_index_options.get(column.name.as_str()) {
+                for request in request {
+                    self.unset_index(&mut column, request)?;
+                }
+            }
+            columns.push(column);
+        }
+
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
                 msg: format!("Failed to convert column schemas into schema for table {table_name}"),
@@ -424,12 +381,17 @@ impl TableMeta {
             builder = builder.add_metadata(k, v);
         }
 
-        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!(
-                "Table {table_name} cannot change fulltext options for column {column_name}",
-            ),
+        let new_schema = builder.build().with_context(|_| {
+            let column_names = requests
+                .iter()
+                .map(|request| request.column_name())
+                .collect::<Vec<_>>();
+            error::SchemaBuildSnafu {
+                msg: format!(
+                    "Table {table_name} cannot set index options with columns {column_names:?}",
+                ),
+            }
         })?;
-
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
@@ -437,54 +399,70 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
-    /// Creates a [TableMetaBuilder] with modified column skipping index options.
-    fn change_column_skipping_index_options(
-        &self,
-        table_name: &str,
-        column_name: &str,
-        options: Option<&SkippingIndexOptions>,
-    ) -> Result<TableMetaBuilder> {
-        let table_schema = &self.schema;
-        let mut meta_builder = self.new_meta_builder();
-
-        let mut columns = Vec::with_capacity(table_schema.column_schemas().len());
-        for column_schema in table_schema.column_schemas() {
-            if column_schema.name == column_name {
-                let mut new_column_schema = column_schema.clone();
-                if let Some(options) = options {
-                    set_column_skipping_index_options(
-                        &mut new_column_schema,
+    fn set_index(&self, column_schema: &mut ColumnSchema, request: &SetIndexOption) -> Result<()> {
+        match request {
+            SetIndexOption::Fulltext {
+                column_name,
+                options,
+            } => {
+                ensure!(
+                    column_schema.data_type.is_string(),
+                    error::InvalidColumnOptionSnafu {
                         column_name,
-                        options,
-                    )?;
-                } else {
-                    unset_column_skipping_index_options(&mut new_column_schema, column_name)?;
-                }
-                columns.push(new_column_schema);
-            } else {
-                columns.push(column_schema.clone());
+                        msg: "FULLTEXT index only supports string type",
+                    }
+                );
+
+                let current_fulltext_options = column_schema
+                    .fulltext_options()
+                    .context(error::SetFulltextOptionsSnafu { column_name })?;
+                set_column_fulltext_options(
+                    column_schema,
+                    column_name,
+                    options,
+                    current_fulltext_options,
+                )?;
+            }
+            SetIndexOption::Inverted { column_name } => {
+                debug_assert_eq!(column_schema.name, *column_name);
+                column_schema.set_inverted_index(true);
+            }
+            SetIndexOption::Skipping {
+                column_name,
+                options,
+            } => {
+                set_column_skipping_index_options(column_schema, column_name, options)?;
             }
         }
 
-        let mut builder = SchemaBuilder::try_from_columns(columns)
-            .with_context(|_| error::SchemaBuildSnafu {
-                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
-            })?
-            .version(table_schema.version() + 1);
+        Ok(())
+    }
 
-        for (k, v) in table_schema.metadata().iter() {
-            builder = builder.add_metadata(k, v);
+    fn unset_index(
+        &self,
+        column_schema: &mut ColumnSchema,
+        request: &UnsetIndexOption,
+    ) -> Result<()> {
+        match request {
+            UnsetIndexOption::Fulltext { column_name } => {
+                let current_fulltext_options = column_schema
+                    .fulltext_options()
+                    .context(error::SetFulltextOptionsSnafu { column_name })?;
+                unset_column_fulltext_options(
+                    column_schema,
+                    column_name,
+                    current_fulltext_options.clone(),
+                )?
+            }
+            UnsetIndexOption::Inverted { .. } => {
+                column_schema.set_inverted_index(false);
+            }
+            UnsetIndexOption::Skipping { column_name } => {
+                unset_column_skipping_index_options(column_schema, column_name)?;
+            }
         }
 
-        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!("Failed to convert column schemas into schema for table {table_name}"),
-        })?;
-
-        let _ = meta_builder
-            .schema(Arc::new(new_schema))
-            .primary_key_indices(self.primary_key_indices.clone());
-
-        Ok(meta_builder)
+        Ok(())
     }
 
     // TODO(yingwen): Remove this.
@@ -1109,12 +1087,13 @@ pub struct RawTableMeta {
     /// The indices of columns in primary key. Note that the index of timestamp column
     /// is not included. Order matters to this array.
     pub primary_key_indices: Vec<usize>,
-    ///  The indices of columns in value. Order doesn't matter to this array.
+    ///  The indices of columns in value. The index of timestamp column is included.
+    /// Order doesn't matter to this array.
     pub value_indices: Vec<usize>,
     /// Engine type of this table. Usually in small case.
     pub engine: String,
     /// Next column id of a new column.
-    /// Deprecated. See https://github.com/GreptimeTeam/greptimedb/issues/2982
+    /// It's used to ensure all columns with the same name across all regions have the same column id.
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
     pub options: TableOptions,
@@ -1122,6 +1101,10 @@ pub struct RawTableMeta {
     /// Order doesn't matter to this array.
     #[serde(default)]
     pub partition_key_indices: Vec<usize>,
+    /// Map of column name to column id.
+    /// Note: This field may be empty for older versions that did not include this field.
+    #[serde(default)]
+    pub column_ids: Vec<ColumnId>,
 }
 
 impl From<TableMeta> for RawTableMeta {
@@ -1136,6 +1119,7 @@ impl From<TableMeta> for RawTableMeta {
             options: meta.options,
             created_on: meta.created_on,
             partition_key_indices: meta.partition_key_indices,
+            column_ids: meta.column_ids,
         }
     }
 }
@@ -1154,6 +1138,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             options: raw.options,
             created_on: raw.created_on,
             partition_key_indices: raw.partition_key_indices,
+            column_ids: raw.column_ids,
         })
     }
 }
@@ -1171,6 +1156,24 @@ pub struct RawTableInfo {
 }
 
 impl RawTableInfo {
+    /// Returns the map of column name to column id.
+    ///
+    /// Note: This method may return an empty map for older versions that did not include this field.
+    pub fn name_to_ids(&self) -> Option<HashMap<String, ColumnId>> {
+        if self.meta.column_ids.len() != self.meta.schema.column_schemas.len() {
+            None
+        } else {
+            Some(
+                self.meta
+                    .column_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| (self.meta.schema.column_schemas[index].name.clone(), *id))
+                    .collect(),
+            )
+        }
+    }
+
     /// Sort the columns in [RawTableInfo], logical tables require it.
     pub fn sort_columns(&mut self) {
         let column_schemas = &self.meta.schema.column_schemas;
@@ -1181,6 +1184,7 @@ impl RawTableInfo {
             .map(|index| column_schemas[*index].name.clone())
             .collect::<HashSet<_>>();
 
+        let name_to_ids = self.name_to_ids().unwrap_or_default();
         self.meta
             .schema
             .column_schemas
@@ -1190,14 +1194,19 @@ impl RawTableInfo {
         let mut primary_key_indices = Vec::with_capacity(primary_keys.len());
         let mut timestamp_index = None;
         let mut value_indices =
-            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len() - 1);
+            Vec::with_capacity(self.meta.schema.column_schemas.len() - primary_keys.len());
+        let mut column_ids = Vec::with_capacity(self.meta.schema.column_schemas.len());
         for (index, column_schema) in self.meta.schema.column_schemas.iter().enumerate() {
             if primary_keys.contains(&column_schema.name) {
                 primary_key_indices.push(index);
             } else if column_schema.is_time_index() {
+                value_indices.push(index);
                 timestamp_index = Some(index);
             } else {
                 value_indices.push(index);
+            }
+            if let Some(id) = name_to_ids.get(&column_schema.name) {
+                column_ids.push(*id);
             }
         }
 
@@ -1205,6 +1214,7 @@ impl RawTableInfo {
         self.meta.schema.timestamp_index = timestamp_index;
         self.meta.primary_key_indices = primary_key_indices;
         self.meta.value_indices = value_indices;
+        self.meta.column_ids = column_ids;
     }
 
     /// Extracts region options from table info.
@@ -1212,6 +1222,15 @@ impl RawTableInfo {
     /// All "region options" are actually a copy of table options for redundancy.
     pub fn to_region_options(&self) -> HashMap<String, String> {
         HashMap::from(&self.meta.options)
+    }
+
+    /// Returns the table reference.
+    pub fn table_ref(&self) -> TableReference {
+        TableReference::full(
+            self.catalog_name.as_str(),
+            self.schema_name.as_str(),
+            self.name.as_str(),
+        )
     }
 }
 
@@ -1929,11 +1948,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetIndex {
-            options: SetIndexOptions::Fulltext {
+        let alter_kind = AlterKind::SetIndexes {
+            options: vec![SetIndexOption::Fulltext {
                 column_name: "col1".to_string(),
                 options: FulltextOptions::default(),
-            },
+            }],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1948,8 +1967,8 @@ mod tests {
         let new_meta = add_columns_to_meta_with_location(&meta);
         assert_eq!(meta.region_numbers, new_meta.region_numbers);
 
-        let alter_kind = AlterKind::SetIndex {
-            options: SetIndexOptions::Fulltext {
+        let alter_kind = AlterKind::SetIndexes {
+            options: vec![SetIndexOption::Fulltext {
                 column_name: "my_tag_first".to_string(),
                 options: FulltextOptions::new_unchecked(
                     true,
@@ -1959,7 +1978,7 @@ mod tests {
                     1000,
                     0.01,
                 ),
-            },
+            }],
         };
         let new_meta = new_meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1978,10 +1997,10 @@ mod tests {
         );
         assert!(fulltext_options.case_sensitive);
 
-        let alter_kind = AlterKind::UnsetIndex {
-            options: UnsetIndexOptions::Fulltext {
+        let alter_kind = AlterKind::UnsetIndexes {
+            options: vec![UnsetIndexOption::Fulltext {
                 column_name: "my_tag_first".to_string(),
-            },
+            }],
         };
         let new_meta = new_meta
             .builder_with_alter_kind("my_table", &alter_kind)

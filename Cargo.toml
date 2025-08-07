@@ -71,7 +71,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.15.4"
+version = "0.15.5"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -134,7 +134,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "a5d256ba4abb7393e0859ffbf7fca1e38f3433dc" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "f3103a8c9b8ce162457d0a3e3ca00d53d1a8bd06" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -220,6 +220,8 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
 tonic = { version = "0.12", features = ["tls", "gzip", "zstd"] }
 tower = "0.5"
+tower-http = "0.6"
+tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 typetag = "0.2"

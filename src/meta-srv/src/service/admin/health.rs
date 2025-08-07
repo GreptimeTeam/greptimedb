@@ -21,6 +21,7 @@ use crate::service::admin::HttpHandler;
 
 const HTTP_OK: &str = "OK\n";
 
+#[derive(Clone)]
 pub struct HealthHandler;
 
 #[async_trait::async_trait]

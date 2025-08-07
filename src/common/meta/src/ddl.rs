@@ -15,25 +15,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::meta::ProcedureDetailResponse;
-use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::ddl::flow_meta::FlowMetadataAllocatorRef;
 use crate::ddl::table_meta::TableMetadataAllocatorRef;
-use crate::error::{Result, UnsupportedSnafu};
 use crate::key::flow::FlowMetadataManagerRef;
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::key::TableMetadataManagerRef;
 use crate::node_manager::NodeManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::region_registry::LeaderRegionRegistryRef;
-use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
-use crate::rpc::procedure::{
-    AddRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
-    RemoveRegionFollowerRequest,
-};
 use crate::DatanodeId;
 
 pub mod alter_database;
@@ -44,13 +36,13 @@ pub mod create_flow;
 pub mod create_logical_tables;
 pub mod create_table;
 mod create_table_template;
+pub(crate) use create_table_template::{build_template_from_raw_table_info, CreateRequestBuilder};
 pub mod create_view;
 pub mod drop_database;
 pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
-mod physical_table_metadata;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
@@ -58,64 +50,6 @@ pub mod test_util;
 pub(crate) mod tests;
 pub mod truncate_table;
 pub mod utils;
-
-#[derive(Debug, Default)]
-pub struct ExecutorContext {
-    pub tracing_context: Option<W3cTrace>,
-}
-
-/// The procedure executor that accepts ddl, region migration task etc.
-#[async_trait::async_trait]
-pub trait ProcedureExecutor: Send + Sync {
-    /// Submit a ddl task
-    async fn submit_ddl_task(
-        &self,
-        ctx: &ExecutorContext,
-        request: SubmitDdlTaskRequest,
-    ) -> Result<SubmitDdlTaskResponse>;
-
-    /// Add a region follower
-    async fn add_region_follower(
-        &self,
-        _ctx: &ExecutorContext,
-        _request: AddRegionFollowerRequest,
-    ) -> Result<()> {
-        UnsupportedSnafu {
-            operation: "add_region_follower",
-        }
-        .fail()
-    }
-
-    /// Remove a region follower
-    async fn remove_region_follower(
-        &self,
-        _ctx: &ExecutorContext,
-        _request: RemoveRegionFollowerRequest,
-    ) -> Result<()> {
-        UnsupportedSnafu {
-            operation: "remove_region_follower",
-        }
-        .fail()
-    }
-
-    /// Submit a region migration task
-    async fn migrate_region(
-        &self,
-        ctx: &ExecutorContext,
-        request: MigrateRegionRequest,
-    ) -> Result<MigrateRegionResponse>;
-
-    /// Query the procedure state by its id
-    async fn query_procedure_state(
-        &self,
-        ctx: &ExecutorContext,
-        pid: &str,
-    ) -> Result<ProcedureStateResponse>;
-
-    async fn list_procedures(&self, ctx: &ExecutorContext) -> Result<ProcedureDetailResponse>;
-}
-
-pub type ProcedureExecutorRef = Arc<dyn ProcedureExecutor>;
 
 /// Metadata allocated to a table.
 #[derive(Default)]

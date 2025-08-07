@@ -100,8 +100,8 @@
 pub mod catalog_name;
 pub mod datanode_table;
 pub mod flow;
-pub mod maintenance;
 pub mod node_address;
+pub mod runtime_switch;
 mod schema_metadata_manager;
 pub mod schema_name;
 pub mod table_info;
@@ -164,7 +164,10 @@ use crate::state_store::PoisonValue;
 use crate::DatanodeId;
 
 pub const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*";
-pub const MAINTENANCE_KEY: &str = "__maintenance";
+pub const LEGACY_MAINTENANCE_KEY: &str = "__maintenance";
+pub const MAINTENANCE_KEY: &str = "__switches/maintenance";
+pub const PAUSE_PROCEDURE_KEY: &str = "__switches/pause_procedure";
+pub const RECOVERY_MODE_KEY: &str = "__switches/recovery";
 
 pub const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
@@ -178,6 +181,11 @@ pub const KAFKA_TOPIC_KEY_PREFIX: &str = "__topic_name/kafka";
 // The legacy topic key prefix is used to store the topic name in previous versions.
 pub const LEGACY_TOPIC_KEY_PREFIX: &str = "__created_wal_topics/kafka";
 pub const TOPIC_REGION_PREFIX: &str = "__topic_region";
+
+/// The election key.
+pub const ELECTION_KEY: &str = "__metasrv_election";
+/// The root key of metasrv election candidates.
+pub const CANDIDATES_ROOT: &str = "__metasrv_election_candidates/";
 
 /// The keys with these prefixes will be loaded into the cache when the leader starts.
 pub const CACHE_KEY_PREFIXES: [&str; 5] = [

@@ -20,12 +20,14 @@ use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::region::sync_request::ManifestInfo;
-use api::v1::region::{region_request, RegionResponse as RegionResponseV1, SyncRequest};
+use api::v1::region::{
+    region_request, ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest,
+};
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::request::QueryRequest;
 use common_query::OutputData;
@@ -47,6 +49,7 @@ pub use query::dummy_catalog::{
     DummyCatalogList, DummyTableProviderFactory, TableProviderFactoryRef,
 };
 use query::QueryEngineRef;
+use serde_json;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
@@ -71,10 +74,10 @@ use tonic::{Request, Response, Result as TonicResult};
 use crate::error::{
     self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
-    ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, HandleBatchDdlRequestSnafu,
-    HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu, NewPlanDecoderSnafu,
-    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu, Result,
-    StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
+    ExecuteLogicalPlanSnafu, FindLogicalRegionsSnafu, GetRegionMetadataSnafu,
+    HandleBatchDdlRequestSnafu, HandleBatchOpenRequestSnafu, HandleRegionRequestSnafu,
+    NewPlanDecoderSnafu, RegionEngineNotFoundSnafu, RegionNotFoundSnafu, RegionNotReadySnafu,
+    Result, SerializeJsonSnafu, StopRegionEngineSnafu, UnexpectedSnafu, UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -138,12 +141,12 @@ impl RegionServer {
 
     /// Finds the region's engine by its id. If the region is not ready, returns `None`.
     pub fn find_engine(&self, region_id: RegionId) -> Result<Option<RegionEngineRef>> {
-        self.inner
-            .get_engine(region_id, &RegionChange::None)
-            .map(|x| match x {
-                CurrentEngine::Engine(engine) => Some(engine),
-                CurrentEngine::EarlyReturn(_) => None,
-            })
+        match self.inner.get_engine(region_id, &RegionChange::None) {
+            Ok(CurrentEngine::Engine(engine)) => Ok(Some(engine)),
+            Ok(CurrentEngine::EarlyReturn(_)) => Ok(None),
+            Err(error::Error::RegionNotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -151,9 +154,10 @@ impl RegionServer {
         &self,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         self.inner
-            .handle_batch_open_requests(parallelism, requests)
+            .handle_batch_open_requests(parallelism, requests, ignore_nonexistent_region)
             .await
     }
 
@@ -411,6 +415,7 @@ impl RegionServer {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 
@@ -440,6 +445,7 @@ impl RegionServer {
         Ok(RegionResponse {
             affected_rows,
             extensions,
+            metadata: Vec::new(),
         })
     }
 
@@ -470,6 +476,48 @@ impl RegionServer {
             .trace(span)
             .await
             .map(|_| RegionResponse::new(AffectedRows::default()))
+    }
+
+    /// Handles the ListMetadata request and retrieves metadata for specified regions.
+    ///
+    /// Returns the results as a JSON-serialized list in the [RegionResponse]. It serializes
+    /// non-existing regions as `null`.
+    #[tracing::instrument(skip_all)]
+    async fn handle_list_metadata_request(
+        &self,
+        request: &ListMetadataRequest,
+    ) -> Result<RegionResponse> {
+        let mut region_metadatas = Vec::new();
+        // Collect metadata for each region
+        for region_id in &request.region_ids {
+            let region_id = RegionId::from_u64(*region_id);
+            // Get the engine.
+            let Some(engine) = self.find_engine(region_id)? else {
+                region_metadatas.push(None);
+                continue;
+            };
+
+            match engine.get_metadata(region_id).await {
+                Ok(metadata) => region_metadatas.push(Some(metadata)),
+                Err(err) => {
+                    if err.status_code() == StatusCode::RegionNotFound {
+                        region_metadatas.push(None);
+                    } else {
+                        Err(err).with_context(|_| GetRegionMetadataSnafu {
+                            engine: engine.name(),
+                            region_id,
+                        })?;
+                    }
+                }
+            }
+        }
+
+        // Serialize metadata to JSON
+        let json_result = serde_json::to_vec(&region_metadatas).context(SerializeJsonSnafu)?;
+
+        let response = RegionResponse::from_metadata(json_result);
+
+        Ok(response)
     }
 
     /// Sync region manifest and registers new opened logical regions.
@@ -503,6 +551,10 @@ impl RegionServerHandler for RegionServer {
             region_request::Body::Sync(sync_request) => {
                 self.handle_sync_region_request(sync_request).await
             }
+            region_request::Body::ListMetadata(list_metadata_request) => {
+                self.handle_list_metadata_request(list_metadata_request)
+                    .await
+            }
             _ => self.handle_requests_in_serial(request).await,
         }
         .map_err(BoxedError::new)
@@ -517,6 +569,7 @@ impl RegionServerHandler for RegionServer {
             }),
             affected_rows: response.affected_rows as _,
             extensions: response.extensions,
+            metadata: response.metadata,
         })
     }
 }
@@ -747,6 +800,7 @@ impl RegionServerInner {
         engine: RegionEngineRef,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         let region_changes = requests
             .iter()
@@ -784,8 +838,14 @@ impl RegionServerInner {
                         }
                         Err(e) => {
                             self.unset_region_status(region_id, &engine, *region_change);
-                            error!(e; "Failed to open region: {}", region_id);
-                            errors.push(e);
+                            if e.status_code() == StatusCode::RegionNotFound
+                                && ignore_nonexistent_region
+                            {
+                                warn!("Region {} not found, ignore it, source: {:?}", region_id, e);
+                            } else {
+                                error!(e; "Failed to open region: {}", region_id);
+                                errors.push(e);
+                            }
                         }
                     }
                 }
@@ -814,6 +874,7 @@ impl RegionServerInner {
         &self,
         parallelism: usize,
         requests: Vec<(RegionId, RegionOpenRequest)>,
+        ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
         let mut engine_grouped_requests: HashMap<String, Vec<_>> =
             HashMap::with_capacity(requests.len());
@@ -836,8 +897,13 @@ impl RegionServerInner {
                 .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
                 .clone();
             results.push(
-                self.handle_batch_open_requests_inner(engine, parallelism, requests)
-                    .await,
+                self.handle_batch_open_requests_inner(
+                    engine,
+                    parallelism,
+                    requests,
+                    ignore_nonexistent_region,
+                )
+                .await,
             )
         }
 
@@ -902,6 +968,7 @@ impl RegionServerInner {
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
+                    metadata: Vec::new(),
                 })
             }
             Err(err) => {
@@ -971,6 +1038,7 @@ impl RegionServerInner {
                 Ok(RegionResponse {
                     affected_rows: result.affected_rows,
                     extensions: result.extensions,
+                    metadata: Vec::new(),
                 })
             }
             Err(err) => {
@@ -1243,8 +1311,11 @@ mod tests {
 
     use std::assert_matches::assert_matches;
 
+    use api::v1::SemanticType;
     use common_error::ext::ErrorExt;
+    use datatypes::prelude::ConcreteDataType;
     use mito2::test_util::CreateRequestBuilder;
+    use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{RegionDropRequest, RegionOpenRequest, RegionTruncateRequest};
     use store_api::storage::RegionId;
@@ -1432,6 +1503,81 @@ mod tests {
         assert!(status.is_some());
     }
 
+    #[tokio::test]
+    async fn test_batch_open_region_ignore_nonexistent_regions() {
+        common_telemetry::init_default_ut_logging();
+        let mut mock_region_server = mock_region_server();
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(|region_id, _request| {
+                if region_id == RegionId::new(1, 1) {
+                    error::RegionNotFoundSnafu { region_id }.fail()
+                } else {
+                    Ok(0)
+                }
+            }),
+        );
+        mock_region_server.register_engine(engine.clone());
+
+        let region_ids = mock_region_server
+            .handle_batch_open_requests(
+                8,
+                vec![
+                    (
+                        RegionId::new(1, 1),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            region_dir: String::new(),
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                    (
+                        RegionId::new(1, 2),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            region_dir: String::new(),
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                ],
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(region_ids, vec![RegionId::new(1, 2)]);
+
+        let err = mock_region_server
+            .handle_batch_open_requests(
+                8,
+                vec![
+                    (
+                        RegionId::new(1, 1),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            region_dir: String::new(),
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                    (
+                        RegionId::new(1, 2),
+                        RegionOpenRequest {
+                            engine: MITO_ENGINE_NAME.to_string(),
+                            region_dir: String::new(),
+                            options: Default::default(),
+                            skip_wal_replay: false,
+                        },
+                    ),
+                ],
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unexpected);
+    }
+
     struct CurrentEngineTest {
         region_id: RegionId,
         current_region_status: Option<RegionEngineWithStatus>,
@@ -1605,5 +1751,176 @@ mod tests {
         drop(first_query);
         let forth_query = p.acquire().await;
         assert!(forth_query.is_ok());
+    }
+
+    fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {
+        let mut metadata_builder = RegionMetadataBuilder::new(region_id);
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        });
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "file",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        });
+        metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: datatypes::schema::ColumnSchema::new(
+                "message",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            semantic_type: SemanticType::Field,
+            column_id: 2,
+        });
+        metadata_builder.primary_key(vec![1]);
+        metadata_builder.build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_request() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+        let region_id_2 = RegionId::new(2, 0);
+
+        let metadata_1 = mock_region_metadata(region_id_1);
+        let metadata_2 = mock_region_metadata(region_id_2);
+        let metadatas = vec![Some(metadata_1.clone()), Some(metadata_2.clone())];
+
+        let metadata_1 = Arc::new(metadata_1);
+        let metadata_2 = Arc::new(metadata_2);
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                if region_id == region_id_1 {
+                    Ok(metadata_1.clone())
+                } else if region_id == region_id_2 {
+                    Ok(metadata_2.clone())
+                } else {
+                    error::RegionNotFoundSnafu { region_id }.fail()
+                }
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_2, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // All regions exist.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64(), region_id_2.as_u64()],
+        };
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        assert_eq!(metadatas, decoded_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_not_found() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+        let region_id_2 = RegionId::new(2, 0);
+
+        let metadata_1 = mock_region_metadata(region_id_1);
+        let metadatas = vec![Some(metadata_1.clone()), None];
+
+        let metadata_1 = Arc::new(metadata_1);
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                if region_id == region_id_1 {
+                    Ok(metadata_1.clone())
+                } else {
+                    error::RegionNotFoundSnafu { region_id }.fail()
+                }
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // Not in region map.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64(), region_id_2.as_u64()],
+        };
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        assert_eq!(metadatas, decoded_metadata);
+
+        // Not in region engine.
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_2, RegionEngineWithStatus::Ready(engine.clone()));
+        let response = mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap();
+        let decoded_metadata: Vec<Option<RegionMetadata>> =
+            serde_json::from_slice(&response.metadata).unwrap();
+        assert_eq!(metadatas, decoded_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_metadata_failed() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let region_id_1 = RegionId::new(1, 0);
+
+        let (engine, _) = MockRegionEngine::with_metadata_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id| {
+                error::UnexpectedSnafu {
+                    violated: format!("Failed to get region {region_id}"),
+                }
+                .fail()
+            }),
+        );
+
+        mock_region_server.register_engine(engine.clone());
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id_1, RegionEngineWithStatus::Ready(engine.clone()));
+
+        // Failed to get.
+        let list_metadata_request = ListMetadataRequest {
+            region_ids: vec![region_id_1.as_u64()],
+        };
+        mock_region_server
+            .handle_list_metadata_request(&list_metadata_request)
+            .await
+            .unwrap_err();
     }
 }

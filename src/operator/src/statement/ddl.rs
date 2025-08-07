@@ -31,10 +31,10 @@ use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::FlowType;
-use common_meta::ddl::ExecutorContext;
 use common_meta::instruction::CacheIdent;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
 use common_meta::key::NAME_PATTERN;
+use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 use common_meta::rpc::ddl::{
@@ -1644,6 +1644,7 @@ fn create_table_info(
         options: table_options,
         created_on: Utc::now(),
         partition_key_indices,
+        column_ids: vec![],
     };
 
     let desc = if create_table.desc.is_empty() {

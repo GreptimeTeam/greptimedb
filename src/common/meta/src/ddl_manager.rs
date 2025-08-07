@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::ProcedureDetailResponse;
 use common_procedure::{
     watcher, BoxedProcedureLoader, Output, ProcedureId, ProcedureManagerRef, ProcedureWithId,
 };
@@ -37,16 +36,16 @@ use crate::ddl::drop_flow::DropFlowProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::drop_view::DropViewProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
-use crate::ddl::{utils, DdlContext, ExecutorContext, ProcedureExecutor};
+use crate::ddl::{utils, DdlContext};
 use crate::error::{
-    EmptyDdlTasksSnafu, ParseProcedureIdSnafu, ProcedureNotFoundSnafu, ProcedureOutputSnafu,
-    QueryProcedureSnafu, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu,
-    TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, UnsupportedSnafu, WaitProcedureSnafu,
+    EmptyDdlTasksSnafu, ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, Result,
+    SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
+    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use crate::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
@@ -61,8 +60,6 @@ use crate::rpc::ddl::{
     CreateViewTask, DropDatabaseTask, DropFlowTask, DropTableTask, DropViewTask, QueryContext,
     SubmitDdlTaskRequest, SubmitDdlTaskResponse, TruncateTableTask,
 };
-use crate::rpc::procedure;
-use crate::rpc::procedure::{MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse};
 use crate::rpc::router::RegionRoute;
 
 pub type DdlManagerRef = Arc<DdlManager>;
@@ -406,6 +403,70 @@ impl DdlManager {
 
         Ok((procedure_id, output))
     }
+
+    pub async fn submit_ddl_task(
+        &self,
+        ctx: &ExecutorContext,
+        request: SubmitDdlTaskRequest,
+    ) -> Result<SubmitDdlTaskResponse> {
+        let span = ctx
+            .tracing_context
+            .as_ref()
+            .map(TracingContext::from_w3c)
+            .unwrap_or_else(TracingContext::from_current_span)
+            .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
+        async move {
+            debug!("Submitting Ddl task: {:?}", request.task);
+            match request.task {
+                CreateTable(create_table_task) => {
+                    handle_create_table_task(self, create_table_task).await
+                }
+                DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
+                AlterTable(alter_table_task) => {
+                    handle_alter_table_task(self, alter_table_task).await
+                }
+                TruncateTable(truncate_table_task) => {
+                    handle_truncate_table_task(self, truncate_table_task).await
+                }
+                CreateLogicalTables(create_table_tasks) => {
+                    handle_create_logical_table_tasks(self, create_table_tasks).await
+                }
+                AlterLogicalTables(alter_table_tasks) => {
+                    handle_alter_logical_table_tasks(self, alter_table_tasks).await
+                }
+                DropLogicalTables(_) => todo!(),
+                CreateDatabase(create_database_task) => {
+                    handle_create_database_task(self, create_database_task).await
+                }
+                DropDatabase(drop_database_task) => {
+                    handle_drop_database_task(self, drop_database_task).await
+                }
+                AlterDatabase(alter_database_task) => {
+                    handle_alter_database_task(self, alter_database_task).await
+                }
+                CreateFlow(create_flow_task) => {
+                    handle_create_flow_task(self, create_flow_task, request.query_context.into())
+                        .await
+                }
+                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
+                CreateView(create_view_task) => {
+                    handle_create_view_task(self, create_view_task).await
+                }
+                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
+                #[cfg(feature = "enterprise")]
+                CreateTrigger(create_trigger_task) => {
+                    handle_create_trigger_task(
+                        self,
+                        create_trigger_task,
+                        request.query_context.into(),
+                    )
+                    .await
+                }
+            }
+        }
+        .trace(span)
+        .await
+    }
 }
 
 async fn handle_truncate_table_task(
@@ -712,6 +773,8 @@ async fn handle_create_trigger_task(
     query_context: QueryContext,
 ) -> Result<SubmitDdlTaskResponse> {
     let Some(m) = ddl_manager.trigger_ddl_manager.as_ref() else {
+        use crate::error::UnsupportedSnafu;
+
         return UnsupportedSnafu {
             operation: "create trigger",
         }
@@ -788,114 +851,6 @@ async fn handle_create_view_task(
     })
 }
 
-/// TODO(dennis): let [`DdlManager`] implement [`ProcedureExecutor`] looks weird, find some way to refactor it.
-#[async_trait::async_trait]
-impl ProcedureExecutor for DdlManager {
-    async fn submit_ddl_task(
-        &self,
-        ctx: &ExecutorContext,
-        request: SubmitDdlTaskRequest,
-    ) -> Result<SubmitDdlTaskResponse> {
-        let span = ctx
-            .tracing_context
-            .as_ref()
-            .map(TracingContext::from_w3c)
-            .unwrap_or(TracingContext::from_current_span())
-            .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
-        async move {
-            debug!("Submitting Ddl task: {:?}", request.task);
-            match request.task {
-                CreateTable(create_table_task) => {
-                    handle_create_table_task(self, create_table_task).await
-                }
-                DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
-                AlterTable(alter_table_task) => {
-                    handle_alter_table_task(self, alter_table_task).await
-                }
-                TruncateTable(truncate_table_task) => {
-                    handle_truncate_table_task(self, truncate_table_task).await
-                }
-                CreateLogicalTables(create_table_tasks) => {
-                    handle_create_logical_table_tasks(self, create_table_tasks).await
-                }
-                AlterLogicalTables(alter_table_tasks) => {
-                    handle_alter_logical_table_tasks(self, alter_table_tasks).await
-                }
-                DropLogicalTables(_) => todo!(),
-                CreateDatabase(create_database_task) => {
-                    handle_create_database_task(self, create_database_task).await
-                }
-                DropDatabase(drop_database_task) => {
-                    handle_drop_database_task(self, drop_database_task).await
-                }
-                AlterDatabase(alter_database_task) => {
-                    handle_alter_database_task(self, alter_database_task).await
-                }
-                CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, create_flow_task, request.query_context.into())
-                        .await
-                }
-                #[cfg(feature = "enterprise")]
-                CreateTrigger(create_trigger_task) => {
-                    handle_create_trigger_task(
-                        self,
-                        create_trigger_task,
-                        request.query_context.into(),
-                    )
-                    .await
-                }
-                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
-                CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task).await
-                }
-                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
-            }
-        }
-        .trace(span)
-        .await
-    }
-
-    async fn migrate_region(
-        &self,
-        _ctx: &ExecutorContext,
-        _request: MigrateRegionRequest,
-    ) -> Result<MigrateRegionResponse> {
-        UnsupportedSnafu {
-            operation: "migrate_region",
-        }
-        .fail()
-    }
-
-    async fn query_procedure_state(
-        &self,
-        _ctx: &ExecutorContext,
-        pid: &str,
-    ) -> Result<ProcedureStateResponse> {
-        let pid =
-            ProcedureId::parse_str(pid).with_context(|_| ParseProcedureIdSnafu { key: pid })?;
-
-        let state = self
-            .procedure_manager
-            .procedure_state(pid)
-            .await
-            .context(QueryProcedureSnafu)?
-            .context(ProcedureNotFoundSnafu {
-                pid: pid.to_string(),
-            })?;
-
-        Ok(procedure::procedure_state_to_pb_response(&state))
-    }
-
-    async fn list_procedures(&self, _ctx: &ExecutorContext) -> Result<ProcedureDetailResponse> {
-        let metas = self
-            .procedure_manager
-            .list_procedures()
-            .await
-            .context(QueryProcedureSnafu)?;
-        Ok(procedure::procedure_details_to_pb_response(metas))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -956,6 +911,7 @@ mod tests {
             Default::default(),
             state_store,
             poison_manager,
+            None,
         ));
 
         let _ = DdlManager::try_new(

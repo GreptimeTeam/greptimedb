@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod raw_table_info;
+#[allow(dead_code)]
+pub(crate) mod region_metadata_lister;
+pub(crate) mod table_id;
+pub(crate) mod table_info;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -29,6 +35,7 @@ use common_telemetry::{error, info, warn};
 use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
 use store_api::storage::{RegionId, RegionNumber};
@@ -37,8 +44,8 @@ use table::table_reference::TableReference;
 
 use crate::ddl::{DdlContext, DetectingRegion};
 use crate::error::{
-    self, Error, OperateDatanodeSnafu, ParseWalOptionsSnafu, Result, TableNotFoundSnafu,
-    UnsupportedSnafu,
+    self, DecodeJsonSnafu, Error, MetadataCorruptionSnafu, OperateDatanodeSnafu,
+    ParseWalOptionsSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu,
 };
 use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
@@ -314,11 +321,23 @@ pub fn parse_manifest_infos_from_extensions(
     Ok(data_manifest_version)
 }
 
+/// Parses column metadatas from extensions.
+pub fn parse_column_metadatas(
+    extensions: &HashMap<String, Vec<u8>>,
+    key: &str,
+) -> Result<Vec<ColumnMetadata>> {
+    let value = extensions.get(key).context(error::UnexpectedSnafu {
+        err_msg: format!("column metadata extension not found: {}", key),
+    })?;
+    let column_metadatas = ColumnMetadata::decode_list(value).context(error::SerdeJsonSnafu {})?;
+    Ok(column_metadatas)
+}
+
 /// Sync follower regions on datanodes.
 pub async fn sync_follower_regions(
     context: &DdlContext,
     table_id: TableId,
-    results: Vec<RegionResponse>,
+    results: &[RegionResponse],
     region_routes: &[RegionRoute],
     engine: &str,
 ) -> Result<()> {
@@ -331,7 +350,7 @@ pub async fn sync_follower_regions(
     }
 
     let results = results
-        .into_iter()
+        .iter()
         .map(|response| parse_manifest_infos_from_extensions(&response.extensions))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
@@ -416,6 +435,39 @@ pub async fn sync_follower_regions(
     info!("Sync follower regions on datanodes, table_id: {}", table_id);
 
     Ok(())
+}
+
+/// Extracts column metadatas from extensions.
+pub fn extract_column_metadatas(
+    results: &mut [RegionResponse],
+    key: &str,
+) -> Result<Option<Vec<ColumnMetadata>>> {
+    let schemas = results
+        .iter_mut()
+        .map(|r| r.extensions.remove(key))
+        .collect::<Vec<_>>();
+
+    if schemas.is_empty() {
+        warn!("extract_column_metadatas: no extension key `{key}` found in results");
+        return Ok(None);
+    }
+
+    // Verify all the physical schemas are the same
+    // Safety: previous check ensures this vec is not empty
+    let first = schemas.first().unwrap();
+    ensure!(
+        schemas.iter().all(|x| x == first),
+        MetadataCorruptionSnafu {
+            err_msg: "The table column metadata schemas from datanodes are not the same."
+        }
+    );
+
+    if let Some(first) = first {
+        let column_metadatas = ColumnMetadata::decode_list(first).context(DecodeJsonSnafu)?;
+        Ok(Some(column_metadatas))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
