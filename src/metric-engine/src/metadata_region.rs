@@ -87,7 +87,7 @@ struct RegionMetadataCacheEntry {
 /// The max size of the region metadata cache.
 const MAX_CACHE_SIZE: u64 = ReadableSize::mb(128).as_bytes();
 /// The TTL of the region metadata cache.
-const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 impl MetadataRegion {
     pub fn new(mito: MitoEngine) -> Self {
