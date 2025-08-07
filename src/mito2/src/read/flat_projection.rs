@@ -105,7 +105,7 @@ impl FlatProjectionMapper {
         let output_schema = Arc::new(Schema::new(column_schemas));
 
         // Creates a map to lookup index.
-        let id_to_index = sst_column_id_indices(&metadata);
+        let id_to_index = sst_column_id_indices(metadata);
         // TODO(yingwen): Support different flat schema options.
         let format_projection = FormatProjection::compute_format_projection(
             &id_to_index,
@@ -120,7 +120,7 @@ impl FlatProjectionMapper {
                 // Safety: The map is computed from `projection` itself.
                 format_projection
                     .column_id_to_projected_index
-                    .get(&id)
+                    .get(id)
                     .copied()
                     .unwrap()
             })

@@ -657,9 +657,7 @@ mod tests {
             .unwrap();
 
         // Create dictionary array for the encoded primary key
-        let pk_values: Vec<&[u8]> = std::iter::repeat(encoded_pk.as_slice())
-            .take(num_rows)
-            .collect();
+        let pk_values: Vec<&[u8]> = std::iter::repeat_n(encoded_pk.as_slice(), num_rows).collect();
         let keys = datatypes::arrow::array::UInt32Array::from_iter(0..num_rows as u32);
         let values = Arc::new(datatypes::arrow::array::BinaryArray::from_vec(pk_values));
         let pk_array =
