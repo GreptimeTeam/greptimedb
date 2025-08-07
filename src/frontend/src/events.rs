@@ -55,7 +55,7 @@ impl EventHandler for EventHandlerImpl {
         let event_groups = aggregate_events_by_type(events);
 
         for (_, events) in event_groups {
-            let opts = self.options(&events[0]);
+            let opts = self.options(events[0].event_type());
 
             let query_ctx = QueryContextBuilder::default()
                 .current_catalog(DEFAULT_CATALOG_NAME.to_string())
@@ -81,8 +81,8 @@ impl EventHandler for EventHandlerImpl {
         Ok(())
     }
 
-    fn options(&self, event: &Box<dyn Event>) -> EventHandlerOptions {
-        match event.event_type() {
+    fn options(&self, event_type: &str) -> EventHandlerOptions {
+        match event_type {
             SLOW_QUERY_EVENT_TYPE => EventHandlerOptions {
                 ttl: self.slow_query_options.ttl.clone().unwrap_or_default(),
                 append_mode: true,

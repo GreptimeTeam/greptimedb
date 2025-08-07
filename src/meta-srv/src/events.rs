@@ -22,7 +22,7 @@ use common_event_recorder::error::{
     InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result,
 };
 use common_event_recorder::{
-    aggregate_events_by_type, build_row_inserts_request, Event, EventHandler,
+    aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
@@ -38,13 +38,15 @@ pub mod region_migration_event;
 pub struct EventHandlerImpl {
     peer_lookup_service: PeerLookupServiceRef,
     channel_manager: ChannelManager,
+    ttl: String,
 }
 
 impl EventHandlerImpl {
-    pub fn new(meta_peer_client: MetaPeerClientRef) -> Self {
+    pub fn new(meta_peer_client: MetaPeerClientRef, ttl: String) -> Self {
         Self {
             peer_lookup_service: Arc::new(MetaPeerLookupService::new(meta_peer_client)),
             channel_manager: ChannelManager::new(),
+            ttl,
         }
     }
 }
@@ -55,7 +57,7 @@ impl EventHandler for EventHandlerImpl {
         let event_groups = aggregate_events_by_type(events);
 
         for (_, events) in event_groups {
-            let opts = self.options(&events[0]);
+            let opts = self.options(events[0].event_type());
             self.build_database_client()
                 .await?
                 .row_inserts_with_hints(build_row_inserts_request(&events)?, &opts.to_hints())
@@ -65,6 +67,13 @@ impl EventHandler for EventHandlerImpl {
         }
 
         Ok(())
+    }
+
+    fn options(&self, _event_type: &str) -> EventHandlerOptions {
+        EventHandlerOptions {
+            ttl: self.ttl.clone(),
+            append_mode: true,
+        }
     }
 }
 

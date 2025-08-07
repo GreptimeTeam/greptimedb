@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::column_data_type_extension::TypeExt;
@@ -49,8 +49,6 @@ pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
-
-static EVENTS_TABLE_TTL: OnceLock<String> = OnceLock::new();
 
 /// The time interval for flushing batched events to the event handler.
 pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
@@ -110,20 +108,6 @@ pub trait Eventable: Send + Sync + Debug {
     fn to_event(&self) -> Option<Box<dyn Event>> {
         None
     }
-}
-
-/// Returns the hints for the insert operation.
-pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            TTL_KEY,
-            EVENTS_TABLE_TTL
-                .get()
-                .map(|s| s.as_str())
-                .unwrap_or(DEFAULT_EVENTS_TABLE_TTL),
-        ),
-        (APPEND_MODE_KEY, "true"),
-    ]
 }
 
 /// Aggregates events by its `event_type`.
@@ -261,8 +245,8 @@ pub trait EventHandler: Send + Sync + 'static {
     /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
 
-    /// Returns the options for the event handler.
-    fn options(&self, _event: &Box<dyn Event>) -> EventHandlerOptions {
+    /// Returns the handler options for the event type. We can use different options for different event types.
+    fn options(&self, _event_type: &str) -> EventHandlerOptions {
         EventHandlerOptions::default()
     }
 }
@@ -320,14 +304,6 @@ impl EventRecorderImpl {
         });
 
         recorder.handle = Some(handle);
-
-        // It only sets the ttl once, so it's safe to skip the error.
-        if EVENTS_TABLE_TTL.set(opts.ttl.clone()).is_err() {
-            info!(
-                "Events table ttl already set to {}, skip setting it",
-                opts.ttl
-            );
-        }
 
         recorder
     }
