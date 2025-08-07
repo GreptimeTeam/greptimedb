@@ -15,6 +15,17 @@
 pub use sqlparser::ast::{
     visit_expressions_mut, visit_statements_mut, BinaryOperator, ColumnDef, ColumnOption,
     ColumnOptionDef, DataType, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo, Value, Visit, VisitMut, Visitor,
-    VisitorMut,
+    Ident, ObjectName, ObjectNamePart, SqlOption, TableConstraint, TimezoneInfo, Value,
+    ValueWithSpan, Visit, VisitMut, Visitor, VisitorMut,
 };
+
+pub trait ObjectNamePartExt {
+    fn to_string_unquoted(&self) -> String;
+}
+
+impl ObjectNamePartExt for ObjectNamePart {
+    fn to_string_unquoted(&self) -> String {
+        let ObjectNamePart::Identifier(ident) = self;
+        ident.value.clone()
+    }
+}

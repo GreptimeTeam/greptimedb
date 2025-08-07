@@ -475,7 +475,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             | ArrowDataType::Union(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
-            | ArrowDataType::RunEndEncoded(_, _) => {
+            | ArrowDataType::RunEndEncoded(_, _)
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
                 }

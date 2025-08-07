@@ -18,7 +18,7 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion::physical_optimizer::pruning::PruningStatistics;
+use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use parquet::file::metadata::RowGroupMetaData;

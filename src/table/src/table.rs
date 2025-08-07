@@ -164,9 +164,10 @@ fn default_constraint_to_expr(
     target_type: &ConcreteDataType,
 ) -> Option<Expr> {
     match default_constraint {
-        ColumnDefaultConstraint::Value(v) => {
-            v.try_to_scalar_value(target_type).ok().map(Expr::Literal)
-        }
+        ColumnDefaultConstraint::Value(v) => v
+            .try_to_scalar_value(target_type)
+            .ok()
+            .map(|x| Expr::Literal(x, None)),
 
         ColumnDefaultConstraint::Function(name)
             if matches!(
@@ -214,7 +215,7 @@ mod tests {
 
         assert!(!column_defaults.contains_key("col1"));
         assert!(matches!(column_defaults.get("col2").unwrap(),
-                         Expr::Literal(ScalarValue::Utf8(Some(s))) if s == "test"));
+                         Expr::Literal(ScalarValue::Utf8(Some(s)), _) if s == "test"));
         assert!(matches!(
             column_defaults.get("ts").unwrap(),
             Expr::Cast(Cast {

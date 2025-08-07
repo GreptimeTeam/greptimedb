@@ -154,7 +154,7 @@ impl TypeConverter {
             (target_type, value) => {
                 let value_arr = value.to_array()?;
                 let arr = compute::cast(&value_arr, target_type)
-                    .map_err(|e| DataFusionError::ArrowError(e, None))?;
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
                 ScalarValue::try_from_array(
                     &arr,
@@ -180,23 +180,23 @@ impl TypeConverter {
         }
 
         match (left, right) {
-            (Expr::Column(col), Expr::Literal(value)) => {
+            (Expr::Column(col), Expr::Literal(value, _)) => {
                 let casted_right = self.cast_scalar_value(value, target_type)?;
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{col:?}. Casting value:{value:?} to {target_type:?} is invalid",
                     )));
                 }
-                Ok((left.clone(), Expr::Literal(casted_right)))
+                Ok((left.clone(), Expr::Literal(casted_right, None)))
             }
-            (Expr::Literal(value), Expr::Column(col)) => {
+            (Expr::Literal(value, _), Expr::Column(col)) => {
                 let casted_left = self.cast_scalar_value(value, target_type)?;
                 if casted_left.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{col:?}. Casting value:{value:?} to {target_type:?} is invalid",
                     )));
                 }
-                Ok((Expr::Literal(casted_left), right.clone()))
+                Ok((Expr::Literal(casted_left, None), right.clone()))
             }
             _ => Ok((left.clone(), right.clone())),
         }
@@ -255,7 +255,7 @@ impl TreeNodeRewriter for TypeConverter {
                     negated,
                 })
             }
-            Expr::Literal(value) => match value {
+            Expr::Literal(value, _) => match value {
                 ScalarValue::TimestampSecond(Some(i), _) => {
                     timestamp_to_timestamp_ms_expr(i, TimeUnit::Second)
                 }
@@ -268,7 +268,7 @@ impl TreeNodeRewriter for TypeConverter {
                 ScalarValue::TimestampNanosecond(Some(i), _) => {
                     timestamp_to_timestamp_ms_expr(i, TimeUnit::Nanosecond)
                 }
-                _ => Expr::Literal(value),
+                _ => Expr::Literal(value, None),
             },
             expr => expr,
         };
@@ -284,7 +284,10 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
         TimeUnit::Nanosecond => val / 1_000 / 1_000,
     };
 
-    Expr::Literal(ScalarValue::TimestampMillisecond(Some(timestamp), None))
+    Expr::Literal(
+        ScalarValue::TimestampMillisecond(Some(timestamp), None),
+        None,
+    )
 }
 
 fn string_to_timestamp_ms(string: &str, timezone: Option<&Timezone>) -> Result<ScalarValue> {
@@ -308,7 +311,7 @@ mod tests {
 
     use datafusion_common::arrow::datatypes::Field;
     use datafusion_common::{Column, DFSchema};
-    use datafusion_expr::LogicalPlanBuilder;
+    use datafusion_expr::{Literal, LogicalPlanBuilder};
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
 
@@ -348,36 +351,36 @@ mod tests {
     fn test_timestamp_to_timestamp_ms_expr() {
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123, TimeUnit::Second),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123000), None))
+            ScalarValue::TimestampMillisecond(Some(123000), None).lit()
         );
 
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123, TimeUnit::Millisecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+            ScalarValue::TimestampMillisecond(Some(123), None).lit()
         );
 
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123, TimeUnit::Microsecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(0), None))
+            ScalarValue::TimestampMillisecond(Some(0), None).lit()
         );
 
         assert_eq!(
             timestamp_to_timestamp_ms_expr(1230, TimeUnit::Microsecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(1), None))
+            ScalarValue::TimestampMillisecond(Some(1), None).lit()
         );
 
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123000, TimeUnit::Microsecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+            ScalarValue::TimestampMillisecond(Some(123), None).lit()
         );
 
         assert_eq!(
             timestamp_to_timestamp_ms_expr(1230, TimeUnit::Nanosecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(0), None))
+            ScalarValue::TimestampMillisecond(Some(0), None).lit()
         );
         assert_eq!(
             timestamp_to_timestamp_ms_expr(123_000_000, TimeUnit::Nanosecond),
-            Expr::Literal(ScalarValue::TimestampMillisecond(Some(123), None))
+            ScalarValue::TimestampMillisecond(Some(123), None).lit()
         );
     }
 
@@ -405,16 +408,13 @@ mod tests {
         };
 
         assert_eq!(
-            Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::TimestampSecond(
+            Expr::Column(Column::from_name("ts")).gt(ScalarValue::TimestampSecond(
                 Some(1599514949),
                 None
-            ))),
+            )
+            .lit()),
             converter
-                .f_up(
-                    Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
-                        Some("2020-09-08T05:42:29+08:00".to_string()),
-                    )))
-                )
+                .f_up(Expr::Column(Column::from_name("ts")).gt("2020-09-08T05:42:29+08:00".lit()))
                 .unwrap()
                 .data
         );
@@ -439,13 +439,9 @@ mod tests {
         };
 
         assert_eq!(
-            Expr::Column(Column::from_name(col_name))
-                .eq(Expr::Literal(ScalarValue::Boolean(Some(true)))),
+            Expr::Column(Column::from_name(col_name)).eq(true.lit()),
             converter
-                .f_up(
-                    Expr::Column(Column::from_name(col_name))
-                        .eq(Expr::Literal(ScalarValue::Utf8(Some("true".to_string()))))
-                )
+                .f_up(Expr::Column(Column::from_name(col_name)).eq("true".lit()))
                 .unwrap()
                 .data
         );
@@ -453,40 +449,36 @@ mod tests {
 
     #[test]
     fn test_retrieve_type_from_aggr_plan() {
-        let plan =
-            LogicalPlanBuilder::values(vec![vec![
-                Expr::Literal(ScalarValue::Int64(Some(1))),
-                Expr::Literal(ScalarValue::Float64(Some(1.0))),
-                Expr::Literal(ScalarValue::TimestampMillisecond(Some(1), None)),
-            ]])
-            .unwrap()
-            .filter(Expr::Column(Column::from_name("column3")).gt(Expr::Literal(
-                ScalarValue::Utf8(Some("1970-01-01 00:00:00+08:00".to_string())),
-            )))
-            .unwrap()
-            .filter(
-                Expr::Literal(ScalarValue::Utf8(Some(
-                    "1970-01-01 00:00:00+08:00".to_string(),
-                )))
+        let plan = LogicalPlanBuilder::values(vec![vec![
+            ScalarValue::Int64(Some(1)).lit(),
+            ScalarValue::Float64(Some(1.0)).lit(),
+            ScalarValue::TimestampMillisecond(Some(1), None).lit(),
+        ]])
+        .unwrap()
+        .filter(Expr::Column(Column::from_name("column3")).gt("1970-01-01 00:00:00+08:00".lit()))
+        .unwrap()
+        .filter(
+            "1970-01-01 00:00:00+08:00"
+                .lit()
                 .lt_eq(Expr::Column(Column::from_name("column3"))),
-            )
-            .unwrap()
-            .aggregate(
-                Vec::<Expr>::new(),
-                vec![Expr::AggregateFunction(
-                    datafusion_expr::expr::AggregateFunction::new_udf(
-                        datafusion::functions_aggregate::count::count_udaf(),
-                        vec![Expr::Column(Column::from_name("column1"))],
-                        false,
-                        None,
-                        None,
-                        None,
-                    ),
-                )],
-            )
-            .unwrap()
-            .build()
-            .unwrap();
+        )
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![Expr::AggregateFunction(
+                datafusion_expr::expr::AggregateFunction::new_udf(
+                    datafusion::functions_aggregate::count::count_udaf(),
+                    vec![Expr::Column(Column::from_name("column1"))],
+                    false,
+                    None,
+                    vec![],
+                    None,
+                ),
+            )],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         let context = QueryEngineContext::mock();
 
         let transformed_plan = TypeConversionRule
@@ -505,21 +497,18 @@ mod tests {
     fn test_reverse_non_ts_type() {
         let context = QueryEngineContext::mock();
 
-        let plan =
-            LogicalPlanBuilder::values(vec![vec![Expr::Literal(ScalarValue::Float64(Some(1.0)))]])
-                .unwrap()
-                .filter(
-                    Expr::Column(Column::from_name("column1"))
-                        .gt_eq(Expr::Literal(ScalarValue::Utf8(Some("1.2345".to_string())))),
-                )
-                .unwrap()
-                .filter(
-                    Expr::Literal(ScalarValue::Utf8(Some("1.2345".to_string())))
-                        .lt(Expr::Column(Column::from_name("column1"))),
-                )
-                .unwrap()
-                .build()
-                .unwrap();
+        let plan = LogicalPlanBuilder::values(vec![vec![1.0f64.lit()]])
+            .unwrap()
+            .filter(Expr::Column(Column::from_name("column1")).gt_eq("1.2345".lit()))
+            .unwrap()
+            .filter(
+                "1.2345"
+                    .lit()
+                    .lt(Expr::Column(Column::from_name("column1"))),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
         let transformed_plan = TypeConversionRule
             .analyze(plan, &context, &ConfigOptions::default())
             .unwrap();

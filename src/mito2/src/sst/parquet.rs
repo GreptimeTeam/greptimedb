@@ -93,7 +93,7 @@ mod tests {
 
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
-    use datafusion_expr::{col, lit, BinaryExpr, Expr, Operator};
+    use datafusion_expr::{col, lit, BinaryExpr, Expr, Literal, Operator};
     use datatypes::arrow;
     use datatypes::arrow::array::{RecordBatch, UInt64Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -383,7 +383,7 @@ mod tests {
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("tag_0"))),
             op: Operator::Eq,
-            right: Box::new(Expr::Literal(ScalarValue::Utf8(Some("a".to_string())))),
+            right: Box::new("a".lit()),
         })]));
 
         let builder = ParquetReaderBuilder::new(
@@ -485,7 +485,7 @@ mod tests {
         let predicate = Some(Predicate::new(vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("field_0"))),
             op: Operator::GtEq,
-            right: Box::new(Expr::Literal(ScalarValue::UInt64(Some(150)))),
+            right: Box::new(150u64.lit()),
         })]));
 
         let builder = ParquetReaderBuilder::new(

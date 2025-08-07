@@ -16,7 +16,7 @@ use std::fmt::Display;
 use std::path;
 use std::time::Duration;
 
-use common_telemetry::{debug, error, info, trace, warn};
+use common_telemetry::{debug, error, info, warn};
 use opendal::layers::{LoggingInterceptor, LoggingLayer, RetryInterceptor, TracingLayer};
 use opendal::raw::{AccessorInfo, HttpClient, Operation};
 use opendal::{Error, ErrorKind};
@@ -183,24 +183,13 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
             };
         }
 
-        // Print debug message if operation is oneshot, otherwise in trace.
-        if operation.is_oneshot() {
-            debug!(
-                target: LOGGING_TARGET,
-                "service={} name={} {}: {operation} {message}",
-                info.scheme(),
-                info.name(),
-                LoggingContext(context),
-            );
-        } else {
-            trace!(
-                target: LOGGING_TARGET,
-                "service={} name={} {}: {operation} {message}",
-                info.scheme(),
-                info.name(),
-                LoggingContext(context),
-            );
-        };
+        debug!(
+            target: LOGGING_TARGET,
+            "service={} name={} {}: {operation} {message}",
+            info.scheme(),
+            info.name(),
+            LoggingContext(context),
+        );
     }
 }
 

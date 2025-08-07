@@ -301,7 +301,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     /// Helper function to get non-null literal value
     fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
         match expr {
-            Expr::Literal(lit) if !lit.is_null() => Some(lit),
+            Expr::Literal(lit, _) if !lit.is_null() => Some(lit),
             _ => None,
         }
     }
@@ -312,8 +312,8 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         right: &'b Expr,
     ) -> Result<Option<(&'b Column, &'b ScalarValue)>> {
         let (col, lit) = match (left, right) {
-            (Expr::Column(col), Expr::Literal(lit)) => (col, lit),
-            (Expr::Literal(lit), Expr::Column(col)) => (col, lit),
+            (Expr::Column(col), Expr::Literal(lit, _)) => (col, lit),
+            (Expr::Literal(lit, _), Expr::Column(col)) => (col, lit),
             _ => return Ok(None),
         };
         Ok(Some((col, lit)))
@@ -335,7 +335,7 @@ fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Bytes> {
 mod tests {
     use api::v1::SemanticType;
     use datafusion_common::Column;
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{col, lit, Literal};
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
@@ -385,10 +385,6 @@ mod tests {
         Expr::Column(Column::from_name(name))
     }
 
-    fn string_lit(s: impl Into<String>) -> Expr {
-        Expr::Literal(ScalarValue::Utf8(Some(s.into())))
-    }
-
     #[test]
     fn test_build_with_exprs() {
         let (_d, factory) = PuffinManagerFactory::new_for_test_block("test_build_with_exprs_");
@@ -403,7 +399,7 @@ mod tests {
         let exprs = vec![Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("column1")),
             op: Operator::Eq,
-            right: Box::new(string_lit("value1")),
+            right: Box::new("value1".lit()),
         })];
         let result = builder.build(&exprs).unwrap();
         assert!(result.is_some());
@@ -423,7 +419,7 @@ mod tests {
     }
 
     fn int64_lit(i: i64) -> Expr {
-        Expr::Literal(ScalarValue::Int64(Some(i)))
+        i.lit()
     }
 
     #[test]
@@ -495,7 +491,7 @@ mod tests {
         assert!(or_chain_predicates.contains(&encode_str("value4")));
 
         // Test with null value
-        let expr = col("column1").eq(Expr::Literal(ScalarValue::Utf8(None)));
+        let expr = col("column1").eq(Expr::Literal(ScalarValue::Utf8(None), None));
         let result = builder().build(&[expr]).unwrap();
         assert!(result.is_none());
 
@@ -529,7 +525,7 @@ mod tests {
             left: Box::new(Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
                 op: Operator::Eq,
-                right: Box::new(string_lit("value1")),
+                right: Box::new("value1".lit()),
             })),
             op: Operator::And,
             right: Box::new(Expr::BinaryExpr(BinaryExpr {
@@ -563,13 +559,13 @@ mod tests {
             Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
                 op: Operator::Eq,
-                right: Box::new(Expr::Literal(ScalarValue::Utf8(None))),
+                right: Box::new(Expr::Literal(ScalarValue::Utf8(None), None)),
             }),
             Expr::InList(InList {
                 expr: Box::new(column("column2")),
                 list: vec![
                     int64_lit(1),
-                    Expr::Literal(ScalarValue::Int64(None)),
+                    Expr::Literal(ScalarValue::Int64(None), None),
                     int64_lit(3),
                 ],
                 negated: false,
@@ -601,13 +597,13 @@ mod tests {
             Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
                 op: Operator::Gt,
-                right: Box::new(string_lit("value1")),
+                right: Box::new("value1".lit()),
             }),
             // Non-existent column
             Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("non_existent")),
                 op: Operator::Eq,
-                right: Box::new(string_lit("value")),
+                right: Box::new("value".lit()),
             }),
             // Negated IN list
             Expr::InList(InList {
@@ -636,11 +632,11 @@ mod tests {
             Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(column("column1")),
                 op: Operator::Eq,
-                right: Box::new(string_lit("value1")),
+                right: Box::new("value1".lit()),
             }),
             Expr::InList(InList {
                 expr: Box::new(column("column1")),
-                list: vec![string_lit("value2"), string_lit("value3")],
+                list: vec!["value2".lit(), "value3".lit()],
                 negated: false,
             }),
         ];

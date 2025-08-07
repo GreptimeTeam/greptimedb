@@ -430,8 +430,8 @@ impl ExecutionPlan for RangeManipulateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn statistics(&self) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.statistics()?;
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -459,7 +459,9 @@ impl ExecutionPlan for RangeManipulateExec {
 impl DisplayAs for RangeManipulateExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
@@ -569,7 +571,7 @@ impl RangeManipulateStream {
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
             .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(e, None))
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
     fn build_aligned_ts_array(start: i64, end: i64, interval: i64) -> ArrayRef {
@@ -665,9 +667,10 @@ mod test {
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_expr::Partitioning;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-    use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
 
@@ -675,7 +678,7 @@ mod test {
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value_1", DataType::Float64, true),
@@ -700,7 +703,9 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data]], schema, None).unwrap(),
+        ))
     }
 
     async fn do_normalize_test(

@@ -19,12 +19,17 @@ mod test {
     use client::{OutputData, DEFAULT_CATALOG_NAME};
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
-    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-    use opentelemetry_proto::tonic::common::v1::any_value::Value as Val;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
-    use opentelemetry_proto::tonic::metrics::v1::number_data_point::Value;
-    use opentelemetry_proto::tonic::metrics::v1::{metric, NumberDataPoint, *};
-    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue,
+    };
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        metric, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, ResourceMetrics,
+        ScopeMetrics,
+    };
+    use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
     use servers::query_handler::sql::SqlQueryHandler;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use session::context::QueryContext;
@@ -218,6 +223,7 @@ mod test {
                 resource: Some(Resource {
                     attributes: vec![keyvalue("resource", "greptimedb")],
                     dropped_attributes_count: 0,
+                    entity_refs: vec![],
                 }),
                 ..Default::default()
             }],

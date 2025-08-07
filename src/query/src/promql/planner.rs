@@ -44,9 +44,10 @@ use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
-use datafusion_common::DFSchema;
+use datafusion_common::{DFSchema, NullEquality};
+use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{col, lit, ExprSchemable, SortExpr};
+use datafusion_expr::{col, lit, ExprSchemable, Literal, SortExpr};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -1291,11 +1292,11 @@ impl PromPlanner {
                 .field_with_unqualified_name(&matcher.name)
                 .is_err()
             {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))).alias(matcher.name)
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None).alias(matcher.name)
             } else {
                 DfExpr::Column(Column::from_name(matcher.name))
             };
-            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
+            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
                 MatchOp::NotEqual => col.not_eq(lit),
@@ -1307,17 +1308,13 @@ impl PromPlanner {
                     DfExpr::BinaryExpr(BinaryExpr {
                         left: Box::new(col),
                         op: Operator::RegexMatch,
-                        right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                            re.as_str().to_string(),
-                        )))),
+                        right: Box::new(re.as_str().lit()),
                     })
                 }
                 MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(col),
                     op: Operator::RegexNotMatch,
-                    right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                        re.as_str().to_string(),
-                    )))),
+                    right: Box::new(re.as_str().lit()),
                 }),
             };
             exprs.push(expr);
@@ -1359,16 +1356,20 @@ impl PromPlanner {
         if (end - start) / interval > MAX_SCATTER_POINTS || interval <= INTERVAL_1H {
             let single_time_range = time_index_expr
                 .clone()
-                .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                    Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range),
+                .gt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
+                        Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range),
+                        None,
+                    ),
                     None,
-                )))
-                .and(
-                    time_index_expr.lt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
+                ))
+                .and(time_index_expr.lt_eq(DfExpr::Literal(
+                    ScalarValue::TimestampMillisecond(
                         Some(self.ctx.end - offset_duration + self.ctx.lookback_delta),
                         None,
-                    ))),
-                );
+                    ),
+                    None,
+                )));
             return Ok(Some(single_time_range));
         }
 
@@ -1378,15 +1379,19 @@ impl PromPlanner {
             filters.push(
                 time_index_expr
                     .clone()
-                    .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(timestamp - offset_duration - lookback_delta - range),
+                    .gt_eq(DfExpr::Literal(
+                        ScalarValue::TimestampMillisecond(
+                            Some(timestamp - offset_duration - lookback_delta - range),
+                            None,
+                        ),
                         None,
-                    )))
+                    ))
                     .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
                             Some(timestamp - offset_duration + lookback_delta),
                             None,
                         ),
+                        None,
                     ))),
             )
         }
@@ -1449,6 +1454,7 @@ impl PromPlanner {
                             table: table_ref.to_quoted_string(),
                         })?
                         .clone(),
+                    metadata: None,
                 })))
                 .collect::<Vec<_>>();
             scan_plan = LogicalPlanBuilder::from(scan_plan)
@@ -1539,7 +1545,7 @@ impl PromPlanner {
                     self.ctx.interval,
                     SPECIAL_TIME_FUNCTION.to_string(),
                     DEFAULT_FIELD_COLUMN.to_string(),
-                    Some(DfExpr::Literal(ScalarValue::Float64(Some(0.0)))),
+                    Some(lit(0.0f64)),
                 )
                 .context(DataFusionPlanningSnafu)?,
             ),
@@ -1685,13 +1691,14 @@ impl PromPlanner {
                 //     'days',
                 //     (date_trunc('month', <TIME INDEX>::date) + interval '1 month - 1 day')
                 // );
-                let day_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("day".to_string())));
-                let month_lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some("month".to_string())));
+                let day_lit_expr = "day".lit();
+                let month_lit_expr = "month".lit();
                 let interval_1month_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)));
-                let interval_1day_lit_expr = DfExpr::Literal(ScalarValue::IntervalDayTime(Some(
-                    IntervalDayTime::new(1, 0),
-                )));
+                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
+                let interval_1day_lit_expr = DfExpr::Literal(
+                    ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
+                    None,
+                );
                 let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
                     left: Box::new(interval_1month_lit_expr),
                     op: Operator::Minus,
@@ -1776,7 +1783,7 @@ impl PromPlanner {
             }
             "round" => {
                 if other_input_exprs.is_empty() {
-                    other_input_exprs.push_front(DfExpr::Literal(ScalarValue::Float64(Some(0.0))));
+                    other_input_exprs.push_front(0.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
@@ -1915,21 +1922,21 @@ impl PromPlanner {
     ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let replacement = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), _)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected replacement string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let src_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)))) => s,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(s)), None)) => s,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected src_label string literal, but found {:?}", other),
             }
@@ -1937,7 +1944,7 @@ impl PromPlanner {
         };
 
         let regex = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)), None)) => r,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected regex string literal, but found {:?}", other),
             }
@@ -1958,7 +1965,7 @@ impl PromPlanner {
                 // the replacement is not empty, always adds dst_label with replacement value.
                 return Ok(Some((
                     // alias literal `replacement` as dst_label
-                    DfExpr::Literal(ScalarValue::Utf8(Some(replacement))).alias(&dst_label),
+                    lit(replacement).alias(&dst_label),
                     dst_label,
                 )));
             }
@@ -1979,12 +1986,12 @@ impl PromPlanner {
         // regexp_replace(src_label, regex, replacement)
         let args = vec![
             if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())))
+                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             } else {
                 DfExpr::Column(Column::from_name(src_label))
             },
-            DfExpr::Literal(ScalarValue::Utf8(Some(regex))),
-            DfExpr::Literal(ScalarValue::Utf8(Some(replacement))),
+            DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
+            DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
         ];
 
         Ok(Some((
@@ -2005,14 +2012,14 @@ impl PromPlanner {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
 
         let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected dst_label string literal, but found {:?}", other),
             }
             .fail()?,
         };
         let separator = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)))) => d,
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
             other => UnexpectedPlanExprSnafu {
                 desc: format!("expected separator string literal, but found {:?}", other),
             }
@@ -2024,9 +2031,9 @@ impl PromPlanner {
             .map(|expr| {
                 // Cast source label into column
                 match expr {
-                    DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                    DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
-                            Ok(DfExpr::Literal(ScalarValue::Null))
+                            Ok(DfExpr::Literal(ScalarValue::Null, None))
                         } else {
                             Ok(DfExpr::Column(Column::from_name(label)))
                         }
@@ -2056,7 +2063,7 @@ impl PromPlanner {
 
         // concat_ws(separator, src_label_1, src_label_2, ...) as dst_label
         let mut args = Vec::with_capacity(1 + src_labels.len());
-        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator))));
+        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator)), None));
         args.extend(src_labels);
 
         Ok((
@@ -2127,7 +2134,7 @@ impl PromPlanner {
 
         tags.iter()
             .map(|col| match col {
-                DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
+                DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
                     Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
                 }
                 other => UnexpectedPlanExprSnafu {
@@ -2340,14 +2347,17 @@ impl PromPlanner {
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
 
-                DfExpr::WindowFunction(WindowFunction {
+                DfExpr::WindowFunction(Box::new(WindowFunction {
                     fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
-                    args: vec![],
-                    partition_by: group_exprs.clone(),
-                    order_by: sort_exprs,
-                    window_frame: WindowFrame::new(Some(true)),
-                    null_treatment: None,
-                })
+                    params: WindowFunctionParams {
+                        args: vec![],
+                        partition_by: group_exprs.clone(),
+                        order_by: sort_exprs,
+                        window_frame: WindowFrame::new(Some(true)),
+                        null_treatment: None,
+                        distinct: false,
+                    },
+                }))
             })
             .collect();
 
@@ -2541,7 +2551,7 @@ impl PromPlanner {
                 .with_context(|| ValueNotFoundSnafu {
                     table: self.ctx.table_name.clone().unwrap_or_default(),
                 })?;
-        let first_value_expr = first_value(first_field_expr, None);
+        let first_value_expr = first_value(first_field_expr, vec![]);
 
         let ordered_aggregated_input = LogicalPlanBuilder::from(input)
             .aggregate(
@@ -2587,14 +2597,8 @@ impl PromPlanner {
     /// `None` if the input is not a literal expression.
     fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
         match expr {
-            PromExpr::NumberLiteral(NumberLiteral { val }) => {
-                let scalar_value = ScalarValue::Float64(Some(*val));
-                Some(DfExpr::Literal(scalar_value))
-            }
-            PromExpr::StringLiteral(StringLiteral { val }) => {
-                let scalar_value = ScalarValue::Utf8(Some(val.to_string()));
-                Some(DfExpr::Literal(scalar_value))
-            }
+            PromExpr::NumberLiteral(NumberLiteral { val }) => Some(val.lit()),
+            PromExpr::StringLiteral(StringLiteral { val }) => Some(val.lit()),
             PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
             | PromExpr::Extension(_)
@@ -2790,7 +2794,7 @@ impl PromPlanner {
                         .collect::<Vec<_>>(),
                 ),
                 None,
-                true,
+                NullEquality::NullEqualsNull,
             )
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -2926,7 +2930,7 @@ impl PromPlanner {
                     JoinType::LeftSemi,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -2939,7 +2943,7 @@ impl PromPlanner {
                     JoinType::LeftAnti,
                     (join_keys.clone(), join_keys),
                     None,
-                    true,
+                    NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -3045,7 +3049,7 @@ impl PromPlanner {
         // step 1: align schema using project, fill non-exist columns with null
         let left_proj_exprs = all_columns.iter().map(|col| {
             if tags_not_in_left.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3077,7 +3081,7 @@ impl PromPlanner {
                     right_field_col,
                 ))
             } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None)).alias(col.to_string())
+                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.to_string())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -3226,7 +3230,6 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let lit_expr = DfExpr::Literal(ScalarValue::Utf8(Some(date_part.to_string())));
         let input_expr = datafusion::logical_expr::col(
             self.ctx
                 .time_index_column
@@ -3238,7 +3241,7 @@ impl PromPlanner {
         );
         let fn_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: datafusion_functions::datetime::date_part(),
-            args: vec![lit_expr, input_expr],
+            args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
     }

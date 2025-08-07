@@ -29,7 +29,9 @@ use datafusion::common::{ColumnStatistics, DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, LexRequirement, PhysicalSortRequirement};
+use datafusion::physical_expr::{
+    EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
+};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -150,10 +152,10 @@ impl HistogramFold {
         let check_column = |col| {
             if !input_schema.has_column_with_unqualified_name(col) {
                 Err(DataFusionError::SchemaError(
-                    datafusion::common::SchemaError::FieldNotFound {
+                    Box::new(datafusion::common::SchemaError::FieldNotFound {
                         field: Box::new(Column::new(None::<String>, col)),
                         valid_fields: input_schema.columns(),
-                    },
+                    }),
                     Box::new(None),
                 ))
             } else {
@@ -266,7 +268,7 @@ impl ExecutionPlan for HistogramFoldExec {
         &self.properties
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<LexRequirement>> {
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
         let mut cols = self
             .tag_col_exprs()
             .into_iter()
@@ -299,7 +301,10 @@ impl ExecutionPlan for HistogramFoldExec {
             }),
         });
 
-        vec![Some(LexRequirement::new(cols))]
+        // Safety: `cols` is not empty
+        let requirement = LexRequirement::new(cols).unwrap();
+
+        vec![Some(OrderingRequirements::Hard(vec![requirement]))]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -414,7 +419,9 @@ impl HistogramFoldExec {
 impl DisplayAs for HistogramFoldExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "HistogramFoldExec: le=@{}, field=@{}, quantile={}",
@@ -629,7 +636,7 @@ impl HistogramFoldStream {
         self.output_buffered_rows = 0;
         RecordBatch::try_new(self.output_schema.clone(), columns)
             .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(e, None))
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
     }
 
     /// Find the first `+Inf` which indicates the end of the bucket group
@@ -729,13 +736,14 @@ mod test {
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::datatypes::{Field, Schema};
     use datafusion::common::ToDFSchema;
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
 
     use super::*;
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("le", DataType::Utf8, true),
@@ -788,7 +796,9 @@ mod test {
         )
         .unwrap();
 
-        MemoryExec::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap()
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap(),
+        ))
     }
 
     #[tokio::test]

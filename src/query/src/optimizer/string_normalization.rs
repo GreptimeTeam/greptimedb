@@ -90,9 +90,9 @@ impl TreeNodeRewriter for StringNormalizationConverter {
             Expr::Cast(Cast { expr, data_type }) => {
                 let expr = match data_type {
                     DataType::Timestamp(_, _) => match *expr {
-                        Expr::Literal(value) => match value {
+                        Expr::Literal(value, _) => match value {
                             ScalarValue::Utf8(Some(s)) => trim_utf_expr(s),
-                            _ => Expr::Literal(value),
+                            _ => Expr::Literal(value, None),
                         },
                         expr => expr,
                     },
@@ -112,7 +112,7 @@ impl TreeNodeRewriter for StringNormalizationConverter {
 fn trim_utf_expr(s: String) -> Expr {
     let parts: Vec<_> = s.split_whitespace().collect();
     let trimmed = parts.join(" ");
-    Expr::Literal(ScalarValue::Utf8(Some(trimmed)))
+    Expr::Literal(ScalarValue::Utf8(Some(trimmed)), None)
 }
 
 #[cfg(test)]

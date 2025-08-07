@@ -420,6 +420,7 @@ pub async fn show_index(
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
+        #[allow(deprecated)]
         Expr::Wildcard {
             qualifier: None,
             options: Box::new(WildcardOptions::default()),
@@ -765,7 +766,7 @@ pub async fn show_search_path(_query_ctx: QueryContextRef) -> Result<Output> {
 
 pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
     let stmt = CreateDatabase {
-        name: ObjectName(vec![Ident::new(database_name)]),
+        name: ObjectName::from(vec![Ident::new(database_name)]),
         if_not_exists: true,
         options,
     };
@@ -1005,7 +1006,7 @@ pub fn show_create_flow(
 
     let stmt = CreateFlow {
         flow_name,
-        sink_table_name: ObjectName(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
+        sink_table_name: ObjectName::from(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
         // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
         // so we set `or_replace` to false.
         or_replace: false,
@@ -1422,7 +1423,7 @@ mod test {
 
     fn exec_show_variable(variable: &str, tz: &str) -> Result<String> {
         let stmt = ShowVariables {
-            variable: ObjectName(vec![Ident::new(variable)]),
+            variable: ObjectName::from(vec![Ident::new(variable)]),
         };
         let ctx = Arc::new(
             QueryContextBuilder::default()

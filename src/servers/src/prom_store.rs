@@ -163,7 +163,7 @@ fn new_label(name: String, value: String) -> Label {
 }
 
 fn lit_timestamp_millisecond(ts: i64) -> Expr {
-    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None))
+    Expr::Literal(ScalarValue::TimestampMillisecond(Some(ts), None), None)
 }
 
 // A timeseries id

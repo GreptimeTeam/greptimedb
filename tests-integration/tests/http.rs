@@ -505,7 +505,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
         res.text().await,
-        r#"[{"DescribeTable":{"name":[{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}]}}]"#,
+        r#"[{"DescribeTable":{"name":[{"Identifier":{"value":"t","quote_style":null,"span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}}]}}]"#,
     );
 
     // test timezone header

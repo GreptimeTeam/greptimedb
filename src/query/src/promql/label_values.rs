@@ -29,8 +29,8 @@ use crate::promql::error::{
 fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
     time_index_expr
         .clone()
-        .gt_eq(Expr::Literal(timestamp_to_scalar_value(start)))
-        .and(time_index_expr.lt_eq(Expr::Literal(timestamp_to_scalar_value(end))))
+        .gt_eq(Expr::Literal(timestamp_to_scalar_value(start), None))
+        .and(time_index_expr.lt_eq(Expr::Literal(timestamp_to_scalar_value(end), None)))
 }
 
 fn timestamp_to_scalar_value(timestamp: Timestamp) -> ScalarValue {

@@ -29,7 +29,6 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::optimize_projections::OptimizeProjections;
 use datafusion::optimizer::simplify_expressions::SimplifyExpressions;
-use datafusion::optimizer::unwrap_cast_in_comparison::UnwrapCastInComparison;
 use datafusion::optimizer::utils::NamePreserver;
 use datafusion::optimizer::{Analyzer, AnalyzerRule, Optimizer, OptimizerContext};
 use datafusion_common::tree_node::{
@@ -38,8 +37,8 @@ use datafusion_common::tree_node::{
 use datafusion_common::{Column, DFSchema, ScalarValue};
 use datafusion_expr::utils::merge_schema;
 use datafusion_expr::{
-    BinaryExpr, ColumnarValue, Expr, Operator, Projection, ScalarFunctionArgs, ScalarUDFImpl,
-    Signature, TypeSignature, Volatility,
+    BinaryExpr, ColumnarValue, Expr, Literal, Operator, Projection, ScalarFunctionArgs,
+    ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 use query::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use query::parser::QueryLanguageParser;
@@ -80,7 +79,6 @@ pub async fn apply_df_optimizer(
         Arc::new(OptimizeProjections::new()),
         Arc::new(CommonSubexprEliminate::new()),
         Arc::new(SimplifyExpressions::new()),
-        Arc::new(UnwrapCastInComparison::new()),
     ]);
     let plan = optimizer
         .optimize(plan, &ctx, |_, _| {})
@@ -305,11 +303,11 @@ impl TreeNodeRewriter for ExpandAvgRewriter<'_> {
                     BinaryExpr::new(Box::new(sum_cast), Operator::Divide, Box::new(count_expr));
                 let div_expr = Box::new(Expr::BinaryExpr(div));
 
-                let zero = Box::new(Expr::Literal(ScalarValue::Int64(Some(0))));
+                let zero = Box::new(0.lit());
                 let not_zero =
                     BinaryExpr::new(Box::new(count_expr_ref), Operator::NotEq, zero.clone());
                 let not_zero = Box::new(Expr::BinaryExpr(not_zero));
-                let null = Box::new(Expr::Literal(ScalarValue::Null));
+                let null = Box::new(Expr::Literal(ScalarValue::Null, None));
 
                 let case_when =
                     datafusion_expr::Case::new(None, vec![(not_zero, div_expr)], Some(null));

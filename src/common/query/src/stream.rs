@@ -123,6 +123,12 @@ impl ExecutionPlan for StreamScanAdapter {
     fn name(&self) -> &str {
         "StreamScanAdapter"
     }
+
+    // bypass DataFusionError:
+    // Context("EnforceDistribution", Internal("YieldStreamExec requires exactly one child"))
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
 }
 
 #[cfg(test)]

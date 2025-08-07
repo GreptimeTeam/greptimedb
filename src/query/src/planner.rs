@@ -97,7 +97,15 @@ impl DfLogicalPlanner {
             is_tql_cte = true;
         }
 
-        let df_stmt = stmt.as_ref().try_into().context(SqlSnafu)?;
+        let mut df_stmt = stmt.as_ref().try_into().context(SqlSnafu)?;
+
+        // TODO(LFC): Remove this when Datafusion supports **both** the syntax and implementation of "explain with format".
+        if let datafusion::sql::parser::Statement::Statement(
+            box datafusion::sql::sqlparser::ast::Statement::Explain { format, .. },
+        ) = &mut df_stmt
+        {
+            format.take();
+        }
 
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
@@ -123,13 +131,7 @@ impl DfLogicalPlanner {
 
         let config_options = self.session_state.config().options();
         let parser_options = &config_options.sql_parser;
-        let parser_options = ParserOptions {
-            enable_ident_normalization: parser_options.enable_ident_normalization,
-            parse_float_as_decimal: parser_options.parse_float_as_decimal,
-            support_varchar_with_length: parser_options.support_varchar_with_length,
-            enable_options_value_normalization: parser_options.enable_options_value_normalization,
-            collect_spans: parser_options.collect_spans,
-        };
+        let parser_options: ParserOptions = parser_options.into();
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
 
@@ -183,12 +185,9 @@ impl DfLogicalPlanner {
 
         let config_options = self.session_state.config().options();
         let parser_options = &config_options.sql_parser;
-        let parser_options = ParserOptions {
+        let parser_options: ParserOptions = ParserOptions {
             enable_ident_normalization: normalize_ident,
-            parse_float_as_decimal: parser_options.parse_float_as_decimal,
-            support_varchar_with_length: parser_options.support_varchar_with_length,
-            enable_options_value_normalization: parser_options.enable_options_value_normalization,
-            collect_spans: parser_options.collect_spans,
+            ..parser_options.into()
         };
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);

@@ -17,9 +17,10 @@ use std::sync::Arc;
 use datafusion::arrow::array::Float64Array;
 use datafusion::logical_expr::ScalarUDF;
 use datafusion::physical_plan::ColumnarValue;
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ScalarFunctionArgs;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, Field};
 
 use crate::functions::extract_array;
 use crate::range_array::RangeArray;
@@ -40,10 +41,17 @@ pub fn simple_range_udf_runner(
     .into_iter()
     .chain(other_args.into_iter().map(ColumnarValue::Scalar))
     .collect::<Vec<_>>();
+    let arg_fields = vec![
+        Arc::new(Field::new("a", input[0].data_type(), false)),
+        Arc::new(Field::new("b", input[1].data_type(), false)),
+    ];
+    let return_field = Arc::new(Field::new("c", DataType::Float64, false));
     let args = ScalarFunctionArgs {
         args: input,
+        arg_fields,
         number_rows: num_rows,
-        return_type: &DataType::Float64,
+        return_field,
+        config_options: Arc::new(ConfigOptions::default()),
     };
     let value = range_fn.invoke_with_args(args).unwrap();
     let eval_result: Vec<Option<f64>> = extract_array(&value)

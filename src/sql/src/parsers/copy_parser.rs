@@ -254,20 +254,8 @@ mod tests {
                     else {
                         unreachable!()
                     };
-                    let (catalog, schema, table) =
-                        if let [catalog, schema, table] = &copy_table.table_name.0[..] {
-                            (
-                                catalog.value.clone(),
-                                schema.value.clone(),
-                                table.value.clone(),
-                            )
-                        } else {
-                            unreachable!()
-                        };
-
-                    assert_eq!("catalog0", catalog);
-                    assert_eq!("schema0", schema);
-                    assert_eq!("tbl", table);
+                    let table = copy_table.table_name.to_string();
+                    assert_eq!("catalog0.schema0.tbl", table);
 
                     let file_name = &copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
@@ -302,20 +290,8 @@ mod tests {
                 Statement::Copy(crate::statements::copy::Copy::CopyTable(CopyTable::From(
                     copy_table,
                 ))) => {
-                    let (catalog, schema, table) =
-                        if let [catalog, schema, table] = &copy_table.table_name.0[..] {
-                            (
-                                catalog.value.clone(),
-                                schema.value.clone(),
-                                table.value.clone(),
-                            )
-                        } else {
-                            unreachable!()
-                        };
-
-                    assert_eq!("catalog0", catalog);
-                    assert_eq!("schema0", schema);
-                    assert_eq!("tbl", table);
+                    let table = copy_table.table_name.to_string();
+                    assert_eq!("catalog0.schema0.tbl", table);
 
                     let file_name = &copy_table.location;
                     assert_eq!("tbl_file.parquet", file_name);
@@ -442,7 +418,7 @@ mod tests {
         };
 
         assert_eq!(
-            ObjectName(vec![Ident::new("catalog0"), Ident::new("schema0")]),
+            ObjectName::from(vec![Ident::new("catalog0"), Ident::new("schema0")]),
             stmt.database_name
         );
         assert_eq!(
@@ -478,7 +454,7 @@ mod tests {
         };
 
         assert_eq!(
-            ObjectName(vec![Ident::new("catalog0"), Ident::new("schema0")]),
+            ObjectName::from(vec![Ident::new("catalog0"), Ident::new("schema0")]),
             stmt.database_name
         );
         assert_eq!(

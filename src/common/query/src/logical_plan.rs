@@ -24,7 +24,7 @@ use datafusion::error::Result as DatafusionResult;
 use datafusion::logical_expr::{LogicalPlan, LogicalPlanBuilder};
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::dml::InsertOp;
-use datafusion_expr::{col, DmlStatement, WriteOp};
+use datafusion_expr::{col, DmlStatement, TableSource, WriteOp};
 pub use expr::{build_filter_from_timestamp, build_same_type_ts_filter};
 use snafu::ResultExt;
 
@@ -131,7 +131,7 @@ pub fn breakup_insert_plan(
 /// create a `insert into table_name <input>` logical plan
 pub fn add_insert_to_logical_plan(
     table_name: TableName,
-    table_schema: datafusion_common::DFSchemaRef,
+    target: Arc<dyn TableSource>,
     input: LogicalPlan,
 ) -> Result<LogicalPlan> {
     let table_name = TableReference::Full {
@@ -142,7 +142,7 @@ pub fn add_insert_to_logical_plan(
 
     let plan = LogicalPlan::Dml(DmlStatement::new(
         table_name,
-        table_schema,
+        target,
         WriteOp::Insert(InsertOp::Append),
         Arc::new(input),
     ));

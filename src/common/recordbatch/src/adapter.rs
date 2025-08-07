@@ -134,11 +134,11 @@ where
             b.and_then(|b| {
                 let projected_column = b.project(&projection)?;
                 if projected_column.schema().fields.len() != projected_schema.fields.len() {
-                   return Err(DataFusionError::ArrowError(ArrowError::SchemaError(format!(
+                   return Err(DataFusionError::ArrowError(Box::new(ArrowError::SchemaError(format!(
                         "Trying to cast a RecordBatch into an incompatible schema. RecordBatch: {}, Target: {}",
                         projected_column.schema(),
                         projected_schema,
-                    )), None));
+                    ))), None));
                 }
 
                 let mut columns = Vec::with_capacity(projected_schema.fields.len());
@@ -360,7 +360,7 @@ impl ExecutionPlanVisitor for MetricCollector {
         // skip if no metric available
         let Some(metric) = plan.metrics() else {
             self.record_batch_metrics.plan_metrics.push(PlanMetrics {
-                plan: std::any::type_name::<Self>().to_string(),
+                plan: plan.name().to_string(),
                 level: self.current_level,
                 metrics: vec![],
             });

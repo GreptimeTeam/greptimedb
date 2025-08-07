@@ -56,7 +56,7 @@ pub fn parser_expr_to_scalar_value_literal(expr: sqlparser::ast::Expr) -> Result
         .simplify(logical_expr)
         .context(SimplificationSnafu)?;
 
-    if let datafusion::logical_expr::Expr::Literal(lit) = simplified_expr {
+    if let datafusion::logical_expr::Expr::Literal(lit, _) = simplified_expr {
         Ok(lit)
     } else {
         // Err(ParseSqlValue)
@@ -106,7 +106,7 @@ impl ContextProvider for StubContextProvider {
     }
 
     fn options(&self) -> &ConfigOptions {
-        unimplemented!()
+        self.state.config_options()
     }
 
     fn udf_names(&self) -> Vec<String> {

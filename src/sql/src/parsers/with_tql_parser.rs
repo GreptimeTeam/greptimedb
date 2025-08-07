@@ -117,8 +117,9 @@ impl ParserContext<'_> {
                         columns: cte
                             .columns
                             .into_iter()
-                            .map(|col| TableAliasColumnDef {
-                                name: col.0[0].clone(),
+                            .flat_map(|col| col.0[0].as_ident().cloned())
+                            .map(|name| TableAliasColumnDef {
+                                name,
                                 data_type: None,
                             })
                             .collect(),
@@ -360,7 +361,14 @@ mod tests {
         let second_cte = &hybrid_cte.cte_tables[0];
         assert!(matches!(second_cte.content, CteContent::Tql(_)));
         assert_eq!(second_cte.columns.len(), 2);
-        assert_eq!(second_cte.columns[0].0[0].value, "time");
-        assert_eq!(second_cte.columns[1].0[0].value, "metric_value");
+        assert_eq!(
+            second_cte
+                .columns
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            "time metric_value"
+        );
     }
 }

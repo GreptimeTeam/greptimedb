@@ -103,7 +103,7 @@ impl<'a> RowGroupBase<'a> {
                     selection
                         .scan_ranges(&offset_index[idx].page_locations)
                         .iter()
-                        .map(|range| range.start as u64..range.end as u64),
+                        .map(|range| range.start..range.end),
                 );
                 page_start_offsets.push(ranges.iter().map(|range| range.start as usize).collect());
 

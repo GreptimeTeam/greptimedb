@@ -87,29 +87,31 @@ fn timestamp_to_literal(timestamp: &Timestamp) -> Expr {
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(timestamp.value()), None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(timestamp.value()), None),
     };
-    Expr::Literal(scalar_value)
+    Expr::Literal(scalar_value, None)
 }
 
 #[cfg(test)]
 mod tests {
+    use datafusion_expr::Literal;
+
     use super::*;
 
     #[test]
     fn test_timestamp_to_literal() {
         let timestamp = Timestamp::new(123456789, TimeUnit::Second);
-        let expected = Expr::Literal(ScalarValue::TimestampSecond(Some(123456789), None));
+        let expected = ScalarValue::TimestampSecond(Some(123456789), None).lit();
         assert_eq!(timestamp_to_literal(&timestamp), expected);
 
         let timestamp = Timestamp::new(123456789, TimeUnit::Millisecond);
-        let expected = Expr::Literal(ScalarValue::TimestampMillisecond(Some(123456789), None));
+        let expected = ScalarValue::TimestampMillisecond(Some(123456789), None).lit();
         assert_eq!(timestamp_to_literal(&timestamp), expected);
 
         let timestamp = Timestamp::new(123456789, TimeUnit::Microsecond);
-        let expected = Expr::Literal(ScalarValue::TimestampMicrosecond(Some(123456789), None));
+        let expected = ScalarValue::TimestampMicrosecond(Some(123456789), None).lit();
         assert_eq!(timestamp_to_literal(&timestamp), expected);
 
         let timestamp = Timestamp::new(123456789, TimeUnit::Nanosecond);
-        let expected = Expr::Literal(ScalarValue::TimestampNanosecond(Some(123456789), None));
+        let expected = ScalarValue::TimestampNanosecond(Some(123456789), None).lit();
         assert_eq!(timestamp_to_literal(&timestamp), expected);
     }
 }

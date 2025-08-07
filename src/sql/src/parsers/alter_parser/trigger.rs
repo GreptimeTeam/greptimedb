@@ -598,8 +598,14 @@ mod tests {
         };
         let trigger_name = alter.trigger_name.0;
         assert_eq!(trigger_name.len(), 2);
-        assert_eq!(trigger_name[0].value, "public");
-        assert_eq!(trigger_name[1].value, "old_trigger");
+        assert_eq!(
+            trigger_name
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            "public old_trigger"
+        );
         assert_eq!(alter.operation.rename, Some("newTrigger".to_string()));
     }
 
