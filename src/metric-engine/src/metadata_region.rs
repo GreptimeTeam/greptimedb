@@ -66,6 +66,10 @@ const COLUMN_PREFIX: &str = "__column_";
 /// itself.
 pub struct MetadataRegion {
     pub(crate) mito: MitoEngine,
+    /// The cache for contents(key-value pairs) of region metadata.
+    ///
+    /// The cache should be invalidated when any new values are put into the metadata region or any
+    /// values are deleted from the metadata region.
     cache: Cache<RegionId, RegionMetadataCacheEntry>,
     /// Logical lock for operations that need to be serialized. Like update & read region columns.
     ///
@@ -455,6 +459,7 @@ impl MetadataRegion {
             )
             .await
             .context(MitoWriteOperationSnafu)?;
+        // Invalidates the region metadata cache if any values are deleted from the metadata region.
         self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
@@ -578,6 +583,7 @@ impl MetadataRegion {
             )
             .await
             .context(MitoWriteOperationSnafu)?;
+        // Invalidates the region metadata cache if any new values are put into the metadata region.
         self.cache.invalidate(&metadata_region_id).await;
 
         Ok(())
