@@ -72,7 +72,10 @@ impl ConvertBatchStream {
                     Ok(self.projection_mapper.empty_record_batch())
                 } else {
                     // Safety: Currently only primary key format is used for batch conversion
-                    self.projection_mapper.as_primary_key().unwrap().convert(&batch, &self.cache_strategy)
+                    self.projection_mapper
+                        .as_primary_key()
+                        .unwrap()
+                        .convert(&batch, &self.cache_strategy)
                 }
             }
             ScanBatch::Series(series) => {
