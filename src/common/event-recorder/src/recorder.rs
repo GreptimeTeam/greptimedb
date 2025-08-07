@@ -111,6 +111,7 @@ pub trait Eventable: Send + Sync + Debug {
 }
 
 /// Aggregates events by its `event_type`.
+#[allow(clippy::borrowed_box)]
 pub fn aggregate_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
     let mut event_groups: HashMap<&str, Vec<&Box<dyn Event>>> = HashMap::new();
     for event in events {
@@ -123,9 +124,10 @@ pub fn aggregate_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<
 }
 
 /// Builds the row inserts request for the events that will be persisted to the events table.
+#[allow(clippy::borrowed_box)]
 pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsertRequests> {
     // Ensure all the events are the same type.
-    validate_events(&events)?;
+    validate_events(events)?;
 
     let mut row_insert_requests = RowInsertRequests {
         inserts: Vec::with_capacity(events.len()),
