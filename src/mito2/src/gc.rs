@@ -39,7 +39,7 @@ pub struct LocalGcWorker {
 impl LocalGcWorker {
     /// concurrency of listing files per region.
     /// This is used to limit the number of concurrent listing operations and speed up listing
-    pub const CONCURRENCY_LIST_PER_FILES: usize = 256;
+    pub const CONCURRENCY_LIST_PER_FILES: usize = 512;
     pub async fn do_region_gc(&self) -> Result<()> {
         // TODO(discord9): impl gc worker
         let manifest = self.manifest_ctx.manifest().await;
