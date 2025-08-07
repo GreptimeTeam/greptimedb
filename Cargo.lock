@@ -7493,6 +7493,7 @@ dependencies = [
  "lazy_static",
  "mito-codec",
  "mito2",
+ "moka",
  "mur3",
  "object-store",
  "prometheus",
