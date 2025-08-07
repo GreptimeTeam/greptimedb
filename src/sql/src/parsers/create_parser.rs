@@ -1490,6 +1490,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 or_replace: expected.or_replace,
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
+                eval_interval: None,
                 comment: expected.comment,
                 // ignore query parse result
                 query: create_task.query.clone(),
