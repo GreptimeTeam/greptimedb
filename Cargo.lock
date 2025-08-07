@@ -13073,6 +13073,7 @@ dependencies = [
  "common-config",
  "common-error",
  "common-event-recorder",
+ "common-frontend",
  "common-grpc",
  "common-meta",
  "common-procedure",

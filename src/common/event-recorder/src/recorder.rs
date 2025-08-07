@@ -19,7 +19,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::helper::{tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -127,65 +126,73 @@ pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Builds the row inserts request for the events that will be persisted to the events table.
-pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertRequests> {
-    // Aggregate the events by the event type.
+/// Aggregates events by its `event_type`.
+pub fn aggregate_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
     let mut event_groups: HashMap<&str, Vec<&Box<dyn Event>>> = HashMap::new();
-
     for event in events {
         event_groups
             .entry(event.event_type())
             .or_default()
             .push(event);
     }
+    event_groups
+}
+
+/// Builds the row inserts request for the events that will be persisted to the events table.
+pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsertRequests> {
+    // Ensure all the events are the same type.
+    validate_events(&events)?;
 
     let mut row_insert_requests = RowInsertRequests {
-        inserts: Vec::with_capacity(event_groups.len()),
+        inserts: Vec::with_capacity(events.len()),
     };
 
-    for (_, events) in event_groups {
-        validate_events(&events)?;
+    // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
+    let event = &events[0];
+    let mut schema = vec![
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Binary as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::TimestampNanosecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+            ..Default::default()
+        },
+    ];
+    schema.extend(event.extra_schema());
 
-        // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
-        let event = &events[0];
-        let mut schema = vec![
-            tag_column_schema(EVENTS_TABLE_TYPE_COLUMN_NAME, ColumnDataType::String),
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Binary as i32,
-                semantic_type: SemanticType::Field as i32,
-                datatype_extension: Some(ColumnDataTypeExtension {
-                    type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                }),
-                ..Default::default()
-            },
-            time_index_column_schema(
-                EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
-                ColumnDataType::TimestampNanosecond,
-            ),
-        ];
-        schema.extend(event.extra_schema());
+    let rows = events
+        .iter()
+        .map(|event| {
+            let mut row = Row {
+                values: vec![
+                    ValueData::StringValue(event.event_type().to_string()).into(),
+                    ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
+                    ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+                ],
+            };
+            row.values.extend(event.extra_row()?.values);
+            Ok(row)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        let rows = events
-            .iter()
-            .map(|event| {
-                let mut row = Row {
-                    values: vec![
-                        ValueData::StringValue(event.event_type().to_string()).into(),
-                        ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
-                        ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
-                    ],
-                };
-                row.values.extend(event.extra_row()?.values);
-                Ok(row)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        row_insert_requests.inserts.push(RowInsertRequest {
-            table_name: event.table_name().to_string(),
-            rows: Some(Rows { schema, rows }),
-        });
-    }
+    row_insert_requests.inserts.push(RowInsertRequest {
+        table_name: event.table_name().to_string(),
+        rows: Some(Rows { schema, rows }),
+    });
 
     Ok(row_insert_requests)
 }

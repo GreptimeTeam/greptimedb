@@ -24,7 +24,8 @@ use common_base::cancellation::CancellationHandle;
 use common_event_recorder::EventRecorderRef;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_frontend::slow_query_event::SlowQueryEvent;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::logging::SlowQueriesRecordType;
+use common_telemetry::{debug, info, slow, warn};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
@@ -298,6 +299,7 @@ pub struct SlowQueryTimer {
     stmt: QueryStatement,
     threshold: Option<Duration>,
     sample_ratio: Option<f64>,
+    record_type: SlowQueriesRecordType,
     recorder: EventRecorderRef,
 }
 
@@ -306,6 +308,7 @@ impl SlowQueryTimer {
         stmt: QueryStatement,
         threshold: Option<Duration>,
         sample_ratio: Option<f64>,
+        record_type: SlowQueriesRecordType,
         recorder: EventRecorderRef,
     ) -> Self {
         Self {
@@ -313,6 +316,7 @@ impl SlowQueryTimer {
             stmt,
             threshold,
             sample_ratio,
+            record_type,
             recorder,
         }
     }
@@ -360,7 +364,24 @@ impl SlowQueryTimer {
             }
         }
 
-        self.recorder.record(Box::new(slow_query_event));
+        match self.record_type {
+            SlowQueriesRecordType::SystemTable => {
+                self.recorder.record(Box::new(slow_query_event));
+            }
+            SlowQueriesRecordType::Log => {
+                // Record the slow query in a specific logs file.
+                slow!(
+                    cost = slow_query_event.cost,
+                    threshold = slow_query_event.threshold,
+                    query = slow_query_event.query,
+                    is_promql = slow_query_event.is_promql,
+                    promql_range = slow_query_event.promql_range,
+                    promql_step = slow_query_event.promql_step,
+                    promql_start = slow_query_event.promql_start,
+                    promql_end = slow_query_event.promql_end,
+                );
+            }
+        }
     }
 }
 

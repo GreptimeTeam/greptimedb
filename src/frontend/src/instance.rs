@@ -236,6 +236,7 @@ impl Instance {
                         CatalogQueryStatement::Sql(stmt.clone()),
                         self.slow_query_options.threshold,
                         self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
                         event_recorder,
                     )
                 });
@@ -610,6 +611,7 @@ impl SqlQueryHandler for Instance {
                         CatalogQueryStatement::Sql(stmt.clone()),
                         self.slow_query_options.threshold,
                         self.slow_query_options.sample_ratio,
+                        self.slow_query_options.record_type,
                         event_recorder,
                     )
                 });
@@ -772,6 +774,7 @@ impl PrometheusHandler for Instance {
                     query_statement,
                     self.slow_query_options.threshold,
                     self.slow_query_options.sample_ratio,
+                    self.slow_query_options.record_type,
                     event_recorder,
                 )
             });

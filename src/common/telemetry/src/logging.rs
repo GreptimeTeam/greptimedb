@@ -128,7 +128,9 @@ impl Default for SlowQueryOptions {
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
+    /// Record the slow query in the system table.
     SystemTable,
+    /// Record the slow query in a specific logs file.
     Log,
 }
 

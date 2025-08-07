@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
-use common_event_recorder::{build_row_inserts_request, Event, EventHandler, EventHandlerOptions};
+use common_event_recorder::{
+    aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
+};
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
 use common_telemetry::logging::SlowQueryOptions;
 use operator::insert::InserterRef;
@@ -50,26 +52,31 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        let opts = self.options(&events[0]);
-        let query_ctx = QueryContextBuilder::default()
-            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
-            .current_schema(DEFAULT_PRIVATE_SCHEMA_NAME.to_string())
-            .set_extension(TTL_KEY.to_string(), opts.ttl)
-            .set_extension(APPEND_MODE_KEY.to_string(), opts.append_mode.to_string())
-            .build()
-            .into();
+        let event_groups = aggregate_events_by_type(events);
 
-        self.inserter
-            .handle_row_inserts(
-                build_row_inserts_request(events)?,
-                query_ctx,
-                &self.statement_executor,
-                false,
-                false,
-            )
-            .await
-            .map_err(BoxedError::new)
-            .context(InsertEventsSnafu)?;
+        for (_, events) in event_groups {
+            let opts = self.options(&events[0]);
+
+            let query_ctx = QueryContextBuilder::default()
+                .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+                .current_schema(DEFAULT_PRIVATE_SCHEMA_NAME.to_string())
+                .set_extension(TTL_KEY.to_string(), opts.ttl)
+                .set_extension(APPEND_MODE_KEY.to_string(), opts.append_mode.to_string())
+                .build()
+                .into();
+
+            self.inserter
+                .handle_row_inserts(
+                    build_row_inserts_request(&events)?,
+                    query_ctx,
+                    &self.statement_executor,
+                    false,
+                    false,
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(InsertEventsSnafu)?;
+        }
 
         Ok(())
     }
