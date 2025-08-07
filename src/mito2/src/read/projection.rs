@@ -118,6 +118,14 @@ impl ProjectionMapper {
             ProjectionMapper::Plain(m) => Some(m),
         }
     }
+
+    /// Returns an empty [RecordBatch].
+    pub(crate) fn empty_record_batch(&self) -> RecordBatch {
+        match self {
+            ProjectionMapper::PrimaryKey(m) => m.empty_record_batch(),
+            ProjectionMapper::Plain(m) => m.empty_record_batch(),
+        }
+    }
 }
 
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].

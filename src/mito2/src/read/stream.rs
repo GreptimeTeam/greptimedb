@@ -71,7 +71,8 @@ impl ConvertBatchStream {
                 if batch.is_empty() {
                     Ok(self.projection_mapper.empty_record_batch())
                 } else {
-                    self.projection_mapper.convert(&batch, &self.cache_strategy)
+                    // Safety: Currently only primary key format is used for batch conversion
+                    self.projection_mapper.as_primary_key().unwrap().convert(&batch, &self.cache_strategy)
                 }
             }
             ScanBatch::Series(series) => {
@@ -79,8 +80,11 @@ impl ConvertBatchStream {
                 self.buffer.reserve(series.batches.len());
 
                 for batch in series.batches {
+                    // Safety: Currently only primary key format is used for batch conversion
                     let record_batch = self
                         .projection_mapper
+                        .as_primary_key()
+                        .unwrap()
                         .convert(&batch, &self.cache_strategy)?;
                     self.buffer.push(record_batch.into_df_record_batch());
                 }
