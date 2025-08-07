@@ -411,11 +411,12 @@ mod tests {
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
     use mito_codec::test_util::TestRegionMetadataBuilder;
-    use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
+    use store_api::storage::consts::{
+        OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
+    };
 
     use super::*;
     use crate::cache::CacheManager;
-    use crate::read::plain_batch::PlainBatch;
     use crate::read::BatchBuilder;
 
     fn new_batch(
@@ -586,14 +587,44 @@ mod tests {
         assert!(record_batch.schema.is_empty());
     }
 
-    fn new_plain_batch(
+    fn new_flat_batch(
         ts_start: Option<i64>,
         idx_tags: &[(usize, i64)],
         idx_fields: &[(usize, i64)],
         num_rows: usize,
-    ) -> PlainBatch {
-        let mut columns = Vec::with_capacity(1 + idx_tags.len() + idx_fields.len());
-        let mut fields = Vec::with_capacity(1 + idx_tags.len() + idx_fields.len());
+    ) -> datatypes::arrow::record_batch::RecordBatch {
+        let mut columns = Vec::with_capacity(1 + idx_tags.len() + idx_fields.len() + 3);
+        let mut fields = Vec::with_capacity(1 + idx_tags.len() + idx_fields.len() + 3);
+
+        // Flat format: primary key columns, field columns, time index, __primary_key, __sequence, __op_type
+
+        // Primary key columns first
+        for (i, tag) in idx_tags {
+            let array = Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
+                *tag, num_rows,
+            ))) as _;
+            columns.push(array);
+            fields.push(Field::new(
+                format!("k{i}"),
+                datatypes::arrow::datatypes::DataType::Int64,
+                true,
+            ));
+        }
+
+        // Field columns
+        for (i, field) in idx_fields {
+            let array = Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
+                *field, num_rows,
+            ))) as _;
+            columns.push(array);
+            fields.push(Field::new(
+                format!("v{i}"),
+                datatypes::arrow::datatypes::DataType::Int64,
+                true,
+            ));
+        }
+
+        // Time index
         if let Some(ts_start) = ts_start {
             let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
                 (0..num_rows).map(|i| ts_start + i as i64 * 1000),
@@ -608,34 +639,48 @@ mod tests {
                 true,
             ));
         }
-        for (i, tag) in idx_tags {
-            let array = Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
-                *tag, num_rows,
-            ))) as _;
-            columns.push(array);
-            fields.push(Field::new(
-                format!("k{i}"),
-                datatypes::arrow::datatypes::DataType::Int64,
-                true,
-            ));
-        }
-        for (i, field) in idx_fields {
-            let array = Arc::new(Int64Array::from_iter_values(std::iter::repeat_n(
-                *field, num_rows,
-            ))) as _;
-            columns.push(array);
-            fields.push(Field::new(
-                format!("v{i}"),
-                datatypes::arrow::datatypes::DataType::Int64,
-                true,
-            ));
-        }
+
+        // __primary_key column (encoded primary key as dictionary)
+        // Create encoded primary key
+        let converter = DensePrimaryKeyCodec::with_fields(
+            (0..idx_tags.len())
+                .map(|idx| {
+                    (
+                        idx as u32,
+                        SortField::new(ConcreteDataType::int64_datatype()),
+                    )
+                })
+                .collect(),
+        );
+        let encoded_pk = converter
+            .encode(idx_tags.iter().map(|(_, v)| ValueRef::Int64(*v)))
+            .unwrap();
+
+        // Create dictionary array for the encoded primary key
+        let pk_values: Vec<&[u8]> = std::iter::repeat(encoded_pk.as_slice())
+            .take(num_rows)
+            .collect();
+        let keys = datatypes::arrow::array::UInt32Array::from_iter(0..num_rows as u32);
+        let values = Arc::new(datatypes::arrow::array::BinaryArray::from_vec(pk_values));
+        let pk_array =
+            Arc::new(datatypes::arrow::array::DictionaryArray::try_new(keys, values).unwrap()) as _;
+        columns.push(pk_array);
+        fields.push(Field::new_dictionary(
+            PRIMARY_KEY_COLUMN_NAME,
+            datatypes::arrow::datatypes::DataType::UInt32,
+            datatypes::arrow::datatypes::DataType::Binary,
+            false,
+        ));
+
+        // __sequence column
         columns.push(Arc::new(UInt64Array::from_iter_values(0..num_rows as u64)) as _);
         fields.push(Field::new(
             SEQUENCE_COLUMN_NAME,
             datatypes::arrow::datatypes::DataType::UInt64,
             false,
         ));
+
+        // __op_type column
         columns.push(Arc::new(UInt8Array::from_iter_values(
             (0..num_rows).map(|_| OpType::Put as u8),
         )) as _);
@@ -647,8 +692,7 @@ mod tests {
 
         let schema = Arc::new(datatypes::arrow::datatypes::Schema::new(fields));
 
-        let rb = datatypes::arrow::record_batch::RecordBatch::try_new(schema, columns).unwrap();
-        PlainBatch::new(rb)
+        datatypes::arrow::record_batch::RecordBatch::try_new(schema, columns).unwrap()
     }
 
     #[test]
@@ -663,16 +707,16 @@ mod tests {
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!(
             [
-                (0, ConcreteDataType::timestamp_millisecond_datatype()),
                 (1, ConcreteDataType::int64_datatype()),
                 (2, ConcreteDataType::int64_datatype()),
                 (3, ConcreteDataType::int64_datatype()),
-                (4, ConcreteDataType::int64_datatype())
+                (4, ConcreteDataType::int64_datatype()),
+                (0, ConcreteDataType::timestamp_millisecond_datatype())
             ],
             mapper.as_plain().unwrap().batch_schema()
         );
 
-        let batch = new_plain_batch(Some(0), &[(1, 1), (2, 2)], &[(3, 3), (4, 4)], 3);
+        let batch = new_flat_batch(Some(0), &[(1, 1), (2, 2)], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.as_plain().unwrap().convert(&batch).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
@@ -704,7 +748,7 @@ mod tests {
             mapper.as_plain().unwrap().batch_schema()
         );
 
-        let batch = new_plain_batch(None, &[(1, 1)], &[(4, 4)], 3);
+        let batch = new_flat_batch(None, &[(1, 1)], &[(4, 4)], 3);
         let record_batch = mapper.as_plain().unwrap().convert(&batch).unwrap();
         let expect = "\
 +----+----+
@@ -732,7 +776,7 @@ mod tests {
         let plain_mapper = mapper.as_plain().unwrap();
         assert!(plain_mapper.batch_schema().is_empty());
 
-        let batch = new_plain_batch(Some(0), &[], &[], 3);
+        let batch = new_flat_batch(Some(0), &[], &[], 3);
         let record_batch = plain_mapper.convert(&batch).unwrap();
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(0, record_batch.num_columns());
