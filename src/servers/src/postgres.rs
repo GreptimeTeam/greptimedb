@@ -32,11 +32,9 @@ use std::sync::Arc;
 
 use ::auth::UserProviderRef;
 use derive_builder::Builder;
-use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::auth::StartupHandler;
+use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::ErrorHandler;
-use pgwire::api::{ClientInfo, PgWireServerHandlers};
+use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::context::Channel;
 use session::Session;

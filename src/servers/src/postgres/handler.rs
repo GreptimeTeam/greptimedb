@@ -30,11 +30,8 @@ use pgwire::api::results::{
     DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, QueryResponse, Response, Tag,
 };
 use pgwire::api::stmt::{QueryParser, StoredStatement};
-use pgwire::api::store::PortalStore;
-use pgwire::api::{ClientInfo, ClientPortalStore, ErrorHandler, Type};
+use pgwire::api::{ClientInfo, ErrorHandler, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use pgwire::messages::extendedquery::Execute;
-use pgwire::messages::simplequery::Query;
 use pgwire::messages::PgWireBackendMessage;
 use query::query_engine::DescribeResult;
 use session::context::QueryContextRef;
@@ -52,18 +49,6 @@ use crate::SqlPlan;
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
-    #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
-    async fn on_query<C>(&self, client: &mut C, query: Query) -> PgWireResult<()>
-    where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
-        C::Error: Debug,
-        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
-    {
-        let result = self._on_query(client, query).await;
-        println!("post processing...");
-        result
-    }
-
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
     async fn do_query<'a, C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response<'a>>>
     where
@@ -274,18 +259,6 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
         self.query_parser.clone()
-    }
-
-    async fn on_execute<C>(&self, client: &mut C, message: Execute) -> PgWireResult<()>
-    where
-        C: ClientInfo + ClientPortalStore + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
-        C::PortalStore: PortalStore<Statement = Self::Statement>,
-        C::Error: Debug,
-        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
-    {
-        let result = self._on_execute(client, message).await;
-        println!("post processing...");
-        result
     }
 
     async fn do_query<'a, C>(
