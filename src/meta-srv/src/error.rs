@@ -958,30 +958,30 @@ impl ErrorExt for Error {
             | Error::BatchGet { .. }
             | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
-            | Error::IsNotLeader { .. }
             | Error::InvalidHttpBody { .. }
             | Error::ExceededRetryLimit { .. }
             | Error::SendShutdownSignal { .. }
-            | Error::PusherNotFound { .. }
             | Error::PushMessage { .. }
             | Error::MailboxClosed { .. }
-            | Error::MailboxTimeout { .. }
             | Error::MailboxReceiver { .. }
-            | Error::MailboxChannelClosed { .. }
-            | Error::RetryLater { .. }
-            | Error::RetryLaterWithSource { .. }
             | Error::StartGrpc { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
-            | Error::PeerUnavailable { .. }
-            | Error::ExceededDeadline { .. }
             | Error::ChooseItems { .. }
             | Error::FlowStateHandler { .. }
             | Error::BuildWalOptionsAllocator { .. }
             | Error::BuildPartitionClient { .. }
-            | Error::BuildKafkaClient { .. }
-            | Error::DeleteRecords { .. }
-            | Error::PruneTaskAlreadyRunning { .. } => StatusCode::Internal,
+            | Error::BuildKafkaClient { .. } => StatusCode::Internal,
+
+            Error::DeleteRecords { .. }
+            | Error::PeerUnavailable { .. }
+            | Error::PusherNotFound { .. } => StatusCode::Unexpected,
+            Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,
+            Error::PruneTaskAlreadyRunning { .. }
+            | Error::RetryLater { .. }
+            | Error::MailboxChannelClosed { .. }
+            | Error::IsNotLeader { .. } => StatusCode::IllegalState,
+            Error::RetryLaterWithSource { source, .. } => source.status_code(),
 
             Error::Unsupported { .. } => StatusCode::Unsupported,
 
