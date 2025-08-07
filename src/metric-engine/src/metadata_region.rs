@@ -382,11 +382,11 @@ impl MetadataRegion {
         }
     }
 
-    async fn load_all(&self, region_id: RegionId) -> Result<RegionMetadataCacheEntry> {
+    async fn load_all(&self, metadata_region_id: RegionId) -> Result<RegionMetadataCacheEntry> {
         let scan_req = MetadataRegion::build_read_request();
         let record_batch_stream = self
             .mito
-            .scan_to_stream(region_id, scan_req)
+            .scan_to_stream(metadata_region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
 
@@ -407,12 +407,12 @@ impl MetadataRegion {
 
     async fn get_all_with_prefix(
         &self,
-        region_id: RegionId,
+        metadata_region_id: RegionId,
         prefix: &str,
     ) -> Result<HashMap<String, String>> {
         let region_metadata = self
             .cache
-            .try_get_with(region_id, self.load_all(region_id))
+            .try_get_with(metadata_region_id, self.load_all(metadata_region_id))
             .await
             .context(CacheGetSnafu)?;
 
