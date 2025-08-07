@@ -245,7 +245,7 @@ SELECT
 FROM tql_summary t
 JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
 WHERE l.host = 'host1'
-ORDER BY t.ts
+ORDER BY t.ts, l.host, avg_value
 LIMIT 5;
 
 +---------------------+-----------+-------+
@@ -255,7 +255,7 @@ LIMIT 5;
 | 1970-01-01T00:00:00 | host2     | host1 |
 | 1970-01-01T00:00:10 | host1     | host1 |
 | 1970-01-01T00:00:10 | host2     | host1 |
-| 1970-01-01T00:00:20 | host2     | host1 |
+| 1970-01-01T00:00:20 | host1     | host1 |
 +---------------------+-----------+-------+
 
 -- Error case - TQL ANALYZE should fail
