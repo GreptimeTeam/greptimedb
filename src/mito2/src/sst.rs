@@ -160,7 +160,7 @@ pub fn to_flat_sst_arrow_schema(
 }
 
 /// Fields for internal columns.
-fn internal_fields() -> [FieldRef; 3] {
+pub(crate) fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
         Arc::new(Field::new_dictionary(
