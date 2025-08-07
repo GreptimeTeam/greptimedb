@@ -84,14 +84,19 @@ struct RegionMetadataCacheEntry {
     size: usize,
 }
 
+/// The max size of the region metadata cache.
 const MAX_CACHE_SIZE: u64 = ReadableSize::mb(128).as_bytes();
+/// The TTL of the region metadata cache.
+const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 impl MetadataRegion {
     pub fn new(mito: MitoEngine) -> Self {
         let cache = Cache::builder()
             .max_capacity(MAX_CACHE_SIZE)
+            // Use the LRU eviction policy to minimize frequent mito scans.
+            // Recently accessed items are retained longer in the cache.
             .eviction_policy(EvictionPolicy::lru())
-            .time_to_live(Duration::from_secs(60))
+            .time_to_live(CACHE_TTL)
             .weigher(|_, v: &RegionMetadataCacheEntry| v.size as u32)
             .build();
         Self {
