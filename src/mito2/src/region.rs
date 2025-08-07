@@ -978,4 +978,110 @@ mod tests {
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
     }
+
+    #[tokio::test]
+    async fn test_staging_state_transitions() {
+        use common_test_util::temp_dir::create_temp_dir;
+        use object_store::services::Fs;
+        use object_store::ObjectStore;
+        use store_api::logstore::provider::Provider;
+        use store_api::region_request::PathType;
+
+        use crate::access_layer::AccessLayer;
+        use crate::region::{ManifestStats, MitoRegion};
+        use crate::sst::index::intermediate::IntermediateManager;
+        use crate::sst::index::puffin_manager::PuffinManagerFactory;
+        use crate::test_util::memtable_util::EmptyMemtableBuilder;
+        use crate::time_provider::StdTimeProvider;
+
+        let _env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let metadata = version_control.current().version.metadata.clone();
+
+        // Create MitoRegion for testing state transitions
+        let temp_dir = create_temp_dir("");
+        let path_str = temp_dir.path().display().to_string();
+        let fs_builder = Fs::default().root(&path_str);
+        let object_store = ObjectStore::new(fs_builder).unwrap().finish();
+
+        let index_aux_path = temp_dir.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let access_layer = Arc::new(AccessLayer::new(
+            "",
+            PathType::Bare,
+            object_store,
+            puffin_mgr,
+            intm_mgr,
+        ));
+
+        let manager = RegionManifestManager::new(
+            metadata.clone(),
+            RegionManifestOptions {
+                manifest_dir: "".to_string(),
+                object_store: access_layer.object_store().clone(),
+                compress_type: CompressionType::Uncompressed,
+                checkpoint_distance: 10,
+            },
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        ));
+
+        let region = MitoRegion {
+            region_id: metadata.region_id,
+            version_control,
+            access_layer,
+            manifest_ctx,
+            file_purger: crate::test_util::new_noop_file_purger(),
+            provider: Provider::noop_provider(),
+            last_flush_millis: Default::default(),
+            last_compaction_millis: Default::default(),
+            time_provider: Arc::new(StdTimeProvider),
+            topic_latest_entry_id: Default::default(),
+            memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
+            stats: ManifestStats::default(),
+        };
+
+        // Test initial state
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+        assert!(!region.is_staging());
+
+        // Test transition to staging
+        region.set_staging().unwrap();
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Staging)
+        );
+        assert!(region.is_staging());
+
+        // Test transition back to writable
+        region.exit_staging().unwrap();
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+        assert!(!region.is_staging());
+
+        // Test invalid transitions
+        assert!(region.set_staging().is_ok()); // Writable -> Staging should work
+        assert!(region.set_staging().is_err()); // Staging -> Staging should fail
+        assert!(region.exit_staging().is_ok()); // Staging -> Writable should work
+        assert!(region.exit_staging().is_err()); // Writable -> Writable should fail
+    }
 }

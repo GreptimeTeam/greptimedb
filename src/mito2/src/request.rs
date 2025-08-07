@@ -788,6 +788,10 @@ pub(crate) enum DdlRequest {
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
     Catchup(RegionCatchupRequest),
+    /// Enter staging mode.
+    EnterStaging,
+    /// Exit staging mode.
+    ExitStaging,
 }
 
 /// Sender and Ddl request.
