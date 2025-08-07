@@ -260,21 +260,20 @@ impl ErrorExt for Error {
             | Error::PutPoison { source, .. }
             | Error::DeletePoison { source, .. }
             | Error::GetPoison { source, .. }
-            | Error::CheckStatus { source, .. } => source.status_code(),
+            | Error::CheckStatus { source, .. }
+            | Error::RetryLater { source, .. } => source.status_code(),
 
             Error::ToJson { .. }
             | Error::DeleteState { .. }
             | Error::FromJson { .. }
-            | Error::WaitWatcher { .. }
-            | Error::RetryLater { .. }
-            | Error::RollbackProcedureRecovered { .. }
-            | Error::TooManyRunningProcedures { .. }
-            | Error::PoisonKeyNotDefined { .. } => StatusCode::Internal,
+            | Error::WaitWatcher { .. } => StatusCode::Internal,
 
             Error::RetryTimesExceeded { .. }
             | Error::RollbackTimesExceeded { .. }
             | Error::ManagerNotStart { .. }
-            | Error::ManagerPasued { .. } => StatusCode::IllegalState,
+            | Error::ManagerPasued { .. }
+            | Error::TooManyRunningProcedures { .. }
+            | Error::RollbackProcedureRecovered { .. } => StatusCode::IllegalState,
 
             Error::RollbackNotSupported { .. } => StatusCode::Unsupported,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
@@ -283,7 +282,8 @@ impl ErrorExt for Error {
             Error::ProcedurePanic { .. }
             | Error::ParseSegmentKey { .. }
             | Error::Unexpected { .. }
-            | &Error::ProcedureNotFound { .. } => StatusCode::Unexpected,
+            | &Error::ProcedureNotFound { .. }
+            | Error::PoisonKeyNotDefined { .. } => StatusCode::Unexpected,
             Error::ProcedureExec { source, .. } => source.status_code(),
             Error::StartRemoveOutdatedMetaTask { source, .. }
             | Error::StopRemoveOutdatedMetaTask { source, .. } => source.status_code(),
