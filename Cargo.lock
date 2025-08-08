@@ -2747,6 +2747,7 @@ dependencies = [
 name = "common-session"
 version = "0.17.0"
 dependencies = [
+ "serde",
  "strum 0.27.1",
 ]
 

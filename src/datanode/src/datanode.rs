@@ -705,6 +705,7 @@ async fn open_all_regions(
             follower_regions.len()
         );
         let mut region_requests = Vec::with_capacity(follower_regions.len());
+        let num_regions = follower_regions.len();
         for (region_id, engine, store_path, options) in follower_regions {
             let table_dir = table_dir(&store_path, region_id.table_id());
             region_requests.push((
