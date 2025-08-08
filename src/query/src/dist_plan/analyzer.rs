@@ -503,7 +503,7 @@ impl PlanRewriter {
                             // there are other physical partition columns that are not in logical table and part cols are empty
                             // so we need to add a placeholder for it to prevent certain optimization
                             // this is used to make sure the final partition columns(that optimizer see) are not empty
-                            // notice if originally partiton_cols is not empty, then there is no need to add this place holder,
+                            // notice if originally partition_cols is not empty, then there is no need to add this place holder,
                             // as subset of phy part cols can still be used for certain optimization, and it works as if
                             // those columns are always null
                             partition_cols
