@@ -36,6 +36,7 @@ use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::dist_plan::PredicateExtractor;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -150,7 +151,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name).await else {
+        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
             // no peers found, going to execute them locally
             return fallback(optimized_plan).await;
         };
@@ -184,7 +185,11 @@ impl DistExtensionPlanner {
         Ok(extractor.table_name)
     }
 
-    async fn get_regions(&self, table_name: &TableName) -> Result<Vec<RegionId>> {
+    async fn get_regions(
+        &self,
+        table_name: &TableName,
+        logical_plan: &LogicalPlan,
+    ) -> Result<Vec<RegionId>> {
         let table = self
             .catalog_manager
             .table(
@@ -198,7 +203,55 @@ impl DistExtensionPlanner {
             .with_context(|| TableNotFoundSnafu {
                 table: table_name.to_string(),
             })?;
-        Ok(table.table_info().region_ids())
+
+        let table_info = table.table_info();
+        let all_regions = table_info.region_ids();
+
+        // Extract partition columns
+        let partition_columns: Vec<String> = table_info
+            .meta
+            .partition_column_names()
+            .map(|s| s.to_string())
+            .collect();
+
+        if partition_columns.is_empty() {
+            // No partitioning, return all regions
+            return Ok(all_regions);
+        }
+
+        // Extract predicates from logical plan
+        let range_constraints =
+            match PredicateExtractor::extract_range_constraints(logical_plan, &partition_columns) {
+                Ok(constraints) => constraints,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to extract range constraints, using all regions: {}",
+                        err
+                    );
+                    return Ok(all_regions);
+                }
+            };
+
+        if range_constraints.is_empty() {
+            // No useful predicates, return all regions
+            common_telemetry::debug!(
+                "No range constraints found for partition columns, using all regions"
+            );
+            return Ok(all_regions);
+        }
+
+        // TODO: Implement region pruning based on partition rules
+        // For now, we skip the actual pruning and return all regions
+        // This is a safe fallback that maintains correctness while we work
+        // on getting proper access to partition metadata
+        common_telemetry::debug!(
+            "Region pruning for table {}: {} range constraints found, but pruning temporarily disabled - returning all {} regions",
+            table_name,
+            range_constraints.len(),
+            all_regions.len()
+        );
+
+        Ok(all_regions)
     }
 
     /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.
