@@ -23,10 +23,10 @@ use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::compute;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::cache::CacheStrategy;
-use crate::error::Result;
+use crate::error::{Result, UnexpectedSnafu};
 use crate::read::projection::ProjectionMapper;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
@@ -66,16 +66,21 @@ impl ConvertBatchStream {
     }
 
     fn convert(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
+        let mapper = self
+            .projection_mapper
+            .as_primary_key()
+            .context(UnexpectedSnafu {
+                reason: "Unexpected format",
+            })
+            .map_err(|e| BoxedError::new(e) as _)
+            .context(ExternalSnafu)?;
+
         match batch {
             ScanBatch::Normal(batch) => {
                 if batch.is_empty() {
-                    Ok(self.projection_mapper.empty_record_batch())
+                    Ok(mapper.empty_record_batch())
                 } else {
-                    // Safety: Currently only primary key format is used for batch conversion
-                    self.projection_mapper
-                        .as_primary_key()
-                        .unwrap()
-                        .convert(&batch, &self.cache_strategy)
+                    mapper.convert(&batch, &self.cache_strategy)
                 }
             }
             ScanBatch::Series(series) => {
@@ -83,16 +88,11 @@ impl ConvertBatchStream {
                 self.buffer.reserve(series.batches.len());
 
                 for batch in series.batches {
-                    // Safety: Currently only primary key format is used for batch conversion
-                    let record_batch = self
-                        .projection_mapper
-                        .as_primary_key()
-                        .unwrap()
-                        .convert(&batch, &self.cache_strategy)?;
+                    let record_batch = mapper.convert(&batch, &self.cache_strategy)?;
                     self.buffer.push(record_batch.into_df_record_batch());
                 }
 
-                let output_schema = self.projection_mapper.output_schema();
+                let output_schema = mapper.output_schema();
                 let record_batch =
                     compute::concat_batches(output_schema.arrow_schema(), &self.buffer)
                         .context(ArrowComputeSnafu)?;

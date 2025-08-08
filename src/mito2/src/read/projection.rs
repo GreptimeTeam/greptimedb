@@ -118,7 +118,8 @@ impl ProjectionMapper {
     }
 
     /// Returns an empty [RecordBatch].
-    pub(crate) fn empty_record_batch(&self) -> RecordBatch {
+    // TODO(yingwen): This is unused now. Use it after we finishing the flat format.
+    pub fn empty_record_batch(&self) -> RecordBatch {
         match self {
             ProjectionMapper::PrimaryKey(m) => m.empty_record_batch(),
             ProjectionMapper::Flat(m) => m.empty_record_batch(),

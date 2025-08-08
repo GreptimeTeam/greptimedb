@@ -227,8 +227,7 @@ impl UnorderedScan {
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
-                // Safety: Only primary key format use this scan method.
-                let mapper = stream_ctx.input.mapper.as_primary_key().unwrap();
+                let mapper = &stream_ctx.input.mapper;
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))

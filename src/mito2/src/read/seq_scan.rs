@@ -27,7 +27,7 @@ use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
-use snafu::ensure;
+use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
@@ -35,7 +35,7 @@ use store_api::region_engine::{
 use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
-use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
+use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu, UnexpectedSnafu};
 use crate::read::dedup::{DedupReader, LastNonNull, LastRow};
 use crate::read::last_row::LastRowReader;
 use crate::read::merge::MergeReaderBuilder;
@@ -274,8 +274,9 @@ impl SeqScan {
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
             ));
-            // Safety: Only primary key format use this scan method.
-            let mapper = stream_ctx.input.mapper.as_primary_key().unwrap();
+            let mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
+                reason: "Unexpected format",
+            })?;
             // Scans each part.
             for part_range in partition_ranges {
                 let mut sources = Vec::new();

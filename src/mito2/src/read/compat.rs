@@ -28,7 +28,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
-use crate::error::{CompatReaderSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu, Result};
+use crate::error::{
+    CompatReaderSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu, Result, UnexpectedSnafu,
+};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 
@@ -87,8 +89,10 @@ impl CompatBatch {
     pub(crate) fn new(mapper: &ProjectionMapper, reader_meta: RegionMetadataRef) -> Result<Self> {
         let rewrite_pk = may_rewrite_primary_key(mapper.metadata(), &reader_meta);
         let compat_pk = may_compat_primary_key(mapper.metadata(), &reader_meta)?;
-        // Safety: Only primary key format use this now.
-        let compat_fields = may_compat_fields(mapper.as_primary_key().unwrap(), &reader_meta)?;
+        let mapper = mapper.as_primary_key().context(UnexpectedSnafu {
+            reason: "Unexpected format",
+        })?;
+        let compat_fields = may_compat_fields(mapper, &reader_meta)?;
 
         Ok(Self {
             rewrite_pk,
