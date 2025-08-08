@@ -56,8 +56,8 @@ impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         let event_groups = aggregate_events_by_type(events);
 
-        for (_, events) in event_groups {
-            let opts = self.options(events[0].event_type());
+        for (event_type, events) in event_groups {
+            let opts = self.options(event_type);
             self.build_database_client()
                 .await?
                 .row_inserts_with_hints(build_row_inserts_request(&events)?, &opts.to_hints())

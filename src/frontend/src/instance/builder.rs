@@ -18,7 +18,7 @@ use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
-use common_event_recorder::{EventRecorderImpl, EventRecorderOptions};
+use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::key::flow::FlowMetadataManager;
@@ -195,14 +195,12 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let event_recorder = Arc::new(EventRecorderImpl::new(
-            Box::new(EventHandlerImpl::new(
-                inserter.clone(),
-                statement_executor.clone(),
-                self.options.slow_query.clone().unwrap_or_default(),
-            )),
-            EventRecorderOptions::default(),
-        ));
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            inserter.clone(),
+            statement_executor.clone(),
+            self.options.slow_query.ttl.clone(),
+            self.options.event_recorder.ttl.clone(),
+        ))));
 
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self
@@ -225,7 +223,7 @@ impl FrontendBuilder {
             limiter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
-            slow_query_options: self.options.slow_query.clone().unwrap_or_default(),
+            slow_query_options: self.options.slow_query.clone(),
         })
     }
 }

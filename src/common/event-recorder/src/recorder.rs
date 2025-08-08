@@ -280,9 +280,7 @@ pub struct EventRecorderImpl {
 }
 
 impl EventRecorderImpl {
-    pub fn new(event_handler: Box<dyn EventHandler>, opts: EventRecorderOptions) -> Self {
-        info!("Creating event recorder with options: {:?}", opts);
-
+    pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
         let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
         let cancel_token = CancellationToken::new();
 
@@ -491,10 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_recorder() {
-        let mut event_recorder = EventRecorderImpl::new(
-            Box::new(TestEventHandlerImpl {}),
-            EventRecorderOptions::default(),
-        );
+        let mut event_recorder = EventRecorderImpl::new(Box::new(TestEventHandlerImpl {}));
         event_recorder.record(Box::new(TestEvent {}));
 
         // Sleep for a while to let the event be sent to the event handler.
@@ -535,10 +530,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_recorder_should_panic() {
-        let mut event_recorder = EventRecorderImpl::new(
-            Box::new(TestEventHandlerImplShouldPanic {}),
-            EventRecorderOptions::default(),
-        );
+        let mut event_recorder =
+            EventRecorderImpl::new(Box::new(TestEventHandlerImplShouldPanic {}));
 
         event_recorder.record(Box::new(TestEvent {}));
 

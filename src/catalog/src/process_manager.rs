@@ -297,8 +297,8 @@ impl Debug for CancellableProcess {
 pub struct SlowQueryTimer {
     start: Instant,
     stmt: QueryStatement,
-    threshold: Option<Duration>,
-    sample_ratio: Option<f64>,
+    threshold: Duration,
+    sample_ratio: f64,
     record_type: SlowQueriesRecordType,
     recorder: EventRecorderRef,
 }
@@ -306,8 +306,8 @@ pub struct SlowQueryTimer {
 impl SlowQueryTimer {
     pub fn new(
         stmt: QueryStatement,
-        threshold: Option<Duration>,
-        sample_ratio: Option<f64>,
+        threshold: Duration,
+        sample_ratio: f64,
         record_type: SlowQueriesRecordType,
         recorder: EventRecorderRef,
     ) -> Self {
@@ -323,10 +323,10 @@ impl SlowQueryTimer {
 }
 
 impl SlowQueryTimer {
-    fn send_slow_query_event(&self, elapsed: Duration, threshold: Duration) {
+    fn send_slow_query_event(&self, elapsed: Duration) {
         let mut slow_query_event = SlowQueryEvent {
             cost: elapsed.as_millis() as u64,
-            threshold: threshold.as_millis() as u64,
+            threshold: self.threshold.as_millis() as u64,
             query: "".to_string(),
 
             // The following fields are only used for PromQL queries.
@@ -365,11 +365,12 @@ impl SlowQueryTimer {
         }
 
         match self.record_type {
+            // Send the slow query event to the event recorder to persist it as the system table.
             SlowQueriesRecordType::SystemTable => {
                 self.recorder.record(Box::new(slow_query_event));
             }
+            // Record the slow query in a specific logs file.
             SlowQueriesRecordType::Log => {
-                // Record the slow query in a specific logs file.
                 slow!(
                     cost = slow_query_event.cost,
                     threshold = slow_query_event.threshold,
@@ -387,21 +388,17 @@ impl SlowQueryTimer {
 
 impl Drop for SlowQueryTimer {
     fn drop(&mut self) {
-        if let Some(threshold) = self.threshold {
-            // Calculate the elaspsed duration since the timer is created.
-            let elapsed = self.start.elapsed();
-            if elapsed > threshold {
-                if let Some(ratio) = self.sample_ratio {
-                    // Only capture a portion of slow queries based on sample_ratio.
-                    // Generate a random number in [0, 1) and compare it with sample_ratio.
-                    if ratio >= 1.0 || random::<f64>() <= ratio {
-                        self.send_slow_query_event(elapsed, threshold);
-                    }
-                } else {
-                    // Captures all slow queries if sample_ratio is not set.
-                    self.send_slow_query_event(elapsed, threshold);
-                }
+        // Calculate the elaspsed duration since the timer is created.
+        let elapsed = self.start.elapsed();
+        if elapsed > self.threshold {
+            // Only capture a portion of slow queries based on sample_ratio.
+            // Generate a random number in [0, 1) and compare it with sample_ratio.
+            if self.sample_ratio >= 1.0 || random::<f64>() <= self.sample_ratio {
+                self.send_slow_query_event(elapsed);
             }
+        } else {
+            // Captures all slow queries if sample_ratio is not set.
+            self.send_slow_query_event(elapsed);
         }
     }
 }

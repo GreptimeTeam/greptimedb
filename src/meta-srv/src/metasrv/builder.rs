@@ -195,13 +195,10 @@ impl MetasrvBuilder {
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
 
         // Builds the event recorder to record important events and persist them as the system table.
-        let event_recorder = Arc::new(EventRecorderImpl::new(
-            Box::new(EventHandlerImpl::new(
-                meta_peer_client.clone(),
-                options.event_recorder.ttl.clone(),
-            )),
-            options.event_recorder.clone(),
-        ));
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            meta_peer_client.clone(),
+            options.event_recorder.ttl.clone(),
+        ))));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();

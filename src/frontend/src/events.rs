@@ -20,7 +20,6 @@ use common_event_recorder::{
     aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
 };
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
-use common_telemetry::logging::SlowQueryOptions;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use session::context::QueryContextBuilder;
@@ -31,7 +30,8 @@ use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 pub struct EventHandlerImpl {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
-    slow_query_options: SlowQueryOptions,
+    slow_query_ttl: String,
+    global_ttl: String,
 }
 
 impl EventHandlerImpl {
@@ -39,12 +39,14 @@ impl EventHandlerImpl {
     pub fn new(
         inserter: InserterRef,
         statement_executor: StatementExecutorRef,
-        slow_query_options: SlowQueryOptions,
+        slow_query_ttl: String,
+        global_ttl: String,
     ) -> Self {
         Self {
             inserter,
             statement_executor,
-            slow_query_options,
+            slow_query_ttl,
+            global_ttl,
         }
     }
 }
@@ -54,9 +56,8 @@ impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
         let event_groups = aggregate_events_by_type(events);
 
-        for (_, events) in event_groups {
-            let opts = self.options(events[0].event_type());
-
+        for (event_type, events) in event_groups {
+            let opts = self.options(event_type);
             let query_ctx = QueryContextBuilder::default()
                 .current_catalog(DEFAULT_CATALOG_NAME.to_string())
                 .current_schema(DEFAULT_PRIVATE_SCHEMA_NAME.to_string())
@@ -84,10 +85,13 @@ impl EventHandler for EventHandlerImpl {
     fn options(&self, event_type: &str) -> EventHandlerOptions {
         match event_type {
             SLOW_QUERY_EVENT_TYPE => EventHandlerOptions {
-                ttl: self.slow_query_options.ttl.clone().unwrap_or_default(),
+                ttl: self.slow_query_ttl.clone(),
                 append_mode: true,
             },
-            _ => EventHandlerOptions::default(),
+            _ => EventHandlerOptions {
+                ttl: self.global_ttl.clone(),
+                append_mode: true,
+            },
         }
     }
 }
