@@ -78,12 +78,6 @@ impl From<ColumnFilters> for Filters {
     }
 }
 
-impl From<Vec<ColumnFilters>> for Filters {
-    fn from(filters: Vec<ColumnFilters>) -> Self {
-        Filters::And(filters.into_iter().map(Filters::from).collect())
-    }
-}
-
 impl Filters {
     pub fn and<T: Into<Filters>>(other: Vec<T>) -> Filters {
         Filters::And(other.into_iter().map(Into::into).collect())
