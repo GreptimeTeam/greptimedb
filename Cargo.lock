@@ -7288,6 +7288,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
+name = "md5"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
+
+[[package]]
 name = "measure_time"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7493,6 +7499,7 @@ dependencies = [
  "lazy_static",
  "mito-codec",
  "mito2",
+ "moka",
  "mur3",
  "object-store",
  "prometheus",
@@ -8348,7 +8355,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "lazy_static",
- "md5",
+ "md5 0.7.0",
  "moka",
  "opendal",
  "prometheus",
@@ -9181,8 +9188,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.30.2"
-source = "git+https://github.com/sunng87/pgwire?rev=127573d997228cfb70c7699881c568eae8131270#127573d997228cfb70c7699881c568eae8131270"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "017b8b74f9e8c7aff0087d4ef2b91676a5509e8928100d6a3510fd472210feb5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9191,7 +9199,7 @@ dependencies = [
  "futures",
  "hex",
  "lazy-regex",
- "md5",
+ "md5 0.8.0",
  "postgres-types",
  "rand 0.9.0",
  "ring",

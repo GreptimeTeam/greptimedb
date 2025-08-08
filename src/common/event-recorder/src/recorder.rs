@@ -19,6 +19,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use api::v1::column_data_type_extension::TypeExt;
+use api::v1::helper::{tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -143,12 +144,7 @@ pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertR
         // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
         let event = &events[0];
         let mut schema = vec![
-            ColumnSchema {
-                column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Tag.into(),
-                ..Default::default()
-            },
+            tag_column_schema(EVENTS_TABLE_TYPE_COLUMN_NAME, ColumnDataType::String),
             ColumnSchema {
                 column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::Binary as i32,
@@ -158,12 +154,10 @@ pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertR
                 }),
                 ..Default::default()
             },
-            ColumnSchema {
-                column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::TimestampNanosecond.into(),
-                semantic_type: SemanticType::Timestamp.into(),
-                ..Default::default()
-            },
+            time_index_column_schema(
+                EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
+                ColumnDataType::TimestampNanosecond,
+            ),
         ];
         schema.extend(event.extra_schema());
 

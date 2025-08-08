@@ -73,17 +73,30 @@ SELECT count(*) FROM filtered;
 | 2        |
 +----------+
 
--- TODO(ruihang): The following tests are not supported yet, need to fix parser first.
 -- TQL CTE with complex PromQL expressions
--- WITH 
---     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
---     filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
--- SELECT sum(val) FROM filtered;
+WITH 
+    tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
+    filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
+SELECT sum(val) FROM filtered;
+
++-------------------+
+| sum(filtered.val) |
++-------------------+
+| 1.05              |
++-------------------+
+
 -- TQL CTE with aggregation functions
--- WITH tql_agg AS (
---     TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
--- )
--- SELECT avg(val) as avg_sum FROM tql_agg;
+WITH tql_agg(ts, summary) AS (
+    TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
+)
+SELECT round(avg(summary)) as avg_sum FROM tql_agg;
+
++---------+
+| avg_sum |
++---------+
+| 1.0     |
++---------+
+
 -- TQL CTE with label selectors
 WITH host_metrics AS (
     TQL EVAL (0, 40, '10s') labels{host="host1"}
@@ -208,6 +221,42 @@ SELECT count(*) as high_values FROM final;
 +-------------+
 | 3           |
 +-------------+
+
+-- TQL CTE with time-based functions
+WITH time_shifted AS (
+    TQL EVAL (0, 40, '10s') metric offset 50s
+)
+SELECT * FROM time_shifted;
+
++----+-----+
+| ts | val |
++----+-----+
++----+-----+
+
+-- TQL CTE with JOIN between TQL and regular table
+-- SQLNESS SORT_RESULT 3 1
+WITH tql_summary(ts, host, cpu) AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
+)
+SELECT 
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
+
++---------------------+-----------+-------+
+| ts                  | avg_value | host  |
++---------------------+-----------+-------+
+| 1970-01-01T00:00:00 | host1     | host1 |
+| 1970-01-01T00:00:00 | host2     | host1 |
+| 1970-01-01T00:00:10 | host1     | host1 |
+| 1970-01-01T00:00:10 | host2     | host1 |
+| 1970-01-01T00:00:20 | host1     | host1 |
++---------------------+-----------+-------+
 
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (

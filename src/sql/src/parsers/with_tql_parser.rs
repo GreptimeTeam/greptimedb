@@ -32,6 +32,7 @@ use crate::parsers::tql_parser;
 use crate::statements::query::Query;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
+use crate::util::location_to_index;
 
 /// Content of a CTE - either SQL or TQL
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -210,7 +211,7 @@ impl ParserContext<'_> {
         Ok(CteContent::Sql(sql_query))
     }
 
-    /// Parse TQL content within a CTE by reusing the standard TQL parser.
+    /// Parse TQL content within a CTE by extracting the raw query string.
     ///
     /// This method consumes all tokens that belong to the TQL statement and
     /// stops right **before** the closing `)` of the CTE so that the caller
@@ -218,8 +219,20 @@ impl ParserContext<'_> {
     ///
     /// Only `TQL EVAL` is supported inside CTEs.
     fn parse_tql_content_in_cte(&mut self) -> Result<Tql> {
-        let mut collected: Vec<Token> = Vec::new();
+        // Consume and get the position of the TQL keyword
+        let tql_token = self.parser.next_token();
+        if tql_token.token == Token::EOF {
+            return Err(error::InvalidSqlSnafu {
+                msg: "Unexpected end of input while parsing TQL inside CTE".to_string(),
+            }
+            .build());
+        }
+
+        let start_location = tql_token.span.start;
+
+        // Track parentheses depth to find the end of the CTE
         let mut paren_depth = 0usize;
+        let end_location;
 
         loop {
             let token_with_span = self.parser.peek_token();
@@ -234,10 +247,11 @@ impl ParserContext<'_> {
 
             // Stop **before** the closing parenthesis that ends the CTE
             if token_with_span.token == Token::RParen && paren_depth == 0 {
+                end_location = token_with_span.span.start;
                 break;
             }
 
-            // Consume the token and push it into our buffer
+            // Consume the token and track parentheses depth
             let consumed = self.parser.next_token();
             match consumed.token {
                 Token::LParen => paren_depth += 1,
@@ -248,20 +262,17 @@ impl ParserContext<'_> {
                 }
                 _ => {}
             }
-
-            collected.push(consumed.token);
         }
 
-        // Re-construct the SQL string of the isolated TQL statement.
-        let tql_string = collected
-            .iter()
-            .map(|tok| tok.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Extract the TQL query string directly from the original SQL
+        let start_index = location_to_index(self.sql, &start_location);
+        let end_index = location_to_index(self.sql, &end_location);
+        let tql_string = &self.sql[start_index..end_index];
+        let tql_string = tql_string.trim();
 
-        // Use the shared parser to turn it into a `Statement`.
+        // Parse the TQL string using the standard TQL parser
         let mut stmts = ParserContext::create_with_dialect(
-            &tql_string,
+            tql_string,
             &GreptimeDbDialect {},
             ParseOptions::default(),
         )?;
@@ -323,15 +334,14 @@ mod tests {
             CteContent::Tql(_)
         ));
 
-        // Check that the query includes the parentheses (spaces are added by tokenizer)
+        // Check that the query includes the parentheses
         if let CteContent::Tql(Tql::Eval(eval)) = &hybrid_cte.cte_tables[0].content {
             // Verify that complex nested parentheses are preserved correctly
-            assert!(eval
-                .query
-                .contains("sum ( rate ( http_requests_total [ 1 m ] ) )"));
-            assert!(eval.query.contains("( max ( cpu_usage ) * ( 1 + 0.5 ) )"));
+            // The new approach preserves original spacing, so no extra spaces between tokens
+            assert!(eval.query.contains("sum(rate(http_requests_total[1m]))"));
+            assert!(eval.query.contains("(max(cpu_usage) * (1 + 0.5))"));
             // Most importantly, verify the parentheses counting didn't break the parsing
-            assert!(eval.query.contains("+ ( max"));
+            assert!(eval.query.contains("+ (max"));
         }
     }
 
