@@ -39,7 +39,7 @@ use crate::error::{
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
-use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
+use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -168,7 +168,6 @@ impl CompatFlatBatch {
     /// - `actual_schema` is the actual batch schema of the input reader.
     pub(crate) fn may_new(
         mapper: &ProjectionMapper,
-        actual: &RegionMetadata,
         actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     ) -> Result<Option<Self>> {
         // FIXME(yingwen): Use batch_schema()
@@ -176,8 +175,6 @@ impl CompatFlatBatch {
         if expect_schema == actual_schema {
             return Ok(None);
         }
-
-        let same_key = Self::is_key_compatible(&mapper.metadata(), actual)?;
 
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
@@ -610,6 +607,8 @@ struct CompatFlatPrimaryKey {
     /// Original primary key codec.
     /// Some if we need to rewrite the primary key.
     old_codec: Option<Arc<dyn PrimaryKeyCodec>>,
+    /// Converter to append values to primary keys.
+    converter: Option<Arc<dyn PrimaryKeyCodec>>,
     /// Default values to append.
     values: Vec<(ColumnId, Value)>,
 }
@@ -627,9 +626,14 @@ impl CompatFlatPrimaryKey {
         // We need to append default values to the primary key.
         let to_add = &expect.primary_key[actual.primary_key.len()..];
         let mut values = Vec::with_capacity(to_add.len());
+        let mut fields = Vec::with_capacity(to_add.len());
         for column_id in to_add {
             // Safety: The id comes from expect region metadata.
             let column = expect.column_by_id(*column_id).unwrap();
+            fields.push((
+                *column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            ));
             let default_value = column
                 .column_schema
                 .create_default()
@@ -646,12 +650,23 @@ impl CompatFlatPrimaryKey {
                 })?;
             values.push((*column_id, default_value));
         }
+        
+        // Create converter to append values if needed.
+        let converter = if !values.is_empty() {
+            Some(build_primary_key_codec_with_fields(
+                expect.primary_key_encoding,
+                fields.into_iter(),
+            ))
+        } else {
+            None
+        };
 
         Ok(Self {
             codec,
             metadata: expect.clone(),
             actual_pk_num,
             old_codec,
+            converter,
             values,
         })
     }
@@ -659,21 +674,23 @@ impl CompatFlatPrimaryKey {
     /// Makes primary key of the `batch` compatible.
     ///
     /// Callers must ensure other columns except the `__primary_key` column is compatible.
-    fn compat(&self, mut batch: RecordBatch) -> Result<RecordBatch> {
+    fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
         if let Some(old_codec) = &self.old_codec {
+            // If we have different encoding, rewrite the whole primary key.
             return self.rewrite_key(old_codec.as_ref(), batch);
         }
 
-        todo!()
+        self.append_key(batch)
     }
 
     /// Rewrites the primary key of the `batch`.
+    /// It also appends the values to the primary key.
     fn rewrite_key(
         &self,
         old_codec: &dyn PrimaryKeyCodec,
         batch: RecordBatch,
     ) -> Result<RecordBatch> {
-        // FIXME(yingwen): Use primary_key_column_index().
+        // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
         let old_pk_dict_array = batch
             .column(batch.num_columns() - 3)
             .as_any()
@@ -727,6 +744,60 @@ impl CompatFlatPrimaryKey {
                 }
             }
         }
+        let new_pk_values_array = Arc::new(builder.finish());
+        let new_pk_dict_array =
+            PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
+
+        let mut columns = batch.columns().to_vec();
+        // FIXME(yingwen): Use primary_key_column_index().
+        columns[batch.num_columns() - 3] = Arc::new(new_pk_dict_array);
+
+        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+    }
+
+    /// Appends values to the primary key of the `batch`.
+    fn append_key(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        let Some(converter) = &self.converter else {
+            return Ok(batch);
+        };
+        
+        // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
+        let old_pk_dict_array = batch
+            .column(batch.num_columns() - 3)
+            .as_any()
+            .downcast_ref::<PrimaryKeyArray>()
+            .unwrap();
+        let old_pk_values_array = old_pk_dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        let mut builder = BinaryBuilder::with_capacity(
+            old_pk_values_array.len(),
+            old_pk_values_array.value_data().len() + converter.estimated_size().unwrap_or_default() * old_pk_values_array.len(),
+        );
+
+        // Binary buffer for the primary key.
+        let mut buffer = Vec::with_capacity(
+            old_pk_values_array.value_data().len() / old_pk_values_array.len() + converter.estimated_size().unwrap_or_default(),
+        );
+        
+        // Iterates the binary array and appends values to the primary key.
+        for value in old_pk_values_array.iter() {
+            let Some(old_pk) = value else {
+                builder.append_null();
+                continue;
+            };
+            
+            buffer.clear();
+            buffer.extend_from_slice(old_pk);
+            converter
+                .encode_values(&self.values, &mut buffer)
+                .context(EncodeSnafu)?;
+            
+            builder.append_value(&buffer);
+        }
+        
         let new_pk_values_array = Arc::new(builder.finish());
         let new_pk_dict_array =
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
