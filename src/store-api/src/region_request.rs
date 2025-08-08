@@ -227,6 +227,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
         .collect::<Result<Vec<_>>>()?;
     let region_id = RegionId::from(create.region_id);
     let table_dir = table_dir(&create.path, region_id.table_id());
+    let partition_expr_json = create.partition.as_ref().map(|p| p.expression.clone());
     Ok((
         region_id,
         RegionCreateRequest {
@@ -236,6 +237,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             options: create.options,
             table_dir,
             path_type: PathType::Bare,
+            partition_expr_json,
         },
     ))
 }
@@ -424,6 +426,9 @@ pub struct RegionCreateRequest {
     pub table_dir: String,
     /// Path type for generating paths
     pub path_type: PathType,
+    /// Partition expression JSON from table metadata. Set to empty string for a region without partition.
+    /// `Option` to keep compatibility with old clients.
+    pub partition_expr_json: Option<String>,
 }
 
 impl RegionCreateRequest {
@@ -1851,6 +1856,7 @@ mod tests {
             options: HashMap::new(),
             table_dir: "path".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
 
         assert!(create.validate().is_err());

@@ -486,6 +486,7 @@ impl MetricEngineInner {
             options,
             table_dir: request.table_dir.clone(),
             path_type: PathType::Metadata,
+            partition_expr_json: Some("".to_string()),
         }
     }
 
@@ -653,6 +654,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            partition_expr_json: Some("".to_string()),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
@@ -699,6 +701,7 @@ mod test {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
+            partition_expr_json: Some("".to_string()),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
@@ -731,6 +734,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            partition_expr_json: Some("".to_string()),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap_err();
 
@@ -783,6 +787,7 @@ mod test {
             options,
             table_dir: "/test_dir".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
 
         // set up

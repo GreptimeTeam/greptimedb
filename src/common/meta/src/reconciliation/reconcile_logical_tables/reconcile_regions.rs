@@ -120,6 +120,8 @@ impl ReconcileRegions {
 
             for region_number in region_numbers {
                 let region_id = RegionId::new(*table_id, *region_number);
+
+                // TODO(zhongzc): add partition definition to the request.
                 let one_region_request =
                     request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
                 requests.push(one_region_request);

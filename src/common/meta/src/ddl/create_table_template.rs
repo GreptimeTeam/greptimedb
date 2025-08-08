@@ -60,6 +60,7 @@ pub(crate) fn build_template_from_raw_table_info(
         primary_key: primary_key_indices.iter().map(|i| *i as u32).collect(),
         path: String::new(),
         options,
+        partition: None,
     };
 
     Ok(template)
@@ -121,6 +122,7 @@ pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<Crea
         primary_key,
         path: String::new(),
         options: create_table_expr.table_options.clone(),
+        partition: None,
     };
 
     Ok(template)
@@ -145,6 +147,7 @@ impl CreateRequestBuilder {
         &self.template
     }
 
+    // TODO(zhongzc): add partition definition as a parameter.
     pub fn build_one(
         &self,
         region_id: RegionId,

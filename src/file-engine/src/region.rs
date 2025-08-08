@@ -124,6 +124,7 @@ mod tests {
             options: new_test_options(),
             table_dir: "create_region_dir/".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
@@ -163,6 +164,7 @@ mod tests {
             options: new_test_options(),
             table_dir: region_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
@@ -203,6 +205,7 @@ mod tests {
             options: new_test_options(),
             table_dir: region_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
         let region_id = RegionId::new(1, 0);
 
