@@ -8,7 +8,7 @@ CREATE TABLE http_requests (
 
 Affected Rows: 0
 
-CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", http_requests);
 
 Affected Rows: 0
@@ -91,7 +91,7 @@ CREATE TABLE http_requests (
 
 Affected Rows: 0
 
-CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);
 
 Affected Rows: 0
