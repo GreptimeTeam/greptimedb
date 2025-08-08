@@ -55,6 +55,7 @@ select host, count(*) from logical_table_2 GROUP BY host ORDER BY host;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN 
 select host, count(*) from logical_table_2 GROUP BY host ORDER BY host;
 
@@ -65,6 +66,7 @@ select ts, count(*) from logical_table_2 GROUP BY ts ORDER BY ts;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN 
 select ts, count(*) from logical_table_2 GROUP BY ts ORDER BY ts;
 
@@ -96,6 +98,7 @@ select a, count(*) from logical_table_3 GROUP BY a ORDER BY a;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN 
 select a, count(*) from logical_table_3 GROUP BY a ORDER BY a;
 
@@ -123,6 +126,7 @@ select count(*) from logical_table_4;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN select count(*) from logical_table_4;
 
 -- check if step aggr push down works with non-part col
@@ -132,6 +136,7 @@ select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN 
 select ts, count(*) from logical_table_4 GROUP BY ts ORDER BY ts;
 
