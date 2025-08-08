@@ -42,7 +42,7 @@ where
         &mut self,
         region_id: RegionId,
     ) -> Result<AffectedRows> {
-        let region = self.regions.writable_region(region_id)?;
+        let region = self.regions.writable_non_staging_region(region_id)?;
 
         info!("Try to drop region: {}, worker: {}", region_id, self.id);
 
