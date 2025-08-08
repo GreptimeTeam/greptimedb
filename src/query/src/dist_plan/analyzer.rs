@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use common_catalog::consts::PHY_PART_COLS_NOT_IN_LOGICAL_TABLE;
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
@@ -28,6 +29,7 @@ use datafusion_expr::{col as col_fn, Expr, LogicalPlan, LogicalPlanBuilder, Subq
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerContext, OptimizerRule};
+use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -486,10 +488,27 @@ impl PlanRewriter {
                         let info = provider.table().table_info();
                         let partition_key_indices = info.meta.partition_key_indices.clone();
                         let schema = info.meta.schema.clone();
-                        let partition_cols = partition_key_indices
+                        let mut partition_cols = partition_key_indices
                             .into_iter()
                             .map(|index| schema.column_name_by_index(index).to_string())
                             .collect::<Vec<String>>();
+
+                        if info
+                            .meta
+                            .options
+                            .extra_options
+                            .contains_key(PHY_PART_COLS_NOT_IN_LOGICAL_TABLE)
+                            && partition_cols.is_empty()
+                        {
+                            // there are other physical partition columns that are not in logical table and part cols are empty
+                            // so we need to add a placeholder for it to prevent certain optimization
+                            // this is used to make sure the final partition columns(that optimizer see) are not empty
+                            // notice if originally partiton_cols is not empty, then there is no need to add this place holder,
+                            // as subset of phy part cols can still be used for certain optimization, and it works as if
+                            // those columns are always null
+                            partition_cols
+                                .push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
+                        }
                         self.partition_cols = Some(partition_cols);
                     }
                 }

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use common_catalog::consts::HIDDEN_TABLE_OPTIONS_PREFIX;
 use common_meta::SchemaOptions;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
@@ -62,6 +63,10 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
+        // Skip if prefix with hidden
+        if k.starts_with(HIDDEN_TABLE_OPTIONS_PREFIX) {
+            continue;
+        }
         options.insert(k.to_string(), v.to_string());
     }
     options

@@ -148,3 +148,13 @@ pub fn trace_services_table_name(trace_table_name: &str) -> String {
     format!("{}_services", trace_table_name)
 }
 // ---- End of special table and fields ----
+
+// ---- speical table options ----
+/// Prefix for hidden table options that don't show in `SHOW CREATE TABLE`.
+/// These options are used internally by GreptimeDB and should not be modified by users.
+pub const HIDDEN_TABLE_OPTIONS_PREFIX: &str = "__HIDDEN_";
+/// The physical partition columns that are not in the logical table.
+/// only used in kvbackend manager to store the physical partition columns that are not in the logical table.
+/// This is used to avoid the partition columns in the physical table that are not in the logical table to prevent certain optimizations, should only be set if not empty
+pub const PHY_PART_COLS_NOT_IN_LOGICAL_TABLE: &str = "__HIDDEN_phy_part_cols_not_in_logical_table";
+// ---- End of speical table options ----

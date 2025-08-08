@@ -96,11 +96,99 @@ select count(*) from logical_table_2;
 | 0        |
 +----------+
 
+select count(*) from logical_table_2 GROUP BY host;
+
+++
+++
+
+-- check if part col aggr push down works with only subset of phy part cols
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN 
+select count(*) from logical_table_2 GROUP BY host;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: count(*)_|
+|_|_Aggregate: groupBy=[[logical_table_2.host]], aggr=[[count(logical_table_2.ts) AS count(*)]]_|
+|_|_TableScan: logical_table_2_|
+|_| ]]_|
+| physical_plan | MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- create a logical table without partition columns on physical table
+create table logical_table_4 (
+    ts timestamp time index,
+    cpu double,
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
+Affected Rows: 0
+
+show create table logical_table_4;
+
++-----------------+-------------------------------------------------+
+| Table           | Create Table                                    |
++-----------------+-------------------------------------------------+
+| logical_table_4 | CREATE TABLE IF NOT EXISTS "logical_table_4" (  |
+|                 |   "cpu" DOUBLE NULL,                            |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                 |   TIME INDEX ("ts")                             |
+|                 | )                                               |
+|                 |                                                 |
+|                 | ENGINE=metric                                   |
+|                 | WITH(                                           |
+|                 |   on_physical_table = 'metric_engine_partition' |
+|                 | )                                               |
++-----------------+-------------------------------------------------+
+
+-- this should only return one row
+select count(*) from logical_table_4;
+
++----------+
+| count(*) |
++----------+
+| 0        |
++----------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN select count(*) from logical_table_4;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(logical_table_4.ts)) AS count(*)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__count_state(logical_table_4.ts)]]_|
+|_|_TableScan: logical_table_4_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[count(*)]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(*)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 drop table logical_table_2;
 
 Affected Rows: 0
 
 drop table logical_table_3;
+
+Affected Rows: 0
+
+drop table logical_table_4;
 
 Affected Rows: 0
 

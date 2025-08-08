@@ -19,7 +19,7 @@ use std::sync::{Arc, Weak};
 use async_stream::try_stream;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-    PG_CATALOG_NAME,
+    PG_CATALOG_NAME, PHY_PART_COLS_NOT_IN_LOGICAL_TABLE,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -50,8 +50,8 @@ use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
-    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
-    ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
+    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, JsonSnafu,
+    ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::information_schema::InformationSchemaTableFactoryRef;
@@ -132,6 +132,8 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
 
+            let mut phy_cols_not_in_logical_table = vec![];
+
             // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
@@ -148,13 +150,30 @@ impl KvBackendCatalogManager {
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
-                            new_table_info
+                            let idx = new_table_info
                                 .meta
                                 .schema
-                                .column_index_by_name(physical_column.name.as_str())
+                                .column_index_by_name(physical_column.name.as_str());
+                            if idx.is_none() {
+                                // not all part columns in physical table that are also in logical table
+                                phy_cols_not_in_logical_table.push(physical_column.name.clone());
+                            }
+
+                            idx
                         })
                 })
                 .collect();
+
+            if !phy_cols_not_in_logical_table.is_empty() {
+                new_table_info.meta.options.extra_options.insert(
+                    PHY_PART_COLS_NOT_IN_LOGICAL_TABLE.to_string(),
+                    serde_json::to_string(&phy_cols_not_in_logical_table)
+                        .with_context(|_| JsonSnafu {
+                            input: format!("{:?}", phy_cols_not_in_logical_table),
+                        })?
+                        .to_string(),
+                );
+            }
 
             let new_table = DistTable::table(Arc::new(new_table_info));
 

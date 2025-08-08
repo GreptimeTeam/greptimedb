@@ -55,8 +55,41 @@ show create table logical_table_2;
 
 select count(*) from logical_table_2;
 
+select count(*) from logical_table_2 GROUP BY host;
+
+-- check if part col aggr push down works with only subset of phy part cols
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN 
+select count(*) from logical_table_2 GROUP BY host;
+
+-- create a logical table without partition columns on physical table
+create table logical_table_4 (
+    ts timestamp time index,
+    cpu double,
+)
+engine = metric
+with (
+    on_physical_table = "metric_engine_partition",
+);
+
+show create table logical_table_4;
+
+-- this should only return one row
+select count(*) from logical_table_4;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN select count(*) from logical_table_4;
+
 drop table logical_table_2;
 
 drop table logical_table_3;
+
+drop table logical_table_4;
 
 drop table metric_engine_partition;
