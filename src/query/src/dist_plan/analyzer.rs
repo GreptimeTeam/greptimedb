@@ -29,7 +29,6 @@ use datafusion_expr::{col as col_fn, Expr, LogicalPlan, LogicalPlanBuilder, Subq
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use datafusion_optimizer::{OptimizerContext, OptimizerRule};
-use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
