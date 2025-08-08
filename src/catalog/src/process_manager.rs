@@ -396,9 +396,6 @@ impl Drop for SlowQueryTimer {
             if self.sample_ratio >= 1.0 || random::<f64>() <= self.sample_ratio {
                 self.send_slow_query_event(elapsed);
             }
-        } else {
-            // Captures all slow queries if sample_ratio is not set.
-            self.send_slow_query_event(elapsed);
         }
     }
 }
