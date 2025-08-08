@@ -132,7 +132,7 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
 
-            let mut phy_cols_not_in_logical_table = vec![];
+            let mut phy_part_cols_not_in_logical_table = vec![];
 
             // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
@@ -156,7 +156,8 @@ impl KvBackendCatalogManager {
                                 .column_index_by_name(physical_column.name.as_str());
                             if idx.is_none() {
                                 // not all part columns in physical table that are also in logical table
-                                phy_cols_not_in_logical_table.push(physical_column.name.clone());
+                                phy_part_cols_not_in_logical_table
+                                    .push(physical_column.name.clone());
                             }
 
                             idx
@@ -164,12 +165,12 @@ impl KvBackendCatalogManager {
                 })
                 .collect();
 
-            if !phy_cols_not_in_logical_table.is_empty() {
+            if !phy_part_cols_not_in_logical_table.is_empty() {
                 new_table_info.meta.options.extra_options.insert(
                     PHY_PART_COLS_NOT_IN_LOGICAL_TABLE.to_string(),
-                    serde_json::to_string(&phy_cols_not_in_logical_table)
+                    serde_json::to_string(&phy_part_cols_not_in_logical_table)
                         .with_context(|_| JsonSnafu {
-                            input: format!("{:?}", phy_cols_not_in_logical_table),
+                            input: format!("{:?}", phy_part_cols_not_in_logical_table),
                         })?
                         .to_string(),
                 );
