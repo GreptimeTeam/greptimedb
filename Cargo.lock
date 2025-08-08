@@ -7600,6 +7600,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "bytes",
+ "chrono",
  "common-base",
  "common-config",
  "common-datasource",
