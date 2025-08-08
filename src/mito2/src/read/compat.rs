@@ -159,6 +159,8 @@ pub(crate) struct CompatFlatBatch {
     index_or_defaults: Vec<IndexOrDefault>,
     /// Expected arrow schema.
     arrow_schema: SchemaRef,
+    /// Optional primary key adapter.
+    compat_pk: CompatFlatPrimaryKey,
 }
 
 impl CompatFlatBatch {
@@ -168,6 +170,7 @@ impl CompatFlatBatch {
     /// - `actual_schema` is the actual batch schema of the input reader.
     pub(crate) fn may_new(
         mapper: &ProjectionMapper,
+        actual: &RegionMetadataRef,
         actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     ) -> Result<Option<Self>> {
         // FIXME(yingwen): Use batch_schema()
@@ -226,10 +229,13 @@ impl CompatFlatBatch {
         }
         fields.extend_from_slice(&internal_fields());
 
+        let compat_pk = CompatFlatPrimaryKey::new(mapper.metadata(), actual)?;
+
         Ok(Some(Self {
             actual_schema,
             index_or_defaults,
             arrow_schema: Arc::new(Schema::new(fields)),
+            compat_pk,
         }))
     }
 
@@ -275,19 +281,6 @@ impl CompatFlatBatch {
         // Safety: We ensure all columns have the same length and the new batch should be valid.
         RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
     }
-
-    // /// Returns true if the primary key is compatible:
-    // ///
-    // /// - The primary key encoding is the same.
-    // /// - The primary key columns are compatible.
-    // ///
-    // /// It doesn't check the data type of the primary key column because the engine
-    // /// doesn't allow to change the data type of the primary key column.
-    // fn is_key_compatible(expect: &RegionMetadata, actual: &RegionMetadata) -> Result<bool> {
-    //     let compatible = has_same_primary_key(expect, actual)?
-    //         && expect.primary_key_encoding == actual.primary_key_encoding;
-    //     Ok(compatible)
-    // }
 }
 
 /// Helper to make primary key compatible.
@@ -398,11 +391,8 @@ fn may_rewrite_primary_key(
     })
 }
 
-/// Creates a [CompatPrimaryKey] if needed.
-fn may_compat_primary_key(
-    expect: &RegionMetadata,
-    actual: &RegionMetadata,
-) -> Result<Option<CompatPrimaryKey>> {
+/// Returns true if the actual primary keys is the same as expected.
+fn is_primary_key_same(expect: &RegionMetadata, actual: &RegionMetadata) -> Result<bool> {
     ensure!(
         actual.primary_key.len() <= expect.primary_key.len(),
         CompatReaderSnafu {
@@ -424,7 +414,16 @@ fn may_compat_primary_key(
             ),
         }
     );
-    if actual.primary_key.len() == expect.primary_key.len() {
+
+    Ok(actual.primary_key.len() == expect.primary_key.len())
+}
+
+/// Creates a [CompatPrimaryKey] if needed.
+fn may_compat_primary_key(
+    expect: &RegionMetadata,
+    actual: &RegionMetadata,
+) -> Result<Option<CompatPrimaryKey>> {
+    if is_primary_key_same(expect, actual)? {
         return Ok(None);
     }
 
@@ -596,98 +595,40 @@ impl RewritePrimaryKey {
     }
 }
 
-/// Helper to make primary key compatible for flat format.
-struct CompatFlatPrimaryKey {
-    /// Primary key encoder.
+/// Helper to rewrite primary key to another encoding for flat format.
+struct RewriteFlatPrimaryKey {
+    /// New primary key encoder.
     codec: Arc<dyn PrimaryKeyCodec>,
     /// Metadata of the expected region.
     metadata: RegionMetadataRef,
-    /// Actual number of primary key columns in the input.
-    actual_pk_num: usize,
     /// Original primary key codec.
-    /// Some if we need to rewrite the primary key.
-    old_codec: Option<Arc<dyn PrimaryKeyCodec>>,
-    /// Converter to append values to primary keys.
-    converter: Option<Arc<dyn PrimaryKeyCodec>>,
-    /// Default values to append.
-    values: Vec<(ColumnId, Value)>,
+    /// If we need to rewrite the primary key.
+    old_codec: Arc<dyn PrimaryKeyCodec>,
 }
 
-impl CompatFlatPrimaryKey {
-    fn new(expect: &RegionMetadataRef, actual: &RegionMetadataRef) -> Result<Self> {
-        let actual_pk_num = actual.primary_key.len();
-        let old_codec = if expect.primary_key_encoding != actual.primary_key_encoding {
-            Some(build_primary_key_codec(actual))
-        } else {
-            None
-        };
-        let codec = build_primary_key_codec(expect);
-
-        // We need to append default values to the primary key.
-        let to_add = &expect.primary_key[actual.primary_key.len()..];
-        let mut values = Vec::with_capacity(to_add.len());
-        let mut fields = Vec::with_capacity(to_add.len());
-        for column_id in to_add {
-            // Safety: The id comes from expect region metadata.
-            let column = expect.column_by_id(*column_id).unwrap();
-            fields.push((
-                *column_id,
-                SortField::new(column.column_schema.data_type.clone()),
-            ));
-            let default_value = column
-                .column_schema
-                .create_default()
-                .context(CreateDefaultSnafu {
-                    region_id: expect.region_id,
-                    column: &column.column_schema.name,
-                })?
-                .with_context(|| CompatReaderSnafu {
-                    region_id: expect.region_id,
-                    reason: format!(
-                        "key column {} does not have a default value to read",
-                        column.column_schema.name
-                    ),
-                })?;
-            values.push((*column_id, default_value));
+impl RewriteFlatPrimaryKey {
+    fn new(
+        expect: &RegionMetadataRef,
+        actual: &RegionMetadataRef,
+    ) -> Option<RewriteFlatPrimaryKey> {
+        if expect.primary_key_encoding == actual.primary_key_encoding {
+            return None;
         }
-        
-        // Create converter to append values if needed.
-        let converter = if !values.is_empty() {
-            Some(build_primary_key_codec_with_fields(
-                expect.primary_key_encoding,
-                fields.into_iter(),
-            ))
-        } else {
-            None
-        };
+        let codec = build_primary_key_codec(expect);
+        let old_codec = build_primary_key_codec(actual);
 
-        Ok(Self {
+        Some(RewriteFlatPrimaryKey {
             codec,
             metadata: expect.clone(),
-            actual_pk_num,
             old_codec,
-            converter,
-            values,
         })
-    }
-
-    /// Makes primary key of the `batch` compatible.
-    ///
-    /// Callers must ensure other columns except the `__primary_key` column is compatible.
-    fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
-        if let Some(old_codec) = &self.old_codec {
-            // If we have different encoding, rewrite the whole primary key.
-            return self.rewrite_key(old_codec.as_ref(), batch);
-        }
-
-        self.append_key(batch)
     }
 
     /// Rewrites the primary key of the `batch`.
     /// It also appends the values to the primary key.
     fn rewrite_key(
         &self,
-        old_codec: &dyn PrimaryKeyCodec,
+        append_values: &[(ColumnId, Value)],
         batch: RecordBatch,
     ) -> Result<RecordBatch> {
         // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
@@ -716,8 +657,8 @@ impl CompatFlatPrimaryKey {
                 continue;
             };
             // Decodes the old primary key.
-            let mut pk_values = old_codec.decode(old_pk).context(DecodeSnafu)?;
-            pk_values.extend(&self.values);
+            let mut pk_values = self.old_codec.decode(old_pk).context(DecodeSnafu)?;
+            pk_values.extend(append_values);
 
             buffer.clear();
             // Encodes the new primary key.
@@ -754,13 +695,91 @@ impl CompatFlatPrimaryKey {
 
         RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
+}
+
+/// Helper to make primary key compatible for flat format.
+struct CompatFlatPrimaryKey {
+    /// Primary key rewriter.
+    rewriter: Option<RewriteFlatPrimaryKey>,
+    /// Converter to append values to primary keys.
+    converter: Option<Arc<dyn PrimaryKeyCodec>>,
+    /// Default values to append.
+    values: Vec<(ColumnId, Value)>,
+}
+
+impl CompatFlatPrimaryKey {
+    fn new(expect: &RegionMetadataRef, actual: &RegionMetadataRef) -> Result<Self> {
+        let rewriter = RewriteFlatPrimaryKey::new(expect, actual);
+
+        if is_primary_key_same(expect, actual)? {
+            return Ok(Self {
+                rewriter,
+                converter: None,
+                values: Vec::new(),
+            });
+        }
+
+        // We need to append default values to the primary key.
+        let to_add = &expect.primary_key[actual.primary_key.len()..];
+        let mut values = Vec::with_capacity(to_add.len());
+        let mut fields = Vec::with_capacity(to_add.len());
+        for column_id in to_add {
+            // Safety: The id comes from expect region metadata.
+            let column = expect.column_by_id(*column_id).unwrap();
+            fields.push((
+                *column_id,
+                SortField::new(column.column_schema.data_type.clone()),
+            ));
+            let default_value = column
+                .column_schema
+                .create_default()
+                .context(CreateDefaultSnafu {
+                    region_id: expect.region_id,
+                    column: &column.column_schema.name,
+                })?
+                .with_context(|| CompatReaderSnafu {
+                    region_id: expect.region_id,
+                    reason: format!(
+                        "key column {} does not have a default value to read",
+                        column.column_schema.name
+                    ),
+                })?;
+            values.push((*column_id, default_value));
+        }
+        // is_primary_key_same() is false so we have different number of primary key columns.
+        debug_assert!(!fields.is_empty());
+
+        // Create converter to append values.
+        let converter = Some(build_primary_key_codec_with_fields(
+            expect.primary_key_encoding,
+            fields.into_iter(),
+        ));
+
+        Ok(Self {
+            rewriter,
+            converter,
+            values,
+        })
+    }
+
+    /// Makes primary key of the `batch` compatible.
+    ///
+    /// Callers must ensure other columns except the `__primary_key` column is compatible.
+    fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
+        if let Some(rewriter) = &self.rewriter {
+            // If we have different encoding, rewrite the whole primary key.
+            return rewriter.rewrite_key(&self.values, batch);
+        }
+
+        self.append_key(batch)
+    }
 
     /// Appends values to the primary key of the `batch`.
     fn append_key(&self, batch: RecordBatch) -> Result<RecordBatch> {
         let Some(converter) = &self.converter else {
             return Ok(batch);
         };
-        
+
         // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
         let old_pk_dict_array = batch
             .column(batch.num_columns() - 3)
@@ -774,30 +793,32 @@ impl CompatFlatPrimaryKey {
             .unwrap();
         let mut builder = BinaryBuilder::with_capacity(
             old_pk_values_array.len(),
-            old_pk_values_array.value_data().len() + converter.estimated_size().unwrap_or_default() * old_pk_values_array.len(),
+            old_pk_values_array.value_data().len()
+                + converter.estimated_size().unwrap_or_default() * old_pk_values_array.len(),
         );
 
         // Binary buffer for the primary key.
         let mut buffer = Vec::with_capacity(
-            old_pk_values_array.value_data().len() / old_pk_values_array.len() + converter.estimated_size().unwrap_or_default(),
+            old_pk_values_array.value_data().len() / old_pk_values_array.len()
+                + converter.estimated_size().unwrap_or_default(),
         );
-        
+
         // Iterates the binary array and appends values to the primary key.
         for value in old_pk_values_array.iter() {
             let Some(old_pk) = value else {
                 builder.append_null();
                 continue;
             };
-            
+
             buffer.clear();
             buffer.extend_from_slice(old_pk);
             converter
                 .encode_values(&self.values, &mut buffer)
                 .context(EncodeSnafu)?;
-            
+
             builder.append_value(&buffer);
         }
-        
+
         let new_pk_values_array = Arc::new(builder.finish());
         let new_pk_dict_array =
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
