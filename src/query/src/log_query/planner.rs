@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow_schema::Schema as ArrowSchema;
+use arrow_schema::{DataType, Schema as ArrowSchema};
 use catalog::table_source::DfTableSourceProvider;
 use common_function::utils::escape_like_pattern;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::utils::{conjunction, disjunction};
-use datafusion_expr::{col, lit, not, BinaryExpr, Expr, LogicalPlan, LogicalPlanBuilder, Operator};
+use datafusion_expr::{
+    col, lit, not, BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator,
+};
 use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
 use log_query::{BinaryOperator, LogExpr, LogQuery, TimeFilter};
@@ -193,7 +195,7 @@ impl LogQueryPlanner {
             .filters
             .iter()
             .filter_map(|filter| {
-                self.build_content_filter_with_expr(col_expr.clone(), filter)
+                self.build_content_filter_with_expr(col_expr.clone(), filter, &df_schema)
                     .transpose()
             })
             .try_collect::<Vec<_>>()?;
@@ -212,6 +214,7 @@ impl LogQueryPlanner {
         &self,
         col_expr: Expr,
         filter: &log_query::ContentFilter,
+        schema: &DFSchema,
     ) -> Result<Option<Expr>> {
         match filter {
             log_query::ContentFilter::Exact(value) => Ok(Some(
@@ -237,47 +240,44 @@ impl LogQueryPlanner {
                 start_inclusive,
                 end_inclusive,
             } => {
+                let start_literal = self.create_inferred_literal(start, &col_expr, schema);
+                let end_literal = self.create_inferred_literal(end, &col_expr, schema);
+
                 let left = if *start_inclusive {
-                    col_expr
-                        .clone()
-                        .gt_eq(lit(ScalarValue::Utf8(Some(start.clone()))))
+                    col_expr.clone().gt_eq(start_literal)
                 } else {
-                    col_expr
-                        .clone()
-                        .gt(lit(ScalarValue::Utf8(Some(start.clone()))))
+                    col_expr.clone().gt(start_literal)
                 };
                 let right = if *end_inclusive {
-                    col_expr.lt_eq(lit(ScalarValue::Utf8(Some(end.clone()))))
+                    col_expr.lt_eq(end_literal)
                 } else {
-                    col_expr.lt(lit(ScalarValue::Utf8(Some(end.clone()))))
+                    col_expr.lt(end_literal)
                 };
                 Ok(Some(left.and(right)))
             }
             log_query::ContentFilter::GreatThan { value, inclusive } => {
+                let value_literal = self.create_inferred_literal(value, &col_expr, schema);
                 let comparison_expr = if *inclusive {
-                    col_expr.gt_eq(lit(ScalarValue::Utf8(Some(value.clone()))))
+                    col_expr.gt_eq(value_literal)
                 } else {
-                    col_expr.gt(lit(ScalarValue::Utf8(Some(value.clone()))))
+                    col_expr.gt(value_literal)
                 };
                 Ok(Some(comparison_expr))
             }
             log_query::ContentFilter::LessThan { value, inclusive } => {
+                let value_literal = self.create_inferred_literal(value, &col_expr, schema);
                 if *inclusive {
-                    Ok(Some(
-                        col_expr.lt_eq(lit(ScalarValue::Utf8(Some(value.clone())))),
-                    ))
+                    Ok(Some(col_expr.lt_eq(value_literal)))
                 } else {
-                    Ok(Some(
-                        col_expr.lt(lit(ScalarValue::Utf8(Some(value.clone())))),
-                    ))
+                    Ok(Some(col_expr.lt(value_literal)))
                 }
             }
             log_query::ContentFilter::In(values) => {
-                let values: Vec<_> = values
+                let inferred_values: Vec<_> = values
                     .iter()
-                    .map(|v| lit(ScalarValue::Utf8(Some(v.clone()))))
+                    .map(|v| self.create_inferred_literal(v, &col_expr, schema))
                     .collect();
-                Ok(Some(col_expr.in_list(values, false)))
+                Ok(Some(col_expr.in_list(inferred_values, false)))
             }
             log_query::ContentFilter::IsTrue => Ok(Some(col_expr.is_true())),
             log_query::ContentFilter::IsFalse => Ok(Some(col_expr.is_false())),
@@ -285,7 +285,7 @@ impl LogQueryPlanner {
                 let exprs = filters
                     .iter()
                     .filter_map(|filter| {
-                        self.build_content_filter_with_expr(col_expr.clone(), filter)
+                        self.build_content_filter_with_expr(col_expr.clone(), filter, schema)
                             .transpose()
                     })
                     .try_collect::<Vec<_>>()?;
@@ -339,15 +339,7 @@ impl LogQueryPlanner {
             LogExpr::PositionalIdent(index) => Ok(col(schema.field(*index).name())),
             LogExpr::Literal(literal) => Ok(lit(ScalarValue::Utf8(Some(literal.clone())))),
             LogExpr::BinaryOp { left, op, right } => {
-                let left_expr = self.log_expr_to_df_expr(left, schema)?;
-                let right_expr = self.log_expr_to_df_expr(right, schema)?;
-                let df_op = Self::binary_operator_to_df_operator(op);
-
-                Ok(Expr::BinaryExpr(BinaryExpr {
-                    left: Box::new(left_expr),
-                    op: df_op,
-                    right: Box::new(right_expr),
-                }))
+                self.build_binary_expr_with_type_inference(left, op, right, schema)
             }
             LogExpr::ScalarFunc { name, args, alias } => {
                 self.build_scalar_func(schema, name, args, alias)
@@ -407,6 +399,150 @@ impl LogQueryPlanner {
             BinaryOperator::Modulo => Operator::Modulo,
             BinaryOperator::And => Operator::And,
             BinaryOperator::Or => Operator::Or,
+        }
+    }
+
+    /// Get the DataType of a DataFusion expression using schema information.
+    fn get_expr_data_type(&self, expr: &Expr, schema: &DFSchema) -> Option<DataType> {
+        expr.get_type(schema).ok()
+    }
+
+    /// Parse a string literal to the appropriate ScalarValue based on target DataType.
+    /// Falls back to UTF8 if parsing fails or type is not supported.
+    fn infer_literal_scalar_value(&self, literal: &str, target_type: &DataType) -> ScalarValue {
+        match target_type {
+            DataType::Boolean => {
+                match literal.to_lowercase().as_str() {
+                    "true" | "1" => ScalarValue::Boolean(Some(true)),
+                    "false" | "0" => ScalarValue::Boolean(Some(false)),
+                    _ => ScalarValue::Utf8(Some(literal.to_string())), // Fallback
+                }
+            }
+            DataType::Int8 => literal
+                .parse::<i8>()
+                .map(|v| ScalarValue::Int8(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::Int16 => literal
+                .parse::<i16>()
+                .map(|v| ScalarValue::Int16(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::Int32 => literal
+                .parse::<i32>()
+                .map(|v| ScalarValue::Int32(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::Int64 => literal
+                .parse::<i64>()
+                .map(|v| ScalarValue::Int64(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::UInt8 => literal
+                .parse::<u8>()
+                .map(|v| ScalarValue::UInt8(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::UInt16 => literal
+                .parse::<u16>()
+                .map(|v| ScalarValue::UInt16(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::UInt32 => literal
+                .parse::<u32>()
+                .map(|v| ScalarValue::UInt32(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::UInt64 => literal
+                .parse::<u64>()
+                .map(|v| ScalarValue::UInt64(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::Float32 => literal
+                .parse::<f32>()
+                .map(|v| ScalarValue::Float32(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            DataType::Float64 => literal
+                .parse::<f64>()
+                .map(|v| ScalarValue::Float64(Some(v)))
+                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
+            // For string types and unsupported types, use UTF8
+            _ => ScalarValue::Utf8(Some(literal.to_string())),
+        }
+    }
+
+    /// Build binary expression with type inference for literals.
+    /// Attempts to infer literal types from the non-literal operand's type.
+    fn build_binary_expr_with_type_inference(
+        &self,
+        left: &LogExpr,
+        op: &BinaryOperator,
+        right: &LogExpr,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        // Convert both sides to DataFusion expressions first
+        let mut left_expr = self.log_expr_to_df_expr_without_inference(left, schema)?;
+        let mut right_expr = self.log_expr_to_df_expr_without_inference(right, schema)?;
+
+        // Try to infer literal types based on the other operand
+        match (left, right) {
+            (LogExpr::Literal(literal), _) => {
+                // Left is literal, try to infer from right
+                if let Some(right_type) = self.get_expr_data_type(&right_expr, schema) {
+                    let inferred_scalar = self.infer_literal_scalar_value(literal, &right_type);
+                    left_expr = lit(inferred_scalar);
+                }
+            }
+            (_, LogExpr::Literal(literal)) => {
+                // Right is literal, try to infer from left
+                if let Some(left_type) = self.get_expr_data_type(&left_expr, schema) {
+                    let inferred_scalar = self.infer_literal_scalar_value(literal, &left_type);
+                    right_expr = lit(inferred_scalar);
+                }
+            }
+            _ => {
+                // Neither is a simple literal, no type inference needed
+            }
+        }
+
+        let df_op = Self::binary_operator_to_df_operator(op);
+        Ok(Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left_expr),
+            op: df_op,
+            right: Box::new(right_expr),
+        }))
+    }
+
+    /// Converts a LogExpr to DataFusion Expr without type inference (used internally).
+    fn log_expr_to_df_expr_without_inference(
+        &self,
+        expr: &LogExpr,
+        schema: &DFSchema,
+    ) -> Result<Expr> {
+        match expr {
+            LogExpr::NamedIdent(name) => Ok(col(name)),
+            LogExpr::PositionalIdent(index) => Ok(col(schema.field(*index).name())),
+            LogExpr::Literal(literal) => Ok(lit(ScalarValue::Utf8(Some(literal.clone())))),
+            LogExpr::BinaryOp { left, op, right } => {
+                // For nested binary operations, still use type inference
+                self.build_binary_expr_with_type_inference(left, op, right, schema)
+            }
+            LogExpr::ScalarFunc { name, args, alias } => {
+                self.build_scalar_func(schema, name, args, alias)
+            }
+            LogExpr::Alias { expr, alias } => {
+                let df_expr = self.log_expr_to_df_expr_without_inference(expr, schema)?;
+                Ok(df_expr.alias(alias))
+            }
+            LogExpr::AggrFunc { .. } | LogExpr::Filter { .. } | LogExpr::Decompose { .. } => {
+                UnexpectedLogExprSnafu {
+                    expr: expr.clone(),
+                    expected: "not a typical expression",
+                }
+                .fail()
+            }
+        }
+    }
+
+    /// Create a type-inferred literal based on the provided expression's type.
+    /// Falls back to UTF8 if type inference fails.
+    fn create_inferred_literal(&self, value: &str, expr: &Expr, schema: &DFSchema) -> Expr {
+        if let Some(expr_type) = self.get_expr_data_type(expr, schema) {
+            lit(self.infer_literal_scalar_value(value, &expr_type))
+        } else {
+            lit(ScalarValue::Utf8(Some(value.to_string())))
         }
     }
 
@@ -532,15 +668,69 @@ mod tests {
         Arc::new(Schema::new(columns))
     }
 
+    fn mock_schema_with_typed_columns() -> SchemaRef {
+        let columns = vec![
+            ColumnSchema::new(
+                "message".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "is_active".to_string(),
+                ConcreteDataType::boolean_datatype(),
+                true,
+            ),
+            // Add more typed columns for comprehensive testing
+            ColumnSchema::new("age".to_string(), ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new(
+                "score".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "count".to_string(),
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
+        ];
+
+        Arc::new(Schema::new(columns))
+    }
+
     /// Registers table under `greptime`, with `message`, `timestamp`, `host`, and `is_active` columns.
     async fn build_test_table_provider(
         table_name_tuples: &[(String, String)],
     ) -> DfTableSourceProvider {
+        build_test_table_provider_with_schema(table_name_tuples, mock_schema()).await
+    }
+
+    /// Registers table under `greptime`, with typed columns for type inference tests.
+    async fn build_test_table_provider_with_typed_columns(
+        table_name_tuples: &[(String, String)],
+    ) -> DfTableSourceProvider {
+        build_test_table_provider_with_schema(table_name_tuples, mock_schema_with_typed_columns())
+            .await
+    }
+
+    async fn build_test_table_provider_with_schema(
+        table_name_tuples: &[(String, String)],
+        schema: SchemaRef,
+    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
         for (schema_name, table_name) in table_name_tuples {
-            let schema = mock_schema();
             let table_meta = TableMetaBuilder::empty()
-                .schema(schema)
+                .schema(schema.clone())
                 .primary_key_indices(vec![2])
                 .value_indices(vec![0])
                 .next_column_id(1024)
@@ -1198,8 +1388,213 @@ mod tests {
         assert!(expr_option.is_some());
 
         let expr = expr_option.unwrap();
-        let expected_expr_string = "character_length(message) > Utf8(\"100\") IS TRUE";
+        let expected_expr_string = "character_length(message) > Int32(100) IS TRUE";
 
         assert_eq!(format!("{}", expr), expected_expr_string);
+    }
+
+    #[tokio::test]
+    async fn test_type_inference_integer_comparison() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test GreaterThan with integer column and string literal
+        let column_filter = ColumnFilters {
+            expr: Box::new(LogExpr::NamedIdent("age".to_string())),
+            filters: vec![ContentFilter::GreatThan {
+                value: "25".to_string(),
+                inclusive: false,
+            }],
+        };
+
+        let expr_option = planner
+            .build_column_filter(&column_filter, schema.arrow_schema())
+            .unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        // Should infer "25" as Int32(25) since age is an int32 column
+        let expected_expr = col("age").gt(lit(ScalarValue::Int32(Some(25))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_type_inference_float_comparison() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test Between with float column and string literals
+        let column_filter = ColumnFilters {
+            expr: Box::new(LogExpr::NamedIdent("score".to_string())),
+            filters: vec![ContentFilter::Between {
+                start: "75.5".to_string(),
+                end: "100.0".to_string(),
+                start_inclusive: true,
+                end_inclusive: false,
+            }],
+        };
+
+        let expr_option = planner
+            .build_column_filter(&column_filter, schema.arrow_schema())
+            .unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        // Should infer literals as Float64 since score is a float64 column
+        let expected_expr = col("score")
+            .gt_eq(lit(ScalarValue::Float64(Some(75.5))))
+            .and(col("score").lt(lit(ScalarValue::Float64(Some(100.0)))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_type_inference_boolean_comparison() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test In filter with boolean column and string literals
+        let column_filter = ColumnFilters {
+            expr: Box::new(LogExpr::NamedIdent("is_active".to_string())),
+            filters: vec![ContentFilter::In(vec![
+                "true".to_string(),
+                "1".to_string(),
+                "false".to_string(),
+            ])],
+        };
+
+        let expr_option = planner
+            .build_column_filter(&column_filter, schema.arrow_schema())
+            .unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        // Should infer string literals as boolean values
+        let expected_expr = col("is_active").in_list(
+            vec![
+                lit(ScalarValue::Boolean(Some(true))),
+                lit(ScalarValue::Boolean(Some(true))),
+                lit(ScalarValue::Boolean(Some(false))),
+            ],
+            false,
+        );
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_binary_operation_type_inference() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test binary operation with integer column and string literal
+        let df_schema = DFSchema::try_from(schema.arrow_schema().clone()).unwrap();
+        let binary_expr = LogExpr::BinaryOp {
+            left: Box::new(LogExpr::NamedIdent("age".to_string())),
+            op: BinaryOperator::Gt,
+            right: Box::new(LogExpr::Literal("30".to_string())),
+        };
+
+        let expr = planner
+            .log_expr_to_df_expr(&binary_expr, &df_schema)
+            .unwrap();
+
+        // Should create age > Int32(30) instead of age > Utf8("30")
+        let expected_expr = Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(col("age")),
+            op: Operator::Gt,
+            right: Box::new(lit(ScalarValue::Int32(Some(30)))),
+        });
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_fallback_to_utf8_on_parse_failure() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test with invalid number format - should fallback to UTF8
+        let column_filter = ColumnFilters {
+            expr: Box::new(LogExpr::NamedIdent("age".to_string())),
+            filters: vec![ContentFilter::GreatThan {
+                value: "not_a_number".to_string(),
+                inclusive: false,
+            }],
+        };
+
+        let expr_option = planner
+            .build_column_filter(&column_filter, schema.arrow_schema())
+            .unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        // Should fallback to UTF8 since "not_a_number" can't be parsed as int32
+        let expected_expr = col("age").gt(lit(ScalarValue::Utf8(Some("not_a_number".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
+    }
+
+    #[tokio::test]
+    async fn test_string_column_remains_utf8() {
+        let table_provider = build_test_table_provider_with_typed_columns(&[(
+            "public".to_string(),
+            "test_table".to_string(),
+        )])
+        .await;
+        let session_state = SessionStateBuilder::new().with_default_features().build();
+        let planner = LogQueryPlanner::new(table_provider, session_state);
+        let schema = mock_schema_with_typed_columns();
+
+        // Test with string column - should remain UTF8 even if value looks like a number
+        let column_filter = ColumnFilters {
+            expr: Box::new(LogExpr::NamedIdent("message".to_string())),
+            filters: vec![ContentFilter::GreatThan {
+                value: "123".to_string(),
+                inclusive: false,
+            }],
+        };
+
+        let expr_option = planner
+            .build_column_filter(&column_filter, schema.arrow_schema())
+            .unwrap();
+        assert!(expr_option.is_some());
+
+        let expr = expr_option.unwrap();
+        // Should remain UTF8 since message is a string column
+        let expected_expr = col("message").gt(lit(ScalarValue::Utf8(Some("123".to_string()))));
+
+        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
     }
 }
