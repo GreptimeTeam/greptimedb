@@ -244,6 +244,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to read TLS file: {}", file))]
+    CannotReadTlsFile {
+        file: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: String,
@@ -947,6 +956,7 @@ impl ErrorExt for Error {
         match self {
             Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
+            | Error::CannotReadTlsFile { .. }
             | Error::TcpBind { .. }
             | Error::TcpIncoming { .. }
             | Error::SerializeToJson { .. }
