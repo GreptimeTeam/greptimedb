@@ -381,7 +381,9 @@ impl Helper {
             | ArrowDataType::Utf8View
             | ArrowDataType::ListView(_)
             | ArrowDataType::LargeListView(_)
-            | ArrowDataType::Date64 => {
+            | ArrowDataType::Date64
+            | ArrowDataType::Decimal32(_, _)
+            | ArrowDataType::Decimal64(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: array.as_ref().data_type().clone(),
                 }

@@ -328,7 +328,9 @@ impl DisplayAs for SeriesScan {
             self.stream_ctx.input.mapper.metadata().region_id
         )?;
         match t {
-            DisplayFormatType::Default => self.stream_ctx.format_for_explain(false, f),
+            DisplayFormatType::Default | DisplayFormatType::TreeRender => {
+                self.stream_ctx.format_for_explain(false, f)
+            }
             DisplayFormatType::Verbose => {
                 self.stream_ctx.format_for_explain(true, f)?;
                 self.metrics_list.format_verbose_metrics(f)

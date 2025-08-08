@@ -95,6 +95,7 @@ http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 opentelemetry-proto.workspace = true
+otel-arrow-rust.workspace = true
 partition.workspace = true
 paste.workspace = true
 pipeline.workspace = true

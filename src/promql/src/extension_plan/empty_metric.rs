@@ -281,7 +281,9 @@ impl ExecutionPlan for EmptyMetricExec {
 impl DisplayAs for EmptyMetricExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => write!(
                 f,
                 "EmptyMetric: range=[{}..{}], interval=[{}]",
                 self.start, self.end, self.interval,
@@ -328,7 +330,7 @@ impl Stream for EmptyMetricStream {
             let num_rows = time_array.len();
             let input_record_batch =
                 RecordBatch::try_new(self.time_index_schema.clone(), vec![time_array.clone()])
-                    .map_err(|e| DataFusionError::ArrowError(e, None))?;
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let mut result_arrays: Vec<ArrayRef> = vec![time_array];
 
             // evaluate the field expr and get the result
@@ -342,7 +344,7 @@ impl Stream for EmptyMetricStream {
 
             // assemble the output record batch
             let batch = RecordBatch::try_new(self.result_schema.clone(), result_arrays)
-                .map_err(|e| DataFusionError::ArrowError(e, None));
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
 
             Poll::Ready(Some(batch))
         } else {

@@ -17,6 +17,7 @@
 #![feature(try_blocks)]
 #![feature(stmt_expr_attributes)]
 #![feature(iterator_try_collect)]
+#![feature(box_patterns)]
 
 mod analyze;
 pub mod dataframe;

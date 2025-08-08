@@ -40,9 +40,7 @@ use datafusion::physical_plan::{
 use datafusion_common::{Column as ColumnExpr, Result};
 use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{
-    Distribution, EquivalenceProperties, LexOrdering, PhysicalSortExpr,
-};
+use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -209,10 +207,7 @@ impl MergeScanExec {
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            EquivalenceProperties::new_with_orderings(
-                arrow_schema.clone(),
-                &[LexOrdering::new(lex_ordering)],
-            )
+            EquivalenceProperties::new_with_orderings(arrow_schema.clone(), vec![lex_ordering])
         } else {
             EquivalenceProperties::new(arrow_schema.clone())
         };
@@ -609,6 +604,12 @@ impl ExecutionPlan for MergeScanExec {
 
     fn name(&self) -> &str {
         "MergeScanExec"
+    }
+
+    // bypass DataFusionError:
+    // Context("EnforceDistribution", Internal("YieldStreamExec requires exactly one child"))
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
     }
 }
 

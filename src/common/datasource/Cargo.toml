@@ -25,19 +25,19 @@ common-error.workspace = true
 common-macro.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
+common-telemetry.workspace = true
 datafusion.workspace = true
+datafusion-orc.workspace = true
 datatypes.workspace = true
-derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
 object_store_opendal.workspace = true
-orc-rust = { git = "https://github.com/datafusion-contrib/orc-rust", rev = "3134cab581a8e91b942d6a23aca2916ea965f6bb", default-features = false, features = [
+orc-rust = { git = "https://github.com/GreptimeTeam/orc-rust", rev = "d1690a06eec754e97beecf2cf7690267fc818726", default-features = false, features = [
     "async",
 ] }
 parquet.workspace = true
 paste.workspace = true
-rand.workspace = true
 regex = "1.7"
 serde.workspace = true
 snafu.workspace = true
@@ -47,6 +47,4 @@ tokio-util.workspace = true
 url = "2.3"
 
 [dev-dependencies]
-common-telemetry.workspace = true
 common-test-util.workspace = true
-uuid.workspace = true

@@ -87,7 +87,8 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         let expr = match c {
             ColumnDefaultConstraint::Value(v) => Expr::Value(
                 statements::value_to_sql_value(v)
-                    .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?,
+                    .with_context(|_| ConvertSqlValueSnafu { value: v.clone() })?
+                    .into(),
             ),
             ColumnDefaultConstraint::Function(expr) => {
                 ParserContext::parse_function(expr, &GreptimeDbDialect {}).context(SqlSnafu)?
@@ -165,7 +166,6 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
                 .with_context(|_| ConvertSqlTypeSnafu {
                     datatype: column_schema.data_type.clone(),
                 })?,
-            collation: None,
             options,
         },
         extensions,
@@ -241,7 +241,7 @@ pub fn create_table_stmt(
     Ok(CreateTable {
         if_not_exists: true,
         table_id: table_info.ident.table_id,
-        name: ObjectName(vec![Ident::with_quote(quote_style, table_name)]),
+        name: ObjectName::from(vec![Ident::with_quote(quote_style, table_name)]),
         columns,
         engine: table_meta.engine.clone(),
         constraints,

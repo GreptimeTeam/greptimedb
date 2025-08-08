@@ -84,6 +84,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use snafu::prelude::*;
+use sql::ast::ObjectNamePartExt;
 use sql::dialect::Dialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::copy::{CopyDatabase, CopyTable};
@@ -974,9 +975,9 @@ fn validate_database(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<(
     let (catalog, schema) = match &name.0[..] {
         [schema] => (
             query_ctx.current_catalog().to_string(),
-            schema.value.clone(),
+            schema.to_string_unquoted(),
         ),
-        [catalog, schema] => (catalog.value.clone(), schema.value.clone()),
+        [catalog, schema] => (catalog.to_string_unquoted(), schema.to_string_unquoted()),
         _ => InvalidSqlSnafu {
             err_msg: format!(
                 "expect database name to be <catalog>.<schema> or <schema>, actual: {name}",

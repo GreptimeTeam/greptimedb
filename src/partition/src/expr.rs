@@ -218,13 +218,13 @@ impl PartitionExpr {
         // Otherwise it will be rejected by the parser.
         let lhs = match &*self.lhs {
             Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap()),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
             Operand::Expr(e) => e.to_parser_expr(),
         };
 
         let rhs = match &*self.rhs {
             Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap()),
+            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
             Operand::Expr(e) => e.to_parser_expr(),
         };
 

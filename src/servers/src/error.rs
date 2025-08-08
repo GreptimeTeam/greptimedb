@@ -108,12 +108,6 @@ pub enum Error {
         error: std::io::Error,
     },
 
-    #[snafu(display("Failed to convert to TcpIncoming"))]
-    TcpIncoming {
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     #[snafu(display("Failed to execute query"))]
     ExecuteQuery {
         #[snafu(implicit)]
@@ -661,7 +655,6 @@ impl ErrorExt for Error {
             | StartGrpc { .. }
             | TcpBind { .. }
             | SendPromRemoteRequest { .. }
-            | TcpIncoming { .. }
             | BuildHttpResponse { .. }
             | Arrow { .. }
             | FileWatch { .. } => StatusCode::Internal,

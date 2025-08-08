@@ -253,12 +253,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert to TcpIncoming"))]
-    TcpIncoming {
-        #[snafu(source)]
-        error: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     #[snafu(display("Failed to start gRPC server"))]
     StartGrpc {
         #[snafu(source)]
@@ -948,7 +942,6 @@ impl ErrorExt for Error {
             Error::EtcdFailed { .. }
             | Error::ConnectEtcd { .. }
             | Error::TcpBind { .. }
-            | Error::TcpIncoming { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::NoLeader { .. }

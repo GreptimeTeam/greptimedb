@@ -31,7 +31,7 @@ impl InvertedIndexApplierBuilder<'_> {
         if !data_type.is_string() {
             return Ok(());
         }
-        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = pattern else {
+        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern)), _) = pattern else {
             return Ok(());
         };
 

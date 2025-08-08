@@ -77,7 +77,7 @@ impl SimpleFilterEvaluator {
             _ => return None,
         }
 
-        let Expr::Literal(val) = lit.lit() else {
+        let Expr::Literal(val, _) = lit.lit() else {
             return None;
         };
 
@@ -143,8 +143,8 @@ impl SimpleFilterEvaluator {
                 // swap the expr if it is in the form of `literal` `op` `col`
                 let mut op = binary.op;
                 let (lhs, rhs) = match (&*binary.left, &*binary.right) {
-                    (Expr::Column(ref col), Expr::Literal(ref lit)) => (col, lit),
-                    (Expr::Literal(ref lit), Expr::Column(ref col)) => {
+                    (Expr::Column(col), Expr::Literal(lit, _)) => (col, lit),
+                    (Expr::Literal(lit, _), Expr::Column(col)) => {
                         // safety: The previous check ensures the operator is able to swap.
                         op = op.swap().unwrap();
                         (col, lit)
@@ -359,15 +359,15 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Plus,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1.lit()),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
         // two literal is not supported
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            left: Box::new(1.lit()),
             op: Operator::Eq,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1.lit()),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
 
@@ -384,10 +384,10 @@ mod test {
             left: Box::new(Expr::BinaryExpr(BinaryExpr {
                 left: Box::new(Expr::Column(Column::from_name("foo"))),
                 op: Operator::Eq,
-                right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+                right: Box::new(1.lit()),
             })),
             op: Operator::Eq,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1.lit()),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
     }
@@ -398,13 +398,13 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Eq,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1.lit()),
         });
         let _ = SimpleFilterEvaluator::try_new(&expr).unwrap();
 
         // swap operands
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            left: Box::new(1.lit()),
             op: Operator::Lt,
             right: Box::new(Expr::Column(Column::from_name("foo"))),
         });
@@ -418,7 +418,7 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Eq,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1i64.lit()),
         });
         let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
 
@@ -440,7 +440,7 @@ mod test {
         let expr = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(Expr::Column(Column::from_name("foo"))),
             op: Operator::Lt,
-            right: Box::new(Expr::Literal(ScalarValue::Int64(Some(1)))),
+            right: Box::new(1i64.lit()),
         });
         let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
 

@@ -32,7 +32,7 @@ use dummy_catalog::DummyCatalogList;
 use table::TableRef;
 
 use crate::error::{
-    CastManagerSnafu, DatafusionSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
+    CastManagerSnafu, DecodePlanSnafu, GetViewCacheSnafu, ProjectViewColumnsSnafu,
     QueryAccessDeniedSnafu, Result, TableNotExistSnafu, ViewInfoNotFoundSnafu,
     ViewPlanColumnsChangedSnafu,
 };
@@ -199,10 +199,10 @@ impl DfTableSourceProvider {
             logical_plan
         };
 
-        Ok(Arc::new(
-            ViewTable::try_new(logical_plan, Some(view_info.definition.to_string()))
-                .context(DatafusionSnafu)?,
-        ))
+        Ok(Arc::new(ViewTable::new(
+            logical_plan,
+            Some(view_info.definition.to_string()),
+        )))
     }
 }
 

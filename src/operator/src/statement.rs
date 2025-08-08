@@ -55,6 +55,7 @@ use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
 use set::{set_query_timeout, set_read_preference};
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::ast::ObjectNamePartExt;
 use sql::statements::copy::{
     CopyDatabase, CopyDatabaseArgument, CopyQueryToArgument, CopyTable, CopyTableArgument,
 };
@@ -736,9 +737,9 @@ fn idents_to_full_database_name(
     match &obj_name.0[..] {
         [database] => Ok((
             query_ctx.current_catalog().to_owned(),
-            database.value.clone(),
+            database.to_string_unquoted(),
         )),
-        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
+        [catalog, database] => Ok((catalog.to_string_unquoted(), database.to_string_unquoted())),
         _ => InvalidSqlSnafu {
             err_msg: format!(
                 "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::parquet::file::statistics::Statistics as ParquetStats;
-use datafusion::physical_optimizer::pruning::PruningStatistics;
+use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::arrow::datatypes::DataType;

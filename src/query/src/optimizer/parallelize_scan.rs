@@ -57,7 +57,7 @@ impl ParallelizeScan {
             .transform_down(|plan| {
                 if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
                     // save the first order expr
-                    first_order_expr = sort_exec.expr().first().cloned();
+                    first_order_expr = Some(sort_exec.expr().first()).cloned();
                 } else if let Some(region_scan_exec) =
                     plan.as_any().downcast_ref::<RegionScanExec>()
                 {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use snafu::ensure;
-use sql::ast::ObjectName;
+use sql::ast::{ObjectName, ObjectNamePartExt};
 use sql::error::{InvalidSqlSnafu, PermissionDeniedSnafu, Result};
 use sql::parser::ParserContext;
 
@@ -48,17 +48,17 @@ pub fn table_idents_to_full_name(
         [table] => Ok((
             query_ctx.current_catalog().to_string(),
             query_ctx.current_schema().to_string(),
-            table.value.clone(),
+            table.to_string_unquoted(),
         )),
         [schema, table] => Ok((
             query_ctx.current_catalog().to_string(),
-            schema.value.clone(),
-            table.value.clone(),
+            schema.to_string_unquoted(),
+            table.to_string_unquoted(),
         )),
         [catalog, schema, table] => Ok((
-            catalog.value.clone(),
-            schema.value.clone(),
-            table.value.clone(),
+            catalog.to_string_unquoted(),
+            schema.to_string_unquoted(),
+            table.to_string_unquoted(),
         )),
         _ => InvalidSqlSnafu {
             msg: format!(

@@ -133,7 +133,7 @@ impl Predicate {
                 let Expr::Column(c) = *expr else {
                     unreachable!();
                 };
-                let Expr::Literal(ScalarValue::Utf8(Some(pattern))) = *pattern else {
+                let Expr::Literal(ScalarValue::Utf8(Some(pattern)), _) = *pattern else {
                     unreachable!();
                 };
 
@@ -148,8 +148,8 @@ impl Predicate {
             // left OP right
             Expr::BinaryExpr(bin) => match (*bin.left, bin.op, *bin.right) {
                 // left == right
-                (Expr::Literal(scalar), Operator::Eq, Expr::Column(c))
-                | (Expr::Column(c), Operator::Eq, Expr::Literal(scalar)) => {
+                (Expr::Literal(scalar, _), Operator::Eq, Expr::Column(c))
+                | (Expr::Column(c), Operator::Eq, Expr::Literal(scalar, _)) => {
                     let Ok(v) = Value::try_from(scalar) else {
                         return None;
                     };
@@ -157,8 +157,8 @@ impl Predicate {
                     Some(Predicate::Eq(c.name, v))
                 }
                 // left != right
-                (Expr::Literal(scalar), Operator::NotEq, Expr::Column(c))
-                | (Expr::Column(c), Operator::NotEq, Expr::Literal(scalar)) => {
+                (Expr::Literal(scalar, _), Operator::NotEq, Expr::Column(c))
+                | (Expr::Column(c), Operator::NotEq, Expr::Literal(scalar, _)) => {
                     let Ok(v) = Value::try_from(scalar) else {
                         return None;
                     };
@@ -189,7 +189,7 @@ impl Predicate {
                         let mut values = Vec::with_capacity(list.len());
                         for scalar in list {
                             // Safety: checked by `is_all_scalars`
-                            let Expr::Literal(scalar) = scalar else {
+                            let Expr::Literal(scalar, _) = scalar else {
                                 unreachable!();
                             };
 
@@ -237,7 +237,7 @@ fn like_utf8(s: &str, pattern: &str, case_insensitive: &bool) -> Option<bool> {
 }
 
 fn is_string_literal(expr: &Expr) -> bool {
-    matches!(expr, Expr::Literal(ScalarValue::Utf8(Some(_))))
+    matches!(expr, Expr::Literal(ScalarValue::Utf8(Some(_)), _))
 }
 
 fn is_column(expr: &Expr) -> bool {
@@ -286,14 +286,14 @@ impl Predicates {
 
 /// Returns true when the values are all [`DfExpr::Literal`].
 fn is_all_scalars(list: &[Expr]) -> bool {
-    list.iter().all(|v| matches!(v, Expr::Literal(_)))
+    list.iter().all(|v| matches!(v, Expr::Literal(_, _)))
 }
 
 #[cfg(test)]
 mod tests {
-    use datafusion::common::{Column, ScalarValue};
+    use datafusion::common::Column;
     use datafusion::logical_expr::expr::InList;
-    use datafusion::logical_expr::BinaryExpr;
+    use datafusion::logical_expr::{BinaryExpr, Literal};
 
     use super::*;
 
@@ -378,7 +378,7 @@ mod tests {
         let expr = Expr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
-            pattern: Box::new(string_literal("%abc")),
+            pattern: Box::new("%abc".lit()),
             case_insensitive: true,
             escape_char: None,
         });
@@ -405,7 +405,7 @@ mod tests {
         let expr = Expr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
-            pattern: Box::new(string_literal("%abc")),
+            pattern: Box::new("%abc".lit()),
             case_insensitive: false,
             escape_char: None,
         });
@@ -425,7 +425,7 @@ mod tests {
         let expr = Expr::Like(Like {
             negated: true,
             expr: Box::new(column("a")),
-            pattern: Box::new(string_literal("%abc")),
+            pattern: Box::new("%abc".lit()),
             case_insensitive: true,
             escape_char: None,
         });
@@ -438,10 +438,6 @@ mod tests {
 
     fn column(name: &str) -> Expr {
         Expr::Column(Column::from_name(name))
-    }
-
-    fn string_literal(v: &str) -> Expr {
-        Expr::Literal(ScalarValue::Utf8(Some(v.to_string())))
     }
 
     fn match_string_value(v: &Value, expected: &str) -> bool {
@@ -463,13 +459,13 @@ mod tests {
         let expr1 = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("a")),
             op: Operator::Eq,
-            right: Box::new(string_literal("a_value")),
+            right: Box::new("a_value".lit()),
         });
 
         let expr2 = Expr::BinaryExpr(BinaryExpr {
             left: Box::new(column("b")),
             op: Operator::NotEq,
-            right: Box::new(string_literal("b_value")),
+            right: Box::new("b_value".lit()),
         });
 
         (expr1, expr2)
@@ -508,7 +504,7 @@ mod tests {
 
         let inlist_expr = Expr::InList(InList {
             expr: Box::new(column("a")),
-            list: vec![string_literal("a1"), string_literal("a2")],
+            list: vec!["a1".lit(), "a2".lit()],
             negated: false,
         });
 
@@ -518,7 +514,7 @@ mod tests {
 
         let inlist_expr = Expr::InList(InList {
             expr: Box::new(column("a")),
-            list: vec![string_literal("a1"), string_literal("a2")],
+            list: vec!["a1".lit(), "a2".lit()],
             negated: true,
         });
         let inlist_p = Predicate::from_expr(inlist_expr).unwrap();

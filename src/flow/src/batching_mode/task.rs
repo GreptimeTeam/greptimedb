@@ -24,8 +24,7 @@ use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
 use common_time::Timestamp;
-use datafusion::optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
-use datafusion::optimizer::AnalyzerRule;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::DFSchemaRef;
@@ -40,6 +39,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use table::table::adapter::DfTableProviderAdapter;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::time::Instant;
@@ -252,7 +252,11 @@ impl BatchingTask {
         .await?;
 
         let new_query = self
-            .gen_query_with_time_window(engine.clone(), &table.meta.schema, max_window_cnt)
+            .gen_query_with_time_window(
+                engine.clone(),
+                &table.table_info().meta.schema,
+                max_window_cnt,
+            )
             .await?;
 
         let insert_into = if let Some((new_query, _column_cnt)) = new_query {
@@ -274,6 +278,10 @@ impl BatchingTask {
                     }
                 );
             }
+
+            let table_provider = Arc::new(DfTableProviderAdapter::new(table));
+            let table_source = Arc::new(DefaultTableSource::new(table_provider));
+
             // update_at& time index placeholder (if exists) should have default value
             LogicalPlan::Dml(DmlStatement::new(
                 datafusion_common::TableReference::Full {
@@ -281,7 +289,7 @@ impl BatchingTask {
                     schema: self.config.sink_table_name[1].clone().into(),
                     table: self.config.sink_table_name[2].clone().into(),
                 },
-                df_schema,
+                table_source,
                 WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
                 Arc::new(new_query),
             ))
@@ -324,7 +332,7 @@ impl BatchingTask {
         let schema = &self.config.sink_table_name[1];
 
         // fix all table ref by make it fully qualified, i.e. "table_name" => "catalog_name.schema_name.table_name"
-        let fixed_plan = plan
+        let plan = plan
             .clone()
             .transform_down_with_subqueries(|p| {
                 if let LogicalPlan::TableScan(mut table_scan) = p {
@@ -340,16 +348,6 @@ impl BatchingTask {
             })?
             .data;
 
-        let expanded_plan = CountWildcardRule::new()
-            .analyze(fixed_plan.clone(), &Default::default())
-            .with_context(|_| DatafusionSnafu {
-                context: format!(
-                    "Failed to expand wildcard in logical plan, plan={:?}",
-                    fixed_plan
-                ),
-            })?;
-
-        let plan = expanded_plan;
         let mut peer_desc = None;
 
         let res = {

@@ -45,7 +45,7 @@ use query::sql::{
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, ObjectName};
+use sql::ast::{ColumnOption, ObjectName, ObjectNamePartExt};
 use sql::statements::alter::{
     AlterDatabase, AlterDatabaseOperation, AlterTable, AlterTableOperation,
 };
@@ -819,7 +819,7 @@ fn sanitize_flow_name(mut flow_name: ObjectName) -> Result<String> {
         }
     );
     // safety: we've checked flow_name.0 has exactly one element.
-    Ok(flow_name.0.swap_remove(0).value)
+    Ok(flow_name.0.swap_remove(0).to_string_unquoted())
 }
 
 #[cfg(test)]

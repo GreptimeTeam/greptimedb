@@ -25,14 +25,14 @@
 use std::sync::Arc;
 
 use arrow::array::StructArray;
-use arrow_schema::Fields;
+use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 use datafusion_common::{Column, ScalarValue};
-use datafusion_expr::expr::AggregateFunction;
+use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::function::StateFieldsArgs;
 use datafusion_expr::{
     Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, Expr, ExprSchemable, LogicalPlan,
@@ -146,6 +146,7 @@ impl StateMergeHelper {
             };
 
             let original_input_types = aggr_func
+                .params
                 .args
                 .iter()
                 .map(|e| e.get_type(&aggr.input.schema()))
@@ -156,11 +157,7 @@ impl StateMergeHelper {
 
             let expr = AggregateFunction {
                 func: Arc::new(state_func.into()),
-                args: aggr_func.args.clone(),
-                distinct: aggr_func.distinct,
-                filter: aggr_func.filter.clone(),
-                order_by: aggr_func.order_by.clone(),
-                null_treatment: aggr_func.null_treatment,
+                params: aggr_func.params.clone(),
             };
             let expr = Expr::AggregateFunction(expr);
             let lower_state_output_col_name = expr.schema_name().to_string();
@@ -182,11 +179,10 @@ impl StateMergeHelper {
             let arg = Expr::Column(Column::new_unqualified(lower_state_output_col_name));
             let expr = AggregateFunction {
                 func: Arc::new(merge_func.into()),
-                args: vec![arg],
-                distinct: aggr_func.distinct,
-                filter: aggr_func.filter.clone(),
-                order_by: aggr_func.order_by.clone(),
-                null_treatment: aggr_func.null_treatment,
+                params: AggregateFunctionParams {
+                    args: vec![arg],
+                    ..aggr_func.params.clone()
+                },
             };
 
             // alias to the original aggregate expr's schema name, so parent plan can refer to it
@@ -247,15 +243,8 @@ impl StateWrapper {
     pub fn deduce_aggr_return_type(
         &self,
         acc_args: &datafusion_expr::function::AccumulatorArgs,
-    ) -> datafusion_common::Result<DataType> {
-        let input_exprs = acc_args.exprs;
-        let input_schema = acc_args.schema;
-        let input_types = input_exprs
-            .iter()
-            .map(|e| e.data_type(input_schema))
-            .collect::<Result<Vec<_>, _>>()?;
-        let return_type = self.inner.return_type(&input_types)?;
-        Ok(return_type)
+    ) -> datafusion_common::Result<FieldRef> {
+        self.inner.return_field(acc_args.schema.fields())
     }
 }
 
@@ -265,14 +254,13 @@ impl AggregateUDFImpl for StateWrapper {
         acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
     ) -> datafusion_common::Result<Box<dyn Accumulator>> {
         // fix and recover proper acc args for the original aggregate function.
-        let state_type = acc_args.return_type.clone();
+        let state_type = acc_args.return_type().clone();
         let inner = {
-            let old_return_type = self.deduce_aggr_return_type(&acc_args)?;
             let acc_args = datafusion_expr::function::AccumulatorArgs {
-                return_type: &old_return_type,
+                return_field: self.deduce_aggr_return_type(&acc_args)?,
                 schema: acc_args.schema,
                 ignore_nulls: acc_args.ignore_nulls,
-                ordering_req: acc_args.ordering_req,
+                order_bys: acc_args.order_bys,
                 is_reversed: acc_args.is_reversed,
                 name: acc_args.name,
                 is_distinct: acc_args.is_distinct,
@@ -297,11 +285,15 @@ impl AggregateUDFImpl for StateWrapper {
     /// Return state_fields as the output struct type.
     ///
     fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
-        let old_return_type = self.inner.return_type(arg_types)?;
+        let input_fields = &arg_types
+            .iter()
+            .map(|x| Arc::new(Field::new("x", x.clone(), false)))
+            .collect::<Vec<_>>();
+
         let state_fields_args = StateFieldsArgs {
             name: self.inner().name(),
-            input_types: arg_types,
-            return_type: &old_return_type,
+            input_fields,
+            return_field: self.inner.return_field(input_fields)?,
             // TODO(discord9): how to get this?, probably ok?
             ordering_fields: &[],
             is_distinct: false,
@@ -315,12 +307,11 @@ impl AggregateUDFImpl for StateWrapper {
     fn state_fields(
         &self,
         args: datafusion_expr::function::StateFieldsArgs,
-    ) -> datafusion_common::Result<Vec<Field>> {
-        let old_return_type = self.inner.return_type(args.input_types)?;
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
         let state_fields_args = StateFieldsArgs {
             name: args.name,
-            input_types: args.input_types,
-            return_type: &old_return_type,
+            input_fields: args.input_fields,
+            return_field: self.inner.return_field(args.input_fields)?,
             ordering_fields: args.ordering_fields,
             is_distinct: args.is_distinct,
         };
@@ -502,7 +493,7 @@ impl AggregateUDFImpl for MergeWrapper {
     fn state_fields(
         &self,
         _args: datafusion_expr::function::StateFieldsArgs,
-    ) -> datafusion_common::Result<Vec<Field>> {
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
         self.original_phy_expr.state_fields()
     }
 }

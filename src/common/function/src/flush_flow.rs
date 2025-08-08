@@ -23,6 +23,7 @@ use datafusion::logical_expr::Volatility;
 use datatypes::value::{Value, ValueRef};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
+use sql::ast::ObjectNamePartExt;
 use sql::parser::ParserContext;
 use store_api::storage::ConcreteDataType;
 
@@ -85,9 +86,9 @@ fn parse_flush_flow(
     let (catalog_name, flow_name) = match &obj_name.0[..] {
         [flow_name] => (
             query_ctx.current_catalog().to_string(),
-            flow_name.value.clone(),
+            flow_name.to_string_unquoted(),
         ),
-        [catalog, flow_name] => (catalog.value.clone(), flow_name.value.clone()),
+        [catalog, flow_name] => (catalog.to_string_unquoted(), flow_name.to_string_unquoted()),
         _ => {
             return InvalidFuncArgsSnafu {
                 err_msg: format!(

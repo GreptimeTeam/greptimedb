@@ -65,7 +65,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     status_code: 0,
                     status_message: Default::default(),
                 };
-                let request = match consumer.consume_batches(&mut batch).map_err(|e| {
+                let request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
                     error::HandleOtelArrowRequestSnafu {
                         err_msg: e.to_string(),
                     }

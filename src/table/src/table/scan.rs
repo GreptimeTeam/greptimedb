@@ -34,9 +34,7 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{
-    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
-};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
@@ -126,7 +124,7 @@ impl RegionScanExec {
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_sort_columns)],
+                    vec![pk_sort_columns],
                 )
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
@@ -135,7 +133,7 @@ impl RegionScanExec {
                 }
                 EquivalenceProperties::new_with_orderings(
                     arrow_schema.clone(),
-                    &[LexOrdering::new(pk_sort_columns)],
+                    vec![pk_sort_columns],
                 )
             }
             None => EquivalenceProperties::new(arrow_schema.clone()),

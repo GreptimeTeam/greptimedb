@@ -20,7 +20,6 @@ use std::sync::Arc;
 use client::{Output, OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::CsvFormat;
-use common_datasource::file_format::json::JsonFormat;
 use common_datasource::file_format::orc::{infer_orc_schema, new_orc_stream_reader, ReaderAdapter};
 use common_datasource::file_format::{FileFormat, Format};
 use common_datasource::lister::{Lister, Source};
@@ -33,12 +32,11 @@ use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener,
+    CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStream, JsonSource,
 };
 use datafusion::parquet::arrow::arrow_reader::ArrowReaderMetadata;
 use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion_common::{Constraints, Statistics};
 use datafusion_expr::Expr;
 use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
@@ -69,7 +67,6 @@ enum FileMetadata {
     },
     Json {
         schema: SchemaRef,
-        format: JsonFormat,
         path: String,
     },
     Csv {
@@ -150,7 +147,6 @@ impl StatementExecutor {
                         .await
                         .context(error::InferSchemaSnafu { path: &path })?,
                 ),
-                format,
                 path,
             }),
             Format::Parquet(_) => {
@@ -199,30 +195,25 @@ impl StatementExecutor {
         }
     }
 
-    async fn build_file_stream<F: FileOpener + Send + 'static>(
+    async fn build_file_stream(
         &self,
-        opener: F,
+        store: &ObjectStore,
         filename: &str,
         file_schema: SchemaRef,
+        file_source: Arc<dyn FileSource>,
     ) -> Result<DfSendableRecordBatchStream> {
-        let statistics = Statistics::new_unknown(file_schema.as_ref());
-        let stream = FileStream::new(
-            &FileScanConfig {
-                object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-                file_schema,
-                file_groups: vec![vec![PartitionedFile::new(filename.to_string(), 10)]],
-                statistics,
-                projection: None,
-                limit: None,
-                table_partition_cols: vec![],
-                output_ordering: vec![],
-                constraints: Constraints::empty(),
-            },
-            0,
-            opener,
-            &ExecutionPlanMetricsSet::new(),
+        let config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::local_filesystem(),
+            file_schema,
+            file_source.clone(),
         )
-        .context(error::BuildFileStreamSnafu)?;
+        .with_file_group(FileGroup::new(vec![PartitionedFile::new(filename, 0)]))
+        .build();
+
+        let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
+        let file_opener = file_source.create_file_opener(store, &config, 0);
+        let stream = FileStream::new(&config, 0, file_opener, &ExecutionPlanMetricsSet::new())
+            .context(error::BuildFileStreamSnafu)?;
 
         Ok(Box::pin(stream))
     }
@@ -246,30 +237,19 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                let csv_config = Arc::new(CsvConfig::new(
-                    DEFAULT_BATCH_SIZE,
-                    schema.clone(),
-                    Some(projection.clone()),
-                    format.has_header,
-                    format.delimiter,
-                    b'"',
-                    None,
-                    Arc::new(object_store_opendal::OpendalStore::new(
-                        object_store.clone(),
-                    )),
-                    None,
-                ));
+
                 let projected_file_schema = Arc::new(
                     schema
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
+
+                let csv_source = CsvSource::new(format.has_header, format.delimiter, b'"')
+                    .with_schema(projected_file_schema.clone())
+                    .with_batch_size(DEFAULT_BATCH_SIZE);
+
                 let stream = self
-                    .build_file_stream(
-                        CsvOpener::new(csv_config, format.compression_type.into()),
-                        path,
-                        projected_file_schema,
-                    )
+                    .build_file_stream(object_store, path, projected_file_schema, csv_source)
                     .await?;
 
                 Ok(Box::pin(
@@ -280,11 +260,7 @@ impl StatementExecutor {
                         .context(error::PhysicalExprSnafu)?,
                 ))
             }
-            FileMetadata::Json {
-                format,
-                path,
-                schema,
-            } => {
+            FileMetadata::Json { path, schema } => {
                 let projected_file_schema = Arc::new(
                     schema
                         .project(&projection)
@@ -295,17 +271,12 @@ impl StatementExecutor {
                         .project(&projection)
                         .context(error::ProjectSchemaSnafu)?,
                 );
-                let store = object_store_opendal::OpendalStore::new(object_store.clone());
                 let stream = self
                     .build_file_stream(
-                        JsonOpener::new(
-                            DEFAULT_BATCH_SIZE,
-                            projected_file_schema.clone(),
-                            format.compression_type.into(),
-                            Arc::new(store),
-                        ),
+                        object_store,
                         path,
                         projected_file_schema,
+                        Arc::new(JsonSource::new()),
                     )
                     .await?;
 

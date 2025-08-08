@@ -292,7 +292,9 @@ impl ExecutionPlan for UnionDistinctOnExec {
 impl DisplayAs for UnionDistinctOnExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(
                     f,
                     "UnionDistinctOnExec: on col=[{:?}], ts_col=[{}]",
@@ -507,7 +509,7 @@ fn interleave_batches(
 
     // assemble new record batch
     RecordBatch::try_new(schema, interleaved_arrays)
-        .map_err(|e| DataFusionError::ArrowError(e, None))
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
@@ -525,10 +527,10 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| DataFusionError::ArrowError(e, None))?;
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
-    let result =
-        RecordBatch::try_new(schema, arrays).map_err(|e| DataFusionError::ArrowError(e, None))?;
+    let result = RecordBatch::try_new(schema, arrays)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     Ok(result)
 }
 
