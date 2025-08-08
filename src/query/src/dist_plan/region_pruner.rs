@@ -34,16 +34,6 @@ pub struct PartitionRange {
 }
 
 impl PartitionRange {
-    fn new(column: String) -> Self {
-        Self {
-            column,
-            min: None,
-            max: None,
-            min_inclusive: true,
-            max_inclusive: true,
-        }
-    }
-
     /// Check if this partition range overlaps with a query constraint
     pub fn overlaps_with(&self, constraint: &RangeConstraint) -> bool {
         if self.column != constraint.column {
@@ -146,24 +136,134 @@ impl RangePartitionPruner {
     }
 
     /// Extract range boundaries from a partition expression
-    /// For now, use a simple heuristic approach instead of parsing the expression tree
+    /// Convert PartitionExpr to LogicalExpr and use existing constraint extraction
     fn extract_partition_ranges(
         partition_expr: &PartitionExpr,
     ) -> Result<HashMap<String, PartitionRange>> {
-        // Convert partition expression to string and parse simple patterns
-        // This is a temporary implementation - in the future we can enhance this
-        // by converting to DataFusion expressions and analyzing the tree
+        // Convert PartitionExpr to DataFusion LogicalExpr
+        let logical_expr = match partition_expr.try_as_logical_expr() {
+            Ok(expr) => expr,
+            Err(_) => {
+                // If conversion fails, fall back to conservative approach
+                debug!(
+                    "Failed to convert PartitionExpr to LogicalExpr, using conservative approach"
+                );
+                return Ok(HashMap::new());
+            }
+        };
+
+        // Extract partition column names from the expression string representation
         let expr_str = partition_expr.to_string();
-        debug!("Analyzing partition expression: {}", expr_str);
+        debug!("Converting partition expression to ranges: {}", expr_str);
 
-        let ranges = HashMap::new();
+        // For now, extract column names by simple pattern matching
+        // This could be enhanced to be more sophisticated
+        let partition_columns = Self::extract_column_names_from_expression(&expr_str);
 
-        // For now, return empty ranges to indicate conservative approach
-        // This will cause all regions to be included, which is safe
-        // TODO: Implement proper expression parsing
-        debug!("Using conservative approach for partition expression analysis");
+        // Create a schema that includes the partition columns
+        use std::sync::Arc;
 
+        use arrow::datatypes::{DataType, Field, Schema};
+        use datafusion_common::DFSchema;
+        use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
+
+        let mut fields = vec![];
+        for col in &partition_columns {
+            fields.push(Field::new(col.as_str(), DataType::Int64, true));
+        }
+        // Add a dummy field if no columns found
+        if fields.is_empty() {
+            fields.push(Field::new("dummy", DataType::Int64, true));
+        }
+
+        let schema = Arc::new(Schema::new(fields));
+        let df_schema = DFSchema::try_from(schema.clone()).unwrap();
+
+        // Create a dummy plan with the filter
+        let logical_plan =
+            LogicalPlanBuilder::from(LogicalPlan::EmptyRelation(datafusion_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(df_schema),
+            }))
+            .filter(logical_expr)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Use the existing predicate extractor
+        use crate::dist_plan::predicate_extractor::PredicateExtractor;
+        let constraints = match PredicateExtractor::extract_range_constraints(
+            &logical_plan,
+            &partition_columns,
+        ) {
+            Ok(constraints) => constraints,
+            Err(_) => {
+                // If extraction fails, fall back to conservative approach
+                debug!("Failed to extract constraints from partition expression, using conservative approach");
+                return Ok(HashMap::new());
+            }
+        };
+
+        // Convert constraints to partition ranges
+        let mut ranges = HashMap::new();
+        for constraint in constraints {
+            let range = PartitionRange {
+                column: constraint.column.clone(),
+                min: constraint.min,
+                max: constraint.max,
+                min_inclusive: constraint.min_inclusive,
+                max_inclusive: constraint.max_inclusive,
+            };
+            ranges.insert(constraint.column, range);
+        }
+
+        debug!(
+            "Extracted {} partition ranges from expression",
+            ranges.len()
+        );
         Ok(ranges)
+    }
+
+    /// Extract column names from partition expression string
+    /// This is a simple pattern-based approach that could be enhanced
+    fn extract_column_names_from_expression(expr_str: &str) -> Vec<String> {
+        // Simple regex-based extraction - could be improved
+        // For now, look for common column patterns
+        let mut columns = Vec::new();
+
+        // Common partition column names in time-series databases
+        let common_columns = vec![
+            "ts",
+            "timestamp",
+            "time",
+            "date",
+            "created_at",
+            "updated_at",
+        ];
+
+        for col in common_columns {
+            if expr_str.contains(col) {
+                columns.push(col.to_string());
+            }
+        }
+
+        // If no common columns found, try to extract any identifier-like patterns
+        if columns.is_empty() {
+            // This is a fallback - in practice, partition columns should be known
+            // from the table metadata
+            if let Some(start) = expr_str.find(char::is_alphabetic) {
+                let remaining = &expr_str[start..];
+                if let Some(end) = remaining.find(|c: char| !c.is_alphanumeric() && c != '_') {
+                    let potential_column = &remaining[..end];
+                    if !potential_column.is_empty() {
+                        columns.push(potential_column.to_string());
+                    }
+                }
+            }
+        }
+
+        debug!("Extracted column names from '{}': {:?}", expr_str, columns);
+        columns
     }
 
     /// Check if query constraints intersect with partition ranges
@@ -254,9 +354,13 @@ mod tests {
         // Create expression: ts >= 100
         let expr = col("ts").gt_eq(Value::Int64(100));
 
-        // Current implementation uses conservative approach and returns empty ranges
+        // New implementation should extract actual ranges
         let ranges = RangePartitionPruner::extract_partition_ranges(&expr).unwrap();
-        assert_eq!(ranges.len(), 0); // Conservative: returns empty ranges
+        assert_eq!(ranges.len(), 1);
+        let range = ranges.get("ts").unwrap();
+        assert_eq!(range.min, Some(ScalarValue::Int64(Some(100))));
+        assert!(range.min_inclusive);
+        assert_eq!(range.max, None); // No upper bound
     }
 
     #[test]
@@ -266,9 +370,14 @@ mod tests {
             .gt_eq(Value::Int64(100))
             .and(col("ts").lt(Value::Int64(200)));
 
-        // Current implementation uses conservative approach and returns empty ranges
+        // New implementation should extract actual ranges
         let ranges = RangePartitionPruner::extract_partition_ranges(&expr).unwrap();
-        assert_eq!(ranges.len(), 0); // Conservative: returns empty ranges
+        assert_eq!(ranges.len(), 1);
+        let range = ranges.get("ts").unwrap();
+        assert_eq!(range.min, Some(ScalarValue::Int64(Some(100))));
+        assert!(range.min_inclusive);
+        assert_eq!(range.max, Some(ScalarValue::Int64(Some(200))));
+        assert!(!range.max_inclusive);
     }
 
     #[test]
@@ -314,11 +423,14 @@ mod tests {
 
         let pruned = RangePartitionPruner::prune_regions(&constraints, &partitions).unwrap();
 
-        // Conservative implementation: returns all regions when no partition metadata available
-        assert_eq!(pruned.len(), 3); // All regions returned
-        assert!(pruned.contains(&RegionId::new(1, 1)));
-        assert!(pruned.contains(&RegionId::new(1, 2)));
-        assert!(pruned.contains(&RegionId::new(1, 3)));
+        // With actual range parsing, should only return regions that overlap with [150, 250):
+        // Region 1: [0, 100) - no overlap
+        // Region 2: [100, 200) - overlap with [150, 250) at [150, 200)
+        // Region 3: [200, 300) - overlap with [150, 250) at [200, 250)
+        assert_eq!(pruned.len(), 2); // Only regions 2 and 3 returned
+        assert!(!pruned.contains(&RegionId::new(1, 1))); // Region 1 excluded
+        assert!(pruned.contains(&RegionId::new(1, 2))); // Region 2 included
+        assert!(pruned.contains(&RegionId::new(1, 3))); // Region 3 included
     }
 
     #[test]

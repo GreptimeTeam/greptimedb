@@ -488,7 +488,7 @@ mod tests {
         let constraint = &constraints[0];
         assert_eq!(constraint.column, "timestamp");
         assert_eq!(constraint.min, Some(ScalarValue::Int64(Some(100))));
-        assert_eq!(constraint.min_inclusive, true);
+        assert!(constraint.min_inclusive);
         assert_eq!(constraint.max, None);
     }
 
@@ -515,9 +515,9 @@ mod tests {
         let constraint = &constraints[0];
         assert_eq!(constraint.column, "timestamp");
         assert_eq!(constraint.min, Some(ScalarValue::Int64(Some(100))));
-        assert_eq!(constraint.min_inclusive, true);
+        assert!(constraint.min_inclusive);
         assert_eq!(constraint.max, Some(ScalarValue::Int64(Some(200))));
-        assert_eq!(constraint.max_inclusive, false);
+        assert!(!constraint.max_inclusive);
     }
 
     #[test]
@@ -529,9 +529,9 @@ mod tests {
 
         let result = c1.intersect(&c2).unwrap();
         assert_eq!(result.min, Some(ScalarValue::Int64(Some(100))));
-        assert_eq!(result.min_inclusive, true);
+        assert!(result.min_inclusive);
         assert_eq!(result.max, Some(ScalarValue::Int64(Some(200))));
-        assert_eq!(result.max_inclusive, false);
+        assert!(!result.max_inclusive);
     }
 
     #[test]

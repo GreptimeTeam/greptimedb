@@ -27,6 +27,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -36,6 +37,7 @@ use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::dist_plan::region_pruner::RangePartitionPruner;
 use crate::dist_plan::PredicateExtractor;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
@@ -103,6 +105,7 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
     region_query_handler: RegionQueryHandlerRef,
+    partition_rule_manager: Option<PartitionRuleManagerRef>,
 }
 
 impl DistExtensionPlanner {
@@ -113,6 +116,7 @@ impl DistExtensionPlanner {
         Self {
             catalog_manager,
             region_query_handler,
+            partition_rule_manager: None, // TODO: Add proper dependency injection
         }
     }
 }
@@ -240,18 +244,57 @@ impl DistExtensionPlanner {
             return Ok(all_regions);
         }
 
-        // TODO: Implement region pruning based on partition rules
-        // For now, we skip the actual pruning and return all regions
-        // This is a safe fallback that maintains correctness while we work
-        // on getting proper access to partition metadata
+        // Get partition information for the table if partition rule manager is available
+        let partitions = match &self.partition_rule_manager {
+            Some(partition_rule_manager) => {
+                match partition_rule_manager
+                    .find_table_partitions(table.table_info().table_id())
+                    .await
+                {
+                    Ok(partitions) => partitions,
+                    Err(err) => {
+                        common_telemetry::debug!(
+                            "Failed to get partition information for table {}: {}, using all regions",
+                            table_name, err
+                        );
+                        return Ok(all_regions);
+                    }
+                }
+            }
+            None => {
+                // No partition rule manager available, create basic partition info without expressions
+                // This will result in conservative pruning (returning all regions)
+                common_telemetry::debug!(
+                    "No partition rule manager available for table {}, using all regions",
+                    table_name
+                );
+                return Ok(all_regions);
+            }
+        };
+
+        // Apply region pruning based on partition rules
+        let pruned_regions =
+            match RangePartitionPruner::prune_regions(&range_constraints, &partitions) {
+                Ok(regions) => regions,
+                Err(err) => {
+                    common_telemetry::debug!(
+                        "Failed to prune regions for table {}: {}, using all regions",
+                        table_name,
+                        err
+                    );
+                    return Ok(all_regions);
+                }
+            };
+
         common_telemetry::debug!(
-            "Region pruning for table {}: {} range constraints found, but pruning temporarily disabled - returning all {} regions",
+            "Region pruning for table {}: {} range constraints applied, pruned from {} to {} regions",
             table_name,
             range_constraints.len(),
-            all_regions.len()
+            all_regions.len(),
+            pruned_regions.len()
         );
 
-        Ok(all_regions)
+        Ok(pruned_regions)
     }
 
     /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.
