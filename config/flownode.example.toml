@@ -30,6 +30,8 @@ node_id = 14
 #+experimental_max_filter_num_per_query=20
 ## Time window merge distance
 #+experimental_time_window_merge_threshold=3
+## Read preference of the Frontend client.
+#+read_preference="Leader"
 
 ## The gRPC server options.
 [grpc]

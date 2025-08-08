@@ -36,6 +36,7 @@ use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
+use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::BatchingModeOptions;
@@ -363,7 +364,10 @@ impl FrontendClient {
                     .handle_with_retry(
                         req.clone(),
                         batch_opts.experimental_grpc_max_retries,
-                        &[(QUERY_PARALLELISM_HINT, &query.parallelism.to_string())],
+                        &[
+                            (QUERY_PARALLELISM_HINT, &query.parallelism.to_string()),
+                            (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
+                        ],
                     )
                     .await
                     .with_context(|_| InvalidRequestSnafu {
