@@ -330,7 +330,7 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = Box::new(self.parse_sql_or_tql()?);
+        let query = Box::new(self.parse_sql_or_tql(true)?);
 
         Ok(Statement::CreateFlow(CreateFlow {
             flow_name,
@@ -344,7 +344,7 @@ impl<'a> ParserContext<'a> {
         }))
     }
 
-    fn parse_sql_or_tql(&mut self) -> Result<SqlOrTql> {
+    fn parse_sql_or_tql(&mut self, only_allow_now_expr: bool) -> Result<SqlOrTql> {
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
 
