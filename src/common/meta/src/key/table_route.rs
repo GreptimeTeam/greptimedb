@@ -22,8 +22,8 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::error::{
-    InvalidMetadataSnafu, MetadataCorruptionSnafu, Result, SerdeJsonSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu,
+    InvalidMetadataSnafu, MetadataCorruptionSnafu, RegionNotFoundSnafu, Result, SerdeJsonSnafu,
+    TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
 };
 use crate::key::node_address::{NodeAddressKey, NodeAddressValue};
 use crate::key::txn_helper::TxnOpGetResponseSet;
@@ -489,6 +489,7 @@ impl TableRouteManager {
         let mut updated_routes = region_routes.clone();
 
         // Find and update the specific region
+        // TODO(ruihang): maybe update them in one transaction
         let mut region_found = false;
         for route in &mut updated_routes {
             if route.region.id == region_id {
@@ -502,7 +503,7 @@ impl TableRouteManager {
             }
         }
 
-        ensure!(region_found, TableRouteNotFoundSnafu { table_id });
+        ensure!(region_found, RegionNotFoundSnafu { region_id });
 
         // Create new table route with updated region routes
         let updated_table_route = new_table_route.update(updated_routes)?;
