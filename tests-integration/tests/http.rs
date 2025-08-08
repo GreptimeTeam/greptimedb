@@ -5009,7 +5009,7 @@ pub async fn test_log_query(store_type: StorageType) {
             fetch: Some(1),
         },
         columns: vec!["ts".to_string(), "message".to_string()],
-        filters: vec![],
+        filters: Default::default(),
         context: Context::None,
         exprs: vec![],
     };
