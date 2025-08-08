@@ -16,22 +16,23 @@
 
 use api::v1::OpType;
 use datatypes::arrow::array::{
-    make_comparator, Array, BinaryArray, BooleanArray, BooleanBufferBuilder,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt64Array, UInt8Array,
+    make_comparator, Array, ArrayRef, BinaryArray, BooleanArray, BooleanBufferBuilder, UInt64Array,
+    UInt8Array,
 };
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::compute::kernels::cmp::distinct;
 use datatypes::arrow::compute::kernels::partition::{partition, Partitions};
 use datatypes::arrow::compute::{filter_record_batch, take_record_batch, SortOptions};
-use datatypes::arrow::datatypes::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, Result};
+use crate::memtable::partition_tree::data::timestamp_array_to_i64_slice;
 use crate::read::dedup::DedupMetrics;
-use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
+use crate::sst::parquet::flat_format::{
+    op_type_column_index, primary_key_column_index, time_index_column_index,
+};
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// An iterator to dedup sorted batches from an iterator based on the dedup strategy.
@@ -213,10 +214,9 @@ impl BatchLastRow {
             .column(primary_key_column_index(batch.num_columns()))
             .as_any()
             .downcast_ref::<PrimaryKeyArray>()
-            .unwrap()
-            .clone();
+            .unwrap();
         // Primary key of the first row in the batch.
-        let batch_key = primary_key_at(&primary_key, 0);
+        let batch_key = primary_key_at(primary_key, 0);
 
         last_key == batch_key
     }
@@ -305,7 +305,7 @@ fn filter_deleted_from_batch(
     metrics: &mut DedupMetrics,
 ) -> Result<RecordBatch> {
     let num_rows = batch.num_rows();
-    let op_type_column = batch.column(batch.num_columns() - 1);
+    let op_type_column = batch.column(op_type_column_index(batch.num_columns()));
     // Safety: The column should be op type.
     let op_types = op_type_column
         .as_any()
@@ -352,38 +352,8 @@ fn primary_key_at(primary_key: &PrimaryKeyArray, index: usize) -> &[u8] {
 /// # Panics
 /// Panics if the array is not a timestamp array or
 /// the index is out of bound.
-pub(crate) fn timestamp_value(array: &dyn Array, idx: usize) -> i64 {
-    match array.data_type() {
-        datatypes::arrow::datatypes::DataType::Timestamp(TimeUnit::Second, None) => {
-            let array = array
-                .as_any()
-                .downcast_ref::<TimestampSecondArray>()
-                .unwrap();
-            array.value(idx)
-        }
-        datatypes::arrow::datatypes::DataType::Timestamp(TimeUnit::Millisecond, None) => {
-            let array = array
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
-            array.value(idx)
-        }
-        datatypes::arrow::datatypes::DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            let array = array
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .unwrap();
-            array.value(idx)
-        }
-        datatypes::arrow::datatypes::DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-            let array = array
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .unwrap();
-            array.value(idx)
-        }
-        _ => panic!("Expected timestamp array, got: {:?}", array.data_type()),
-    }
+pub(crate) fn timestamp_value(array: &ArrayRef, idx: usize) -> i64 {
+    timestamp_array_to_i64_slice(array)[idx]
 }
 
 #[cfg(test)]

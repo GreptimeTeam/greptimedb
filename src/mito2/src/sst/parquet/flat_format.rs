@@ -114,6 +114,11 @@ pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
     num_columns - 3
 }
 
+/// Returns the position of the op type key column.
+pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
+    num_columns - 1
+}
+
 // TODO(yingwen): Add an option to skip reading internal columns.
 /// Helper for reading the flat SST format with projection.
 ///
