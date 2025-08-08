@@ -277,9 +277,11 @@ impl FlatCompatBatch {
             )
             .collect::<Result<Vec<_>>>()?;
 
-        // FIXME(yingwen): Handles primary keys.
-        // Safety: We ensure all columns have the same length and the new batch should be valid.
-        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+        let compat_batch = RecordBatch::try_new(self.arrow_schema.clone(), columns)
+            .context(NewRecordBatchSnafu)?;
+
+        // Handles primary keys.
+        self.compat_pk.compat(compat_batch)
     }
 }
 
