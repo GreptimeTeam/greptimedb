@@ -152,7 +152,7 @@ pub(crate) fn has_same_columns_and_pk_encoding(
 }
 
 /// A helper struct to adapt schema of the batch to an expected schema.
-pub(crate) struct CompatFlatBatch {
+pub(crate) struct FlatCompatBatch {
     /// Column Ids and DataTypes the reader actually returns.
     actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     /// Indices to convert actual fields to expect fields.
@@ -160,11 +160,11 @@ pub(crate) struct CompatFlatBatch {
     /// Expected arrow schema.
     arrow_schema: SchemaRef,
     /// Optional primary key adapter.
-    compat_pk: CompatFlatPrimaryKey,
+    compat_pk: FlatCompatPrimaryKey,
 }
 
-impl CompatFlatBatch {
-    /// Creates a [CompatPlainBatch] if needed.
+impl FlatCompatBatch {
+    /// Creates a [FlatCompatBatch] if needed.
     /// - `mapper` is built from the metadata users expect to see.
     /// - `actual` is the [RegionMetadata] of the input reader.
     /// - `actual_schema` is the actual batch schema of the input reader.
@@ -229,7 +229,7 @@ impl CompatFlatBatch {
         }
         fields.extend_from_slice(&internal_fields());
 
-        let compat_pk = CompatFlatPrimaryKey::new(mapper.metadata(), actual)?;
+        let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
         Ok(Some(Self {
             actual_schema,
@@ -596,7 +596,7 @@ impl RewritePrimaryKey {
 }
 
 /// Helper to rewrite primary key to another encoding for flat format.
-struct RewriteFlatPrimaryKey {
+struct FlatRewritePrimaryKey {
     /// New primary key encoder.
     codec: Arc<dyn PrimaryKeyCodec>,
     /// Metadata of the expected region.
@@ -606,18 +606,18 @@ struct RewriteFlatPrimaryKey {
     old_codec: Arc<dyn PrimaryKeyCodec>,
 }
 
-impl RewriteFlatPrimaryKey {
+impl FlatRewritePrimaryKey {
     fn new(
         expect: &RegionMetadataRef,
         actual: &RegionMetadataRef,
-    ) -> Option<RewriteFlatPrimaryKey> {
+    ) -> Option<FlatRewritePrimaryKey> {
         if expect.primary_key_encoding == actual.primary_key_encoding {
             return None;
         }
         let codec = build_primary_key_codec(expect);
         let old_codec = build_primary_key_codec(actual);
 
-        Some(RewriteFlatPrimaryKey {
+        Some(FlatRewritePrimaryKey {
             codec,
             metadata: expect.clone(),
             old_codec,
@@ -698,18 +698,18 @@ impl RewriteFlatPrimaryKey {
 }
 
 /// Helper to make primary key compatible for flat format.
-struct CompatFlatPrimaryKey {
+struct FlatCompatPrimaryKey {
     /// Primary key rewriter.
-    rewriter: Option<RewriteFlatPrimaryKey>,
+    rewriter: Option<FlatRewritePrimaryKey>,
     /// Converter to append values to primary keys.
     converter: Option<Arc<dyn PrimaryKeyCodec>>,
     /// Default values to append.
     values: Vec<(ColumnId, Value)>,
 }
 
-impl CompatFlatPrimaryKey {
+impl FlatCompatPrimaryKey {
     fn new(expect: &RegionMetadataRef, actual: &RegionMetadataRef) -> Result<Self> {
-        let rewriter = RewriteFlatPrimaryKey::new(expect, actual);
+        let rewriter = FlatRewritePrimaryKey::new(expect, actual);
 
         if is_primary_key_same(expect, actual)? {
             return Ok(Self {
