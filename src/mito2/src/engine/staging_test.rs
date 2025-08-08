@@ -19,7 +19,7 @@ use store_api::region_request::{RegionAlterRequest, RegionRequest, RegionTruncat
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::request::{DdlRequest, WorkerRequest};
+use crate::request::WorkerRequest;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -36,29 +36,37 @@ async fn test_staging_state_integration() {
         .await
         .unwrap();
 
-    // Test DDL request creation patterns work correctly
-    let (enter_req, _receiver) = WorkerRequest::new_enter_staging(region_id);
-    match enter_req {
-        WorkerRequest::Ddl(ddl_req) => {
-            assert_eq!(ddl_req.region_id, region_id);
-            match ddl_req.request {
-                DdlRequest::EnterStaging => {}
-                _ => panic!("Expected EnterStaging request"),
-            }
+    // Test external API patterns work correctly
+    use store_api::region_engine::SettableRegionRoleState;
+
+    let (role_req, _receiver) = WorkerRequest::new_set_readonly_gracefully(
+        region_id,
+        SettableRegionRoleState::StagingLeader,
+    );
+    match role_req {
+        WorkerRequest::SetRegionRoleStateGracefully {
+            region_id: req_region_id,
+            region_role_state,
+            ..
+        } => {
+            assert_eq!(req_region_id, region_id);
+            assert_eq!(region_role_state, SettableRegionRoleState::StagingLeader);
         }
-        _ => panic!("Expected DDL request"),
+        _ => panic!("Expected SetRegionRoleStateGracefully request"),
     }
 
-    let (exit_req, _receiver) = WorkerRequest::new_exit_staging(region_id);
-    match exit_req {
-        WorkerRequest::Ddl(ddl_req) => {
-            assert_eq!(ddl_req.region_id, region_id);
-            match ddl_req.request {
-                DdlRequest::ExitStaging => {}
-                _ => panic!("Expected ExitStaging request"),
-            }
+    let (role_req, _receiver) =
+        WorkerRequest::new_set_readonly_gracefully(region_id, SettableRegionRoleState::Leader);
+    match role_req {
+        WorkerRequest::SetRegionRoleStateGracefully {
+            region_id: req_region_id,
+            region_role_state,
+            ..
+        } => {
+            assert_eq!(req_region_id, region_id);
+            assert_eq!(region_role_state, SettableRegionRoleState::Leader);
         }
-        _ => panic!("Expected DDL request"),
+        _ => panic!("Expected SetRegionRoleStateGracefully request"),
     }
 }
 

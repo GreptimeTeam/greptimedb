@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_base::Plugins;
+use common_error::ext::BoxedError;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
@@ -46,7 +47,6 @@ use store_api::logstore::LogStore;
 use store_api::region_engine::{
     SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
-use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -951,8 +951,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
-                DdlRequest::EnterStaging => self.handle_enter_staging_request(ddl.region_id).await,
-                DdlRequest::ExitStaging => self.handle_exit_staging_request(ddl.region_id).await,
             };
 
             ddl.sender.send(res);
@@ -1006,43 +1004,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if let Some(region) = self.regions.get_region(region_id) {
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
-                region.set_role_state_gracefully(region_role_state).await;
-
-                let last_entry_id = region.version_control.current().last_entry_id;
-                let _ = sender.send(SetRegionRoleStateResponse::success(
-                    SetRegionRoleStateSuccess::mito(last_entry_id),
-                ));
+                match region.set_role_state_gracefully(region_role_state).await {
+                    Ok(()) => {
+                        let last_entry_id = region.version_control.current().last_entry_id;
+                        let _ = sender.send(SetRegionRoleStateResponse::success(
+                            SetRegionRoleStateSuccess::mito(last_entry_id),
+                        ));
+                    }
+                    Err(e) => {
+                        error!(e; "Failed to set region {} role state to {:?}", region_id, region_role_state);
+                        let _ = sender.send(SetRegionRoleStateResponse::invalid_transition(
+                            BoxedError::new(e),
+                        ));
+                    }
+                }
             });
         } else {
             let _ = sender.send(SetRegionRoleStateResponse::NotFound);
-        }
-    }
-
-    /// Handles enter staging request.
-    async fn handle_enter_staging_request(&mut self, region_id: RegionId) -> Result<AffectedRows> {
-        if let Some(region) = self.regions.get_region(region_id) {
-            info!("Enter staging mode for region {}", region_id);
-            region.set_staging().map_err(|e| {
-                error!(e; "Failed to enter staging mode for region {}", region_id);
-                e
-            })?;
-            Ok(0)
-        } else {
-            error::RegionNotFoundSnafu { region_id }.fail()
-        }
-    }
-
-    /// Handles exit staging request.
-    async fn handle_exit_staging_request(&mut self, region_id: RegionId) -> Result<AffectedRows> {
-        if let Some(region) = self.regions.get_region(region_id) {
-            info!("Exit staging mode for region {}", region_id);
-            region.exit_staging().map_err(|e| {
-                error!(e; "Failed to exit staging mode for region {}", region_id);
-                e
-            })?;
-            Ok(0)
-        } else {
-            error::RegionNotFoundSnafu { region_id }.fail()
         }
     }
 }

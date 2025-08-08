@@ -312,12 +312,113 @@ impl MitoRegion {
         )
     }
 
-    /// Sets the region to readonly gracefully. This acquires the manifest write lock.
-    pub(crate) async fn set_role_state_gracefully(&self, state: SettableRegionRoleState) {
-        let _manager = self.manifest_ctx.manifest_manager.write().await;
-        // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
-        // Then we change the state.
-        self.set_role(state.into());
+    /// Sets the region role state gracefully. This acquires the manifest write lock.
+    pub(crate) async fn set_role_state_gracefully(
+        &self,
+        state: SettableRegionRoleState,
+    ) -> Result<()> {
+        let current_state = self.state();
+
+        match state {
+            SettableRegionRoleState::Leader => {
+                // Exit staging mode and return to normal writable leader
+                // Only allowed from staging state
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!("Exiting staging mode for region {}", self.region_id);
+                        self.exit_staging()?;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in normal leader mode", self.region_id);
+                    }
+                    _ => {
+                        // Only staging -> leader transition is allowed
+                        return Err(RegionStateSnafu {
+                            region_id: self.region_id,
+                            state: current_state,
+                            expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                        }
+                        .build());
+                    }
+                }
+            }
+
+            SettableRegionRoleState::StagingLeader => {
+                // Enter staging mode from normal writable leader
+                // Only allowed from writable leader state
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        info!("Entering staging mode for region {}", self.region_id);
+                        self.set_staging()?;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in staging mode", self.region_id);
+                    }
+                    _ => {
+                        return Err(RegionStateSnafu {
+                            region_id: self.region_id,
+                            state: current_state,
+                            expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                        }
+                        .build());
+                    }
+                }
+            }
+
+            SettableRegionRoleState::Follower => {
+                // Make this region a follower
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!(
+                            "Exiting staging and demoting region {} to follower",
+                            self.region_id
+                        );
+                        self.exit_staging()?;
+                        self.set_role(RegionRole::Follower);
+                    }
+                    RegionRoleState::Leader(_) => {
+                        info!("Demoting region {} from leader to follower", self.region_id);
+                        self.set_role(RegionRole::Follower);
+                    }
+                    RegionRoleState::Follower => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in follower mode", self.region_id);
+                    }
+                }
+            }
+
+            SettableRegionRoleState::DowngradingLeader => {
+                // downgrade this region to downgrading leader
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!(
+                            "Exiting staging and entering downgrade for region {}",
+                            self.region_id
+                        );
+                        self.exit_staging()?;
+                        self.set_role(RegionRole::DowngradingLeader);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        info!("Starting downgrade for region {}", self.region_id);
+                        self.set_role(RegionRole::DowngradingLeader);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in downgrading mode", self.region_id);
+                    }
+                    _ => {
+                        warn!(
+                            "Cannot start downgrade for region {} from state {:?}",
+                            self.region_id, current_state
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
