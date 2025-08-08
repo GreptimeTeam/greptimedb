@@ -1164,7 +1164,8 @@ impl FlowMirrorTask {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{ColumnSchema as GrpcColumnSchema, RowInsertRequest, Rows, SemanticType, Value};
+    use api::v1::helper::{field_column_schema, time_index_column_schema};
+    use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
@@ -1235,18 +1236,8 @@ mod tests {
             table_name: "test_table".to_string(),
             rows: Some(Rows {
                 schema: vec![
-                    GrpcColumnSchema {
-                        column_name: "ts_wrong".to_string(),
-                        datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
-                        semantic_type: SemanticType::Timestamp as i32,
-                        ..Default::default()
-                    },
-                    GrpcColumnSchema {
-                        column_name: "field_wrong".to_string(),
-                        datatype: api::v1::ColumnDataType::Float64 as i32,
-                        semantic_type: SemanticType::Field as i32,
-                        ..Default::default()
-                    },
+                    time_index_column_schema("ts_wrong", ColumnDataType::TimestampMillisecond),
+                    field_column_schema("field_wrong", ColumnDataType::Float64),
                 ],
                 rows: vec![api::v1::Row {
                     values: vec![Value::default(), Value::default()],
