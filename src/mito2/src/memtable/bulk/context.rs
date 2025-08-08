@@ -41,7 +41,6 @@ impl BulkIterContext {
         region_metadata: RegionMetadataRef,
         projection: &Option<&[ColumnId]>,
         predicate: Option<Predicate>,
-        flat_format: bool,
     ) -> Self {
         let codec = build_primary_key_codec(&region_metadata);
 
@@ -56,7 +55,7 @@ impl BulkIterContext {
             })
             .collect();
 
-        let read_format = build_read_format(region_metadata, projection, flat_format);
+        let read_format = build_read_format(region_metadata, projection, true);
 
         Self {
             base: RangeBase {

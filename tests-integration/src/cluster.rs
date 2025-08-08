@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::net::TcpListener;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,12 +52,14 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::heartbeat::HeartbeatTask;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::Instance as FeInstance;
+use frontend::server::Services;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{Metasrv, MetasrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use object_store::config::ObjectStoreConfig;
+use rand::Rng;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
 use servers::grpc::GrpcOptions;
@@ -177,6 +181,7 @@ impl GreptimeDbClusterBuilder {
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
+        start_frontend_servers: bool,
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
@@ -218,7 +223,9 @@ impl GreptimeDbClusterBuilder {
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
-        let mut frontend = self.build_frontend(metasrv.clone(), datanode_clients).await;
+        let mut frontend = self
+            .build_frontend(metasrv.clone(), datanode_clients, start_frontend_servers)
+            .await;
 
         test_util::prepare_another_catalog_and_schema(&frontend.instance).await;
 
@@ -234,10 +241,11 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    pub async fn build(&self) -> GreptimeDbCluster {
+    pub async fn build(&self, start_frontend_servers: bool) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
         let (datanode_options, guards) = self.build_datanode_options_and_guards(datanodes).await;
-        self.build_with(datanode_options, guards).await
+        self.build_with(datanode_options, start_frontend_servers, guards)
+            .await
     }
 
     async fn build_datanode_options_and_guards(
@@ -352,6 +360,7 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: MockInfo,
         datanode_clients: Arc<NodeClients>,
+        start_frontend_servers: bool,
     ) -> Frontend {
         let mut meta_client = MetaClientBuilder::frontend_default_options()
             .channel_manager(metasrv.channel_manager)
@@ -393,36 +402,96 @@ impl GreptimeDbClusterBuilder {
             Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
         ]);
 
-        let options = FrontendOptions::default();
+        let fe_opts = self.build_frontend_options();
+
         let heartbeat_task = HeartbeatTask::new(
-            &options,
+            &fe_opts,
             meta_client.clone(),
             HeartbeatOptions::default(),
             Arc::new(handlers_executor),
         );
 
-        let server_addr = options.grpc.server_addr.clone();
         let instance = FrontendBuilder::new(
-            options,
+            fe_opts.clone(),
             cached_meta_backend.clone(),
             cache_registry.clone(),
             catalog_manager,
             datanode_clients,
             meta_client,
-            Arc::new(ProcessManager::new(server_addr, None)),
+            Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
         .unwrap();
+
         let instance = Arc::new(instance);
+
+        // Build the servers for the frontend.
+        let servers = if start_frontend_servers {
+            Services::new(fe_opts, instance.clone(), Plugins::default())
+                .build()
+                .unwrap()
+        } else {
+            ServerHandlers::default()
+        };
 
         Frontend {
             instance,
-            servers: ServerHandlers::default(),
+            servers,
             heartbeat_task: Some(heartbeat_task),
             export_metrics_task: None,
         }
+    }
+
+    fn build_frontend_options(&self) -> FrontendOptions {
+        let mut fe_opts = FrontendOptions::default();
+
+        // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
+        let port_range = 14000..=24000;
+        let max_attempts = 10;
+        let localhost = "127.0.0.1";
+        let construct_addr = |port: u16| format!("{}:{}", localhost, port);
+
+        fe_opts.http.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+
+        let grpc_port = self.choose_random_unused_port(port_range.clone(), max_attempts, localhost);
+        fe_opts.grpc.bind_addr = construct_addr(grpc_port);
+        fe_opts.grpc.server_addr = construct_addr(grpc_port);
+        fe_opts.mysql.addr = construct_addr(self.choose_random_unused_port(
+            port_range.clone(),
+            max_attempts,
+            localhost,
+        ));
+        fe_opts.postgres.addr =
+            construct_addr(self.choose_random_unused_port(port_range, max_attempts, localhost));
+
+        fe_opts
+    }
+
+    // Choose a random unused port between [start, end].
+    fn choose_random_unused_port(
+        &self,
+        port_range: RangeInclusive<u16>,
+        max_attempts: u16,
+        addr: &str,
+    ) -> u16 {
+        let mut rng = rand::rng();
+
+        let mut attempts = 0;
+        while attempts < max_attempts {
+            let port = rng.random_range(port_range.clone());
+            if TcpListener::bind(format!("{}:{}", addr, port)).is_ok() {
+                return port;
+            }
+            attempts += 1;
+        }
+
+        panic!("No unused port found");
     }
 }
 

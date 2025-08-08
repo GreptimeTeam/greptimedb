@@ -22,6 +22,7 @@ pub mod cache_invalidator;
 pub mod cluster;
 pub mod election;
 pub mod error;
+pub mod events;
 mod failure_detector;
 pub mod flow_meta_alloc;
 pub mod handler;

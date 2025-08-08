@@ -116,6 +116,9 @@ impl State for UpdateTableInfo {
                 ],
             )
             .await?;
+        // Update metrics.
+        let metrics = ctx.mut_metrics();
+        metrics.update_table_info = true;
 
         Ok((Box::new(ReconciliationEnd), Status::executing(true)))
     }

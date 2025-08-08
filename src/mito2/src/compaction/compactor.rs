@@ -90,7 +90,8 @@ pub struct CompactionRegion {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) region_metadata: RegionMetadataRef,
     pub(crate) cache_manager: CacheManagerRef,
-    pub(crate) access_layer: AccessLayerRef,
+    /// Access layer to get the table path and path type.
+    pub access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: Arc<ManifestContext>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) file_purger: Option<Arc<LocalFilePurger>>,

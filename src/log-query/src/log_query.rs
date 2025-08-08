@@ -42,7 +42,7 @@ pub struct LogQuery {
     // Filters
     /// Conjunction of filters to apply for the raw logs.
     ///
-    /// Filters here can only refer to the columns from the original log.
+    /// Filters here can apply to any LogExpr.
     pub filters: Vec<ColumnFilters>,
     /// Adjacent lines to return. Applies to all filters above.
     ///
@@ -82,7 +82,7 @@ pub enum LogExpr {
     },
     BinaryOp {
         left: Box<LogExpr>,
-        op: String,
+        op: BinaryOperator,
         right: Box<LogExpr>,
     },
     Alias {
@@ -90,8 +90,7 @@ pub enum LogExpr {
         alias: String,
     },
     Filter {
-        expr: Box<LogExpr>,
-        filter: ContentFilter,
+        filter: ColumnFilters,
     },
 }
 
@@ -282,12 +281,12 @@ impl TimeFilter {
     }
 }
 
-/// Represents a column with filters to query.
-#[derive(Debug, Serialize, Deserialize)]
+/// Represents an expression with filters to query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnFilters {
-    /// Case-sensitive column name to query.
-    pub column_name: String,
-    /// Filters to apply to the column. Can be empty.
+    /// Expression to apply filters to. Can be a column reference or any other LogExpr.
+    pub expr: Box<LogExpr>,
+    /// Filters to apply to the expression result. Can be empty.
     pub filters: Vec<ContentFilter>,
 }
 
@@ -327,14 +326,38 @@ pub enum ContentFilter {
         inclusive: bool,
     },
     In(Vec<String>),
-    // TODO(ruihang): arithmetic operations
+    IsTrue,
+    IsFalse,
 
     // Compound filters
-    Compound(Vec<ContentFilter>, BinaryOperator),
+    Compound(Vec<ContentFilter>, ConjunctionOperator),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ConjunctionOperator {
+    And,
+    Or,
+}
+
+/// Binary operators for LogExpr::BinaryOp.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BinaryOperator {
+    // Comparison operators
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+
+    // Arithmetic operators
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulo,
+
+    // Logical operators
     And,
     Or,
 }

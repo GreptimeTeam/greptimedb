@@ -23,7 +23,8 @@ use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
-    LayeredCacheRegistryRef, TableRoute, TableRouteCacheRef, ViewInfoCacheRef,
+    LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRoute, TableRouteCacheRef,
+    ViewInfoCacheRef,
 };
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
@@ -41,7 +42,7 @@ use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use table::dist_table::DistTable;
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::table_name::TableName;
 use table::TableRef;
@@ -323,6 +324,63 @@ impl CatalogManager for KvBackendCatalogManager {
         }
 
         Ok(None)
+    }
+
+    async fn table_id(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        query_ctx: Option<&QueryContext>,
+    ) -> Result<Option<TableId>> {
+        let channel = query_ctx.map_or(Channel::Unknown, |ctx| ctx.channel());
+        if let Some(table) =
+            self.system_catalog
+                .table(catalog_name, schema_name, table_name, query_ctx)
+        {
+            return Ok(Some(table.table_info().table_id()));
+        }
+
+        let table_cache: TableNameCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_name_cache",
+            })?;
+
+        let table = table_cache
+            .get_by_ref(&TableName {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
+                table_name: table_name.to_string(),
+            })
+            .await
+            .context(GetTableCacheSnafu)?;
+
+        if let Some(table) = table {
+            return Ok(Some(table));
+        }
+
+        if channel == Channel::Postgres {
+            // falldown to pg_catalog
+            if let Some(table) =
+                self.system_catalog
+                    .table(catalog_name, PG_CATALOG_NAME, table_name, query_ctx)
+            {
+                return Ok(Some(table.table_info().table_id()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
+        let table_info_cache: TableInfoCacheRef =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_info_cache",
+            })?;
+        table_info_cache
+            .get_by_ref(&table_id)
+            .await
+            .context(GetTableCacheSnafu)
     }
 
     async fn tables_by_ids(

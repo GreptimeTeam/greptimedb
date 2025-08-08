@@ -13,23 +13,35 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::fmt::{self, Display};
+use std::ops::AddAssign;
+use std::time::Instant;
 
 use api::v1::SemanticType;
-use common_telemetry::warn;
+use common_procedure::{watcher, Context as ProcedureContext, ProcedureId};
+use common_telemetry::{error, warn};
 use datatypes::schema::ColumnSchema;
-use snafu::{ensure, OptionExt};
+use futures::future::{join_all, try_join_all};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{RegionId, TableId};
 use table::metadata::{RawTableInfo, RawTableMeta};
+use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::{
-    MismatchColumnIdSnafu, MissingColumnInColumnMetadataSnafu, Result, UnexpectedSnafu,
+    ColumnIdMismatchSnafu, ColumnNotFoundSnafu, MismatchColumnIdSnafu,
+    MissingColumnInColumnMetadataSnafu, ProcedureStateReceiverNotFoundSnafu,
+    ProcedureStateReceiverSnafu, Result, TimestampMismatchSnafu, UnexpectedSnafu,
+    WaitProcedureSnafu,
 };
 use crate::key::TableMetadataManagerRef;
+use crate::metrics;
 use crate::node_manager::NodeManagerRef;
+use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
+use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
+use crate::reconciliation::reconcile_table::ReconcileTableProcedure;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PartialRegionMetadata<'a> {
@@ -45,20 +57,6 @@ impl<'a> From<&'a RegionMetadata> for PartialRegionMetadata<'a> {
             primary_key: &region_metadata.primary_key,
             table_id: region_metadata.region_id.table_id(),
         }
-    }
-}
-
-/// A display wrapper for [`ColumnMetadata`] that formats the column metadata in a more readable way.
-struct ColumnMetadataDisplay<'a>(pub &'a ColumnMetadata);
-
-impl<'a> fmt::Debug for ColumnMetadataDisplay<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let col = self.0;
-        write!(
-            f,
-            "Column {{ name: {}, id: {}, semantic_type: {:?}, data_type: {:?} }}",
-            col.column_schema.name, col.column_id, col.semantic_type, col.column_schema.data_type,
-        )
     }
 }
 
@@ -110,21 +108,7 @@ pub(crate) fn resolve_column_metadatas_with_metasrv(
     let mut regions_ids = vec![];
     for region_metadata in region_metadatas {
         if region_metadata.column_metadatas != column_metadatas {
-            let is_invariant_preserved = check_column_metadata_invariants(
-                column_metadatas,
-                &region_metadata.column_metadatas,
-            );
-            ensure!(
-                is_invariant_preserved,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column metadata invariants violated for region {}. Resolved column metadata: {:?}, region column metadata: {:?}",
-                        region_metadata.region_id,
-                        column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                        region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                    )
-                }
-            );
+            check_column_metadata_invariants(column_metadatas, &region_metadata.column_metadatas)?;
             regions_ids.push(region_metadata.region_id);
         }
     }
@@ -163,21 +147,10 @@ pub(crate) fn resolve_column_metadatas_with_latest(
     let mut region_ids = vec![];
     for region_metadata in region_metadatas {
         if PartialRegionMetadata::from(region_metadata) != latest_column_metadatas {
-            let is_invariant_preserved = check_column_metadata_invariants(
+            check_column_metadata_invariants(
                 &latest_region_metadata.column_metadatas,
                 &region_metadata.column_metadatas,
-            );
-            ensure!(
-                is_invariant_preserved,
-                UnexpectedSnafu {
-                    err_msg: format!(
-                        "Column metadata invariants violated for region {}. Resolved column metadata: {:?}, region column metadata: {:?}",
-                        region_metadata.region_id,
-                        latest_column_metadatas.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>(),
-                        region_metadata.column_metadatas.iter().map(ColumnMetadataDisplay).collect::<Vec<_>>()
-                    )
-                }
-            );
+            )?;
             region_ids.push(region_metadata.region_id);
         }
     }
@@ -239,7 +212,7 @@ pub(crate) fn build_column_metadata_from_table_info(
 pub(crate) fn check_column_metadata_invariants(
     new_column_metadatas: &[ColumnMetadata],
     column_metadatas: &[ColumnMetadata],
-) -> bool {
+) -> Result<()> {
     let new_primary_keys = new_column_metadatas
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
@@ -252,22 +225,50 @@ pub(crate) fn check_column_metadata_invariants(
         .map(|c| (c.column_schema.name.as_str(), c.column_id));
 
     for (name, id) in old_primary_keys {
-        if new_primary_keys.get(name) != Some(&id) {
-            return false;
-        }
+        let column_id = new_primary_keys
+            .get(name)
+            .cloned()
+            .context(ColumnNotFoundSnafu {
+                column_name: name,
+                column_id: id,
+            })?;
+
+        ensure!(
+            column_id == id,
+            ColumnIdMismatchSnafu {
+                column_name: name,
+                expected_column_id: id,
+                actual_column_id: column_id,
+            }
+        );
     }
 
     let new_ts_column = new_column_metadatas
         .iter()
         .find(|c| c.semantic_type == SemanticType::Timestamp)
-        .map(|c| (c.column_schema.name.as_str(), c.column_id));
+        .map(|c| (c.column_schema.name.as_str(), c.column_id))
+        .context(UnexpectedSnafu {
+            err_msg: "Timestamp column not found in new column metadata",
+        })?;
 
     let old_ts_column = column_metadatas
         .iter()
         .find(|c| c.semantic_type == SemanticType::Timestamp)
-        .map(|c| (c.column_schema.name.as_str(), c.column_id));
+        .map(|c| (c.column_schema.name.as_str(), c.column_id))
+        .context(UnexpectedSnafu {
+            err_msg: "Timestamp column not found in column metadata",
+        })?;
+    ensure!(
+        new_ts_column == old_ts_column,
+        TimestampMismatchSnafu {
+            expected_column_name: old_ts_column.0,
+            expected_column_id: old_ts_column.1,
+            actual_column_name: new_ts_column.0,
+            actual_column_id: new_ts_column.1,
+        }
+    );
 
-    new_ts_column == old_ts_column
+    Ok(())
 }
 
 /// Builds a [`RawTableMeta`] from the provided [`ColumnMetadata`]s.
@@ -406,11 +407,533 @@ pub(crate) fn need_update_logical_table_info(
     table_info.meta.schema.column_schemas.len() != column_metadatas.len()
 }
 
+/// The result of waiting for inflight subprocedures.
+pub struct PartialSuccessResult<'a> {
+    pub failed_procedures: Vec<&'a SubprocedureMeta>,
+    pub success_procedures: Vec<&'a SubprocedureMeta>,
+}
+
+/// The result of waiting for inflight subprocedures.
+pub enum WaitForInflightSubproceduresResult<'a> {
+    Success(Vec<&'a SubprocedureMeta>),
+    PartialSuccess(PartialSuccessResult<'a>),
+}
+
+/// Wait for inflight subprocedures.
+///
+/// If `fail_fast` is true, the function will return an error if any subprocedure fails.
+/// Otherwise, the function will continue waiting for all subprocedures to complete.
+pub(crate) async fn wait_for_inflight_subprocedures<'a>(
+    procedure_ctx: &ProcedureContext,
+    subprocedures: &'a [SubprocedureMeta],
+    fail_fast: bool,
+) -> Result<WaitForInflightSubproceduresResult<'a>> {
+    let mut receivers = Vec::with_capacity(subprocedures.len());
+    for subprocedure in subprocedures {
+        let procedure_id = subprocedure.procedure_id();
+        let receiver = procedure_ctx
+            .provider
+            .procedure_state_receiver(procedure_id)
+            .await
+            .context(ProcedureStateReceiverSnafu { procedure_id })?
+            .context(ProcedureStateReceiverNotFoundSnafu { procedure_id })?;
+        receivers.push((receiver, subprocedure));
+    }
+
+    let mut tasks = Vec::with_capacity(receivers.len());
+    for (receiver, subprocedure) in receivers.iter_mut() {
+        tasks.push(async move {
+            watcher::wait(receiver).await.inspect_err(|e| {
+                error!(e; "inflight subprocedure failed, parent procedure_id: {}, procedure: {}", procedure_ctx.procedure_id, subprocedure);
+            })
+        });
+    }
+
+    if fail_fast {
+        try_join_all(tasks).await.context(WaitProcedureSnafu)?;
+        return Ok(WaitForInflightSubproceduresResult::Success(
+            subprocedures.iter().collect(),
+        ));
+    }
+
+    // If fail_fast is false, we need to wait for all subprocedures to complete.
+    let results = join_all(tasks).await;
+    let failed_procedures_num = results.iter().filter(|r| r.is_err()).count();
+    if failed_procedures_num == 0 {
+        return Ok(WaitForInflightSubproceduresResult::Success(
+            subprocedures.iter().collect(),
+        ));
+    }
+    warn!(
+        "{} inflight subprocedures failed, total: {}, parent procedure_id: {}",
+        failed_procedures_num,
+        subprocedures.len(),
+        procedure_ctx.procedure_id
+    );
+
+    let mut failed_procedures = Vec::with_capacity(failed_procedures_num);
+    let mut success_procedures = Vec::with_capacity(subprocedures.len() - failed_procedures_num);
+    for (result, subprocedure) in results.into_iter().zip(subprocedures) {
+        if result.is_err() {
+            failed_procedures.push(subprocedure);
+        } else {
+            success_procedures.push(subprocedure);
+        }
+    }
+
+    Ok(WaitForInflightSubproceduresResult::PartialSuccess(
+        PartialSuccessResult {
+            failed_procedures,
+            success_procedures,
+        },
+    ))
+}
+
 #[derive(Clone)]
 pub struct Context {
     pub node_manager: NodeManagerRef,
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
+}
+
+/// Metadata for an inflight physical table subprocedure.
+pub struct PhysicalTableMeta {
+    pub procedure_id: ProcedureId,
+    pub table_id: TableId,
+    pub table_name: TableName,
+}
+
+/// Metadata for an inflight logical table subprocedure.
+pub struct LogicalTableMeta {
+    pub procedure_id: ProcedureId,
+    pub physical_table_id: TableId,
+    pub physical_table_name: TableName,
+    pub logical_tables: Vec<(TableId, TableName)>,
+}
+
+/// Metadata for an inflight database subprocedure.
+pub struct ReconcileDatabaseMeta {
+    pub procedure_id: ProcedureId,
+    pub catalog: String,
+    pub schema: String,
+}
+
+/// The inflight subprocedure metadata.
+pub enum SubprocedureMeta {
+    PhysicalTable(PhysicalTableMeta),
+    LogicalTable(LogicalTableMeta),
+    Database(ReconcileDatabaseMeta),
+}
+
+impl Display for SubprocedureMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SubprocedureMeta::PhysicalTable(meta) => {
+                write!(
+                    f,
+                    "ReconcilePhysicalTable(procedure_id: {}, table_id: {}, table_name: {})",
+                    meta.procedure_id, meta.table_id, meta.table_name
+                )
+            }
+            SubprocedureMeta::LogicalTable(meta) => {
+                write!(
+                    f,
+                    "ReconcileLogicalTable(procedure_id: {}, physical_table_id: {}, physical_table_name: {}, logical_tables: {:?})",
+                    meta.procedure_id, meta.physical_table_id, meta.physical_table_name, meta.logical_tables
+                )
+            }
+            SubprocedureMeta::Database(meta) => {
+                write!(
+                    f,
+                    "ReconcileDatabase(procedure_id: {}, catalog: {}, schema: {})",
+                    meta.procedure_id, meta.catalog, meta.schema
+                )
+            }
+        }
+    }
+}
+
+impl SubprocedureMeta {
+    /// Creates a new logical table subprocedure metadata.
+    pub fn new_logical_table(
+        procedure_id: ProcedureId,
+        physical_table_id: TableId,
+        physical_table_name: TableName,
+        logical_tables: Vec<(TableId, TableName)>,
+    ) -> Self {
+        Self::LogicalTable(LogicalTableMeta {
+            procedure_id,
+            physical_table_id,
+            physical_table_name,
+            logical_tables,
+        })
+    }
+
+    /// Creates a new physical table subprocedure metadata.
+    pub fn new_physical_table(
+        procedure_id: ProcedureId,
+        table_id: TableId,
+        table_name: TableName,
+    ) -> Self {
+        Self::PhysicalTable(PhysicalTableMeta {
+            procedure_id,
+            table_id,
+            table_name,
+        })
+    }
+
+    /// Creates a new reconcile database subprocedure metadata.
+    pub fn new_reconcile_database(
+        procedure_id: ProcedureId,
+        catalog: String,
+        schema: String,
+    ) -> Self {
+        Self::Database(ReconcileDatabaseMeta {
+            procedure_id,
+            catalog,
+            schema,
+        })
+    }
+
+    /// Returns the procedure id of the subprocedure.
+    pub fn procedure_id(&self) -> ProcedureId {
+        match self {
+            SubprocedureMeta::PhysicalTable(meta) => meta.procedure_id,
+            SubprocedureMeta::LogicalTable(meta) => meta.procedure_id,
+            SubprocedureMeta::Database(meta) => meta.procedure_id,
+        }
+    }
+
+    /// Returns the number of tables will be reconciled.
+    pub fn table_num(&self) -> usize {
+        match self {
+            SubprocedureMeta::PhysicalTable(_) => 1,
+            SubprocedureMeta::LogicalTable(meta) => meta.logical_tables.len(),
+            SubprocedureMeta::Database(_) => 0,
+        }
+    }
+
+    /// Returns the number of databases will be reconciled.
+    pub fn database_num(&self) -> usize {
+        match self {
+            SubprocedureMeta::Database(_) => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// The metrics of reconciling catalog.
+#[derive(Clone, Default)]
+pub struct ReconcileCatalogMetrics {
+    pub succeeded_databases: usize,
+    pub failed_databases: usize,
+}
+
+impl AddAssign for ReconcileCatalogMetrics {
+    fn add_assign(&mut self, other: Self) {
+        self.succeeded_databases += other.succeeded_databases;
+        self.failed_databases += other.failed_databases;
+    }
+}
+
+impl Display for ReconcileCatalogMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "succeeded_databases: {}, failed_databases: {}",
+            self.succeeded_databases, self.failed_databases
+        )
+    }
+}
+
+impl From<WaitForInflightSubproceduresResult<'_>> for ReconcileCatalogMetrics {
+    fn from(result: WaitForInflightSubproceduresResult<'_>) -> Self {
+        match result {
+            WaitForInflightSubproceduresResult::Success(subprocedures) => ReconcileCatalogMetrics {
+                succeeded_databases: subprocedures.len(),
+                failed_databases: 0,
+            },
+            WaitForInflightSubproceduresResult::PartialSuccess(PartialSuccessResult {
+                failed_procedures,
+                success_procedures,
+            }) => {
+                let succeeded_databases = success_procedures
+                    .iter()
+                    .map(|subprocedure| subprocedure.database_num())
+                    .sum();
+                let failed_databases = failed_procedures
+                    .iter()
+                    .map(|subprocedure| subprocedure.database_num())
+                    .sum();
+                ReconcileCatalogMetrics {
+                    succeeded_databases,
+                    failed_databases,
+                }
+            }
+        }
+    }
+}
+
+/// The metrics of reconciling database.
+#[derive(Clone, Default)]
+pub struct ReconcileDatabaseMetrics {
+    pub succeeded_tables: usize,
+    pub failed_tables: usize,
+    pub succeeded_procedures: usize,
+    pub failed_procedures: usize,
+}
+
+impl Display for ReconcileDatabaseMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "succeeded_tables: {}, failed_tables: {}, succeeded_procedures: {}, failed_procedures: {}", self.succeeded_tables, self.failed_tables, self.succeeded_procedures, self.failed_procedures)
+    }
+}
+
+impl AddAssign for ReconcileDatabaseMetrics {
+    fn add_assign(&mut self, other: Self) {
+        self.succeeded_tables += other.succeeded_tables;
+        self.failed_tables += other.failed_tables;
+        self.succeeded_procedures += other.succeeded_procedures;
+        self.failed_procedures += other.failed_procedures;
+    }
+}
+
+impl From<WaitForInflightSubproceduresResult<'_>> for ReconcileDatabaseMetrics {
+    fn from(result: WaitForInflightSubproceduresResult<'_>) -> Self {
+        match result {
+            WaitForInflightSubproceduresResult::Success(subprocedures) => {
+                let table_num = subprocedures
+                    .iter()
+                    .map(|subprocedure| subprocedure.table_num())
+                    .sum();
+                ReconcileDatabaseMetrics {
+                    succeeded_procedures: subprocedures.len(),
+                    failed_procedures: 0,
+                    succeeded_tables: table_num,
+                    failed_tables: 0,
+                }
+            }
+            WaitForInflightSubproceduresResult::PartialSuccess(PartialSuccessResult {
+                failed_procedures,
+                success_procedures,
+            }) => {
+                let succeeded_tables = success_procedures
+                    .iter()
+                    .map(|subprocedure| subprocedure.table_num())
+                    .sum();
+                let failed_tables = failed_procedures
+                    .iter()
+                    .map(|subprocedure| subprocedure.table_num())
+                    .sum();
+                ReconcileDatabaseMetrics {
+                    succeeded_procedures: success_procedures.len(),
+                    failed_procedures: failed_procedures.len(),
+                    succeeded_tables,
+                    failed_tables,
+                }
+            }
+        }
+    }
+}
+
+/// The metrics of reconciling logical tables.
+#[derive(Clone)]
+pub struct ReconcileLogicalTableMetrics {
+    pub start_time: Instant,
+    pub update_table_info_count: usize,
+    pub create_tables_count: usize,
+    pub column_metadata_consistent_count: usize,
+    pub column_metadata_inconsistent_count: usize,
+}
+
+impl Default for ReconcileLogicalTableMetrics {
+    fn default() -> Self {
+        Self {
+            start_time: Instant::now(),
+            update_table_info_count: 0,
+            create_tables_count: 0,
+            column_metadata_consistent_count: 0,
+            column_metadata_inconsistent_count: 0,
+        }
+    }
+}
+
+const CREATE_TABLES: &str = "create_tables";
+const UPDATE_TABLE_INFO: &str = "update_table_info";
+const COLUMN_METADATA_CONSISTENT: &str = "column_metadata_consistent";
+const COLUMN_METADATA_INCONSISTENT: &str = "column_metadata_inconsistent";
+
+impl ReconcileLogicalTableMetrics {
+    /// The total number of tables that have been reconciled.
+    pub fn total_table_count(&self) -> usize {
+        self.create_tables_count
+            + self.column_metadata_consistent_count
+            + self.column_metadata_inconsistent_count
+    }
+}
+
+impl Drop for ReconcileLogicalTableMetrics {
+    fn drop(&mut self) {
+        let procedure_name = ReconcileLogicalTablesProcedure::TYPE_NAME;
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[procedure_name, metrics::TABLE_TYPE_LOGICAL, CREATE_TABLES])
+            .inc_by(self.create_tables_count as u64);
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                UPDATE_TABLE_INFO,
+            ])
+            .inc_by(self.update_table_info_count as u64);
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                COLUMN_METADATA_CONSISTENT,
+            ])
+            .inc_by(self.column_metadata_consistent_count as u64);
+        metrics::METRIC_META_RECONCILIATION_STATS
+            .with_label_values(&[
+                procedure_name,
+                metrics::TABLE_TYPE_LOGICAL,
+                COLUMN_METADATA_INCONSISTENT,
+            ])
+            .inc_by(self.column_metadata_inconsistent_count as u64);
+    }
+}
+
+impl Display for ReconcileLogicalTableMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let elapsed = self.start_time.elapsed();
+        if self.create_tables_count > 0 {
+            write!(f, "create_tables_count: {}, ", self.create_tables_count)?;
+        }
+        if self.update_table_info_count > 0 {
+            write!(
+                f,
+                "update_table_info_count: {}, ",
+                self.update_table_info_count
+            )?;
+        }
+        if self.column_metadata_consistent_count > 0 {
+            write!(
+                f,
+                "column_metadata_consistent_count: {}, ",
+                self.column_metadata_consistent_count
+            )?;
+        }
+        if self.column_metadata_inconsistent_count > 0 {
+            write!(
+                f,
+                "column_metadata_inconsistent_count: {}, ",
+                self.column_metadata_inconsistent_count
+            )?;
+        }
+
+        write!(
+            f,
+            "total_table_count: {}, elapsed: {:?}",
+            self.total_table_count(),
+            elapsed
+        )
+    }
+}
+
+/// The result of resolving column metadata.
+#[derive(Clone, Copy)]
+pub enum ResolveColumnMetadataResult {
+    Consistent,
+    Inconsistent(ResolveStrategy),
+}
+
+impl Display for ResolveColumnMetadataResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveColumnMetadataResult::Consistent => write!(f, "Consistent"),
+            ResolveColumnMetadataResult::Inconsistent(strategy) => {
+                let strategy_str = strategy.as_ref();
+                write!(f, "Inconsistent({})", strategy_str)
+            }
+        }
+    }
+}
+
+/// The metrics of reconciling physical tables.
+#[derive(Clone)]
+pub struct ReconcileTableMetrics {
+    /// The start time of the reconciliation.
+    pub start_time: Instant,
+    /// The result of resolving column metadata.
+    pub resolve_column_metadata_result: Option<ResolveColumnMetadataResult>,
+    /// Whether the table info has been updated.
+    pub update_table_info: bool,
+}
+
+impl Drop for ReconcileTableMetrics {
+    fn drop(&mut self) {
+        if let Some(resolve_column_metadata_result) = self.resolve_column_metadata_result {
+            match resolve_column_metadata_result {
+                ResolveColumnMetadataResult::Consistent => {
+                    metrics::METRIC_META_RECONCILIATION_STATS
+                        .with_label_values(&[
+                            ReconcileTableProcedure::TYPE_NAME,
+                            metrics::TABLE_TYPE_PHYSICAL,
+                            COLUMN_METADATA_CONSISTENT,
+                        ])
+                        .inc();
+                }
+                ResolveColumnMetadataResult::Inconsistent(strategy) => {
+                    metrics::METRIC_META_RECONCILIATION_STATS
+                        .with_label_values(&[
+                            ReconcileTableProcedure::TYPE_NAME,
+                            metrics::TABLE_TYPE_PHYSICAL,
+                            COLUMN_METADATA_INCONSISTENT,
+                        ])
+                        .inc();
+                    metrics::METRIC_META_RECONCILIATION_RESOLVED_COLUMN_METADATA
+                        .with_label_values(&[strategy.as_ref()])
+                        .inc();
+                }
+            }
+        }
+        if self.update_table_info {
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    UPDATE_TABLE_INFO,
+                ])
+                .inc();
+        }
+    }
+}
+
+impl Default for ReconcileTableMetrics {
+    fn default() -> Self {
+        Self {
+            start_time: Instant::now(),
+            resolve_column_metadata_result: None,
+            update_table_info: false,
+        }
+    }
+}
+
+impl Display for ReconcileTableMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let elapsed = self.start_time.elapsed();
+        if let Some(resolve_column_metadata_result) = self.resolve_column_metadata_result {
+            write!(
+                f,
+                "resolve_column_metadata_result: {}, ",
+                resolve_column_metadata_result
+            )?;
+        }
+        write!(
+            f,
+            "update_table_info: {}, elapsed: {:?}",
+            self.update_table_info, elapsed
+        )
+    }
 }
 
 #[cfg(test)]
@@ -665,10 +1188,7 @@ mod tests {
             semantic_type: SemanticType::Field,
             column_id: 3,
         });
-        assert!(check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap();
     }
 
     #[test]
@@ -676,18 +1196,12 @@ mod tests {
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
         new_column_metadatas.retain(|c| c.semantic_type != SemanticType::Timestamp);
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
 
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
         new_column_metadatas.retain(|c| c.semantic_type != SemanticType::Tag);
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
     }
 
     #[test]
@@ -700,10 +1214,7 @@ mod tests {
         {
             col.column_id = 100;
         }
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
 
         let column_metadatas = new_test_column_metadatas();
         let mut new_column_metadatas = column_metadatas.clone();
@@ -713,10 +1224,7 @@ mod tests {
         {
             col.column_id = 100;
         }
-        assert!(!check_column_metadata_invariants(
-            &new_column_metadatas,
-            &column_metadatas
-        ));
+        check_column_metadata_invariants(&new_column_metadatas, &column_metadatas).unwrap_err();
     }
 
     #[test]

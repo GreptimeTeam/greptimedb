@@ -136,6 +136,7 @@ impl MysqlInstanceShim {
     async fn do_exec_plan(
         &self,
         query: &str,
+        stmt: Option<Statement>,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
@@ -144,7 +145,7 @@ impl MysqlInstanceShim {
         {
             Ok(output)
         } else {
-            self.query_handler.do_exec_plan(plan, query_ctx).await
+            self.query_handler.do_exec_plan(stmt, plan, query_ctx).await
         }
     }
 
@@ -231,6 +232,7 @@ impl MysqlInstanceShim {
             self.save_plan(
                 SqlPlan {
                     query: query.to_string(),
+                    statement: Some(statement),
                     plan: None,
                     schema: None,
                 },
@@ -240,6 +242,7 @@ impl MysqlInstanceShim {
             self.save_plan(
                 SqlPlan {
                     query: query.to_string(),
+                    statement: Some(statement),
                     plan,
                     schema,
                 },
@@ -291,8 +294,13 @@ impl MysqlInstanceShim {
 
                 debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 vec![
-                    self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
-                        .await,
+                    self.do_exec_plan(
+                        &sql_plan.query,
+                        sql_plan.statement.clone(),
+                        plan,
+                        query_ctx.clone(),
+                    )
+                    .await,
                 ]
             }
             None => {

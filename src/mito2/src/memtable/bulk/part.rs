@@ -60,7 +60,7 @@ use crate::error::{
 use crate::memtable::bulk::context::BulkIterContextRef;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
-use crate::memtable::BoxedBatchIterator;
+use crate::memtable::BoxedRecordBatchIterator;
 use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat};
 use crate::sst::parquet::helper::parse_parquet_metadata;
 use crate::sst::to_sst_arrow_schema;
@@ -511,7 +511,7 @@ impl EncodedBulkPart {
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceNumber>,
-    ) -> Result<Option<BoxedBatchIterator>> {
+    ) -> Result<Option<BoxedRecordBatchIterator>> {
         // use predicate to find row groups to read.
         let row_groups_to_read = context.row_groups_to_read(&self.metadata.parquet_metadata);
 
@@ -527,7 +527,7 @@ impl EncodedBulkPart {
             self.data.clone(),
             sequence,
         )?;
-        Ok(Some(Box::new(iter) as BoxedBatchIterator))
+        Ok(Some(Box::new(iter) as BoxedRecordBatchIterator))
     }
 }
 
@@ -547,19 +547,12 @@ pub struct BulkPartMeta {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    pk_encoder: DensePrimaryKeyCodec,
     row_group_size: usize,
-    dedup: bool,
     writer_props: Option<WriterProperties>,
 }
 
 impl BulkPartEncoder {
-    pub(crate) fn new(
-        metadata: RegionMetadataRef,
-        dedup: bool,
-        row_group_size: usize,
-    ) -> BulkPartEncoder {
-        let codec = DensePrimaryKeyCodec::new(&metadata);
+    pub(crate) fn new(metadata: RegionMetadataRef, row_group_size: usize) -> BulkPartEncoder {
         let writer_props = Some(
             WriterProperties::builder()
                 .set_write_batch_size(row_group_size)
@@ -568,33 +561,27 @@ impl BulkPartEncoder {
         );
         Self {
             metadata,
-            pk_encoder: codec,
             row_group_size,
-            dedup,
             writer_props,
         }
     }
 }
 
 impl BulkPartEncoder {
-    /// Encodes mutations to a [EncodedBulkPart], returns true if encoded data has been written to `dest`.
-    fn encode_mutations(&self, mutations: &[Mutation]) -> Result<Option<EncodedBulkPart>> {
-        let Some((arrow_record_batch, min_ts, max_ts)) =
-            mutations_to_record_batch(mutations, &self.metadata, &self.pk_encoder, self.dedup)?
-        else {
+    /// Encodes bulk part to a [EncodedBulkPart], returns the encoded data.
+    fn encode_part(&self, part: &BulkPart) -> Result<Option<EncodedBulkPart>> {
+        if part.batch.num_rows() == 0 {
             return Ok(None);
-        };
+        }
 
         let mut buf = Vec::with_capacity(4096);
-        let arrow_schema = arrow_record_batch.schema();
+        let arrow_schema = part.batch.schema();
 
         let file_metadata = {
             let mut writer =
                 ArrowWriter::try_new(&mut buf, arrow_schema, self.writer_props.clone())
                     .context(EncodeMemtableSnafu)?;
-            writer
-                .write(&arrow_record_batch)
-                .context(EncodeMemtableSnafu)?;
+            writer.write(&part.batch).context(EncodeMemtableSnafu)?;
             writer.finish().context(EncodeMemtableSnafu)?
         };
 
@@ -604,9 +591,9 @@ impl BulkPartEncoder {
         Ok(Some(EncodedBulkPart {
             data: buf,
             metadata: BulkPartMeta {
-                num_rows: arrow_record_batch.num_rows(),
-                max_timestamp: max_ts,
-                min_timestamp: min_ts,
+                num_rows: part.batch.num_rows(),
+                max_timestamp: part.max_ts,
+                min_timestamp: part.min_ts,
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
             },
@@ -881,6 +868,7 @@ mod tests {
 
     use api::v1::{Row, WriteHint};
     use datafusion_common::ScalarValue;
+    use datatypes::arrow::array::Float64Array;
     use datatypes::prelude::{ConcreteDataType, ScalarVector, Value};
     use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
     use store_api::storage::consts::ReservedColumnId;
@@ -890,8 +878,7 @@ mod tests {
     use crate::sst::parquet::format::{PrimaryKeyReadFormat, ReadFormat};
     use crate::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
     use crate::test_util::memtable_util::{
-        build_key_values_with_ts_seq_values, metadata_for_test, metadata_with_primary_key,
-        region_metadata_to_row_schema,
+        build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
     };
 
     fn check_binary_array_to_dictionary(
@@ -1191,7 +1178,7 @@ mod tests {
 
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {
         let metadata = metadata_for_test();
-        let mutations = input
+        let kvs = input
             .iter()
             .map(|m| {
                 build_key_values_with_ts_seq_values(
@@ -1202,11 +1189,17 @@ mod tests {
                     m.v1.iter().copied(),
                     m.sequence,
                 )
-                .mutation
             })
             .collect::<Vec<_>>();
-        let encoder = BulkPartEncoder::new(metadata, true, 1024);
-        encoder.encode_mutations(&mutations).unwrap().unwrap()
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema, 64, primary_key_codec, true);
+        for kv in kvs {
+            converter.append_key_values(&kv).unwrap();
+        }
+        let part = converter.convert().unwrap();
+        let encoder = BulkPartEncoder::new(metadata, 1024);
+        encoder.encode_part(&part).unwrap().unwrap()
     }
 
     #[test]
@@ -1236,14 +1229,12 @@ mod tests {
         ]);
 
         let projection = &[4u32];
-
         let mut reader = part
             .read(
                 Arc::new(BulkIterContext::new(
                     part.metadata.region_metadata.clone(),
                     &Some(projection.as_slice()),
                     None,
-                    false,
                 )),
                 None,
             )
@@ -1251,19 +1242,17 @@ mod tests {
             .expect("expect at least one row group");
 
         let mut total_rows_read = 0;
-        let mut field = vec![];
+        let mut field: Vec<f64> = vec![];
         for res in reader {
             let batch = res.unwrap();
-            assert_eq!(1, batch.fields().len());
-            assert_eq!(4, batch.fields()[0].column_id);
-            field.extend(
-                batch.fields()[0]
-                    .data
+            assert_eq!(5, batch.num_columns());
+            field.extend_from_slice(
+                batch
+                    .column(0)
                     .as_any()
-                    .downcast_ref::<Float64Vector>()
+                    .downcast_ref::<Float64Array>()
                     .unwrap()
-                    .iter_data()
-                    .map(|v| v.unwrap()),
+                    .values(),
             );
             total_rows_read += batch.num_rows();
         }
@@ -1273,17 +1262,23 @@ mod tests {
 
     fn prepare(key_values: Vec<(&str, u32, (i64, i64), u64)>) -> EncodedBulkPart {
         let metadata = metadata_for_test();
-        let mutations = key_values
+        let kvs = key_values
             .into_iter()
             .map(|(k0, k1, (start, end), sequence)| {
                 let ts = (start..end);
                 let v1 = (start..end).map(|_| None);
                 build_key_values_with_ts_seq_values(&metadata, k0.to_string(), k1, ts, v1, sequence)
-                    .mutation
             })
             .collect::<Vec<_>>();
-        let encoder = BulkPartEncoder::new(metadata, true, 100);
-        encoder.encode_mutations(&mutations).unwrap().unwrap()
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let primary_key_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema, 64, primary_key_codec, true);
+        for kv in kvs {
+            converter.append_key_values(&kv).unwrap();
+        }
+        let part = converter.convert().unwrap();
+        let encoder = BulkPartEncoder::new(metadata, 1024);
+        encoder.encode_part(&part).unwrap().unwrap()
     }
 
     fn check_prune_row_group(
@@ -1295,7 +1290,6 @@ mod tests {
             part.metadata.region_metadata.clone(),
             &None,
             predicate,
-            false,
         ));
         let mut reader = part
             .read(context, None)
@@ -1326,7 +1320,6 @@ mod tests {
             Some(Predicate::new(vec![datafusion_expr::col("ts").eq(
                 datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
             )])),
-            false,
         ));
         assert!(part.read(context, None).unwrap().is_none());
 

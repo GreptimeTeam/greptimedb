@@ -28,7 +28,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
 use snafu::OptionExt;
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfoRef};
 use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
@@ -142,6 +142,18 @@ impl CatalogManager for MemoryCatalogManager {
                 .cloned()?
         };
         Ok(result)
+    }
+
+    async fn table_info_by_id(&self, table_id: TableId) -> Result<Option<TableInfoRef>> {
+        Ok(self
+            .catalogs
+            .read()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, schema_entries)| schema_entries.values())
+            .flat_map(|tables| tables.values())
+            .find(|t| t.table_info().ident.table_id == table_id)
+            .map(|t| t.table_info()))
     }
 
     async fn tables_by_ids(

@@ -29,7 +29,7 @@ use crate::key::table_route::TableRouteValue;
 use crate::reconciliation::reconcile_database::end::ReconcileDatabaseEnd;
 use crate::reconciliation::reconcile_database::{ReconcileDatabaseContext, State};
 use crate::reconciliation::reconcile_logical_tables::ReconcileLogicalTablesProcedure;
-use crate::reconciliation::utils::Context;
+use crate::reconciliation::utils::{Context, SubprocedureMeta};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReconcileLogicalTables;
@@ -128,13 +128,12 @@ impl State for ReconcileLogicalTables {
 impl ReconcileLogicalTables {
     fn schedule_reconcile_logical_tables(
         ctx: &mut ReconcileDatabaseContext,
-        buffer: &mut Vec<ProcedureWithId>,
+        buffer: &mut Vec<(ProcedureWithId, SubprocedureMeta)>,
     ) -> Result<(Box<dyn State>, Status)> {
-        let procedures = std::mem::take(buffer);
-        ctx.volatile_ctx
-            .inflight_subprocedures
-            .extend(procedures.iter().map(|p| p.id));
+        let buffer = std::mem::take(buffer);
+        let (procedures, meta): (Vec<_>, Vec<_>) = buffer.into_iter().unzip();
 
+        ctx.volatile_ctx.inflight_subprocedures.extend(meta);
         Ok((
             Box::new(ReconcileLogicalTables),
             Status::suspended(procedures, false),
@@ -142,7 +141,7 @@ impl ReconcileLogicalTables {
     }
 
     fn should_schedule_reconcile_logical_tables(
-        buffer: &[ProcedureWithId],
+        buffer: &[(ProcedureWithId, SubprocedureMeta)],
         parallelism: usize,
     ) -> bool {
         buffer.len() >= parallelism
@@ -152,7 +151,7 @@ impl ReconcileLogicalTables {
         ctx: &Context,
         pending_logical_tables: &mut HashMap<TableId, Vec<(TableId, TableName)>>,
         parallelism: usize,
-    ) -> Result<Option<ProcedureWithId>> {
+    ) -> Result<Option<(ProcedureWithId, SubprocedureMeta)>> {
         let mut physical_table_id = None;
         for (table_id, tables) in pending_logical_tables.iter() {
             if tables.len() >= parallelism {
@@ -176,7 +175,7 @@ impl ReconcileLogicalTables {
     async fn build_remaining_procedures(
         ctx: &Context,
         pending_logical_tables: &mut HashMap<TableId, Vec<(TableId, TableName)>>,
-        pending_procedures: &mut Vec<ProcedureWithId>,
+        pending_procedures: &mut Vec<(ProcedureWithId, SubprocedureMeta)>,
         parallelism: usize,
     ) -> Result<()> {
         if pending_logical_tables.is_empty() {
@@ -203,7 +202,7 @@ impl ReconcileLogicalTables {
         ctx: &Context,
         physical_table_id: TableId,
         logical_tables: Vec<(TableId, TableName)>,
-    ) -> Result<ProcedureWithId> {
+    ) -> Result<(ProcedureWithId, SubprocedureMeta)> {
         let table_info = ctx
             .table_metadata_manager
             .table_info_manager()
@@ -217,12 +216,18 @@ impl ReconcileLogicalTables {
         let procedure = ReconcileLogicalTablesProcedure::new(
             ctx.clone(),
             physical_table_id,
-            physical_table_name,
-            logical_tables,
+            physical_table_name.clone(),
+            logical_tables.clone(),
             true,
         );
-
-        Ok(ProcedureWithId::with_random_id(Box::new(procedure)))
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let subprocedure_meta = SubprocedureMeta::new_logical_table(
+            procedure_with_id.id,
+            physical_table_id,
+            physical_table_name,
+            logical_tables,
+        );
+        Ok((procedure_with_id, subprocedure_meta))
     }
 
     fn enqueue_logical_table(

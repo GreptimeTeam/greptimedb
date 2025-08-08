@@ -14,10 +14,11 @@
 
 use std::any::Any;
 use std::fmt::Debug;
+use std::time::Instant;
 
 use common_procedure::error::FromJsonSnafu;
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
     Result as ProcedureResult, Status,
 };
 use futures::stream::BoxStream;
@@ -28,11 +29,13 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
 use crate::lock_key::CatalogLock;
+use crate::metrics;
 use crate::node_manager::NodeManagerRef;
 use crate::reconciliation::reconcile_catalog::start::ReconcileCatalogStart;
-use crate::reconciliation::reconcile_database::utils::wait_for_inflight_subprocedures;
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveStrategy;
-use crate::reconciliation::utils::Context;
+use crate::reconciliation::utils::{
+    wait_for_inflight_subprocedures, Context, ReconcileCatalogMetrics, SubprocedureMeta,
+};
 
 pub(crate) mod end;
 pub(crate) mod reconcile_databases;
@@ -61,13 +64,15 @@ impl ReconcileCatalogContext {
         &mut self,
         procedure_ctx: &ProcedureContext,
     ) -> Result<()> {
-        if let Some(procedure_id) = self.volatile_ctx.inflight_subprocedure {
-            wait_for_inflight_subprocedures(
+        if let Some(subprocedure) = self.volatile_ctx.inflight_subprocedure.take() {
+            let subprocedures = [subprocedure];
+            let result = wait_for_inflight_subprocedures(
                 procedure_ctx,
-                &[procedure_id],
+                &subprocedures,
                 self.persistent_ctx.fast_fail,
             )
             .await?;
+            self.volatile_ctx.metrics += result.into();
         }
         Ok(())
     }
@@ -97,12 +102,26 @@ impl PersistentContext {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct VolatileContext {
     /// Stores the stream of catalogs.
     schemas: Option<BoxStream<'static, Result<String>>>,
     /// Stores the inflight subprocedure.
-    inflight_subprocedure: Option<ProcedureId>,
+    inflight_subprocedure: Option<SubprocedureMeta>,
+    /// Stores the metrics of reconciling catalog.
+    metrics: ReconcileCatalogMetrics,
+    /// The start time of the reconciliation.
+    start_time: Instant,
+}
+
+impl Default for VolatileContext {
+    fn default() -> Self {
+        Self {
+            schemas: None,
+            inflight_subprocedure: None,
+            metrics: Default::default(),
+            start_time: Instant::now(),
+        }
+    }
 }
 
 pub struct ReconcileCatalogProcedure {
@@ -158,6 +177,11 @@ impl Procedure for ReconcileCatalogProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
+        let procedure_name = Self::TYPE_NAME;
+        let step = state.name();
+        let _timer = metrics::METRIC_META_RECONCILIATION_PROCEDURE
+            .with_label_values(&[procedure_name, step])
+            .start_timer();
         match state.next(&mut self.context, _ctx).await {
             Ok((next, status)) => {
                 *state = next;
@@ -165,8 +189,14 @@ impl Procedure for ReconcileCatalogProcedure {
             }
             Err(e) => {
                 if e.is_retry_later() {
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_RETRYABLE])
+                        .inc();
                     Err(ProcedureError::retry_later(e))
                 } else {
+                    metrics::METRIC_META_RECONCILIATION_PROCEDURE_ERROR
+                        .with_label_values(&[procedure_name, step, metrics::ERROR_TYPE_EXTERNAL])
+                        .inc();
                     Err(ProcedureError::external(e))
                 }
             }

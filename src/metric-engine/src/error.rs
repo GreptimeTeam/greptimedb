@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -304,6 +305,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Get value from cache"))]
+    CacheGet {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -362,6 +370,8 @@ impl ErrorExt for Error {
             StartRepeatedTask { source, .. } => source.status_code(),
 
             MetricManifestInfo { .. } => StatusCode::Internal,
+
+            CacheGet { source, .. } => source.status_code(),
         }
     }
 

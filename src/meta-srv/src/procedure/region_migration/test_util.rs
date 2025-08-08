@@ -95,6 +95,7 @@ impl TestingEnv {
             state_store,
             poison_manager,
             None,
+            None,
         ));
 
         Self {

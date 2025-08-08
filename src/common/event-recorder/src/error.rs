@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::ColumnSchema;
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
@@ -35,6 +35,30 @@ pub enum Error {
         expected: Vec<ColumnSchema>,
         actual: Vec<ColumnSchema>,
     },
+
+    #[snafu(display("Failed to serialize event"))]
+    SerializeEvent {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to insert events"))]
+    InsertEvents {
+        // BoxedError is utilized here to prevent introducing a circular dependency that would arise from directly referencing `client::error::Error`.
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Keyvalue backend error"))]
+    KvBackend {
+        // BoxedError is utilized here to prevent introducing a circular dependency that would arise from directly referencing `common_meta::error::Error`.
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -42,8 +66,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MismatchedSchema { .. } => StatusCode::InvalidArguments,
-            Error::NoAvailableFrontend { .. } => StatusCode::Internal,
+            Error::MismatchedSchema { .. } | Error::SerializeEvent { .. } => {
+                StatusCode::InvalidArguments
+            }
+            Error::NoAvailableFrontend { .. }
+            | Error::InsertEvents { .. }
+            | Error::KvBackend { .. } => StatusCode::Internal,
         }
     }
 

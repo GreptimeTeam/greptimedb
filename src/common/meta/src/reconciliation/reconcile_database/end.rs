@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -28,9 +29,17 @@ pub(crate) struct ReconcileDatabaseEnd;
 impl State for ReconcileDatabaseEnd {
     async fn next(
         &mut self,
-        _ctx: &mut ReconcileDatabaseContext,
-        _procedure_ctx: &ProcedureContext,
+        ctx: &mut ReconcileDatabaseContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
+        info!(
+            "Database reconciliation completed. schema: {}, catalog: {}, procedure_id: {}, metrics: {}, elapsed: {:?}",
+            ctx.persistent_ctx.schema,
+            ctx.persistent_ctx.catalog,
+            procedure_ctx.procedure_id,
+            ctx.metrics(),
+            ctx.volatile_ctx.start_time.elapsed(),
+        );
         Ok((Box::new(ReconcileDatabaseEnd), Status::done()))
     }
 

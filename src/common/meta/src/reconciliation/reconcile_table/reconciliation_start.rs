@@ -20,9 +20,12 @@ use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::ddl::utils::region_metadata_lister::RegionMetadataLister;
-use crate::error::{self, Result, UnexpectedSnafu};
+use crate::error::{self, Result};
+use crate::metrics::{self};
 use crate::reconciliation::reconcile_table::resolve_column_metadata::ResolveColumnMetadata;
-use crate::reconciliation::reconcile_table::{ReconcileTableContext, State};
+use crate::reconciliation::reconcile_table::{
+    ReconcileTableContext, ReconcileTableProcedure, State,
+};
 
 /// The start state of the reconciliation procedure.
 ///
@@ -40,7 +43,7 @@ impl State for ReconciliationStart {
     async fn next(
         &mut self,
         ctx: &mut ReconcileTableContext,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let table_id = ctx.table_id();
         let table_name = ctx.table_name();
@@ -60,33 +63,56 @@ impl State for ReconciliationStart {
             }
         );
 
-        info!("Reconciling table: {}, table_id: {}", table_name, table_id);
+        info!(
+            "Reconciling table: {}, table_id: {}, procedure_id: {}",
+            table_name, table_id, procedure_ctx.procedure_id
+        );
         // TODO(weny): Repairs the table route if needed.
         let region_metadata_lister = RegionMetadataLister::new(ctx.node_manager.clone());
-        // Always list region metadatas for the physical table.
-        let region_metadatas = region_metadata_lister
-            .list(physical_table_id, &physical_table_route.region_routes)
-            .await?;
 
-        ensure!(
-            !region_metadatas.is_empty(),
+        let region_metadatas = {
+            let _timer = metrics::METRIC_META_RECONCILIATION_LIST_REGION_METADATA_DURATION
+                .with_label_values(&[metrics::TABLE_TYPE_PHYSICAL])
+                .start_timer();
+            // Always list region metadatas for the physical table.
+            region_metadata_lister
+                .list(physical_table_id, &physical_table_route.region_routes)
+                .await?
+        };
+
+        ensure!(!region_metadatas.is_empty(), {
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_NO_REGION_METADATA,
+                ])
+                .inc();
+
             error::UnexpectedSnafu {
                 err_msg: format!(
                     "No region metadata found for table: {}, table_id: {}",
                     table_name, table_id
                 ),
             }
-        );
+        });
 
-        if region_metadatas.iter().any(|r| r.is_none()) {
-            return UnexpectedSnafu {
+        ensure!(region_metadatas.iter().all(|r| r.is_some()), {
+            metrics::METRIC_META_RECONCILIATION_STATS
+                .with_label_values(&[
+                    ReconcileTableProcedure::TYPE_NAME,
+                    metrics::TABLE_TYPE_PHYSICAL,
+                    metrics::STATS_TYPE_REGION_NOT_OPEN,
+                ])
+                .inc();
+
+            error::UnexpectedSnafu {
                 err_msg: format!(
                     "Some regions are not opened, table: {}, table_id: {}",
                     table_name, table_id
                 ),
             }
-            .fail();
-        }
+        });
 
         // Persist the physical table route.
         // TODO(weny): refetch the physical table route if repair is needed.

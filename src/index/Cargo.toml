@@ -50,5 +50,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [[bench]]
+name = "tokenizer_bench"
+harness = false
+
+[[bench]]
 name = "bytes_to_u64_vec"
 harness = false

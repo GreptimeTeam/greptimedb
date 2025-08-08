@@ -124,7 +124,7 @@ pub enum Statement {
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
-    Explain(Explain),
+    Explain(Box<Explain>),
     // COPY
     Copy(Copy),
     // Telemetry Query Language
