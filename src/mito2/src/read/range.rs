@@ -98,7 +98,7 @@ impl RangeMeta {
         Self::push_seq_file_ranges(input.memtables.len(), &input.files, &mut ranges);
 
         #[cfg(feature = "enterprise")]
-        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
+        Self::push_extension_ranges(input, &mut ranges);
 
         let ranges = group_ranges_for_seq_scan(ranges);
         if compaction || input.distribution == Some(TimeSeriesDistribution::PerSeries) {
@@ -120,7 +120,7 @@ impl RangeMeta {
         );
 
         #[cfg(feature = "enterprise")]
-        Self::push_extension_ranges(input.extension_ranges(), &mut ranges);
+        Self::push_extension_ranges(input, &mut ranges);
 
         ranges
     }
@@ -320,12 +320,9 @@ impl RangeMeta {
     }
 
     #[cfg(feature = "enterprise")]
-    fn push_extension_ranges(
-        ranges: &[crate::extension::BoxedExtensionRange],
-        metas: &mut Vec<RangeMeta>,
-    ) {
-        for range in ranges.iter() {
-            let index = metas.len();
+    fn push_extension_ranges(input: &ScanInput, metas: &mut Vec<RangeMeta>) {
+        for (i, range) in input.extension_ranges().iter().enumerate() {
+            let index = input.num_memtables() + input.num_files() + i;
             metas.push(RangeMeta {
                 time_range: range.time_range(),
                 indices: smallvec![SourceIndex {

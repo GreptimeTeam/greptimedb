@@ -1,11 +1,11 @@
-use std::fmt::Display;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
-use store_api::storage::ScanRequest;
+use store_api::storage::{ScanRequest, SequenceNumber};
 
 use crate::error::Result;
 use crate::read::range::RowGroupIndex;
@@ -20,7 +20,7 @@ pub type InclusiveTimeRange = (Timestamp, Timestamp);
 /// memtable range and sst file range, but resides on the outside.
 /// It can be scanned side by side as other ranges to produce the final result, so it's very useful
 /// to extend the source of data in GreptimeDB.
-pub trait ExtensionRange: Display + Send + Sync {
+pub trait ExtensionRange: Debug + Send + Sync {
     /// The number of rows in this range.
     fn num_rows(&self) -> u64;
 
@@ -56,9 +56,11 @@ pub trait ExtensionRangeProvider: Send + Sync {
     /// Find the extension ranges by the timestamp filter and the [`ScanRequest`].
     async fn find_extension_ranges(
         &self,
+        flushed_sequence: SequenceNumber,
         timestamp_range: TimestampRange,
         request: &ScanRequest,
     ) -> Result<Vec<BoxedExtensionRange>> {
+        let _ = flushed_sequence;
         let _ = timestamp_range;
         let _ = request;
         Ok(vec![])

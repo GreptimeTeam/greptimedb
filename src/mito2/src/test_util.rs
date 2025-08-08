@@ -29,6 +29,7 @@ use std::sync::Arc;
 use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
+use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
@@ -940,18 +941,12 @@ pub fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::C
 /// `start`, `end` are in second resolution.
 pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(i.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::F64Value(i as f64),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1025,18 +1020,12 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
 pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usize) -> Vec<Row> {
     (start..end)
         .enumerate()
-        .map(|(idx, ts)| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|(idx, ts)| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::F64Value((value_start + idx) as f64),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1044,15 +1033,11 @@ pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usiz
 /// Build rows to delete for specific `key`.
 pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|ts| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|ts| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }

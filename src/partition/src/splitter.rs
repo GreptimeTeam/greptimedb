@@ -134,8 +134,9 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use api::v1::helper::{field_column_schema, tag_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, SemanticType};
+    use api::v1::ColumnDataType;
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -144,24 +145,9 @@ mod tests {
 
     fn mock_rows() -> Rows {
         let schema = vec![
-            ColumnSchema {
-                column_name: "id".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "name".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "age".to_string(),
-                datatype: ColumnDataType::Uint32 as i32,
-                semantic_type: SemanticType::Field as i32,
-                ..Default::default()
-            },
+            tag_column_schema("id", ColumnDataType::String),
+            tag_column_schema("name", ColumnDataType::String),
+            field_column_schema("age", ColumnDataType::Uint32),
         ];
         let rows = vec![
             Row {

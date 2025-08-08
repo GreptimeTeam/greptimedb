@@ -393,8 +393,9 @@ impl Iterator for Iter {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::helper::row;
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_recordbatch::DfRecordBatch;
     use common_time::Timestamp;
     use datatypes::arrow::array::{ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
@@ -458,18 +459,12 @@ mod tests {
 
         let rows: Vec<_> = row_values
             .iter()
-            .map(|(ts, f1, f2)| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(*ts)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(*f1)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(f2.clone())),
-                    },
-                ],
+            .map(|(ts, f1, f2)| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::F64Value(*f1),
+                    ValueData::StringValue(f2.clone()),
+                ])
             })
             .collect();
         let mutation = Mutation {
