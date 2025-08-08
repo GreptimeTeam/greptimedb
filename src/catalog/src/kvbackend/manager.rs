@@ -19,7 +19,7 @@ use std::sync::{Arc, Weak};
 use async_stream::try_stream;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-    PG_CATALOG_NAME, PHY_PART_COLS_NOT_IN_LOGICAL_TABLE,
+    PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -44,14 +44,15 @@ use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+use table::table::PartitionRules;
 use table::table_name::TableName;
 use table::TableRef;
 use tokio::sync::Semaphore;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{
-    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, JsonSnafu,
-    ListCatalogsSnafu, ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
+    CacheNotFoundSnafu, GetTableCacheSnafu, InvalidTableInfoInCatalogSnafu, ListCatalogsSnafu,
+    ListSchemasSnafu, ListTablesSnafu, Result, TableMetadataManagerSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::information_schema::InformationSchemaTableFactoryRef;
@@ -165,18 +166,15 @@ impl KvBackendCatalogManager {
                 })
                 .collect();
 
-            if !phy_part_cols_not_in_logical_table.is_empty() {
-                new_table_info.meta.options.extra_options.insert(
-                    PHY_PART_COLS_NOT_IN_LOGICAL_TABLE.to_string(),
-                    serde_json::to_string(&phy_part_cols_not_in_logical_table)
-                        .with_context(|_| JsonSnafu {
-                            input: format!("{:?}", phy_part_cols_not_in_logical_table),
-                        })?
-                        .to_string(),
-                );
-            }
+            let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
+                Some(PartitionRules {
+                    extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
+                })
+            } else {
+                None
+            };
 
-            let new_table = DistTable::table(Arc::new(new_table_info));
+            let new_table = DistTable::table_partitioned(Arc::new(new_table_info), partition_rules);
 
             return Ok(new_table);
         }
