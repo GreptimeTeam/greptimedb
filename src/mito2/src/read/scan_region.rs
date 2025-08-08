@@ -476,8 +476,9 @@ impl ScanRegion {
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
             let ranges = provider
-                .find_extension_ranges(time_range, &self.request)
+                .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;
+            debug!("Find extension ranges: {ranges:?}");
             input.with_extension_ranges(ranges)
         } else {
             input
@@ -1101,7 +1102,7 @@ impl StreamContext {
             num_file_ranges,
         )?;
         if num_other_ranges > 0 {
-            write!(f, r#"", other_ranges":{}"#, num_other_ranges)?;
+            write!(f, r#", "other_ranges":{}"#, num_other_ranges)?;
         }
         write!(f, "}}")?;
 
@@ -1156,7 +1157,7 @@ impl StreamContext {
                 let mut delimiter = "";
                 write!(f, ", extension_ranges: [")?;
                 for range in self.input.extension_ranges() {
-                    write!(f, "{}{}", delimiter, range)?;
+                    write!(f, "{}{:?}", delimiter, range)?;
                     delimiter = ", ";
                 }
                 write!(f, "]")?;
