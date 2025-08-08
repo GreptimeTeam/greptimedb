@@ -317,6 +317,7 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
+        let _manager = self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
 
         match state {
@@ -840,6 +841,22 @@ impl RegionMap {
         }
     }
 
+    /// Gets writable non-staging region by region id.
+    ///
+    /// Returns error if the region does not exist, is readonly, or is in staging mode.
+    pub(crate) fn writable_non_staging_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self.writable_region(region_id)?;
+        if region.is_staging() {
+            return Err(crate::error::RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+            }
+            .build());
+        }
+        Ok(region)
+    }
+
     /// Gets flushable region by region id.
     ///
     /// Returns error if the region does not exist or is not operable.
@@ -970,14 +987,26 @@ mod tests {
     use std::sync::Arc;
 
     use common_datasource::compression::CompressionType;
+    use common_test_util::temp_dir::create_temp_dir;
     use crossbeam_utils::atomic::AtomicCell;
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
+    use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
+    use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
+    use crate::access_layer::AccessLayer;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-    use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
+    use crate::region::{
+        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+    };
+    use crate::sst::index::intermediate::IntermediateManager;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
+    use crate::time_provider::StdTimeProvider;
 
     #[test]
     fn test_region_state_lock_free() {
@@ -1082,20 +1111,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_staging_state_transitions() {
-        use common_test_util::temp_dir::create_temp_dir;
-        use object_store::services::Fs;
-        use object_store::ObjectStore;
-        use store_api::logstore::provider::Provider;
-        use store_api::region_request::PathType;
-
-        use crate::access_layer::AccessLayer;
-        use crate::region::{ManifestStats, MitoRegion};
-        use crate::sst::index::intermediate::IntermediateManager;
-        use crate::sst::index::puffin_manager::PuffinManagerFactory;
-        use crate::test_util::memtable_util::EmptyMemtableBuilder;
-        use crate::time_provider::StdTimeProvider;
-
-        let _env = SchedulerEnv::new().await;
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
         let metadata = version_control.current().version.metadata.clone();

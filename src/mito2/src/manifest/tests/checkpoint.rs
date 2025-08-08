@@ -460,9 +460,7 @@ async fn test_checkpoint_bypass_in_staging_mode() {
             .await
             .unwrap();
     }
-
-    // Wait a bit to ensure no checkpoint is created
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!manager.checkpointer().is_doing_checkpoint());
 
     // Verify no checkpoint was created in staging mode
     assert!(manager

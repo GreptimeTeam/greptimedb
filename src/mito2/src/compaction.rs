@@ -137,7 +137,7 @@ impl CompactionScheduler {
         compact_options: compact_request::Options,
         version_control: &VersionControlRef,
         access_layer: &AccessLayerRef,
-        mut waiter: OptionOutputTx,
+        waiter: OptionOutputTx,
         manifest_ctx: &ManifestContextRef,
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
@@ -149,10 +149,7 @@ impl CompactionScheduler {
                 "Skipping compaction for region {} in staging mode, options: {:?}",
                 region_id, compact_options
             );
-            if let Some(waiter) = waiter.take_inner() {
-                #[allow(clippy::let_unit_value)]
-                let _ = waiter.send(Ok(0));
-            }
+            waiter.send(Ok(0));
             return Ok(());
         }
 
@@ -540,14 +537,12 @@ impl CompactionStatus {
 
     /// Set pending compaction request or replace current value if already exist.
     fn set_pending_request(&mut self, pending: PendingCompaction) {
-        if let Some(mut prev) = self.pending_request.replace(pending) {
+        if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
                 prev.options, self.region_id
             );
-            if let Some(waiter) = prev.waiter.take_inner() {
-                waiter.send(ManualCompactionOverrideSnafu.fail());
-            }
+            prev.waiter.send(ManualCompactionOverrideSnafu.fail());
         }
     }
 

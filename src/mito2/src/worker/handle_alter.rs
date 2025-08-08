@@ -45,24 +45,15 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
-        mut sender: OptionOutputTx,
+        sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
-            return;
-        };
-
-        // Check if region is in staging mode - reject ALTER operations
-        if region.is_staging() {
-            sender.send(Err(crate::error::RegionStateSnafu {
-                region_id,
-                state: region.state(),
-                expect: crate::region::RegionRoleState::Leader(
-                    crate::region::RegionLeaderState::Writable,
-                ),
+        let region = match self.regions.writable_non_staging_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
             }
-            .build()));
-            return;
-        }
+        };
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
