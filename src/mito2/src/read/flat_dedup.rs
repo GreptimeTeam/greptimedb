@@ -329,7 +329,9 @@ fn filter_deleted_from_batch(
     }
     let predicate = BooleanArray::new(builder.into(), None);
     let new_batch = filter_record_batch(&batch, &predicate).context(ComputeArrowSnafu)?;
-    metrics.num_deleted_rows += num_rows - new_batch.num_rows();
+    let num_deleted = num_rows - new_batch.num_rows();
+    metrics.num_deleted_rows += num_deleted;
+    metrics.num_unselected_rows += num_deleted;
 
     Ok(new_batch)
 }
