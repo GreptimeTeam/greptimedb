@@ -182,7 +182,7 @@ impl BatchLastRow {
                 .unwrap()
                 .clone();
             let timestamp_array = record_batch.column(time_index_column_index(num_columns));
-            let timestamp = timestamp_value(&timestamp_array, timestamp_array.len() - 1);
+            let timestamp = timestamp_value(timestamp_array, timestamp_array.len() - 1);
 
             Some(Self {
                 last_batch: record_batch,
