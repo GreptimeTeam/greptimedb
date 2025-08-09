@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["primary_key_column_index","sequence_column_index","sst_column_id_indices","time_index_column_index"],"struct":["FlatReadFormat","FlatWriteFormat"]};

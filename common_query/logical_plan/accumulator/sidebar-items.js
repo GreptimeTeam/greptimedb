@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_accumulator_function","make_return_function","make_state_function"],"struct":["DfAccumulatorAdaptor"],"trait":["Accumulator","AggrFuncTypeStore","AggregateFunctionCreator"],"type":["AggregateFunctionCreatorRef"]};
