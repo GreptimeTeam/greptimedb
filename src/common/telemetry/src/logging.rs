@@ -126,19 +126,21 @@ impl Default for SlowQueryOptions {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     /// Record the slow query in the system table.
+    #[default]
     SystemTable,
     /// Record the slow query in a specific logs file.
     Log,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     Json,
+    #[default]
     Text,
 }
 
