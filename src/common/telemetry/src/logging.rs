@@ -110,7 +110,8 @@ pub struct SlowQueryOptions {
 
     /// The table TTL of `slow_queries` system table. Default is "30d".
     /// It's used when `record_type` is `SystemTable`.
-    pub ttl: String,
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
 }
 
 impl Default for SlowQueryOptions {
@@ -120,7 +121,7 @@ impl Default for SlowQueryOptions {
             record_type: SlowQueriesRecordType::SystemTable,
             threshold: Duration::from_secs(30),
             sample_ratio: 1.0,
-            ttl: "30d".to_string(),
+            ttl: Duration::from_secs(30 * 24 * 60 * 60), // 30 days.
         }
     }
 }

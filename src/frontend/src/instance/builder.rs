@@ -198,8 +198,8 @@ impl FrontendBuilder {
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
             inserter.clone(),
             statement_executor.clone(),
-            self.options.slow_query.ttl.clone(),
-            self.options.event_recorder.ttl.clone(),
+            self.options.slow_query.ttl,
+            self.options.event_recorder.ttl,
         ))));
 
         // Create the limiter if the max_in_flight_write_bytes is set.

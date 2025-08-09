@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database};
@@ -38,11 +39,11 @@ pub mod region_migration_event;
 pub struct EventHandlerImpl {
     peer_lookup_service: PeerLookupServiceRef,
     channel_manager: ChannelManager,
-    ttl: String,
+    ttl: Duration,
 }
 
 impl EventHandlerImpl {
-    pub fn new(meta_peer_client: MetaPeerClientRef, ttl: String) -> Self {
+    pub fn new(meta_peer_client: MetaPeerClientRef, ttl: Duration) -> Self {
         Self {
             peer_lookup_service: Arc::new(MetaPeerLookupService::new(meta_peer_client)),
             channel_manager: ChannelManager::new(),
@@ -58,9 +59,17 @@ impl EventHandler for EventHandlerImpl {
 
         for (event_type, events) in event_groups {
             let opts = self.options(event_type);
+            let hints = opts.to_hints();
+
             self.build_database_client()
                 .await?
-                .row_inserts_with_hints(build_row_inserts_request(&events)?, &opts.to_hints())
+                .row_inserts_with_hints(
+                    build_row_inserts_request(&events)?,
+                    &hints
+                        .iter()
+                        .map(|(k, v)| (*k, v.as_str()))
+                        .collect::<Vec<_>>(),
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(InsertEventsSnafu)?;

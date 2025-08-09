@@ -35,21 +35,13 @@ pub const SLOW_QUERY_EVENT_TYPE: &str = "slow_query";
 /// SlowQueryEvent is the event of slow query.
 #[derive(Debug, Serialize)]
 pub struct SlowQueryEvent {
-    #[serde(skip)]
     pub cost: u64,
-    #[serde(skip)]
     pub threshold: u64,
-    #[serde(skip)]
     pub query: String,
-    #[serde(skip)]
     pub is_promql: bool,
-    #[serde(skip)]
     pub promql_range: Option<u64>,
-    #[serde(skip)]
     pub promql_step: Option<u64>,
-    #[serde(skip)]
     pub promql_start: Option<i64>,
-    #[serde(skip)]
     pub promql_end: Option<i64>,
 }
 

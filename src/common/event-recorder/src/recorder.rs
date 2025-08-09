@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
+use humantime::format_duration;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -52,8 +53,8 @@ pub type EventRecorderRef = Arc<dyn EventRecorder>;
 
 /// The time interval for flushing batched events to the event handler.
 pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
-// The default TTL for the events table.
-const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
+/// The default TTL(30 days) for the events table.
+const DEFAULT_EVENTS_TABLE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 // The capacity of the tokio channel for transmitting events to background processor.
 const DEFAULT_CHANNEL_SIZE: usize = 2048;
 // The size of the buffer for batching events before flushing to event handler.
@@ -213,7 +214,7 @@ pub trait EventRecorder: Send + Sync + Debug + 'static {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventHandlerOptions {
     /// TTL for the events table that will be used to store the events.
-    pub ttl: String,
+    pub ttl: Duration,
     /// Append mode for the events table that will be used to store the events.
     pub append_mode: bool,
 }
@@ -221,7 +222,7 @@ pub struct EventHandlerOptions {
 impl Default for EventHandlerOptions {
     fn default() -> Self {
         Self {
-            ttl: DEFAULT_EVENTS_TABLE_TTL.to_string(),
+            ttl: DEFAULT_EVENTS_TABLE_TTL,
             append_mode: true,
         }
     }
@@ -229,13 +230,10 @@ impl Default for EventHandlerOptions {
 
 impl EventHandlerOptions {
     /// Converts the options to the hints for the insert operation.
-    pub fn to_hints(&self) -> Vec<(&str, &str)> {
+    pub fn to_hints(&self) -> Vec<(&str, String)> {
         vec![
-            (TTL_KEY, self.ttl.as_str()),
-            (
-                APPEND_MODE_KEY,
-                if self.append_mode { "true" } else { "false" },
-            ),
+            (TTL_KEY, format_duration(self.ttl).to_string()),
+            (APPEND_MODE_KEY, self.append_mode.to_string()),
         ]
     }
 }
@@ -257,13 +255,14 @@ pub trait EventHandler: Send + Sync + 'static {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventRecorderOptions {
     /// TTL for the events table that will be used to store the events.
-    pub ttl: String,
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
 }
 
 impl Default for EventRecorderOptions {
     fn default() -> Self {
         Self {
-            ttl: DEFAULT_EVENTS_TABLE_TTL.to_string(),
+            ttl: Duration::from_secs(30 * 24 * 60 * 60), // 30 days.
         }
     }
 }

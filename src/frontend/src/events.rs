@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -20,6 +22,7 @@ use common_event_recorder::{
     aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
 };
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
+use humantime::format_duration;
 use operator::insert::InserterRef;
 use operator::statement::StatementExecutorRef;
 use session::context::QueryContextBuilder;
@@ -30,8 +33,8 @@ use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 pub struct EventHandlerImpl {
     inserter: InserterRef,
     statement_executor: StatementExecutorRef,
-    slow_query_ttl: String,
-    global_ttl: String,
+    slow_query_ttl: Duration,
+    global_ttl: Duration,
 }
 
 impl EventHandlerImpl {
@@ -39,8 +42,8 @@ impl EventHandlerImpl {
     pub fn new(
         inserter: InserterRef,
         statement_executor: StatementExecutorRef,
-        slow_query_ttl: String,
-        global_ttl: String,
+        slow_query_ttl: Duration,
+        global_ttl: Duration,
     ) -> Self {
         Self {
             inserter,
@@ -61,7 +64,7 @@ impl EventHandler for EventHandlerImpl {
             let query_ctx = QueryContextBuilder::default()
                 .current_catalog(DEFAULT_CATALOG_NAME.to_string())
                 .current_schema(DEFAULT_PRIVATE_SCHEMA_NAME.to_string())
-                .set_extension(TTL_KEY.to_string(), opts.ttl)
+                .set_extension(TTL_KEY.to_string(), format_duration(opts.ttl).to_string())
                 .set_extension(APPEND_MODE_KEY.to_string(), opts.append_mode.to_string())
                 .build()
                 .into();
@@ -85,11 +88,11 @@ impl EventHandler for EventHandlerImpl {
     fn options(&self, event_type: &str) -> EventHandlerOptions {
         match event_type {
             SLOW_QUERY_EVENT_TYPE => EventHandlerOptions {
-                ttl: self.slow_query_ttl.clone(),
+                ttl: self.slow_query_ttl,
                 append_mode: true,
             },
             _ => EventHandlerOptions {
-                ttl: self.global_ttl.clone(),
+                ttl: self.global_ttl,
                 append_mode: true,
             },
         }
