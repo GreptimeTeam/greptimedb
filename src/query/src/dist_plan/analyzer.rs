@@ -482,14 +482,32 @@ impl PlanRewriter {
                     .as_any()
                     .downcast_ref::<DfTableProviderAdapter>()
                 {
-                    if provider.table().table_type() == TableType::Base {
-                        let info = provider.table().table_info();
+                    let table = provider.table();
+                    if table.table_type() == TableType::Base {
+                        let info = table.table_info();
                         let partition_key_indices = info.meta.partition_key_indices.clone();
                         let schema = info.meta.schema.clone();
-                        let partition_cols = partition_key_indices
+                        let mut partition_cols = partition_key_indices
                             .into_iter()
                             .map(|index| schema.column_name_by_index(index).to_string())
                             .collect::<Vec<String>>();
+
+                        let partition_rules = table.partition_rules();
+                        let exist_phy_part_cols_not_in_logical_table = partition_rules
+                            .map(|r| !r.extra_phy_cols_not_in_logical_table.is_empty())
+                            .unwrap_or(false);
+
+                        if exist_phy_part_cols_not_in_logical_table && partition_cols.is_empty() {
+                            // there are other physical partition columns that are not in logical table and part cols are empty
+                            // so we need to add a placeholder for it to prevent certain optimization
+                            // this is used to make sure the final partition columns(that optimizer see) are not empty
+                            // notice if originally partition_cols is not empty, then there is no need to add this place holder,
+                            // as subset of phy part cols can still be used for certain optimization, and it works as if
+                            // those columns are always null
+                            // This helps with distinguishing between non-partitioned table and partitioned table with all phy part cols not in logical table
+                            partition_cols
+                                .push("__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__".to_string());
+                        }
                         self.partition_cols = Some(partition_cols);
                     }
                 }

@@ -44,6 +44,7 @@ use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
+use table::table::PartitionRules;
 use table::table_name::TableName;
 use table::TableRef;
 use tokio::sync::Semaphore;
@@ -132,6 +133,8 @@ impl KvBackendCatalogManager {
         {
             let mut new_table_info = (*table.table_info()).clone();
 
+            let mut phy_part_cols_not_in_logical_table = vec![];
+
             // Remap partition key indices from physical table to logical table
             new_table_info.meta.partition_key_indices = physical_table_info_value
                 .table_info
@@ -148,15 +151,30 @@ impl KvBackendCatalogManager {
                         .get(physical_index)
                         .and_then(|physical_column| {
                             // Find the corresponding index in the logical table schema
-                            new_table_info
+                            let idx = new_table_info
                                 .meta
                                 .schema
-                                .column_index_by_name(physical_column.name.as_str())
+                                .column_index_by_name(physical_column.name.as_str());
+                            if idx.is_none() {
+                                // not all part columns in physical table that are also in logical table
+                                phy_part_cols_not_in_logical_table
+                                    .push(physical_column.name.clone());
+                            }
+
+                            idx
                         })
                 })
                 .collect();
 
-            let new_table = DistTable::table(Arc::new(new_table_info));
+            let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
+                Some(PartitionRules {
+                    extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
+                })
+            } else {
+                None
+            };
+
+            let new_table = DistTable::table_partitioned(Arc::new(new_table_info), partition_rules);
 
             return Ok(new_table);
         }
