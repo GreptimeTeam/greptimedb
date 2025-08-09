@@ -57,12 +57,15 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/) and [style guide](docs/style-guide.md).
 - Make sure all unit tests are passed using [nextest](https://nexte.st/index.html) `cargo nextest run`.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings`).
+- Ensure there are no unused dependencies by running `make check-udeps` (clean them up with `make fix-udeps` if reported).
+- If you must keep a target-specific dependency (e.g. under `[target.'cfg(...)'.dev-dependencies]`), add a cargo-udeps ignore entry in the same `Cargo.toml`, for example:
+  `[package.metadata.cargo-udeps.ignore]` with `development = ["rexpect"]` (or `dependencies`/`build` as appropriate).
 
 #### `pre-commit` Hooks
 
 You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run these checks on every commit automatically.
 
-1. Install `pre-commit`
+1.  Install `pre-commit`
 
         pip install pre-commit
 
@@ -70,7 +73,7 @@ You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run
 
         brew install pre-commit
 
-2. Install the `pre-commit` hooks
+2.  Install the `pre-commit` hooks
 
         $ pre-commit install
         pre-commit installed at .git/hooks/pre-commit
