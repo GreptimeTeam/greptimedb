@@ -136,7 +136,8 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
 
     // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
     let event = &events[0];
-    let mut schema = vec![
+    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + event.extra_schema().len());
+    schema.extend(vec![
         ColumnSchema {
             column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
             datatype: ColumnDataType::String.into(),
@@ -158,23 +159,21 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
             semantic_type: SemanticType::Timestamp.into(),
             ..Default::default()
         },
-    ];
+    ]);
     schema.extend(event.extra_schema());
 
-    let rows = events
-        .iter()
-        .map(|event| {
-            let mut row = Row {
-                values: vec![
-                    ValueData::StringValue(event.event_type().to_string()).into(),
-                    ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
-                    ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
-                ],
-            };
-            row.values.extend(event.extra_row()?.values);
-            Ok(row)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut rows: Vec<Row> = Vec::with_capacity(events.len());
+    for event in events {
+        let extra_row = event.extra_row()?;
+        let mut values = Vec::with_capacity(3 + extra_row.values.len());
+        values.extend([
+            ValueData::StringValue(event.event_type().to_string()).into(),
+            ValueData::BinaryValue(event.json_payload()?.into_bytes()).into(),
+            ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+        ]);
+        values.extend(extra_row.values);
+        rows.push(Row { values });
+    }
 
     row_insert_requests.inserts.push(RowInsertRequest {
         table_name: event.table_name().to_string(),
