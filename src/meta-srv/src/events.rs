@@ -80,7 +80,7 @@ impl EventHandler for EventHandlerImpl {
 
     fn options(&self, _event_type: &str) -> EventHandlerOptions {
         EventHandlerOptions {
-            ttl: self.ttl.clone(),
+            ttl: self.ttl,
             append_mode: true,
         }
     }
