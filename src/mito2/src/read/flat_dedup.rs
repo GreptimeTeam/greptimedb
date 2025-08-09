@@ -159,6 +159,52 @@ impl FlatLastRow {
     }
 }
 
+impl RecordBatchDedupStrategy for FlatLastRow {
+    fn push_batch(
+        &mut self,
+        batch: RecordBatch,
+        metrics: &mut DedupMetrics,
+    ) -> Result<Option<RecordBatch>> {
+        if batch.num_rows() == 0 {
+            return Ok(None);
+        }
+
+        // Dedup current batch to ensure no duplication before we checking the previous row.
+        let row_before_dedup = batch.num_rows();
+        let mut batch = Self::dedup_one_batch(batch)?;
+
+        if let Some(prev_batch) = &self.prev_batch {
+            // If we have previous batch.
+            if prev_batch.is_last_row_duplicated(&batch) {
+                // Duplicated with the last batch, skip the first row.
+                batch = batch.slice(1, batch.num_rows() - 1);
+            }
+        }
+        metrics.num_unselected_rows += row_before_dedup - batch.num_rows();
+
+        let Some(batch_last_row) = BatchLastRow::try_new(batch.clone()) else {
+            // The batch after dedup is empty.
+            // We don't need to update `prev_batch` because they have the same
+            // key and timestamp.
+            return Ok(None);
+        };
+
+        // Store current batch to `prev_batch` so we could compare the next batch
+        // with this batch. We store batch before filtering it as rows with `OpType::Delete`
+        // would be removed from the batch after filter, then we may store an incorrect `last row`
+        // of previous batch.
+        // Safety: We checked the batch is not empty before.
+        self.prev_batch = Some(batch_last_row);
+
+        // Filters deleted rows at last.
+        maybe_filter_deleted(batch, self.filter_deleted, metrics)
+    }
+
+    fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
+        Ok(None)
+    }
+}
+
 /// State of the batch with the last row for dedup.
 struct BatchLastRow {
     /// The record batch that contains the last row.
@@ -219,52 +265,6 @@ impl BatchLastRow {
         let batch_key = primary_key_at(primary_key, 0);
 
         last_key == batch_key
-    }
-}
-
-impl RecordBatchDedupStrategy for FlatLastRow {
-    fn push_batch(
-        &mut self,
-        batch: RecordBatch,
-        metrics: &mut DedupMetrics,
-    ) -> Result<Option<RecordBatch>> {
-        if batch.num_rows() == 0 {
-            return Ok(None);
-        }
-
-        // Dedup current batch to ensure no duplication before we checking the previous row.
-        let row_before_dedup = batch.num_rows();
-        let mut batch = Self::dedup_one_batch(batch)?;
-
-        if let Some(prev_batch) = &self.prev_batch {
-            // If we have previous batch.
-            if prev_batch.is_last_row_duplicated(&batch) {
-                // Duplicated with the last batch, skip the first row.
-                batch = batch.slice(1, batch.num_rows() - 1);
-            }
-        }
-        metrics.num_unselected_rows += row_before_dedup - batch.num_rows();
-
-        let Some(batch_last_row) = BatchLastRow::try_new(batch.clone()) else {
-            // The batch after dedup is empty.
-            // We don't need to update `prev_batch` because they have the same
-            // key and timestamp.
-            return Ok(None);
-        };
-
-        // Store current batch to `prev_batch` so we could compare the next batch
-        // with this batch. We store batch before filtering it as rows with `OpType::Delete`
-        // would be removed from the batch after filter, then we may store an incorrect `last row`
-        // of previous batch.
-        // Safety: We checked the batch is not empty before.
-        self.prev_batch = Some(batch_last_row);
-
-        // Filters deleted rows at last.
-        maybe_filter_deleted(batch, self.filter_deleted, metrics)
-    }
-
-    fn finish(&mut self, _metrics: &mut DedupMetrics) -> Result<Option<RecordBatch>> {
-        Ok(None)
     }
 }
 
