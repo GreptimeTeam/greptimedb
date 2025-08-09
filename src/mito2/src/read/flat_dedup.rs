@@ -222,7 +222,6 @@ pub struct FlatLastNonNull {
     buffer: Option<BatchLastRow>,
 }
 
-// TODO(yingwen): metrics.
 impl RecordBatchDedupStrategy for FlatLastNonNull {
     fn push_batch(
         &mut self,
@@ -233,9 +232,12 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             return Ok(None);
         }
 
+        let row_before_dedup = batch.num_rows();
+
         let Some(buffer) = self.buffer.take() else {
             // If the buffer is None, dedup the batch, put the batch into the buffer and return.
             let record_batch = Self::dedup_one_batch(batch, self.num_pk_columns)?;
+            metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             self.buffer = BatchLastRow::try_new(record_batch);
 
             return Ok(None);
@@ -246,6 +248,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             // We can replace the buffer with the new batch.
             // Dedup the batch.
             let record_batch = Self::dedup_one_batch(batch, self.num_pk_columns)?;
+            metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             debug_assert!(record_batch.num_rows() > 0);
             self.buffer = BatchLastRow::try_new(record_batch);
 
@@ -267,8 +270,10 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         // We concat the last row with the next batch.
         let schema = batch.schema();
         let merged = concat_batches(&schema, &[last_row, batch]).context(ComputeArrowSnafu)?;
+        let merged_row_count = merged.num_rows();
         // Dedup the merged batch and update the buffer.
         let record_batch = Self::dedup_one_batch(merged, self.num_pk_columns)?;
+        metrics.num_unselected_rows += merged_row_count - record_batch.num_rows();
         debug_assert!(record_batch.num_rows() > 0);
         self.buffer = BatchLastRow::try_new(record_batch);
 
@@ -480,6 +485,10 @@ fn maybe_filter_deleted(
         return Ok(Some(record_batch));
     }
     let batch = filter_deleted_from_batch(record_batch, metrics)?;
+    // Skips empty batches.
+    if batch.num_rows() == 0 {
+        return Ok(None);
+    }
     Ok(Some(batch))
 }
 
@@ -546,8 +555,8 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt64Array,
-        UInt8Array,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
+        TimestampMillisecondArray, UInt64Array, UInt8Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -569,6 +578,8 @@ mod tests {
         debug_assert_eq!(primary_keys.len(), num_rows);
 
         let columns: Vec<ArrayRef> = vec![
+            // k0 column (primary key as string dictionary)
+            build_test_pk_string_dict_array(primary_keys),
             // field0 column
             Arc::new(Int64Array::from_iter(
                 fields.iter().map(|v| Some(*v as i64)),
@@ -590,6 +601,58 @@ mod tests {
         RecordBatch::try_new(build_test_flat_schema(), columns).unwrap()
     }
 
+    /// Creates a test RecordBatch in flat format with multiple fields for testing FlatLastNonNull.
+    fn new_record_batch_multi_fields(
+        primary_keys: &[&[u8]],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        fields: &[(Option<u64>, Option<u64>)],
+    ) -> RecordBatch {
+        let num_rows = timestamps.len();
+        debug_assert_eq!(sequences.len(), num_rows);
+        debug_assert_eq!(op_types.len(), num_rows);
+        debug_assert_eq!(fields.len(), num_rows);
+        debug_assert_eq!(primary_keys.len(), num_rows);
+
+        let columns: Vec<ArrayRef> = vec![
+            // k0 column (primary key as string dictionary)
+            build_test_pk_string_dict_array(primary_keys),
+            // field0 column
+            Arc::new(Int64Array::from_iter(
+                fields.iter().map(|field| field.0.map(|v| v as i64)),
+            )),
+            // field1 column
+            Arc::new(Int64Array::from_iter(
+                fields.iter().map(|field| field.1.map(|v| v as i64)),
+            )),
+            // ts column (time index)
+            Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )),
+            // __primary_key column
+            build_test_pk_array(primary_keys),
+            // __sequence column
+            Arc::new(UInt64Array::from_iter_values(sequences.iter().copied())),
+            // __op_type column
+            Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )),
+        ];
+
+        RecordBatch::try_new(build_test_multi_field_schema(), columns).unwrap()
+    }
+
+    /// Creates a test string dictionary primary key array for given primary keys.
+    fn build_test_pk_string_dict_array(primary_keys: &[&[u8]]) -> ArrayRef {
+        let mut builder = StringDictionaryBuilder::<UInt32Type>::new();
+        for &pk in primary_keys {
+            let pk_str = std::str::from_utf8(pk).unwrap();
+            builder.append(pk_str).unwrap();
+        }
+        Arc::new(builder.finish())
+    }
+
     /// Creates a test primary key array for given primary keys.
     fn build_test_pk_array(primary_keys: &[&[u8]]) -> ArrayRef {
         let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
@@ -602,7 +665,38 @@ mod tests {
     /// Builds the arrow schema for test flat format.
     fn build_test_flat_schema() -> SchemaRef {
         let fields = vec![
+            Field::new(
+                "k0",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                false,
+            ),
             Field::new("field0", DataType::Int64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ];
+        Arc::new(Schema::new(fields))
+    }
+
+    /// Builds the arrow schema for test flat format with multiple fields.
+    fn build_test_multi_field_schema() -> SchemaRef {
+        let fields = vec![
+            Field::new(
+                "k0",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+                false,
+            ),
+            Field::new("field0", DataType::Int64, true),
+            Field::new("field1", DataType::Int64, true),
             Field::new(
                 "ts",
                 DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -621,11 +715,6 @@ mod tests {
 
     /// Asserts that two RecordBatch vectors are equal.
     fn check_record_batches_equal(expected: &[RecordBatch], actual: &[RecordBatch]) {
-        assert_eq!(
-            expected.len(),
-            actual.len(),
-            "Number of batches don't match"
-        );
         for (i, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
             assert_eq!(
                 exp, act,
@@ -633,6 +722,11 @@ mod tests {
                 i, exp, act
             );
         }
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "Number of batches don't match"
+        );
     }
 
     /// Helper function to collect iterator results.
@@ -766,6 +860,190 @@ mod tests {
         let result = collect_iterator_results(&mut dedup_iter);
         check_record_batches_equal(&expected_no_filter, &result);
         assert_eq!(3, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+    }
+
+    #[test]
+    fn test_flat_last_non_null_no_duplications() {
+        let input = vec![
+            new_record_batch(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[11, 12],
+                &[OpType::Put, OpType::Put],
+                &[21, 22],
+            ),
+            new_record_batch(&[b"k1"], &[3], &[13], &[OpType::Put], &[23]),
+            new_record_batch(
+                &[b"k2", b"k2"],
+                &[1, 2],
+                &[111, 112],
+                &[OpType::Put, OpType::Put],
+                &[31, 32],
+            ),
+        ];
+
+        // Test with filter_deleted = true
+        let iter = input.clone().into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&input, &result);
+        assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+
+        // Test with filter_deleted = false
+        let iter = input.clone().into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, false));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&input, &result);
+        assert_eq!(0, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+    }
+
+    #[test]
+    fn test_flat_last_non_null_field_merging() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (None, None)],
+            ),
+            // empty batch
+            new_record_batch_multi_fields(&[], &[], &[], &[], &[]),
+            // Duplicate with the previous batch - should merge fields
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[10],
+                &[OpType::Put],
+                &[(Some(12), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1", b"k1"],
+                &[2, 3, 4],
+                &[10, 13, 13],
+                &[OpType::Put, OpType::Put, OpType::Delete],
+                &[(Some(2), Some(22)), (Some(13), None), (None, Some(14))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2", b"k2"],
+                &[1, 2],
+                &[20, 20],
+                &[OpType::Put, OpType::Delete],
+                &[(Some(101), Some(101)), (None, None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[2],
+                &[19],
+                &[OpType::Put],
+                &[(Some(102), Some(102))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k3"],
+                &[2],
+                &[20],
+                &[OpType::Put],
+                &[(Some(202), Some(202))],
+            ),
+            // This batch won't increase the deleted rows count as it
+            // is filtered out by the previous batch. (All fields are null).
+            new_record_batch_multi_fields(
+                &[b"k3"],
+                &[2],
+                &[19],
+                &[OpType::Delete],
+                &[(None, None)],
+            ),
+        ];
+
+        // Test with filter_deleted = true
+        let expected_filter_deleted = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[13],
+                &[OpType::Put],
+                &[(Some(11), Some(11))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[2, 3],
+                &[11, 13],
+                &[OpType::Put, OpType::Put],
+                &[(Some(12), Some(22)), (Some(13), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[1],
+                &[20],
+                &[OpType::Put],
+                &[(Some(101), Some(101))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k3"],
+                &[2],
+                &[20],
+                &[OpType::Put],
+                &[(Some(202), Some(202))],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&expected_filter_deleted, &result);
+        assert_eq!(6, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(2, dedup_iter.metrics.num_deleted_rows);
+
+        // Test with filter_deleted = false
+        let expected_no_filter = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[13],
+                &[OpType::Put],
+                &[(Some(11), Some(11))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1", b"k1"],
+                &[2, 3, 4],
+                &[11, 13, 13],
+                &[OpType::Put, OpType::Put, OpType::Delete],
+                &[(Some(12), Some(22)), (Some(13), None), (None, Some(14))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[1],
+                &[20],
+                &[OpType::Put],
+                &[(Some(101), Some(101))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[2],
+                &[20],
+                &[OpType::Delete],
+                // Current dedup strategy will fill null fields without checking the op type,
+                // but this should be acceptable.
+                &[(Some(102), Some(102))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k3"],
+                &[2],
+                &[20],
+                &[OpType::Put],
+                &[(Some(202), Some(202))],
+            ),
+        ];
+
+        let iter = input.clone().into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, false));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&expected_no_filter, &result);
+        assert_eq!(4, dedup_iter.metrics.num_unselected_rows);
         assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
     }
 }
