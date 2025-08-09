@@ -217,9 +217,7 @@ impl DistExtensionPlanner {
             .partition_column_names()
             .map(|s| s.to_string())
             .collect();
-
         if partition_columns.is_empty() {
-            // No partitioning, return all regions
             return Ok(all_regions);
         }
 
@@ -237,10 +235,6 @@ impl DistExtensionPlanner {
             };
 
         if range_constraints.is_empty() {
-            // No useful predicates, return all regions
-            common_telemetry::debug!(
-                "No range constraints found for partition columns, using all regions"
-            );
             return Ok(all_regions);
         }
 
@@ -262,15 +256,12 @@ impl DistExtensionPlanner {
                 }
             }
             None => {
-                // No partition rule manager available, create basic partition info without expressions
-                // This will result in conservative pruning (returning all regions)
-                common_telemetry::debug!(
-                    "No partition rule manager available for table {}, using all regions",
-                    table_name
-                );
                 return Ok(all_regions);
             }
         };
+        if partitions.is_empty() {
+            return Ok(all_regions);
+        }
 
         // Apply region pruning based on partition rules
         let pruned_regions =

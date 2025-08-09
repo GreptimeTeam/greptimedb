@@ -13,14 +13,18 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use arrow::datatypes::{DataType, Field, Schema};
 use common_telemetry::debug;
-use datafusion_common::ScalarValue;
+use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use partition::expr::PartitionExpr;
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
 
 use crate::dist_plan::predicate_extractor::RangeConstraint;
+use crate::dist_plan::PredicateExtractor;
 use crate::error::Result;
 
 /// Represents the range boundary extracted from a partition expression
@@ -160,13 +164,6 @@ impl RangePartitionPruner {
         // This could be enhanced to be more sophisticated
         let partition_columns = Self::extract_column_names_from_expression(&expr_str);
 
-        // Create a schema that includes the partition columns
-        use std::sync::Arc;
-
-        use arrow::datatypes::{DataType, Field, Schema};
-        use datafusion_common::DFSchema;
-        use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
-
         let mut fields = vec![];
         for col in &partition_columns {
             fields.push(Field::new(col.as_str(), DataType::Int64, true));
@@ -190,8 +187,6 @@ impl RangePartitionPruner {
             .build()
             .unwrap();
 
-        // Use the existing predicate extractor
-        use crate::dist_plan::predicate_extractor::PredicateExtractor;
         let constraints = match PredicateExtractor::extract_range_constraints(
             &logical_plan,
             &partition_columns,
