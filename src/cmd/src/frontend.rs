@@ -279,7 +279,7 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             opts.component.node_id.clone(),
-            opts.component.slow_query.as_ref(),
+            Some(&opts.component.slow_query),
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);

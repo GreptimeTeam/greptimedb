@@ -15,11 +15,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::column_data_type_extension::TypeExt;
-use api::v1::helper::{tag_column_schema, time_index_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
@@ -29,6 +28,7 @@ use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
+use humantime::format_duration;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -51,12 +51,10 @@ pub const EVENTS_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 /// EventRecorderRef is the reference to the event recorder.
 pub type EventRecorderRef = Arc<dyn EventRecorder>;
 
-static EVENTS_TABLE_TTL: OnceLock<String> = OnceLock::new();
-
 /// The time interval for flushing batched events to the event handler.
 pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
-// The default TTL for the events table.
-const DEFAULT_EVENTS_TABLE_TTL: &str = "30d";
+/// The default TTL(30 days) for the events table.
+const DEFAULT_EVENTS_TABLE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 // The capacity of the tokio channel for transmitting events to background processor.
 const DEFAULT_CHANNEL_SIZE: usize = 2048;
 // The size of the buffer for batching events before flushing to event handler.
@@ -73,6 +71,11 @@ const DEFAULT_MAX_RETRY_TIMES: u64 = 3;
 ///
 /// The event can also add the extra schema and row to the event by overriding the `extra_schema` and `extra_row` methods.
 pub trait Event: Send + Sync + Debug {
+    /// Returns the table name of the event.
+    fn table_name(&self) -> &str {
+        DEFAULT_EVENTS_TABLE_NAME
+    }
+
     /// Returns the type of the event.
     fn event_type(&self) -> &str;
 
@@ -108,79 +111,74 @@ pub trait Eventable: Send + Sync + Debug {
     }
 }
 
-/// Returns the hints for the insert operation.
-pub fn insert_hints() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            TTL_KEY,
-            EVENTS_TABLE_TTL
-                .get()
-                .map(|s| s.as_str())
-                .unwrap_or(DEFAULT_EVENTS_TABLE_TTL),
-        ),
-        (APPEND_MODE_KEY, "true"),
-    ]
-}
-
-/// Builds the row inserts request for the events that will be persisted to the events table.
-pub fn build_row_inserts_request(events: &[Box<dyn Event>]) -> Result<RowInsertRequests> {
-    // Aggregate the events by the event type.
+/// Aggregates events by its `event_type`.
+#[allow(clippy::borrowed_box)]
+pub fn aggregate_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
     let mut event_groups: HashMap<&str, Vec<&Box<dyn Event>>> = HashMap::new();
-
     for event in events {
         event_groups
             .entry(event.event_type())
             .or_default()
             .push(event);
     }
+    event_groups
+}
+
+/// Builds the row inserts request for the events that will be persisted to the events table.
+#[allow(clippy::borrowed_box)]
+pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsertRequests> {
+    // Ensure all the events are the same type.
+    validate_events(events)?;
 
     let mut row_insert_requests = RowInsertRequests {
-        inserts: Vec::with_capacity(event_groups.len()),
+        inserts: Vec::with_capacity(events.len()),
     };
 
-    for (_, events) in event_groups {
-        validate_events(&events)?;
+    // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
+    let event = &events[0];
+    let mut schema: Vec<ColumnSchema> = Vec::with_capacity(3 + event.extra_schema().len());
+    schema.extend(vec![
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TYPE_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Binary as i32,
+            semantic_type: SemanticType::Field as i32,
+            datatype_extension: Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: EVENTS_TABLE_TIMESTAMP_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::TimestampNanosecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+            ..Default::default()
+        },
+    ]);
+    schema.extend(event.extra_schema());
 
-        // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
-        let event = &events[0];
-        let mut schema = vec![
-            tag_column_schema(EVENTS_TABLE_TYPE_COLUMN_NAME, ColumnDataType::String),
-            ColumnSchema {
-                column_name: EVENTS_TABLE_PAYLOAD_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::Binary as i32,
-                semantic_type: SemanticType::Field as i32,
-                datatype_extension: Some(ColumnDataTypeExtension {
-                    type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
-                }),
-                ..Default::default()
-            },
-            time_index_column_schema(
-                EVENTS_TABLE_TIMESTAMP_COLUMN_NAME,
-                ColumnDataType::TimestampNanosecond,
-            ),
-        ];
-        schema.extend(event.extra_schema());
-
-        let rows = events
-            .iter()
-            .map(|event| {
-                let mut row = Row {
-                    values: vec![
-                        ValueData::StringValue(event.event_type().to_string()).into(),
-                        ValueData::BinaryValue(event.json_payload()?.as_bytes().to_vec()).into(),
-                        ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
-                    ],
-                };
-                row.values.extend(event.extra_row()?.values);
-                Ok(row)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        row_insert_requests.inserts.push(RowInsertRequest {
-            table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
-            rows: Some(Rows { schema, rows }),
-        });
+    let mut rows: Vec<Row> = Vec::with_capacity(events.len());
+    for event in events {
+        let extra_row = event.extra_row()?;
+        let mut values = Vec::with_capacity(3 + extra_row.values.len());
+        values.extend([
+            ValueData::StringValue(event.event_type().to_string()).into(),
+            ValueData::BinaryValue(event.json_payload()?.into_bytes()).into(),
+            ValueData::TimestampNanosecondValue(event.timestamp().value()).into(),
+        ]);
+        values.extend(extra_row.values);
+        rows.push(Row { values });
     }
+
+    row_insert_requests.inserts.push(RowInsertRequest {
+        table_name: event.table_name().to_string(),
+        rows: Some(Rows { schema, rows }),
+    });
 
     Ok(row_insert_requests)
 }
@@ -211,25 +209,59 @@ pub trait EventRecorder: Send + Sync + Debug + 'static {
     fn close(&self);
 }
 
+/// EventHandlerOptions is the options for the event handler.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventHandlerOptions {
+    /// TTL for the events table that will be used to store the events.
+    pub ttl: Duration,
+    /// Append mode for the events table that will be used to store the events.
+    pub append_mode: bool,
+}
+
+impl Default for EventHandlerOptions {
+    fn default() -> Self {
+        Self {
+            ttl: DEFAULT_EVENTS_TABLE_TTL,
+            append_mode: true,
+        }
+    }
+}
+
+impl EventHandlerOptions {
+    /// Converts the options to the hints for the insert operation.
+    pub fn to_hints(&self) -> Vec<(&str, String)> {
+        vec![
+            (TTL_KEY, format_duration(self.ttl).to_string()),
+            (APPEND_MODE_KEY, self.append_mode.to_string()),
+        ]
+    }
+}
+
 /// EventHandler trait defines the interface for how to handle the event.
 #[async_trait]
 pub trait EventHandler: Send + Sync + 'static {
     /// Processes and handles incoming events. The [DefaultEventHandlerImpl] implementation forwards events to frontend instances for persistence.
     /// We use `&[Box<dyn Event>]` to avoid consuming the events, so the caller can buffer the events and retry if the handler fails.
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()>;
+
+    /// Returns the handler options for the event type. We can use different options for different event types.
+    fn options(&self, _event_type: &str) -> EventHandlerOptions {
+        EventHandlerOptions::default()
+    }
 }
 
 /// Configuration options for the event recorder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventRecorderOptions {
     /// TTL for the events table that will be used to store the events.
-    pub ttl: String,
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
 }
 
 impl Default for EventRecorderOptions {
     fn default() -> Self {
         Self {
-            ttl: DEFAULT_EVENTS_TABLE_TTL.to_string(),
+            ttl: Duration::from_secs(30 * 24 * 60 * 60), // 30 days.
         }
     }
 }
@@ -246,9 +278,7 @@ pub struct EventRecorderImpl {
 }
 
 impl EventRecorderImpl {
-    pub fn new(event_handler: Box<dyn EventHandler>, opts: EventRecorderOptions) -> Self {
-        info!("Creating event recorder with options: {:?}", opts);
-
+    pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
         let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
         let cancel_token = CancellationToken::new();
 
@@ -272,14 +302,6 @@ impl EventRecorderImpl {
         });
 
         recorder.handle = Some(handle);
-
-        // It only sets the ttl once, so it's safe to skip the error.
-        if EVENTS_TABLE_TTL.set(opts.ttl.clone()).is_err() {
-            info!(
-                "Events table ttl already set to {}, skip setting it",
-                opts.ttl
-            );
-        }
 
         recorder
     }
@@ -465,10 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_recorder() {
-        let mut event_recorder = EventRecorderImpl::new(
-            Box::new(TestEventHandlerImpl {}),
-            EventRecorderOptions::default(),
-        );
+        let mut event_recorder = EventRecorderImpl::new(Box::new(TestEventHandlerImpl {}));
         event_recorder.record(Box::new(TestEvent {}));
 
         // Sleep for a while to let the event be sent to the event handler.
@@ -509,10 +528,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_recorder_should_panic() {
-        let mut event_recorder = EventRecorderImpl::new(
-            Box::new(TestEventHandlerImplShouldPanic {}),
-            EventRecorderOptions::default(),
-        );
+        let mut event_recorder =
+            EventRecorderImpl::new(Box::new(TestEventHandlerImplShouldPanic {}));
 
         event_recorder.record(Box::new(TestEvent {}));
 

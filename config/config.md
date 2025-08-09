@@ -316,6 +316,8 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
+| `event_recorder` | -- | -- | Configuration options for the event recorder. |
+| `event_recorder.ttl` | String | `30d` | TTL for the events table that will be used to store the events. |
 
 
 ### Metasrv

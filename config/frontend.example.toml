@@ -288,3 +288,8 @@ headers = { }
 ## is set to "prof:true,prof_active:false". The official image adds this env variable.
 ## Default is true.
 enable_heap_profiling = true
+
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events.
+ttl = "30d"

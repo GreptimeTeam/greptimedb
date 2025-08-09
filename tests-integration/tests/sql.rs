@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
-use frontend::slow_query_recorder::{
+use common_frontend::slow_query_event::{
     SLOW_QUERY_TABLE_COST_COLUMN_NAME, SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
     SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
     SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
