@@ -104,19 +104,20 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
 
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
+    partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
-    partition_rule_manager: Option<PartitionRuleManagerRef>,
 }
 
 impl DistExtensionPlanner {
     pub fn new(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
+            partition_rule_manager,
             region_query_handler,
-            partition_rule_manager: None, // TODO: Add proper dependency injection
         }
     }
 }
@@ -239,23 +240,18 @@ impl DistExtensionPlanner {
         }
 
         // Get partition information for the table if partition rule manager is available
-        let partitions = match &self.partition_rule_manager {
-            Some(partition_rule_manager) => {
-                match partition_rule_manager
-                    .find_table_partitions(table.table_info().table_id())
-                    .await
-                {
-                    Ok(partitions) => partitions,
-                    Err(err) => {
-                        common_telemetry::debug!(
-                            "Failed to get partition information for table {}: {}, using all regions",
-                            table_name, err
-                        );
-                        return Ok(all_regions);
-                    }
-                }
-            }
-            None => {
+        let partitions = match self
+            .partition_rule_manager
+            .find_table_partitions(table.table_info().table_id())
+            .await
+        {
+            Ok(partitions) => partitions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to get partition information for table {}: {}, using all regions",
+                    table_name,
+                    err
+                );
                 return Ok(all_regions);
             }
         };

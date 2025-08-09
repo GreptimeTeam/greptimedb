@@ -3303,11 +3303,12 @@ mod test {
     fn build_query_engine_state() -> QueryEngineState {
         QueryEngineState::new(
             new_memory_catalog_manager().unwrap(),
-            None,  // region_query_handler
-            None,  // table_mutation_handler
-            None,  // procedure_service_handler
-            None,  // flow_service_handler
-            false, // with_dist_planner
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
             Plugins::default(),
             QueryOptions::default(),
         )
