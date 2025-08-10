@@ -388,9 +388,7 @@ impl FlatLastNonNull {
 
         let mut is_field = vec![false; batch.num_columns()];
         // Iterates fields, skips internal columns.
-        for idx in num_pk_columns..batch.num_columns() - FIXED_POS_COLUMN_NUM {
-            is_field[idx] = true;
-        }
+        is_field[num_pk_columns..batch.num_columns() - FIXED_POS_COLUMN_NUM].fill(true);
 
         let take_options = Some(TakeOptions {
             check_bounds: false,
