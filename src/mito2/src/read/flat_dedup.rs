@@ -1046,4 +1046,113 @@ mod tests {
         assert_eq!(4, dedup_iter.metrics.num_unselected_rows);
         assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
     }
+
+    #[test]
+    fn test_flat_last_non_null_skip_merge_no_null() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (Some(12), Some(12))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[10],
+                &[OpType::Put],
+                &[(None, Some(22))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[2, 3],
+                &[9, 13],
+                &[OpType::Put, OpType::Put],
+                &[(Some(32), None), (Some(13), Some(13))],
+            ),
+        ];
+
+        let expected = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[13],
+                &[OpType::Put],
+                &[(Some(11), Some(11))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[2, 3],
+                &[11, 13],
+                &[OpType::Put, OpType::Put],
+                &[(Some(12), Some(12)), (Some(13), Some(13))],
+            ),
+        ];
+
+        let iter = input.into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&expected, &result);
+        assert_eq!(2, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+    }
+
+    #[test]
+    fn test_flat_last_non_null_merge_null() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[13, 11],
+                &[OpType::Put, OpType::Put],
+                &[(Some(11), Some(11)), (None, None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[10],
+                &[OpType::Put],
+                &[(None, Some(22))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[3],
+                &[13],
+                &[OpType::Put],
+                &[(Some(33), None)],
+            ),
+        ];
+
+        let expected = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[13],
+                &[OpType::Put],
+                &[(Some(11), Some(11))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[11],
+                &[OpType::Put],
+                &[(None, Some(22))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[3],
+                &[13],
+                &[OpType::Put],
+                &[(Some(33), None)],
+            ),
+        ];
+
+        let iter = input.into_iter().map(Ok);
+        let mut dedup_iter = DedupIterator::new(iter, FlatLastNonNull::new(1, true));
+        let result = collect_iterator_results(&mut dedup_iter);
+        check_record_batches_equal(&expected, &result);
+        assert_eq!(1, dedup_iter.metrics.num_unselected_rows);
+        assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+    }
 }
