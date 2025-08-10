@@ -54,7 +54,7 @@ pub type EventRecorderRef = Arc<dyn EventRecorder>;
 /// The time interval for flushing batched events to the event handler.
 pub const DEFAULT_FLUSH_INTERVAL_SECONDS: Duration = Duration::from_secs(5);
 /// The default TTL(30 days) for the events table.
-const DEFAULT_EVENTS_TABLE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const DEFAULT_EVENTS_TABLE_TTL: Duration = Duration::from_days(90);
 // The capacity of the tokio channel for transmitting events to background processor.
 const DEFAULT_CHANNEL_SIZE: usize = 2048;
 // The size of the buffer for batching events before flushing to event handler.
@@ -111,9 +111,9 @@ pub trait Eventable: Send + Sync + Debug {
     }
 }
 
-/// Aggregates events by its `event_type`.
+/// Groups events by its `event_type`.
 #[allow(clippy::borrowed_box)]
-pub fn aggregate_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
+pub fn group_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
     let mut event_groups: HashMap<&str, Vec<&Box<dyn Event>>> = HashMap::new();
     for event in events {
         event_groups

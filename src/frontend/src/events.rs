@@ -19,7 +19,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_event_recorder::error::{InsertEventsSnafu, Result};
 use common_event_recorder::{
-    aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
+    build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
 };
 use common_frontend::slow_query_event::SLOW_QUERY_EVENT_TYPE;
 use humantime::format_duration;
@@ -57,7 +57,7 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        let event_groups = aggregate_events_by_type(events);
+        let event_groups = group_events_by_type(events);
 
         for (event_type, events) in event_groups {
             let opts = self.options(event_type);

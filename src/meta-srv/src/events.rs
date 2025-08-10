@@ -23,7 +23,7 @@ use common_event_recorder::error::{
     InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result,
 };
 use common_event_recorder::{
-    aggregate_events_by_type, build_row_inserts_request, Event, EventHandler, EventHandlerOptions,
+    build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
 };
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
@@ -55,7 +55,7 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        let event_groups = aggregate_events_by_type(events);
+        let event_groups = group_events_by_type(events);
 
         for (event_type, events) in event_groups {
             let opts = self.options(event_type);
