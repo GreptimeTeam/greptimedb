@@ -197,9 +197,11 @@ fn prepare_partition_expr(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
     use store_api::storage::{RegionId, RegionNumber};
+
+    use super::*;
 
     #[test]
     fn test_build_one_sets_partition_expr_per_region() {
@@ -216,8 +218,8 @@ mod tests {
         let builder = CreateRequestBuilder::new(template, None);
 
         let mut partition_exprs: HashMap<RegionNumber, String> = HashMap::new();
-        let expr_a = r#"{"Expr":{"lhs":{"Column":"a"},"op":"Eq","rhs":{"Value":{"UInt32":1}}}}"#
-            .to_string();
+        let expr_a =
+            r#"{"Expr":{"lhs":{"Column":"a"},"op":"Eq","rhs":{"Value":{"UInt32":1}}}}"#.to_string();
         partition_exprs.insert(0, expr_a.clone());
 
         let r0 = builder.build_one(

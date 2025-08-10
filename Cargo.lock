@@ -5313,6 +5313,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?branch=zhongzc%2Fadd-partition-create-req#e688d43e72e945e4796534e7d08907918b94cc3e"
 dependencies = [
  "prost 0.13.5",
  "serde",

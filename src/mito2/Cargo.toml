@@ -54,6 +54,7 @@ mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
+partition.workspace = true
 paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
@@ -79,7 +80,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-partition.workspace = true
 
 [dev-dependencies]
 common-function.workspace = true

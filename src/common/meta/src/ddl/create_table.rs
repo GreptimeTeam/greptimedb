@@ -214,8 +214,7 @@ impl CreateTableProcedure {
         let leaders = find_leaders(region_routes);
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
-        // Prepare per-region partition exprs map
-        let partition_exprs: HashMap<RegionNumber, String> = region_routes
+        let partition_exprs = region_routes
             .iter()
             .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
             .collect();
