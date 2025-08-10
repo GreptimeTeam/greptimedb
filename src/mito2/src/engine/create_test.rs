@@ -22,7 +22,9 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::region::options::MemtableOptions;
-use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::test_util::{
+    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+};
 
 #[tokio::test]
 async fn test_engine_create_new_region() {
@@ -242,4 +244,32 @@ async fn test_engine_create_with_memtable_opts() {
 | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn create_with_partition_expr_persists_manifest() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let expr_json = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+    let request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(expr_json.to_string()))
+        .build();
+    let table_dir = request.table_dir.clone();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
+
+    // Reopen the region with options containing partition.expr_json
+    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
 }

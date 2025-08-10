@@ -92,34 +92,6 @@ async fn test_engine_open_existing() {
 }
 
 #[tokio::test]
-async fn test_create_and_open_with_partition_expr() {
-    let mut env = TestEnv::with_prefix("open-with-partition").await;
-    let engine = env.create_engine(MitoConfig::default()).await;
-
-    let region_id = RegionId::new(1, 1);
-    let expr_json = r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
-    let request = CreateRequestBuilder::new()
-        .partition_expr_json(Some(expr_json.to_string()))
-        .build();
-    let table_dir = request.table_dir.clone();
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-
-    // Verify manifest contains partition_expr
-    let region = engine.get_region(region_id).unwrap();
-    let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
-
-    // Reopen and verify again
-    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
-    let region = engine.get_region(region_id).unwrap();
-    let manifest = region.manifest_ctx.manifest().await;
-    assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
-}
-
-#[tokio::test]
 async fn test_engine_reopen_region() {
     let mut env = TestEnv::with_prefix("reopen-region").await;
     let engine = env.create_engine(MitoConfig::default()).await;

@@ -155,14 +155,9 @@ pub struct RegionMetadata {
     pub primary_key_encoding: PrimaryKeyEncoding,
 
     /// Partition expression serialized as a JSON string.
-    ///
-    /// Compatibility and persistence behavior:
-    /// - Older manifests may not contain this field (None).
-    /// - On open, the engine may backfill this value at runtime from
-    ///   `RegionOptions.partition_expr_json()` for compatibility, without
-    ///   persisting it immediately.
-    /// - The JSON will be persisted into the manifest on a subsequent
-    ///   metadata update (e.g., an ALTER that triggers a RegionChange).
+    /// Compatibility behavior:
+    /// - None: no partition expr was ever set in the manifest (legacy regions).
+    /// - Some(""): an explicit “single-region/no-partition” designation. This is distinct from None and should be preserved as-is.
     pub partition_expr: Option<String>,
 }
 
