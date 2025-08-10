@@ -212,8 +212,8 @@ impl RecordBatchDedupStrategy for FlatLastRow {
 
 /// Dedup strategy that keeps the last non-null field for the same key.
 pub struct FlatLastNonNull {
-    /// The number of primary key columns:
-    num_pk_columns: usize,
+    /// The start index of field columns:
+    field_column_start: usize,
     /// Filter deleted rows.
     filter_deleted: bool,
     /// Buffered batch to check whether the next batch have duplicated rows with this batch.
@@ -241,7 +241,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             // If the buffer is None, dedup the batch, put the batch into the buffer and return.
             // There is no previous batch with the same key, we can pass contains_delete as false.
             let (record_batch, contains_delete) =
-                Self::dedup_one_batch(batch, self.num_pk_columns, false)?;
+                Self::dedup_one_batch(batch, self.field_column_start, false)?;
             metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             self.buffer = BatchLastRow::try_new(record_batch);
             self.contains_delete = contains_delete;
@@ -255,7 +255,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             // Dedup the batch.
             // There is no previous batch with the same key, we can pass contains_delete as false.
             let (record_batch, contains_delete) =
-                Self::dedup_one_batch(batch, self.num_pk_columns, false)?;
+                Self::dedup_one_batch(batch, self.field_column_start, false)?;
             metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             debug_assert!(record_batch.num_rows() > 0);
             self.buffer = BatchLastRow::try_new(record_batch);
@@ -282,7 +282,7 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         let merged_row_count = merged.num_rows();
         // Dedup the merged batch and update the buffer.
         let (record_batch, contains_delete) =
-            Self::dedup_one_batch(merged, self.num_pk_columns, self.contains_delete)?;
+            Self::dedup_one_batch(merged, self.field_column_start, self.contains_delete)?;
         metrics.num_unselected_rows += merged_row_count - record_batch.num_rows();
         debug_assert!(record_batch.num_rows() > 0);
         self.buffer = BatchLastRow::try_new(record_batch);
@@ -302,9 +302,9 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
 
 impl FlatLastNonNull {
     /// Creates a new strategy with the given `filter_deleted` flag.
-    pub fn new(num_pk_columns: usize, filter_deleted: bool) -> Self {
+    pub fn new(field_column_start: usize, filter_deleted: bool) -> Self {
         Self {
-            num_pk_columns,
+            field_column_start,
             filter_deleted,
             buffer: None,
             contains_delete: false,
@@ -315,7 +315,7 @@ impl FlatLastNonNull {
     /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows.
     fn dedup_one_batch(
         batch: RecordBatch,
-        num_pk_columns: usize,
+        field_column_start: usize,
         prev_batch_contains_delete: bool,
     ) -> Result<(RecordBatch, bool)> {
         // Get op type array for checking delete operations
@@ -361,7 +361,7 @@ impl FlatLastNonNull {
         Self::dedup_by_partitions(
             batch,
             &partitions,
-            num_pk_columns,
+            field_column_start,
             op_types,
             prev_batch_contains_delete,
         )
@@ -372,7 +372,7 @@ impl FlatLastNonNull {
     fn dedup_by_partitions(
         batch: RecordBatch,
         partitions: &Partitions,
-        num_pk_columns: usize,
+        field_column_start: usize,
         op_types: &UInt8Array,
         first_range_contains_delete: bool,
     ) -> Result<(RecordBatch, bool)> {
@@ -388,7 +388,7 @@ impl FlatLastNonNull {
 
         let mut is_field = vec![false; batch.num_columns()];
         // Iterates fields, skips internal columns.
-        is_field[num_pk_columns..batch.num_columns() - FIXED_POS_COLUMN_NUM].fill(true);
+        is_field[field_column_start..batch.num_columns() - FIXED_POS_COLUMN_NUM].fill(true);
 
         let take_options = Some(TakeOptions {
             check_bounds: false,
