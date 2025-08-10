@@ -220,6 +220,9 @@ pub struct FlatLastNonNull {
     /// Fields in the last row of this batch may be updated by the next batch.
     /// The buffered batch should contain no duplication.
     buffer: Option<BatchLastRow>,
+    /// Whether the last row range contains a delete operation.
+    /// If so, we don't need to update null fields.
+    contains_delete: bool,
 }
 
 impl RecordBatchDedupStrategy for FlatLastNonNull {
@@ -236,9 +239,12 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
 
         let Some(buffer) = self.buffer.take() else {
             // If the buffer is None, dedup the batch, put the batch into the buffer and return.
-            let record_batch = Self::dedup_one_batch(batch, self.num_pk_columns)?;
+            // There is no previous batch with the same key, we can pass contains_delete as false.
+            let (record_batch, contains_delete) =
+                Self::dedup_one_batch(batch, self.num_pk_columns, false)?;
             metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             self.buffer = BatchLastRow::try_new(record_batch);
+            self.contains_delete = contains_delete;
 
             return Ok(None);
         };
@@ -247,10 +253,13 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
             // The first row of batch has different key from the buffer.
             // We can replace the buffer with the new batch.
             // Dedup the batch.
-            let record_batch = Self::dedup_one_batch(batch, self.num_pk_columns)?;
+            // There is no previous batch with the same key, we can pass contains_delete as false.
+            let (record_batch, contains_delete) =
+                Self::dedup_one_batch(batch, self.num_pk_columns, false)?;
             metrics.num_unselected_rows += row_before_dedup - record_batch.num_rows();
             debug_assert!(record_batch.num_rows() > 0);
             self.buffer = BatchLastRow::try_new(record_batch);
+            self.contains_delete = contains_delete;
 
             return maybe_filter_deleted(buffer.last_batch, self.filter_deleted, metrics);
         }
@@ -272,10 +281,12 @@ impl RecordBatchDedupStrategy for FlatLastNonNull {
         let merged = concat_batches(&schema, &[last_row, batch]).context(ComputeArrowSnafu)?;
         let merged_row_count = merged.num_rows();
         // Dedup the merged batch and update the buffer.
-        let record_batch = Self::dedup_one_batch(merged, self.num_pk_columns)?;
+        let (record_batch, contains_delete) =
+            Self::dedup_one_batch(merged, self.num_pk_columns, self.contains_delete)?;
         metrics.num_unselected_rows += merged_row_count - record_batch.num_rows();
         debug_assert!(record_batch.num_rows() > 0);
         self.buffer = BatchLastRow::try_new(record_batch);
+        self.contains_delete = contains_delete;
 
         Ok(output)
     }
@@ -296,15 +307,33 @@ impl FlatLastNonNull {
             num_pk_columns,
             filter_deleted,
             buffer: None,
+            contains_delete: false,
         }
     }
 
     /// Remove duplications from the batch without considering the previous and next rows.
-    // FIXME(yingwen): Avoid repeating code.
-    fn dedup_one_batch(batch: RecordBatch, num_pk_columns: usize) -> Result<RecordBatch> {
+    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows.
+    fn dedup_one_batch(
+        batch: RecordBatch,
+        num_pk_columns: usize,
+        prev_batch_contains_delete: bool,
+    ) -> Result<(RecordBatch, bool)> {
+        // Get op type array for checking delete operations
+        let op_type_column = batch
+            .column(op_type_column_index(batch.num_columns()))
+            .clone();
+        let op_types = op_type_column
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
         let num_rows = batch.num_rows();
         if num_rows < 2 {
-            return Ok(batch);
+            let contains_delete = if num_rows > 0 {
+                op_types.value(0) == OpType::Delete as u8
+            } else {
+                false
+            };
+            return Ok((batch, contains_delete));
         }
 
         let num_columns = batch.num_columns();
@@ -312,8 +341,9 @@ impl FlatLastNonNull {
         // Checks duplications based on the timestamp.
         let mask = find_boundaries(timestamps).context(ComputeArrowSnafu)?;
         if mask.count_set_bits() == num_rows - 1 {
+            let contains_delete = op_types.value(num_rows - 1) == OpType::Delete as u8;
             // Fast path: No duplication.
-            return Ok(batch);
+            return Ok((batch, contains_delete));
         }
 
         // The batch has duplicated timestamps, but it doesn't mean it must
@@ -328,21 +358,32 @@ impl FlatLastNonNull {
         .collect();
         let partitions = partition(&columns).context(ComputeArrowSnafu)?;
 
-        Self::dedup_by_partitions(batch, &partitions, num_pk_columns)
+        Self::dedup_by_partitions(
+            batch,
+            &partitions,
+            num_pk_columns,
+            op_types,
+            prev_batch_contains_delete,
+        )
     }
 
     /// Remove depulications for each partition.
+    /// Returns a tuple containing the deduplicated batch and a boolean indicating whether the last range contains deleted rows.
     fn dedup_by_partitions(
         batch: RecordBatch,
         partitions: &Partitions,
         num_pk_columns: usize,
-    ) -> Result<RecordBatch> {
+        op_types: &UInt8Array,
+        first_range_contains_delete: bool,
+    ) -> Result<(RecordBatch, bool)> {
         let ranges = partitions.ranges();
+        let contains_delete = Self::last_range_has_delete(&ranges, op_types);
+
         // Each range at least has 1 row.
         let num_duplications: usize = ranges.iter().map(|r| r.end - r.start - 1).sum();
         if num_duplications == 0 {
             // Fast path, no duplication.
-            return Ok(batch);
+            return Ok((batch, contains_delete));
         }
 
         let mut is_field = vec![false; batch.num_columns()];
@@ -362,7 +403,12 @@ impl FlatLastNonNull {
             .enumerate()
             .map(|(col_idx, column)| {
                 if is_field[col_idx] {
-                    let field_indices = Self::compute_field_indices(&ranges, column);
+                    let field_indices = Self::compute_field_indices(
+                        &ranges,
+                        column,
+                        op_types,
+                        first_range_contains_delete,
+                    );
                     take(column, &field_indices, take_options.clone()).context(ComputeArrowSnafu)
                 } else {
                     take(column, &non_field_indices, take_options.clone())
@@ -371,26 +417,56 @@ impl FlatLastNonNull {
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
 
-        RecordBatch::try_new(batch.schema(), new_columns).context(NewRecordBatchSnafu)
+        let record_batch =
+            RecordBatch::try_new(batch.schema(), new_columns).context(NewRecordBatchSnafu)?;
+        Ok((record_batch, contains_delete))
     }
 
     /// Returns an array of indices of the latest non null value for
     /// each input range.
     /// If all values in a range are null, the returned index is unspecific.
-    fn compute_field_indices(ranges: &[Range<usize>], field_array: &ArrayRef) -> UInt64Array {
+    /// Stops when encountering a delete operation and ignores all subsequent rows.
+    fn compute_field_indices(
+        ranges: &[Range<usize>],
+        field_array: &ArrayRef,
+        op_types: &UInt8Array,
+        first_range_contains_delete: bool,
+    ) -> UInt64Array {
         ranges
             .iter()
-            .map(|r| {
-                let value_index = r
-                    .clone()
-                    .filter(|&i| field_array.is_valid(i))
-                    .next()
-                    .map(|i| i as u64)
-                    // if all field values are none, pick one arbitrarily
-                    .unwrap_or(r.start as u64);
+            .enumerate()
+            .map(|(range_idx, r)| {
+                let mut value_index = r.start as u64;
+                if range_idx == 0 && first_range_contains_delete {
+                    return Some(value_index);
+                }
+
+                // Iterate through the range to find the first valid non-null value
+                // but stop if we encounter a delete operation.
+                for i in r.clone() {
+                    if op_types.value(i) == OpType::Delete as u8 {
+                        break;
+                    }
+                    if field_array.is_valid(i) {
+                        value_index = i as u64;
+                        break;
+                    }
+                }
+
                 Some(value_index)
             })
             .collect()
+    }
+
+    /// Checks whether the last range contains a delete operation.
+    fn last_range_has_delete(ranges: &[Range<usize>], op_types: &UInt8Array) -> bool {
+        if let Some(last_range) = ranges.last() {
+            last_range
+                .clone()
+                .any(|i| op_types.value(i) == OpType::Delete as u8)
+        } else {
+            false
+        }
     }
 }
 
@@ -716,11 +792,7 @@ mod tests {
     /// Asserts that two RecordBatch vectors are equal.
     fn check_record_batches_equal(expected: &[RecordBatch], actual: &[RecordBatch]) {
         for (i, (exp, act)) in expected.iter().zip(actual.iter()).enumerate() {
-            assert_eq!(
-                exp, act,
-                "RecordBatch {} differs:\nExpected: {:?}\nActual: {:?}",
-                i, exp, act
-            );
+            assert_eq!(exp, act, "RecordBatch {} differs", i);
         }
         assert_eq!(
             expected.len(),
@@ -1026,9 +1098,7 @@ mod tests {
                 &[2],
                 &[20],
                 &[OpType::Delete],
-                // Current dedup strategy will fill null fields without checking the op type,
-                // but this should be acceptable.
-                &[(Some(102), Some(102))],
+                &[(None, None)],
             ),
             new_record_batch_multi_fields(
                 &[b"k3"],
@@ -1154,5 +1224,277 @@ mod tests {
         check_record_batches_equal(&expected, &result);
         assert_eq!(1, dedup_iter.metrics.num_unselected_rows);
         assert_eq!(0, dedup_iter.metrics.num_deleted_rows);
+    }
+
+    /// Helper function to check dedup strategy behavior directly.
+    fn check_flat_dedup_strategy(
+        input: &[RecordBatch],
+        strategy: &mut dyn RecordBatchDedupStrategy,
+        expect: &[RecordBatch],
+    ) {
+        let mut actual = Vec::new();
+        let mut metrics = DedupMetrics::default();
+        for batch in input {
+            if let Some(out) = strategy.push_batch(batch.clone(), &mut metrics).unwrap() {
+                actual.push(out);
+            }
+        }
+        if let Some(out) = strategy.finish(&mut metrics).unwrap() {
+            actual.push(out);
+        }
+
+        check_record_batches_equal(expect, &actual);
+    }
+
+    #[test]
+    fn test_flat_last_non_null_strategy_delete_last() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[6],
+                &[OpType::Put],
+                &[(Some(11), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[1, 7],
+                &[OpType::Put, OpType::Put],
+                &[(Some(1), None), (Some(22), Some(222))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[4],
+                &[OpType::Put],
+                &[(Some(12), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k2", b"k2"],
+                &[2, 3],
+                &[2, 5],
+                &[OpType::Put, OpType::Delete],
+                &[(None, None), (Some(13), None)],
+            ),
+            new_record_batch_multi_fields(&[b"k2"], &[3], &[3], &[OpType::Put], &[(None, Some(3))]),
+        ];
+
+        let mut strategy = FlatLastNonNull::new(1, true);
+        check_flat_dedup_strategy(
+            &input,
+            &mut strategy,
+            &[
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[1],
+                    &[6],
+                    &[OpType::Put],
+                    &[(Some(11), None)],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[2],
+                    &[7],
+                    &[OpType::Put],
+                    &[(Some(22), Some(222))],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k2"],
+                    &[2],
+                    &[2],
+                    &[OpType::Put],
+                    &[(None, None)],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_flat_last_non_null_strategy_delete_one() {
+        let input = vec![
+            new_record_batch_multi_fields(&[b"k1"], &[1], &[1], &[OpType::Delete], &[(None, None)]),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[1],
+                &[6],
+                &[OpType::Put],
+                &[(Some(11), None)],
+            ),
+        ];
+
+        let mut strategy = FlatLastNonNull::new(1, true);
+        check_flat_dedup_strategy(
+            &input,
+            &mut strategy,
+            &[new_record_batch_multi_fields(
+                &[b"k2"],
+                &[1],
+                &[6],
+                &[OpType::Put],
+                &[(Some(11), None)],
+            )],
+        );
+    }
+
+    #[test]
+    fn test_flat_last_non_null_strategy_delete_all() {
+        let input = vec![
+            new_record_batch_multi_fields(&[b"k1"], &[1], &[1], &[OpType::Delete], &[(None, None)]),
+            new_record_batch_multi_fields(
+                &[b"k2"],
+                &[1],
+                &[6],
+                &[OpType::Delete],
+                &[(Some(11), None)],
+            ),
+        ];
+
+        let mut strategy = FlatLastNonNull::new(1, true);
+        check_flat_dedup_strategy(&input, &mut strategy, &[]);
+    }
+
+    #[test]
+    fn test_flat_last_non_null_strategy_same_batch() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[6],
+                &[OpType::Put],
+                &[(Some(11), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[1, 2],
+                &[1, 7],
+                &[OpType::Put, OpType::Put],
+                &[(Some(1), None), (Some(22), Some(222))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[4],
+                &[OpType::Put],
+                &[(Some(12), None)],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1", b"k1"],
+                &[2, 3],
+                &[2, 5],
+                &[OpType::Put, OpType::Put],
+                &[(None, None), (Some(13), None)],
+            ),
+            new_record_batch_multi_fields(&[b"k1"], &[3], &[3], &[OpType::Put], &[(None, Some(3))]),
+        ];
+
+        let mut strategy = FlatLastNonNull::new(1, true);
+        check_flat_dedup_strategy(
+            &input,
+            &mut strategy,
+            &[
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[1],
+                    &[6],
+                    &[OpType::Put],
+                    &[(Some(11), None)],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[2],
+                    &[7],
+                    &[OpType::Put],
+                    &[(Some(22), Some(222))],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[3],
+                    &[5],
+                    &[OpType::Put],
+                    &[(Some(13), Some(3))],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_flat_last_non_null_strategy_delete_middle() {
+        let input = vec![
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[7],
+                &[OpType::Put],
+                &[(Some(11), None)],
+            ),
+            new_record_batch_multi_fields(&[b"k1"], &[1], &[4], &[OpType::Delete], &[(None, None)]),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[1],
+                &[1],
+                &[OpType::Put],
+                &[(Some(12), Some(1))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[8],
+                &[OpType::Put],
+                &[(Some(21), None)],
+            ),
+            new_record_batch_multi_fields(&[b"k1"], &[2], &[5], &[OpType::Delete], &[(None, None)]),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[2],
+                &[2],
+                &[OpType::Put],
+                &[(Some(22), Some(2))],
+            ),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[3],
+                &[9],
+                &[OpType::Put],
+                &[(Some(31), None)],
+            ),
+            new_record_batch_multi_fields(&[b"k1"], &[3], &[6], &[OpType::Delete], &[(None, None)]),
+            new_record_batch_multi_fields(
+                &[b"k1"],
+                &[3],
+                &[3],
+                &[OpType::Put],
+                &[(Some(32), Some(3))],
+            ),
+        ];
+
+        let mut strategy = FlatLastNonNull::new(1, true);
+        check_flat_dedup_strategy(
+            &input,
+            &mut strategy,
+            &[
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[1],
+                    &[7],
+                    &[OpType::Put],
+                    &[(Some(11), None)],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[2],
+                    &[8],
+                    &[OpType::Put],
+                    &[(Some(21), None)],
+                ),
+                new_record_batch_multi_fields(
+                    &[b"k1"],
+                    &[3],
+                    &[9],
+                    &[OpType::Put],
+                    &[(Some(31), None)],
+                ),
+            ],
+        );
     }
 }
