@@ -261,7 +261,7 @@ pub struct EventRecorderOptions {
 impl Default for EventRecorderOptions {
     fn default() -> Self {
         Self {
-            ttl: Duration::from_secs(30 * 24 * 60 * 60), // 30 days.
+            ttl: DEFAULT_EVENTS_TABLE_TTL,
         }
     }
 }

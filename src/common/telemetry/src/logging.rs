@@ -108,7 +108,7 @@ pub struct SlowQueryOptions {
     /// The sample ratio of slow queries.
     pub sample_ratio: f64,
 
-    /// The table TTL of `slow_queries` system table. Default is "30d".
+    /// The table TTL of `slow_queries` system table. Default is "90d".
     /// It's used when `record_type` is `SystemTable`.
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,

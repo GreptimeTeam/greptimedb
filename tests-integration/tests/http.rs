@@ -1339,7 +1339,7 @@ enable = true
 record_type = "system_table"
 threshold = "1s"
 sample_ratio = 1.0
-ttl = "90days"
+ttl = "2months 29days 2h 52m 48s"
 
 [query]
 parallelism = 0
