@@ -66,36 +66,35 @@ pub(crate) fn build_template_from_raw_table_info(
 }
 
 pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
-    let mut column_defs = Vec::with_capacity(create_table_expr.column_defs.len());
-    let mut column_id_counter = 0u32;
+    let column_defs = create_table_expr
+        .column_defs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let semantic_type = if create_table_expr.time_index == c.name {
+                SemanticType::Timestamp
+            } else if create_table_expr.primary_keys.contains(&c.name) {
+                SemanticType::Tag
+            } else {
+                SemanticType::Field
+            };
 
-    // Add table columns
-    for c in &create_table_expr.column_defs {
-        let semantic_type = if create_table_expr.time_index == c.name {
-            SemanticType::Timestamp
-        } else if create_table_expr.primary_keys.contains(&c.name) {
-            SemanticType::Tag
-        } else {
-            SemanticType::Field
-        };
+            RegionColumnDef {
+                column_def: Some(ColumnDef {
+                    name: c.name.clone(),
+                    data_type: c.data_type,
+                    is_nullable: c.is_nullable,
+                    default_constraint: c.default_constraint.clone(),
+                    semantic_type: semantic_type as i32,
+                    comment: String::new(),
+                    datatype_extension: c.datatype_extension,
+                    options: c.options.clone(),
+                }),
+                column_id: i as u32,
+            }
+        })
+        .collect::<Vec<_>>();
 
-        column_defs.push(RegionColumnDef {
-            column_def: Some(ColumnDef {
-                name: c.name.clone(),
-                data_type: c.data_type,
-                is_nullable: c.is_nullable,
-                default_constraint: c.default_constraint.clone(),
-                semantic_type: semantic_type as i32,
-                comment: String::new(),
-                datatype_extension: c.datatype_extension,
-                options: c.options.clone(),
-            }),
-            column_id: column_id_counter,
-        });
-        column_id_counter += 1;
-    }
-
-    // Build primary key indices
     let primary_key = create_table_expr
         .primary_keys
         .iter()
