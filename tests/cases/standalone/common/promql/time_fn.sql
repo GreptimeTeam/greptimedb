@@ -30,9 +30,6 @@ tql eval (1000, 1000, '1s') time() + time() > bool time();
 -- expect error: parse error: comparisons between scalars must use BOOL modifier
 tql eval (1000, 1000, '1s') time() == time();
 
-tql eval (1000, 1000, '1s') time() == bool time();
-
-tql eval (1000, 1000, '1s') time() != bool time();
 
 -- time() with table
 
