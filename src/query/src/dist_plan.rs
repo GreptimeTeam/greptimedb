@@ -23,5 +23,5 @@ mod region_pruner;
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
-pub use predicate_extractor::{PredicateExtractor, RangeConstraint};
-pub use region_pruner::RangePartitionPruner;
+pub use predicate_extractor::PredicateExtractor;
+pub use region_pruner::ConstraintPruner;

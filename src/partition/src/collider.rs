@@ -46,12 +46,12 @@ pub(crate) const CHECK_STEP: OrderedF64 = OrderedFloat(0.5f64);
 /// Represents an "atomic" Expression, which isn't composed (OR-ed) of other expressions.
 #[allow(unused)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AtomicExpr {
+pub struct AtomicExpr {
     /// A (ordered) list of simplified expressions. They are [`RestrictedOp::And`]'ed together.
-    pub(crate) nucleons: Vec<NucleonExpr>,
+    pub nucleons: Vec<NucleonExpr>,
     /// Index to reference the [`PartitionExpr`] that this [`AtomicExpr`] is derived from.
     /// This index is used with `exprs` field in [`MultiDimPartitionRule`](crate::multi_dim::MultiDimPartitionRule).
-    pub(crate) source_expr_index: usize,
+    pub source_expr_index: usize,
 }
 
 impl AtomicExpr {
@@ -78,7 +78,7 @@ impl PartialOrd for AtomicExpr {
 ///
 /// This struct is used to compose [`AtomicExpr`], hence "nucleon".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct NucleonExpr {
+pub struct NucleonExpr {
     column: String,
     op: GluonOp,
     /// Normalized [`Value`].
@@ -93,6 +93,21 @@ impl NucleonExpr {
             lit(*self.value.as_ref()),
         ))
     }
+
+    /// Get the column name
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    /// Get the normalized value
+    pub fn value(&self) -> OrderedF64 {
+        self.value
+    }
+
+    /// Get the operation
+    pub fn op(&self) -> &GluonOp {
+        &self.op
+    }
 }
 
 /// Further restricted operation set.
@@ -100,7 +115,7 @@ impl NucleonExpr {
 /// Conjunction operations are removed from [`RestrictedOp`].
 /// This enumeration is used to bind elements in [`NucleonExpr`], hence "gluon".
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum GluonOp {
+pub enum GluonOp {
     Eq,
     NotEq,
     Lt,
@@ -129,11 +144,11 @@ impl GluonOp {
 pub struct Collider<'a> {
     source_exprs: &'a [PartitionExpr],
 
-    pub(crate) atomic_exprs: Vec<AtomicExpr>,
+    pub atomic_exprs: Vec<AtomicExpr>,
     /// A map of column name to a list of `(value, normalized value)` pairs.
     ///
     /// The normalized value is used for comparison. The normalization process keeps the order of the values.
-    pub(crate) normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
+    pub normalized_values: HashMap<String, Vec<(Value, OrderedF64)>>,
 }
 
 impl<'a> Collider<'a> {

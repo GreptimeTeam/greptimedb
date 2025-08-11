@@ -37,7 +37,7 @@ use table::table_name::TableName;
 
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
-use crate::dist_plan::region_pruner::RangePartitionPruner;
+use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::dist_plan::PredicateExtractor;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
@@ -223,19 +223,21 @@ impl DistExtensionPlanner {
         }
 
         // Extract predicates from logical plan
-        let range_constraints =
-            match PredicateExtractor::extract_range_constraints(logical_plan, &partition_columns) {
-                Ok(constraints) => constraints,
-                Err(err) => {
-                    common_telemetry::debug!(
-                        "Failed to extract range constraints, using all regions: {}",
-                        err
-                    );
-                    return Ok(all_regions);
-                }
-            };
+        let partition_expressions = match PredicateExtractor::extract_partition_expressions(
+            logical_plan,
+            &partition_columns,
+        ) {
+            Ok(expressions) => expressions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to extract partition expressions, using all regions: {}",
+                    err
+                );
+                return Ok(all_regions);
+            }
+        };
 
-        if range_constraints.is_empty() {
+        if partition_expressions.is_empty() {
             return Ok(all_regions);
         }
 
@@ -261,7 +263,7 @@ impl DistExtensionPlanner {
 
         // Apply region pruning based on partition rules
         let pruned_regions =
-            match RangePartitionPruner::prune_regions(&range_constraints, &partitions) {
+            match ConstraintPruner::prune_regions(&partition_expressions, &partitions) {
                 Ok(regions) => regions,
                 Err(err) => {
                     common_telemetry::debug!(
@@ -274,9 +276,9 @@ impl DistExtensionPlanner {
             };
 
         common_telemetry::debug!(
-            "Region pruning for table {}: {} range constraints applied, pruned from {} to {} regions",
+            "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
             table_name,
-            range_constraints.len(),
+            partition_expressions.len(),
             all_regions.len(),
             pruned_regions.len()
         );
