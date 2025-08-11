@@ -339,7 +339,8 @@ impl LogQueryPlanner {
             LogExpr::PositionalIdent(index) => Ok(col(schema.field(*index).name())),
             LogExpr::Literal(literal) => Ok(lit(ScalarValue::Utf8(Some(literal.clone())))),
             LogExpr::BinaryOp { left, op, right } => {
-                self.build_binary_expr_with_type_inference(left, op, right, schema)
+                // For binary operations, always use type inference (matches original behavior)
+                self.build_binary_expr(left, op, right, schema)
             }
             LogExpr::ScalarFunc { name, args, alias } => {
                 self.build_scalar_func(schema, name, args, alias)
@@ -402,70 +403,16 @@ impl LogQueryPlanner {
         }
     }
 
-    /// Get the DataType of a DataFusion expression using schema information.
-    fn get_expr_data_type(&self, expr: &Expr, schema: &DFSchema) -> Option<DataType> {
-        expr.get_type(schema).ok()
-    }
-
     /// Parse a string literal to the appropriate ScalarValue based on target DataType.
     /// Falls back to UTF8 if parsing fails or type is not supported.
     fn infer_literal_scalar_value(&self, literal: &str, target_type: &DataType) -> ScalarValue {
-        match target_type {
-            DataType::Boolean => {
-                match literal.to_lowercase().as_str() {
-                    "true" | "1" => ScalarValue::Boolean(Some(true)),
-                    "false" | "0" => ScalarValue::Boolean(Some(false)),
-                    _ => ScalarValue::Utf8(Some(literal.to_string())), // Fallback
-                }
-            }
-            DataType::Int8 => literal
-                .parse::<i8>()
-                .map(|v| ScalarValue::Int8(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::Int16 => literal
-                .parse::<i16>()
-                .map(|v| ScalarValue::Int16(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::Int32 => literal
-                .parse::<i32>()
-                .map(|v| ScalarValue::Int32(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::Int64 => literal
-                .parse::<i64>()
-                .map(|v| ScalarValue::Int64(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::UInt8 => literal
-                .parse::<u8>()
-                .map(|v| ScalarValue::UInt8(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::UInt16 => literal
-                .parse::<u16>()
-                .map(|v| ScalarValue::UInt16(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::UInt32 => literal
-                .parse::<u32>()
-                .map(|v| ScalarValue::UInt32(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::UInt64 => literal
-                .parse::<u64>()
-                .map(|v| ScalarValue::UInt64(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::Float32 => literal
-                .parse::<f32>()
-                .map(|v| ScalarValue::Float32(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            DataType::Float64 => literal
-                .parse::<f64>()
-                .map(|v| ScalarValue::Float64(Some(v)))
-                .unwrap_or_else(|_| ScalarValue::Utf8(Some(literal.to_string()))),
-            // For string types and unsupported types, use UTF8
-            _ => ScalarValue::Utf8(Some(literal.to_string())),
-        }
+        let utf8_literal = ScalarValue::Utf8(Some(literal.to_string()));
+        utf8_literal.cast_to(target_type).unwrap_or(utf8_literal)
     }
 
     /// Build binary expression with type inference for literals.
     /// Attempts to infer literal types from the non-literal operand's type.
-    fn build_binary_expr_with_type_inference(
+    fn build_binary_expr(
         &self,
         left: &LogExpr,
         op: &BinaryOperator,
@@ -473,21 +420,21 @@ impl LogQueryPlanner {
         schema: &DFSchema,
     ) -> Result<Expr> {
         // Convert both sides to DataFusion expressions first
-        let mut left_expr = self.log_expr_to_df_expr_without_inference(left, schema)?;
-        let mut right_expr = self.log_expr_to_df_expr_without_inference(right, schema)?;
+        let mut left_expr = self.log_expr_to_df_expr(left, schema)?;
+        let mut right_expr = self.log_expr_to_df_expr(right, schema)?;
 
         // Try to infer literal types based on the other operand
         match (left, right) {
             (LogExpr::Literal(literal), _) => {
                 // Left is literal, try to infer from right
-                if let Some(right_type) = self.get_expr_data_type(&right_expr, schema) {
+                if let Ok(right_type) = right_expr.get_type(schema) {
                     let inferred_scalar = self.infer_literal_scalar_value(literal, &right_type);
                     left_expr = lit(inferred_scalar);
                 }
             }
             (_, LogExpr::Literal(literal)) => {
                 // Right is literal, try to infer from left
-                if let Some(left_type) = self.get_expr_data_type(&left_expr, schema) {
+                if let Ok(left_type) = left_expr.get_type(schema) {
                     let inferred_scalar = self.infer_literal_scalar_value(literal, &left_type);
                     right_expr = lit(inferred_scalar);
                 }
@@ -505,41 +452,10 @@ impl LogQueryPlanner {
         }))
     }
 
-    /// Converts a LogExpr to DataFusion Expr without type inference (used internally).
-    fn log_expr_to_df_expr_without_inference(
-        &self,
-        expr: &LogExpr,
-        schema: &DFSchema,
-    ) -> Result<Expr> {
-        match expr {
-            LogExpr::NamedIdent(name) => Ok(col(name)),
-            LogExpr::PositionalIdent(index) => Ok(col(schema.field(*index).name())),
-            LogExpr::Literal(literal) => Ok(lit(ScalarValue::Utf8(Some(literal.clone())))),
-            LogExpr::BinaryOp { left, op, right } => {
-                // For nested binary operations, still use type inference
-                self.build_binary_expr_with_type_inference(left, op, right, schema)
-            }
-            LogExpr::ScalarFunc { name, args, alias } => {
-                self.build_scalar_func(schema, name, args, alias)
-            }
-            LogExpr::Alias { expr, alias } => {
-                let df_expr = self.log_expr_to_df_expr_without_inference(expr, schema)?;
-                Ok(df_expr.alias(alias))
-            }
-            LogExpr::AggrFunc { .. } | LogExpr::Filter { .. } | LogExpr::Decompose { .. } => {
-                UnexpectedLogExprSnafu {
-                    expr: expr.clone(),
-                    expected: "not a typical expression",
-                }
-                .fail()
-            }
-        }
-    }
-
     /// Create a type-inferred literal based on the provided expression's type.
     /// Falls back to UTF8 if type inference fails.
     fn create_inferred_literal(&self, value: &str, expr: &Expr, schema: &DFSchema) -> Expr {
-        if let Some(expr_type) = self.get_expr_data_type(expr, schema) {
+        if let Ok(expr_type) = expr.get_type(schema) {
             lit(self.infer_literal_scalar_value(value, &expr_type))
         } else {
             lit(ScalarValue::Utf8(Some(value.to_string())))
