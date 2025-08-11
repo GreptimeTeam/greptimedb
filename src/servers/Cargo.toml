@@ -90,7 +90,7 @@ opentelemetry-proto.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 #pgwire = { version = "0.32", default-features = false, features = ["server-api-ring"] }
-pgwire = { git = "https://github.com/sunng87/pgwire", rev = "f71d76cb897d3e74ddb98cbf3675bdfd37efbdd8", default-features = false, features = [
+pgwire = { git = "https://github.com/sunng87/pgwire", rev = "028c481ae98dace05341392eaf9c67b0b3321777", default-features = false, features = [
     "server-api-ring",
 ] }
 pin-project = "1.0"
