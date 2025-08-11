@@ -170,7 +170,7 @@ impl CreateTableProcedure {
         physical_table_id: Option<TableId>,
     ) -> Result<CreateRequestBuilder> {
         let create_table_expr = &self.creator.data.task.create_table;
-        let template = build_template(create_table_expr)?;
+        let template = build_template(create_table_expr, None)?;
         Ok(CreateRequestBuilder::new(template, physical_table_id))
     }
 
