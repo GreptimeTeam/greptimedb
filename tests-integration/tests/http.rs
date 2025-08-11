@@ -1316,7 +1316,7 @@ experimental_frontend_activity_timeout = "1m"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
 read_preference = "Leader"
-experimental_truncate_duration = "10m"
+experimental_truncate_duration = "1h"
 
 [logging]
 max_log_files = 720
