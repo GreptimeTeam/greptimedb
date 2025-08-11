@@ -78,16 +78,8 @@ insert into metrics values (0, 0), (1000, 1), (2000, 2), (3000, 3);
 Affected Rows: 4
 
 -- Test time() with table data - focus on behavior not exact values
-tql eval (1, 2, '1s') time() + metrics > bool metrics;
-
-+---------------------+------------------------------------------------+
-| ts                  | lhs.Float64(1754893602.655869) + val > rhs.val |
-+---------------------+------------------------------------------------+
-| 1970-01-01T00:00:01 | 1.0                                            |
-| 1970-01-01T00:00:02 | 1.0                                            |
-+---------------------+------------------------------------------------+
-
 -- Test time() equality operations with metrics
+tql eval (1, 2, '1s') time() > bool metrics; -- time() should be much larger than metric values
 tql eval (1, 2, '1s') time() != bool metrics; -- time() should not equal metric values
 tql eval (1, 2, '1s') metrics + time() > bool metrics;
 

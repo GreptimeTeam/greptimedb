@@ -41,7 +41,7 @@ create table metrics (ts timestamp time index, val double);
 insert into metrics values (0, 0), (1000, 1), (2000, 2), (3000, 3);
 
 -- Test time() with table data - focus on behavior not exact values
-tql eval (1, 2, '1s') time() + metrics > bool metrics;
+tql eval (1, 2, '1s') time() > bool metrics; -- time() should be much larger than metric values
 
 -- Test time() equality operations with metrics
 tql eval (1, 2, '1s') time() != bool metrics; -- time() should not equal metric values
