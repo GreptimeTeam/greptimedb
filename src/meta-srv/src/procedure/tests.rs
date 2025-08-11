@@ -158,10 +158,7 @@ fn test_region_request_builder() {
         primary_key: vec![2, 1],
         path: String::new(),
         options: HashMap::new(),
-        partition: Some(Partition {
-            expression: "".to_string(),
-            ..Default::default()
-        }),
+        partition: None,
     };
     assert_eq!(template.template(), &expected);
 }
