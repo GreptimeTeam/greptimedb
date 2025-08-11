@@ -47,11 +47,8 @@ impl CreateLogicalTablesProcedure {
             let logical_table_id = task.table_info.ident.table_id;
             let physical_table_id = self.data.physical_table_id;
             let storage_path = region_storage_path(catalog, schema);
-            let request_builder = create_region_request_builder(
-                &task.create_table,
-                physical_table_id,
-                Some(&self.data.physical_partition_columns),
-            )?;
+            let request_builder =
+                create_region_request_builder(&task.create_table, physical_table_id)?;
 
             for region_number in &regions_on_this_peer {
                 let region_id = RegionId::new(logical_table_id, *region_number);
@@ -76,12 +73,11 @@ impl CreateLogicalTablesProcedure {
     }
 }
 
-/// Creates a region request builder.
+/// Creates a region request builder
 pub fn create_region_request_builder(
     create_table_expr: &CreateTableExpr,
     physical_table_id: TableId,
-    physical_partition_columns: Option<&[String]>,
 ) -> Result<CreateRequestBuilder> {
-    let template = build_template(create_table_expr, physical_partition_columns)?;
+    let template = build_template(create_table_expr)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }

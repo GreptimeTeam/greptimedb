@@ -69,7 +69,7 @@ pub fn make_create_region_request_for_peer(
     let regions_on_this_peer = find_leader_regions(region_routes, peer);
     let mut requests = Vec::with_capacity(regions_on_this_peer.len());
     let request_builder =
-        create_region_request_builder(create_table_expr, physical_table_id, None).unwrap();
+        create_region_request_builder(create_table_expr, physical_table_id).unwrap();
 
     let catalog = &create_table_expr.catalog_name;
     let schema = &create_table_expr.schema_name;

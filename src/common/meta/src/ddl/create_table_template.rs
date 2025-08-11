@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use api::v1::column_def::try_as_column_def;
 use api::v1::region::{CreateRequest, RegionColumnDef};
-use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
+use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::storage::{RegionId, RegionNumber};
@@ -65,20 +65,11 @@ pub(crate) fn build_template_from_raw_table_info(
     Ok(template)
 }
 
-pub(crate) fn build_template(
-    create_table_expr: &CreateTableExpr,
-    physical_partition_columns: Option<&[String]>,
-) -> Result<CreateRequest> {
-    let logical_column_names: HashSet<_> = create_table_expr
-        .column_defs
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
-
-    let mut all_column_defs = Vec::new();
+pub(crate) fn build_template(create_table_expr: &CreateTableExpr) -> Result<CreateRequest> {
+    let mut column_defs = Vec::with_capacity(create_table_expr.column_defs.len());
     let mut column_id_counter = 0u32;
 
-    // Add existing logical table columns
+    // Add table columns
     for c in &create_table_expr.column_defs {
         let semantic_type = if create_table_expr.time_index == c.name {
             SemanticType::Timestamp
@@ -88,7 +79,7 @@ pub(crate) fn build_template(
             SemanticType::Field
         };
 
-        all_column_defs.push(RegionColumnDef {
+        column_defs.push(RegionColumnDef {
             column_def: Some(ColumnDef {
                 name: c.name.clone(),
                 data_type: c.data_type,
@@ -104,34 +95,12 @@ pub(crate) fn build_template(
         column_id_counter += 1;
     }
 
-    // Add missing partition columns if provided
-    if let Some(partition_columns) = physical_partition_columns {
-        for partition_column in partition_columns {
-            if !logical_column_names.contains(partition_column) {
-                all_column_defs.push(RegionColumnDef {
-                    column_def: Some(ColumnDef {
-                        name: partition_column.clone(),
-                        data_type: ColumnDataType::String as i32,
-                        is_nullable: true,
-                        default_constraint: vec![],
-                        semantic_type: SemanticType::Tag as i32,
-                        comment: String::new(),
-                        datatype_extension: None,
-                        options: None,
-                    }),
-                    column_id: column_id_counter,
-                });
-                column_id_counter += 1;
-            }
-        }
-    }
-
-    // Build primary key indices including original primary keys
+    // Build primary key indices
     let primary_key = create_table_expr
         .primary_keys
         .iter()
         .map(|key| {
-            all_column_defs
+            column_defs
                 .iter()
                 .find_map(|c| {
                     c.column_def.as_ref().and_then(|x| {
@@ -149,7 +118,7 @@ pub(crate) fn build_template(
     let template = CreateRequest {
         region_id: 0,
         engine: create_table_expr.engine.to_string(),
-        column_defs: all_column_defs,
+        column_defs,
         primary_key,
         path: String::new(),
         options: create_table_expr.table_options.clone(),
