@@ -80,7 +80,7 @@ pub struct TaskConfig {
     pub catalog_manager: CatalogManagerRef,
     pub query_type: QueryType,
     pub batch_opts: Arc<BatchingModeOptions>,
-    pub flow_eval_interval: Option<common_time::Duration>,
+    pub flow_eval_interval_ms: Option<u128>,
 }
 
 fn determine_query_type(query: &str, query_ctx: &QueryContextRef) -> Result<QueryType, Error> {
@@ -129,7 +129,7 @@ pub struct TaskArgs<'a> {
     pub catalog_manager: CatalogManagerRef,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub batch_opts: Arc<BatchingModeOptions>,
-    pub flow_eval_interval: Option<common_time::Duration>,
+    pub flow_eval_interval_ms: Option<u128>,
 }
 
 pub struct PlanInfo {
@@ -152,7 +152,7 @@ impl BatchingTask {
             catalog_manager,
             shutdown_rx,
             batch_opts,
-            flow_eval_interval,
+            flow_eval_interval_ms: flow_eval_interval,
         }: TaskArgs<'_>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -167,7 +167,7 @@ impl BatchingTask {
                 output_schema: plan.schema().clone(),
                 query_type: determine_query_type(query, &query_ctx)?,
                 batch_opts,
-                flow_eval_interval,
+                flow_eval_interval_ms: flow_eval_interval,
             }),
             state: Arc::new(RwLock::new(TaskState::new(query_ctx, shutdown_rx))),
         })

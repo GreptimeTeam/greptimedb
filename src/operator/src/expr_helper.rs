@@ -802,10 +802,8 @@ pub fn to_create_flow_task_expr(
         .map(common_time::Duration::new_second);
     let mut flow_options = HashMap::new();
     if let Some(interval) = eval_interval {
-        flow_options.insert(
-            FLOW_EVAL_INTERVAL_KEY.to_string(),
-            serde_json::to_string(&interval).context(EncodeJsonSnafu)?,
-        );
+        let interval_ms = interval.to_std_duration().as_millis();
+        flow_options.insert(FLOW_EVAL_INTERVAL_KEY.to_string(), interval_ms.to_string());
     }
 
     Ok(CreateFlowExpr {

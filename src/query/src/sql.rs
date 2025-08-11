@@ -1023,8 +1023,8 @@ pub fn show_create_flow(
         eval_interval: flow_val
             .options
             .get(FLOW_EVAL_INTERVAL_KEY)
-            .and_then(|v| serde_json::from_str::<common_time::Duration>(v).ok())
-            .map(|d| d.to_std_duration().as_secs() as _),
+            .and_then(|v| v.parse::<u128>().ok())
+            .map(|d| d as _),
         comment,
         query,
     };

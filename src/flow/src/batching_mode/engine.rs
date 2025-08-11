@@ -371,9 +371,9 @@ impl BatchingEngine {
 
         // optionally set a eval interval for the flow
 
-        let flow_eval_interval: Option<common_time::Duration> = flow_options
+        let flow_eval_interval_ms: Option<u128> = flow_options
             .get(FLOW_EVAL_INTERVAL_KEY)
-            .map(|v| serde_json::from_str(v))
+            .map(|v| v.parse::<u128>())
             .transpose()
             .map_err(|e| {
                 UnexpectedSnafu {
@@ -382,7 +382,7 @@ impl BatchingEngine {
                 .build()
             })?;
 
-        if flow_eval_interval.is_none() && is_tql(query_ctx.clone(), &sql)? {
+        if flow_eval_interval_ms.is_none() && is_tql(query_ctx.clone(), &sql)? {
             InvalidQuerySnafu {
                 reason: "TQL query requires EVAL INTERVAL to be set".to_string(),
             }
@@ -463,7 +463,7 @@ impl BatchingEngine {
             catalog_manager: self.catalog_manager.clone(),
             shutdown_rx: rx,
             batch_opts: self.batch_opts.clone(),
-            flow_eval_interval,
+            flow_eval_interval_ms,
         };
 
         let task = BatchingTask::try_new(task_args)?;
