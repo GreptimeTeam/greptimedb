@@ -592,7 +592,7 @@
 | `flow.batching_mode.experimental_max_filter_num_per_query` | Integer | `20` | Maximum number of filters allowed in a single query |
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
-| `flow.batching_mode.experimental_truncate_duration` | String | `10min` | Experimental: A duration to truncate the time window of repetitive data to improve performance |
+| `flow.batching_mode.experimental_truncate_duration` | String | `1h` | Experimental: A duration to truncate the time window of repetitive data to improve performance |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:6800` | The address advertised to the metasrv,<br/>and used for connections from outside the host |

@@ -75,7 +75,7 @@ impl Default for BatchingModeOptions {
             experimental_max_filter_num_per_query: 20,
             experimental_time_window_merge_threshold: 3,
             read_preference: Default::default(),
-            experimental_truncate_duration: Duration::from_secs(600),
+            experimental_truncate_duration: Duration::from_secs(3600),
         }
     }
 }

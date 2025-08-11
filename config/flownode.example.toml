@@ -33,7 +33,7 @@ node_id = 14
 ## Read preference of the Frontend client.
 #+read_preference="Leader"
 ## Experimental: A duration to truncate the time window of repetitive data to improve performance
-#+experimental_truncate_duration="10min"
+#+experimental_truncate_duration="1h"
 
 ## The gRPC server options.
 [grpc]
