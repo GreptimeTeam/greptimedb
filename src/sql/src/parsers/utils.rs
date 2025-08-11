@@ -20,10 +20,11 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::simplify::SimplifyContext;
-use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datafusion_sql::TableReference;
 use datatypes::arrow::datatypes::DataType;
@@ -42,12 +43,56 @@ use crate::error::{
 /// Convert a parser expression to a scalar value. This function will try the
 /// best to resolve and reduce constants. Exprs like `1 + 1` or `now()` can be
 /// handled properly.
-pub fn parser_expr_to_scalar_value_literal(expr: sqlparser::ast::Expr) -> Result<ScalarValue> {
+///
+/// if `require_now_expr` is true, it will ensure that the expression contains a `now()` function.
+/// If the expression does not contain `now()`, it will return an error.
+///
+pub fn parser_expr_to_scalar_value_literal(
+    expr: sqlparser::ast::Expr,
+    require_now_expr: bool,
+) -> Result<ScalarValue> {
     // 1. convert parser expr to logical expr
     let empty_df_schema = DFSchema::empty();
     let logical_expr = SqlToRel::new(&StubContextProvider::default())
         .sql_to_expr(expr.into(), &empty_df_schema, &mut Default::default())
         .context(ConvertToLogicalExpressionSnafu)?;
+
+    struct FindNow {
+        found: bool,
+    }
+
+    impl TreeNodeVisitor<'_> for FindNow {
+        type Node = Expr;
+        fn f_down(
+            &mut self,
+            node: &Self::Node,
+        ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
+            if let Expr::ScalarFunction(func) = node {
+                if func.name().to_lowercase() == "now" {
+                    self.found = true;
+                    return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
+                }
+            }
+            Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+        }
+    }
+
+    if require_now_expr {
+        let have_now = {
+            let mut visitor = FindNow { found: false };
+            logical_expr.visit(&mut visitor).unwrap();
+            visitor.found
+        };
+        if !have_now {
+            return ParseSqlValueSnafu {
+                msg: format!(
+                    "expected now() expression, but not found in {:?}",
+                    logical_expr
+                ),
+            }
+            .fail();
+        }
+    }
 
     // 2. simplify logical expr
     let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());

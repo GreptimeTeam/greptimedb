@@ -170,7 +170,7 @@ impl ParserContext<'_> {
                 Keyword::NoKeyword
                     if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
                 {
-                    self.parse_tql()
+                    self.parse_tql(false)
                 }
 
                 Keyword::DECLARE => self.parse_declare_cursor(),
