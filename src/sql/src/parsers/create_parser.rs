@@ -38,6 +38,7 @@ use crate::error::{
     SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{ParserContext, FLOW};
+use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
@@ -341,11 +342,25 @@ impl<'a> ParserContext<'a> {
         }))
     }
 
-    fn parse_sql_or_tql(&mut self, only_allow_now_expr: bool) -> Result<SqlOrTql> {
+    fn parse_sql_or_tql(&mut self, require_now_expr: bool) -> Result<SqlOrTql> {
         let start_loc = self.parser.peek_token().span.start;
         let start_index = location_to_index(self.sql, &start_loc);
 
-        let query = self.parse_statement()?;
+        // only accept sql or tql
+        let query = match self.parser.peek_token().token {
+            Token::Word(w) => match w.keyword {
+                Keyword::SELECT => self.parse_query(),
+                Keyword::NoKeyword
+                    if w.quote_style.is_none() && w.value.to_uppercase() == tql_parser::TQL =>
+                {
+                    self.parse_tql(require_now_expr)
+                }
+
+                _ => self.unsupported(self.peek_token_as_string()),
+            },
+            _ => self.unsupported(self.peek_token_as_string()),
+        }?;
+
         let end_token = self.parser.peek_token();
 
         let raw_query = if end_token == Token::EOF {
@@ -363,7 +378,7 @@ impl<'a> ParserContext<'a> {
     /// Parse the interval expr to duration in seconds.
     fn parse_interval(&mut self) -> Result<i64> {
         let interval_expr = self.parser.parse_expr().context(error::SyntaxSnafu)?;
-        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone())?
+        let interval = utils::parser_expr_to_scalar_value_literal(interval_expr.clone(), false)?
             .cast_to(&ArrowDataType::Interval(IntervalUnit::MonthDayNano))
             .ok()
             .with_context(|| InvalidIntervalSnafu {
