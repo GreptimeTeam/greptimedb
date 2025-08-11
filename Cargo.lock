@@ -2350,6 +2350,7 @@ dependencies = [
  "common-time",
  "humantime",
  "humantime-serde",
+ "itertools 0.14.0",
  "serde",
  "serde_json",
  "snafu 0.8.5",

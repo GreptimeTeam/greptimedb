@@ -29,6 +29,7 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::{TimeUnit, Timestamp};
 use humantime::format_duration;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -114,25 +115,17 @@ pub trait Eventable: Send + Sync + Debug {
 /// Groups events by its `event_type`.
 #[allow(clippy::borrowed_box)]
 pub fn group_events_by_type(events: &[Box<dyn Event>]) -> HashMap<&str, Vec<&Box<dyn Event>>> {
-    let mut event_groups: HashMap<&str, Vec<&Box<dyn Event>>> = HashMap::new();
-    for event in events {
-        event_groups
-            .entry(event.event_type())
-            .or_default()
-            .push(event);
-    }
-    event_groups
+    events
+        .iter()
+        .into_grouping_map_by(|event| event.event_type())
+        .collect()
 }
 
-/// Builds the row inserts request for the events that will be persisted to the events table.
+/// Builds the row inserts request for the events that will be persisted to the events table. The `events` should have the same event type, or it will return an error.
 #[allow(clippy::borrowed_box)]
 pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsertRequests> {
     // Ensure all the events are the same type.
     validate_events(events)?;
-
-    let mut row_insert_requests = RowInsertRequests {
-        inserts: Vec::with_capacity(events.len()),
-    };
 
     // We already validated the events, so it's safe to get the first event to build the schema for the RowInsertRequest.
     let event = &events[0];
@@ -175,12 +168,12 @@ pub fn build_row_inserts_request(events: &[&Box<dyn Event>]) -> Result<RowInsert
         rows.push(Row { values });
     }
 
-    row_insert_requests.inserts.push(RowInsertRequest {
-        table_name: event.table_name().to_string(),
-        rows: Some(Rows { schema, rows }),
-    });
-
-    Ok(row_insert_requests)
+    Ok(RowInsertRequests {
+        inserts: vec![RowInsertRequest {
+            table_name: event.table_name().to_string(),
+            rows: Some(Rows { schema, rows }),
+        }],
+    })
 }
 
 // Ensure the events with the same event type have the same extra schema.
@@ -544,6 +537,137 @@ mod tests {
 
         if let Some(handle) = event_recorder.handle.take() {
             assert!(handle.await.unwrap_err().is_panic());
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestEventA {}
+
+    impl Event for TestEventA {
+        fn event_type(&self) -> &str {
+            "A"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestEventB {}
+
+    impl Event for TestEventB {
+        fn table_name(&self) -> &str {
+            "table_B"
+        }
+
+        fn event_type(&self) -> &str {
+            "B"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestEventC {}
+
+    impl Event for TestEventC {
+        fn table_name(&self) -> &str {
+            "table_C"
+        }
+
+        fn event_type(&self) -> &str {
+            "C"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_group_events_by_type() {
+        let events: Vec<Box<dyn Event>> = vec![
+            Box::new(TestEventA {}),
+            Box::new(TestEventB {}),
+            Box::new(TestEventA {}),
+            Box::new(TestEventC {}),
+            Box::new(TestEventB {}),
+            Box::new(TestEventC {}),
+            Box::new(TestEventA {}),
+        ];
+
+        let event_groups = group_events_by_type(&events);
+        assert_eq!(event_groups.len(), 3);
+        assert_eq!(event_groups.get("A").unwrap().len(), 3);
+        assert_eq!(event_groups.get("B").unwrap().len(), 2);
+        assert_eq!(event_groups.get("C").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_build_row_inserts_request() {
+        let events: Vec<Box<dyn Event>> = vec![
+            Box::new(TestEventA {}),
+            Box::new(TestEventB {}),
+            Box::new(TestEventA {}),
+            Box::new(TestEventC {}),
+            Box::new(TestEventB {}),
+            Box::new(TestEventC {}),
+            Box::new(TestEventA {}),
+        ];
+
+        let event_groups = group_events_by_type(&events);
+        assert_eq!(event_groups.len(), 3);
+        assert_eq!(event_groups.get("A").unwrap().len(), 3);
+        assert_eq!(event_groups.get("B").unwrap().len(), 2);
+        assert_eq!(event_groups.get("C").unwrap().len(), 2);
+
+        for (event_type, events) in event_groups {
+            let row_inserts_request = build_row_inserts_request(&events).unwrap();
+            if event_type == "A" {
+                assert_eq!(row_inserts_request.inserts.len(), 1);
+                assert_eq!(
+                    row_inserts_request.inserts[0].table_name,
+                    DEFAULT_EVENTS_TABLE_NAME
+                );
+                assert_eq!(
+                    row_inserts_request.inserts[0]
+                        .rows
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .len(),
+                    3
+                );
+            } else if event_type == "B" {
+                assert_eq!(row_inserts_request.inserts.len(), 1);
+                assert_eq!(row_inserts_request.inserts[0].table_name, "table_B");
+                assert_eq!(
+                    row_inserts_request.inserts[0]
+                        .rows
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .len(),
+                    2
+                );
+            } else if event_type == "C" {
+                assert_eq!(row_inserts_request.inserts.len(), 1);
+                assert_eq!(row_inserts_request.inserts[0].table_name, "table_C");
+                assert_eq!(
+                    row_inserts_request.inserts[0]
+                        .rows
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .len(),
+                    2
+                );
+            } else {
+                panic!("Unexpected event type: {}", event_type);
+            }
         }
     }
 }
