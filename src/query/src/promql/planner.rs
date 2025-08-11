@@ -528,10 +528,7 @@ impl PromPlanner {
             (Some(mut expr), None) => {
                 let input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    lhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = Self::try_build_special_time_expr(lhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -557,10 +554,7 @@ impl PromPlanner {
             (None, Some(mut expr)) => {
                 let input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 // check if the literal is a special time expr
-                if let Some(time_expr) = Self::try_build_special_time_expr(
-                    rhs,
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ) {
+                if let Some(time_expr) = Self::try_build_special_time_expr(rhs) {
                     expr = time_expr
                 }
                 let bin_expr_builder = |col: &String| {
@@ -2702,7 +2696,7 @@ impl PromPlanner {
         }
     }
 
-    fn try_build_special_time_expr(expr: &PromExpr, time_index_col: &str) -> Option<DfExpr> {
+    fn try_build_special_time_expr(expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
