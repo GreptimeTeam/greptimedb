@@ -693,6 +693,48 @@ jobs:
       - name: Merge Conflict Finder
         uses: olivernybroe/action-conflict-finder@v4.0
 
+  test-on-windows:
+    name: Run tests on Windows
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: windows-2022-8-cores
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools-preview
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install Cargo Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install WSL distribution
+        uses: Vampire/setup-wsl@v2
+        with:
+          distribution: Ubuntu-22.04
+      - name: Running tests
+        run: cargo nextest run -F dashboard
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          GT_S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+          GT_S3_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          GT_S3_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+          GT_S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          UNITTEST_LOG_DIR: "__unittest_logs"
+
   test:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-22.04-arm
