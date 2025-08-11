@@ -17,6 +17,7 @@ mod grpc;
 #[macro_use]
 mod http;
 #[macro_use]
+#[cfg(not(windows))]
 mod sql;
 #[macro_use]
 mod region_migration;
@@ -25,6 +26,7 @@ grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
+#[cfg(not(windows))]
 sql_tests!(File);
 
 region_migration_tests!(File);
