@@ -54,7 +54,6 @@ mito-codec.workspace = true
 moka = { workspace = true, features = ["sync", "future"] }
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
-partition.workspace = true
 paste.workspace = true
 pin-project.workspace = true
 prometheus.workspace = true
