@@ -3310,6 +3310,7 @@ mod test {
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::test_util::DummyDecoder;
+    use datafusion_optimizer::OptimizerContext;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
@@ -4928,6 +4929,51 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
         \n          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_nested_aggr_not_exists_table_label() {
+        let mut eval_stmt = EvalStmt {
+            expr: PromExpr::NumberLiteral(NumberLiteral { val: 1.0 }),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+        let case = r#"count(count(node_cpu_seconds_total)) / node_load5"#;
+
+        let prom_expr = parser::parse(case).unwrap();
+        eval_stmt.expr = prom_expr;
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "metric_exists".to_string())],
+            &["job"],
+        )
+        .await;
+
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let expected = r#"Projection: lhs.time, lhs.count(count(.value)) / rhs.value AS lhs.count(count(.value)) / rhs.value [time:Timestamp(Millisecond, None), lhs.count(count(.value)) / rhs.value:Float64;N]
+  Inner Join: lhs.time = rhs.time [time:Timestamp(Millisecond, None), count(.value):Int64, count(count(.value)):Int64, time:Timestamp(Millisecond, None), value:Float64;N]
+    SubqueryAlias: lhs [time:Timestamp(Millisecond, None), count(.value):Int64, count(count(.value)):Int64]
+      Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), count(.value):Int64, count(count(.value)):Int64]
+        Aggregate: groupBy=[[.time, count(.value)]], aggr=[[count(count(.value))]] [time:Timestamp(Millisecond, None), count(.value):Int64, count(count(.value)):Int64]
+          Sort: .time ASC NULLS LAST [time:Timestamp(Millisecond, None), count(.value):Int64]
+            Aggregate: groupBy=[[.time]], aggr=[[count(.value)]] [time:Timestamp(Millisecond, None), count(.value):Int64]
+              EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]
+    SubqueryAlias: rhs [time:Timestamp(Millisecond, None), value:Float64;N]
+      EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]"#;
+
+        println!("{}", plan.display_indent_schema().to_string());
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        let optimizer = datafusion_optimizer::Optimizer::new();
+        let optimized_plan = optimizer
+            .optimize(plan, &OptimizerContext::default(), |_, _| {})
+            .unwrap();
+        println!("{}", optimized_plan.display_indent_schema().to_string());
     }
 
     #[tokio::test]
