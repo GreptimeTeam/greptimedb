@@ -143,7 +143,7 @@ impl FlatLastRow {
         Self::dedup_by_partitions(batch, &partitions)
     }
 
-    /// Remove depulications for each partition.
+    /// Remove duplications for each partition.
     fn dedup_by_partitions(batch: RecordBatch, partitions: &Partitions) -> Result<RecordBatch> {
         let ranges = partitions.ranges();
         // Each range at least has 1 row.
