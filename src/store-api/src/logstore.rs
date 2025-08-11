@@ -95,8 +95,8 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         provider: &Provider,
     ) -> Result<Entry, Self::Error>;
 
-    /// Returns the highest existing entry id in the log store.
-    fn high_watermark(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
+    /// Returns the latest entry id in the log store.
+    fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
 }
 
 /// The response of an `append` operation.

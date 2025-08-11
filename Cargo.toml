@@ -140,7 +140,7 @@ etcd-client = "0.14"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "ccfd4da48bc0254ed865e479cd981a3581b02d84" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "fd206ee8591850392e624475caa4b2ab1418afe0" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -188,7 +188,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "8dbd01ed809f5a791833a594e85b144e36e45820", features = [
+rskafka = { git = "https://github.com/WenyXu/rskafka.git", rev = "bc582e98918def613a882581a1b9331d186d9b2d", features = [
     "transport-tls",
 ] }
 rstest = "0.25"

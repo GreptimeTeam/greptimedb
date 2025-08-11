@@ -197,7 +197,7 @@ mod tests {
             unreachable!()
         }
 
-        fn high_watermark(&self, _provider: &Provider) -> Result<EntryId, Self::Error> {
+        fn latest_entry_id(&self, _provider: &Provider) -> Result<EntryId, Self::Error> {
             unreachable!()
         }
     }

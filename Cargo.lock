@@ -5314,7 +5314,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ccfd4da48bc0254ed865e479cd981a3581b02d84#ccfd4da48bc0254ed865e479cd981a3581b02d84"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=fd206ee8591850392e624475caa4b2ab1418afe0#fd206ee8591850392e624475caa4b2ab1418afe0"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -10858,7 +10858,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.6.0"
-source = "git+https://github.com/influxdata/rskafka.git?rev=8dbd01ed809f5a791833a594e85b144e36e45820#8dbd01ed809f5a791833a594e85b144e36e45820"
+source = "git+https://github.com/WenyXu/rskafka.git?rev=bc582e98918def613a882581a1b9331d186d9b2d#bc582e98918def613a882581a1b9331d186d9b2d"
 dependencies = [
  "bytes",
  "chrono",
