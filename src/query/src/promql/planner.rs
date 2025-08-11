@@ -1559,7 +1559,9 @@ impl PromPlanner {
                 | PromExpr::Extension(_)
                 | PromExpr::Aggregate(_)
                 | PromExpr::Paren(_)
-                | PromExpr::Call(_) => {
+                | PromExpr::Call(_)
+                | PromExpr::Binary(_)
+                | PromExpr::Unary(_) => {
                     if result.input.replace(*arg.clone()).is_some() {
                         MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
                     }
