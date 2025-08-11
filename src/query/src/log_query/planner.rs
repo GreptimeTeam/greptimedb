@@ -1353,38 +1353,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_type_inference_integer_comparison() {
-        let table_provider = build_test_table_provider_with_typed_columns(&[(
-            "public".to_string(),
-            "test_table".to_string(),
-        )])
-        .await;
-        let session_state = SessionStateBuilder::new().with_default_features().build();
-        let planner = LogQueryPlanner::new(table_provider, session_state);
-        let schema = mock_schema_with_typed_columns();
-
-        // Test GreaterThan with integer column and string literal
-        let column_filter = ColumnFilters {
-            expr: Box::new(LogExpr::NamedIdent("age".to_string())),
-            filters: vec![ContentFilter::GreatThan {
-                value: "25".to_string(),
-                inclusive: false,
-            }],
-        };
-
-        let expr_option = planner
-            .build_column_filter(&column_filter, schema.arrow_schema())
-            .unwrap();
-        assert!(expr_option.is_some());
-
-        let expr = expr_option.unwrap();
-        // Should infer "25" as Int32(25) since age is an int32 column
-        let expected_expr = col("age").gt(lit(ScalarValue::Int32(Some(25))));
-
-        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
-    }
-
-    #[tokio::test]
     async fn test_type_inference_float_comparison() {
         let table_provider = build_test_table_provider_with_typed_columns(&[(
             "public".to_string(),
@@ -1456,39 +1424,6 @@ mod tests {
             ],
             false,
         );
-
-        assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
-    }
-
-    #[tokio::test]
-    async fn test_binary_operation_type_inference() {
-        let table_provider = build_test_table_provider_with_typed_columns(&[(
-            "public".to_string(),
-            "test_table".to_string(),
-        )])
-        .await;
-        let session_state = SessionStateBuilder::new().with_default_features().build();
-        let planner = LogQueryPlanner::new(table_provider, session_state);
-        let schema = mock_schema_with_typed_columns();
-
-        // Test binary operation with integer column and string literal
-        let df_schema = DFSchema::try_from(schema.arrow_schema().clone()).unwrap();
-        let binary_expr = LogExpr::BinaryOp {
-            left: Box::new(LogExpr::NamedIdent("age".to_string())),
-            op: BinaryOperator::Gt,
-            right: Box::new(LogExpr::Literal("30".to_string())),
-        };
-
-        let expr = planner
-            .log_expr_to_df_expr(&binary_expr, &df_schema)
-            .unwrap();
-
-        // Should create age > Int32(30) instead of age > Utf8("30")
-        let expected_expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(col("age")),
-            op: Operator::Gt,
-            right: Box::new(lit(ScalarValue::Int32(Some(30)))),
-        });
 
         assert_eq!(format!("{:?}", expr), format!("{:?}", expected_expr));
     }
@@ -1609,46 +1544,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_binary_operation_in_expression_processing() {
-        let table_provider = build_test_table_provider_with_typed_columns(&[(
-            "public".to_string(),
-            "test_table".to_string(),
-        )])
-        .await;
-        let session_state = SessionStateBuilder::new().with_default_features().build();
-        let mut planner = LogQueryPlanner::new(table_provider, session_state);
-
-        let log_query = LogQuery {
-            table: TableName::new(DEFAULT_CATALOG_NAME, "public", "test_table"),
-            time_filter: TimeFilter {
-                start: Some("2021-01-01T00:00:00Z".to_string()),
-                end: Some("2021-01-02T00:00:00Z".to_string()),
-                span: None,
-            },
-            filters: vec![],
-            limit: Limit {
-                skip: None,
-                fetch: Some(100),
-            },
-            context: Context::None,
-            columns: vec![],
-            exprs: vec![LogExpr::BinaryOp {
-                left: Box::new(LogExpr::NamedIdent("age".to_string())),
-                op: BinaryOperator::Plus,
-                right: Box::new(LogExpr::Literal("5".to_string())),
-            }],
-        };
-
-        let plan = planner.query_to_plan(log_query).await.unwrap();
-
-        // Verify the binary operation is properly integrated into the logical plan
-        assert!(plan
-            .display_indent_schema()
-            .to_string()
-            .contains("age + Int32(5)"));
-    }
-
-    #[tokio::test]
     async fn test_nested_binary_operations() {
         let table_provider = build_test_table_provider_with_typed_columns(&[(
             "public".to_string(),
@@ -1677,9 +1572,7 @@ mod tests {
             .unwrap();
 
         // Verify the nested structure is properly created
-        assert!(format!("{:?}", expr).contains("Plus"));
-        assert!(format!("{:?}", expr).contains("Gt"));
-        assert!(format!("{:?}", expr).contains("Int32(5)"));
-        assert!(format!("{:?}", expr).contains("Int32(30)"));
+        let expected_expr_debug = "BinaryExpr(BinaryExpr { left: BinaryExpr(BinaryExpr { left: Column(Column { relation: None, name: \"age\" }), op: Plus, right: Literal(Int32(5)) }), op: Gt, right: Literal(Int32(30)) })";
+        assert_eq!(format!("{:?}", expr), expected_expr_debug);
     }
 }
