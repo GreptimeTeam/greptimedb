@@ -1641,9 +1641,12 @@ impl PromPlanner {
             }
             "holt_winters" => ScalarFunc::Udf(Arc::new(HoltWinters::scalar_udf())),
             "time" => {
-                exprs.push(build_special_time_expr(
-                    self.ctx.time_index_column.as_ref().unwrap(),
-                ));
+                // time() function should return current timestamp
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                exprs.push(DfExpr::Literal(ScalarValue::Float64(Some(now))));
                 ScalarFunc::GeneratedExpr
             }
             "minute" => {
@@ -2655,7 +2658,14 @@ impl PromPlanner {
             | PromExpr::Subquery(_) => None,
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    Some(build_special_time_expr(SPECIAL_TIME_FUNCTION))
+                    // For the time() function, return current evaluation time as a literal.
+                    // According to Prometheus documentation: https://prometheus.io/docs/prometheus/latest/querying/functions/#time
+                    // time() returns the number of seconds since January 1, 1970 UTC.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(now))))
                 } else {
                     None
                 }
@@ -2696,7 +2706,12 @@ impl PromPlanner {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    Some(build_special_time_expr(time_index_col))
+                    // Return current system time for time() function
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64();
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(now))))
                 } else {
                     None
                 }
