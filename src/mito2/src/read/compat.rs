@@ -36,9 +36,11 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
+use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
 
 /// Reader to adapt schema of underlying reader to expected schema.
@@ -169,12 +171,11 @@ impl FlatCompatBatch {
     /// - `actual` is the [RegionMetadata] of the input reader.
     /// - `actual_schema` is the actual batch schema of the input reader.
     pub(crate) fn may_new(
-        mapper: &ProjectionMapper,
+        mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
         actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     ) -> Result<Option<Self>> {
-        // FIXME(yingwen): Use batch_schema()
-        let expect_schema = mapper.batch_fields();
+        let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema {
             return Ok(None);
         }
@@ -633,9 +634,8 @@ impl FlatRewritePrimaryKey {
         append_values: &[(ColumnId, Value)],
         batch: RecordBatch,
     ) -> Result<RecordBatch> {
-        // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
         let old_pk_dict_array = batch
-            .column(batch.num_columns() - 3)
+            .column(primary_key_column_index(batch.num_columns()))
             .as_any()
             .downcast_ref::<PrimaryKeyArray>()
             .unwrap();
@@ -692,8 +692,7 @@ impl FlatRewritePrimaryKey {
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
 
         let mut columns = batch.columns().to_vec();
-        // FIXME(yingwen): Use primary_key_column_index().
-        columns[batch.num_columns() - 3] = Arc::new(new_pk_dict_array);
+        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
 
         RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
@@ -782,9 +781,8 @@ impl FlatCompatPrimaryKey {
             return Ok(batch);
         };
 
-        // FIXME(yingwen): Use primary_key_column_index() after #6666 is merged.
         let old_pk_dict_array = batch
-            .column(batch.num_columns() - 3)
+            .column(primary_key_column_index(batch.num_columns()))
             .as_any()
             .downcast_ref::<PrimaryKeyArray>()
             .unwrap();
@@ -826,8 +824,7 @@ impl FlatCompatPrimaryKey {
             PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
 
         let mut columns = batch.columns().to_vec();
-        // FIXME(yingwen): Use primary_key_column_index().
-        columns[batch.num_columns() - 3] = Arc::new(new_pk_dict_array);
+        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
 
         RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
     }
