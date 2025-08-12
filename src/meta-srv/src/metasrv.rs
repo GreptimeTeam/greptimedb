@@ -113,6 +113,10 @@ pub struct MetasrvOptions {
     /// Only applicable when using PostgreSQL or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
+    /// TLS configuration for etcd client connections
+    /// Only applicable when using etcd as the metadata store
+    #[serde(default)]
+    pub etcd_tls: Option<TlsOption>,
     /// The type of selector.
     pub selector: SelectorType,
     /// Whether to use the memory store.
@@ -190,6 +194,7 @@ impl fmt::Debug for MetasrvOptions {
         debug_struct
             .field("store_addrs", &self.sanitize_store_addrs())
             .field("backend_tls", &self.backend_tls)
+            .field("etcd_tls", &self.etcd_tls)
             .field("selector", &self.selector)
             .field("use_memory_store", &self.use_memory_store)
             .field("enable_region_failover", &self.enable_region_failover)
@@ -236,6 +241,7 @@ impl Default for MetasrvOptions {
             server_addr: String::new(),
             store_addrs: vec!["127.0.0.1:2379".to_string()],
             backend_tls: None,
+            etcd_tls: None,
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: false,
