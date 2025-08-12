@@ -448,7 +448,7 @@ mod tests {
         // and now just use local file system to mock.
         let mut env = TestEnv::new().await;
         let mock_store = env.init_object_store_manager();
-        let path_provider = RegionFilePathFactory::new("test".to_string(), PathType::Bare);
+        let path_provider = RegionFilePathFactory::new("test".to_string(), PathType::Bare, false);
 
         let local_dir = create_temp_dir("");
         let local_store = new_fs_store(local_dir.path().to_str().unwrap());
@@ -477,6 +477,7 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            is_staging: false,
         };
 
         let upload_request = SstUploadRequest {
@@ -575,13 +576,18 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            is_staging: false,
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
+            dest_path_provider: RegionFilePathFactory::new(
+                data_home.clone(),
+                PathType::Bare,
+                false,
+            ),
             remote_store: mock_store.clone(),
         };
 
@@ -654,13 +660,18 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
+            is_staging: false,
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
             ..Default::default()
         };
         let upload_request = SstUploadRequest {
-            dest_path_provider: RegionFilePathFactory::new(data_home.clone(), PathType::Bare),
+            dest_path_provider: RegionFilePathFactory::new(
+                data_home.clone(),
+                PathType::Bare,
+                false,
+            ),
             remote_store: mock_store.clone(),
         };
 

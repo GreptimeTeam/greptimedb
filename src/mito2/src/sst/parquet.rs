@@ -619,6 +619,7 @@ mod tests {
         let path_provider = RegionFilePathFactory {
             table_dir: "test".to_string(),
             path_type: PathType::Bare,
+            is_staging: false,
         };
         let mut writer = ParquetWriter::new_with_object_store(
             object_store.clone(),
@@ -657,7 +658,7 @@ mod tests {
     async fn test_write_read_with_index() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
-        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare);
+        let file_path = RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare, false);
         let metadata = Arc::new(sst_region_metadata());
         let row_group_size = 50;
 

@@ -43,7 +43,7 @@ use crate::read::scan_region::PredicateGroup;
 use crate::read::Source;
 use crate::region::options::{IndexOptions, MergeMode};
 use crate::region::version::{VersionControlData, VersionControlRef};
-use crate::region::{ManifestContextRef, RegionLeaderState};
+use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
@@ -386,6 +386,10 @@ impl RegionFlushTask {
                 Source::Reader(maybe_dedup)
             };
 
+            // Check if the region is in staging mode
+            let is_staging = self.manifest_ctx.current_state()
+                == RegionRoleState::Leader(RegionLeaderState::Staging);
+
             // Flush to level 0.
             let write_request = SstWriteRequest {
                 op_type: OperationType::Flush,
@@ -398,6 +402,7 @@ impl RegionFlushTask {
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
+                is_staging,
             };
 
             let (ssts_written, metrics) = self
