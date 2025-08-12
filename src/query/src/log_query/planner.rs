@@ -24,7 +24,7 @@ use datafusion_expr::{
 };
 use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
-use log_query::{BinaryOperator, LogExpr, LogQuery, TimeFilter};
+use log_query::{BinaryOperator, EqualValue, LogExpr, LogQuery, TimeFilter};
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -281,6 +281,10 @@ impl LogQueryPlanner {
             }
             log_query::ContentFilter::IsTrue => Ok(Some(col_expr.is_true())),
             log_query::ContentFilter::IsFalse => Ok(Some(col_expr.is_false())),
+            log_query::ContentFilter::Equal(value) => {
+                let value_literal = Self::create_eq_literal(value.clone());
+                Ok(Some(col_expr.eq(value_literal)))
+            }
             log_query::ContentFilter::Compound(filters, op) => {
                 let exprs = filters
                     .iter()
@@ -459,6 +463,15 @@ impl LogQueryPlanner {
             lit(self.infer_literal_scalar_value(value, &expr_type))
         } else {
             lit(ScalarValue::Utf8(Some(value.to_string())))
+        }
+    }
+
+    fn create_eq_literal(value: EqualValue) -> Expr {
+        match value {
+            EqualValue::String(s) => lit(ScalarValue::Utf8(Some(s))),
+            EqualValue::Float(n) => lit(ScalarValue::Float64(Some(n))),
+            EqualValue::Int(n) => lit(ScalarValue::Int64(Some(n))),
+            EqualValue::Boolean(b) => lit(ScalarValue::Boolean(Some(b))),
         }
     }
 
