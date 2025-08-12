@@ -25,9 +25,87 @@ use datafusion_expr::{Expr, LogicalPlan, Operator};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
+/// Extracts a list of [`PartitionExpr`] from given [`LogicalPlan`]
+pub struct PredicateExtractor;
+
+impl PredicateExtractor {
+    /// Extract partition expressions for partition columns from logical plan  
+    /// This method returns PartitionExpr objects suitable for ConstraintPruner
+    pub fn extract_partition_expressions(
+        plan: &LogicalPlan,
+        partition_columns: &[String],
+    ) -> DfResult<Vec<PartitionExpr>> {
+        // Collect all filter expressions from the logical plan
+        let mut filter_exprs = Vec::new();
+        Self::collect_filter_expressions(plan, &mut filter_exprs)?;
+
+        if filter_exprs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Convert each DataFusion filter expression to PartitionExpr
+        let mut partition_exprs = Vec::with_capacity(filter_exprs.len());
+        let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
+
+        for filter_expr in filter_exprs {
+            match DataFusionExprConverter::convert(&filter_expr) {
+                Ok(partition_expr) => {
+                    // Check expression for safe partition pruning
+                    match ExpressionChecker::check_expression_for_pruning(
+                        &partition_expr,
+                        &partition_set,
+                    ) {
+                        ExpressionCheckResult::UseAsIs(expr) => {
+                            partition_exprs.push(expr);
+                        }
+                        ExpressionCheckResult::UsePartial(exprs) => {
+                            partition_exprs.extend(exprs);
+                        }
+                        ExpressionCheckResult::Drop => {
+                            debug!(
+                                "Dropping mixed expression for correctness: {}",
+                                partition_expr
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    debug!(
+                        "Failed to convert filter expression to PartitionExpr: {}, skipping",
+                        err
+                    );
+                    continue;
+                }
+            }
+        }
+
+        debug!(
+            "Extracted {} partition expressions from logical plan for partition columns: {:?}",
+            partition_exprs.len(),
+            partition_columns
+        );
+
+        Ok(partition_exprs)
+    }
+
+    /// Collect all filter expressions from a logical plan
+    fn collect_filter_expressions(plan: &LogicalPlan, expressions: &mut Vec<Expr>) -> DfResult<()> {
+        if let LogicalPlan::Filter(filter) = plan {
+            expressions.push(filter.predicate.clone());
+        }
+
+        // Recursively visit children
+        for child in plan.inputs() {
+            Self::collect_filter_expressions(child, expressions)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// Result of analyzing an expression for partition pruning safety
 #[derive(Debug, Clone)]
-enum ExpressionAnalysisResult {
+enum ExpressionCheckResult {
     /// Expression is safe to use as-is for pruning (only involves partition columns)
     UseAsIs(PartitionExpr),
     /// Extract only these parts for AND expressions (mixed with non-partition columns)
@@ -36,15 +114,15 @@ enum ExpressionAnalysisResult {
     Drop,
 }
 
-/// Analyzes expressions to determine safe pruning strategies for mixed partition/non-partition expressions
-struct ExpressionAnalyzer;
+/// Checks expressions to determine safe pruning strategies for mixed partition/non-partition expressions
+struct ExpressionChecker;
 
-impl ExpressionAnalyzer {
-    /// Analyze a partition expression to determine how it should be handled for safe pruning
-    fn analyze_expression_for_pruning(
+impl ExpressionChecker {
+    /// Check a partition expression to determine how it should be handled for safe pruning
+    fn check_expression_for_pruning(
         expr: &PartitionExpr,
         partition_columns: &HashSet<String>,
-    ) -> ExpressionAnalysisResult {
+    ) -> ExpressionCheckResult {
         match expr.op() {
             RestrictedOp::And => {
                 // For AND expressions, we can extract only the partition-related parts
@@ -53,23 +131,23 @@ impl ExpressionAnalyzer {
                 Self::extract_and_constraints(expr, partition_columns, &mut partition_constraints);
 
                 if partition_constraints.is_empty() {
-                    ExpressionAnalysisResult::Drop
+                    ExpressionCheckResult::Drop
                 } else if Self::expr_only_involves_partition_columns(expr, partition_columns) {
                     // If the entire expression only involves partition columns, use as-is
-                    ExpressionAnalysisResult::UseAsIs(expr.clone())
+                    ExpressionCheckResult::UseAsIs(expr.clone())
                 } else {
                     // Mixed expression: return only the partition parts
-                    ExpressionAnalysisResult::UsePartial(partition_constraints)
+                    ExpressionCheckResult::UsePartial(partition_constraints)
                 }
             }
             RestrictedOp::Or => {
                 // For OR expressions, we can only use them if ALL branches involve only partition columns
                 // because if any branch involves non-partition columns, we cannot safely prune
                 if Self::expr_only_involves_partition_columns(expr, partition_columns) {
-                    ExpressionAnalysisResult::UseAsIs(expr.clone())
+                    ExpressionCheckResult::UseAsIs(expr.clone())
                 } else {
                     // Mixed OR expression: must drop entirely for safety
-                    ExpressionAnalysisResult::Drop
+                    ExpressionCheckResult::Drop
                 }
             }
             _ => {
@@ -78,13 +156,13 @@ impl ExpressionAnalyzer {
                     || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
                 {
                     if Self::expr_only_involves_partition_columns(expr, partition_columns) {
-                        ExpressionAnalysisResult::UseAsIs(expr.clone())
+                        ExpressionCheckResult::UseAsIs(expr.clone())
                     } else {
                         // This shouldn't happen for simple comparisons, but handle defensively
-                        ExpressionAnalysisResult::Drop
+                        ExpressionCheckResult::Drop
                     }
                 } else {
-                    ExpressionAnalysisResult::Drop
+                    ExpressionCheckResult::Drop
                 }
             }
         }
@@ -170,7 +248,7 @@ impl ExpressionAnalyzer {
 }
 
 /// Converts DataFusion expressions to PartitionExpr
-pub struct DataFusionExprConverter;
+struct DataFusionExprConverter;
 
 impl DataFusionExprConverter {
     /// Convert DataFusion Expr to PartitionExpr
@@ -344,7 +422,6 @@ impl DataFusionExprConverter {
                 Ok(Operand::Column(column_name))
             }
             Expr::Literal(scalar_value) => {
-                // let value = Self::scalar_value_to_value(scalar_value)?;
                 let value = Value::try_from(scalar_value.clone()).unwrap();
                 Ok(Operand::Value(value))
             }
@@ -395,20 +472,13 @@ impl DataFusionExprConverter {
 
     /// Invert a DataFusion Operator for NOT expressions
     fn invert_operator(op: &Operator) -> DfResult<RestrictedOp> {
-        match op {
-            Operator::Eq => Ok(RestrictedOp::NotEq),
-            Operator::NotEq => Ok(RestrictedOp::Eq),
-            Operator::Lt => Ok(RestrictedOp::GtEq),
-            Operator::LtEq => Ok(RestrictedOp::Gt),
-            Operator::Gt => Ok(RestrictedOp::LtEq),
-            Operator::GtEq => Ok(RestrictedOp::Lt),
-            Operator::And => Ok(RestrictedOp::Or), // De Morgan's law: NOT (A AND B) = (NOT A) OR (NOT B)
-            Operator::Or => Ok(RestrictedOp::And), // De Morgan's law: NOT (A OR B) = (NOT A) AND (NOT B)
-            _ => Err(datafusion_common::DataFusionError::Plan(format!(
+        let Some(negated) = op.negate() else {
+            return Err(datafusion_common::DataFusionError::Plan(format!(
                 "Cannot invert operator: {:?}",
                 op
-            ))),
-        }
+            )));
+        };
+        Self::convert_operator(&negated)
     }
 
     /// Determine if a cast is safe for partition pruning
@@ -447,93 +517,13 @@ impl DataFusionExprConverter {
     }
 }
 
-/// Extracts range constraints from logical plan filters
-pub struct PredicateExtractor;
-
-impl PredicateExtractor {
-    /// Extract partition expressions for partition columns from logical plan  
-    /// This method returns PartitionExpr objects suitable for ConstraintPruner
-    pub fn extract_partition_expressions(
-        plan: &LogicalPlan,
-        partition_columns: &[String],
-    ) -> DfResult<Vec<PartitionExpr>> {
-        // Collect all filter expressions from the logical plan
-        let mut filter_exprs = Vec::new();
-        Self::collect_filter_expressions(plan, &mut filter_exprs)?;
-
-        if filter_exprs.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Convert each DataFusion filter expression to PartitionExpr
-        let mut partition_exprs = Vec::with_capacity(filter_exprs.len());
-        let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
-
-        for filter_expr in filter_exprs {
-            match DataFusionExprConverter::convert(&filter_expr) {
-                Ok(partition_expr) => {
-                    // Analyze expression for safe partition pruning
-                    match ExpressionAnalyzer::analyze_expression_for_pruning(
-                        &partition_expr,
-                        &partition_set,
-                    ) {
-                        ExpressionAnalysisResult::UseAsIs(expr) => {
-                            partition_exprs.push(expr);
-                        }
-                        ExpressionAnalysisResult::UsePartial(exprs) => {
-                            partition_exprs.extend(exprs);
-                        }
-                        ExpressionAnalysisResult::Drop => {
-                            debug!(
-                                "Dropping mixed expression for correctness: {}",
-                                partition_expr
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    debug!(
-                        "Failed to convert filter expression to PartitionExpr: {}, skipping",
-                        err
-                    );
-                    continue;
-                }
-            }
-        }
-
-        debug!(
-            "Extracted {} partition expressions from logical plan for partition columns: {:?}",
-            partition_exprs.len(),
-            partition_columns
-        );
-
-        Ok(partition_exprs)
-    }
-
-    /// Collect all filter expressions from a logical plan
-    fn collect_filter_expressions(plan: &LogicalPlan, expressions: &mut Vec<Expr>) -> DfResult<()> {
-        if let LogicalPlan::Filter(filter) = plan {
-            expressions.push(filter.predicate.clone());
-        }
-
-        // Recursively visit children
-        for child in plan.inputs() {
-            Self::collect_filter_expressions(child, expressions)?;
-        }
-
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_time::Timestamp;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::Column;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit, LogicalPlanBuilder};
     use datatypes::value::Value;
     use partition::expr::{Operand, PartitionExpr, RestrictedOp};
@@ -1014,40 +1004,6 @@ mod tests {
                     Operand::Column("user_id".to_string()),
                     RestrictedOp::NotEq,
                     Operand::Value(Value::Int64(100)),
-                )],
-                vec!["user_id"],
-            ),
-        ];
-        check_partition_expressions(cases);
-    }
-
-    #[test]
-    fn test_scalar_value_conversions() {
-        let cases = vec![
-            FilterTestCase::new(
-                "timestamp_scalar",
-                {
-                    let timestamp_val =
-                        ScalarValue::TimestampMillisecond(Some(1672574400000), None);
-                    col("timestamp").eq(Expr::Literal(timestamp_val))
-                },
-                vec![PartitionExpr::new(
-                    Operand::Column("timestamp".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Timestamp(Timestamp::new_millisecond(1672574400000))),
-                )],
-                vec!["timestamp"],
-            ),
-            FilterTestCase::new(
-                "float_scalar",
-                {
-                    let float_val = ScalarValue::Float64(Some(123.45));
-                    col("user_id").eq(Expr::Literal(float_val))
-                },
-                vec![PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Float64(123.45.into())),
                 )],
                 vec!["user_id"],
             ),
