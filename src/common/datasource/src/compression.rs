@@ -215,3 +215,48 @@ impl From<CompressionType> for FileCompressionType {
         }
     }
 }
+#[cfg(test)]
+mod deserialization_tests {
+    use serde::Deserialize;
+
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        compression: CompressionType,
+    }
+
+    #[test]
+    fn test_deserialize_all_variants() {
+        let cases = vec![
+            (r#"{"compression": "gzip"}"#, CompressionType::Gzip),
+            (r#"{"compression": "bzip2"}"#, CompressionType::Bzip2),
+            (r#"{"compression": "xz"}"#, CompressionType::Xz),
+            (r#"{"compression": "zstd"}"#, CompressionType::Zstd),
+            (
+                r#"{"compression": "uncompressed"}"#,
+                CompressionType::Uncompressed,
+            ),
+        ];
+
+        for (json, expected) in cases {
+            let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+            assert_eq!(wrapper.compression, expected, "Failed for json: {}", json);
+        }
+    }
+
+    #[test]
+    fn test_deserialize_empty_string_defaults_to_uncompressed() {
+        let json = r#"{"compression": ""}"#;
+        let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.compression, CompressionType::Uncompressed);
+    }
+
+    #[test]
+    fn test_deserialize_missing_field_defaults_to_uncompressed() {
+        let json = r#"{}"#;
+        let wrapper: Wrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(wrapper.compression, CompressionType::Uncompressed);
+    }
+}

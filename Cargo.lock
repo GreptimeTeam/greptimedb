@@ -2305,6 +2305,7 @@ dependencies = [
  "rand 0.9.0",
  "regex",
  "serde",
+ "serde_json",
  "snafu 0.8.5",
  "strum 0.27.1",
  "tokio",
