@@ -227,6 +227,7 @@ impl UnorderedScan {
             for part_range in part_ranges {
                 let mut metrics = ScannerMetrics::default();
                 let mut fetch_start = Instant::now();
+                let mapper = &stream_ctx.input.mapper;
                 #[cfg(debug_assertions)]
                 let mut checker = crate::read::BatchChecker::default()
                     .with_start(Some(part_range.start))
@@ -252,7 +253,7 @@ impl UnorderedScan {
                     #[cfg(debug_assertions)]
                     checker.ensure_part_range_batch(
                         "UnorderedScan",
-                        stream_ctx.input.mapper.metadata().region_id,
+                        mapper.metadata().region_id,
                         partition,
                         part_range,
                         &batch,

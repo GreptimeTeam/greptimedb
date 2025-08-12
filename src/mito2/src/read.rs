@@ -18,6 +18,7 @@ pub mod compat;
 pub mod dedup;
 pub mod flat_dedup;
 pub mod flat_merge;
+pub mod flat_projection;
 pub mod last_row;
 pub mod merge;
 pub mod plain_batch;
