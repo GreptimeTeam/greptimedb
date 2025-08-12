@@ -12,6 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Predicate extraction for partition pruning.
+//!
+//! This module extracts predicate expressions from DataFusion logical plans and converts them
+//! into atomic constraints suitable for partition pruning. It serves as a bridge between
+//! DataFusion's query representation and GreptimeDB's partition constraint system.
+//!
+//! ## Key Components
+//!
+//! - [`DataFusionExprConverter`]: Converts DataFusion expressions into PartitionExpr format
+//! - [`PredicateExtractor`]: Main entry point for extracting predicates from logical plans
+//!
+//! ## Core Workflow
+//!
+//! 1. **Extract Filters**: Traverse the logical plan to collect all filter expressions
+//! 2. **Convert Expressions**: Transform DataFusion expressions into PartitionExpr format
+//! 3. **Generate Atomics**: Use the Collider to break down complex expressions into atomic constraints
+//! 4. **Filter Relevance**: Only return constraints that involve specified partition columns
+//!
+//! ## Atomic Expressions
+//!
+//! The module produces [`AtomicExpr`] objects that represent normalized constraint expressions:
+//! - Each atomic expression is a conjunction (AND) of nucleons
+//! - Multiple atomic expressions represent disjunctions (OR)
+//! - Nucleons are individual column constraints (e.g., `column >= value`)
+//!
+//! ## Example
+//!
+//! Given a SQL WHERE clause like:
+//! ```sql
+//! WHERE (timestamp >= 100 AND timestamp < 200) OR timestamp = 300
+//! ```
+//!
+//! This produces two atomic expressions:
+//! - Atomic 1: `[timestamp >= 100, timestamp < 200]` (AND of nucleons)
+//! - Atomic 2: `[timestamp = 300]` (single nucleon)
+
 use std::collections::HashSet;
 
 use common_telemetry::debug;
@@ -251,6 +287,7 @@ mod tests {
                 DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
                 false,
             ),
+            Field::new("user_id", DataType::Int64, false),
             Field::new("value", DataType::Int64, false),
         ]));
 
@@ -275,7 +312,7 @@ mod tests {
 
         let atomic_constraints = PredicateExtractor::extract_atomic_constraints(
             &plan,
-            &["timestamp".to_string()], // only timestamp is partition column
+            &["user_id".to_string()], // only user_id is partition column
         )
         .unwrap();
 
@@ -286,47 +323,47 @@ mod tests {
     fn test_extract_atomic_constraints_simple() {
         let table_scan = create_test_table_scan();
 
-        // timestamp >= 100
+        // user_id >= 100
         let plan = LogicalPlanBuilder::from(table_scan)
-            .filter(col("timestamp").gt_eq(lit(100i64)))
+            .filter(col("user_id").gt_eq(lit(100i64)))
             .unwrap()
             .build()
             .unwrap();
 
         let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["timestamp".to_string()])
+            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
                 .unwrap();
 
         assert_eq!(atomic_constraints.len(), 1);
         let atomic = &atomic_constraints[0];
         assert_eq!(atomic.nucleons.len(), 1);
-        assert_eq!(atomic.nucleons[0].column(), "timestamp");
+        assert_eq!(atomic.nucleons[0].column(), "user_id");
     }
 
     #[test]
     fn test_extract_atomic_constraints_or_expression() {
         let table_scan = create_test_table_scan();
 
-        // timestamp = 100 OR timestamp = 200
+        // user_id = 100 OR user_id = 200
         let plan = LogicalPlanBuilder::from(table_scan)
             .filter(
-                col("timestamp")
+                col("user_id")
                     .eq(lit(100i64))
-                    .or(col("timestamp").eq(lit(200i64))),
+                    .or(col("user_id").eq(lit(200i64))),
             )
             .unwrap()
             .build()
             .unwrap();
 
         let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["timestamp".to_string()])
+            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
                 .unwrap();
 
         // OR expression should result in 2 atomic expressions
         assert_eq!(atomic_constraints.len(), 2);
         for atomic in &atomic_constraints {
             assert_eq!(atomic.nucleons.len(), 1);
-            assert_eq!(atomic.nucleons[0].column(), "timestamp");
+            assert_eq!(atomic.nucleons[0].column(), "user_id");
         }
     }
 
@@ -334,13 +371,13 @@ mod tests {
     fn test_extract_atomic_constraints_complex_and_or() {
         let table_scan = create_test_table_scan();
 
-        // (timestamp >= 100 AND timestamp < 200) OR (timestamp >= 300 AND timestamp < 400)
-        let filter = col("timestamp")
+        // (user_id >= 100 AND user_id < 200) OR (user_id >= 300 AND user_id < 400)
+        let filter = col("user_id")
             .gt_eq(lit(100i64))
-            .and(col("timestamp").lt(lit(200i64)))
-            .or(col("timestamp")
+            .and(col("user_id").lt(lit(200i64)))
+            .or(col("user_id")
                 .gt_eq(lit(300i64))
-                .and(col("timestamp").lt(lit(400i64))));
+                .and(col("user_id").lt(lit(400i64))));
 
         let plan = LogicalPlanBuilder::from(table_scan)
             .filter(filter)
@@ -349,7 +386,7 @@ mod tests {
             .unwrap();
 
         let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["timestamp".to_string()])
+            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
                 .unwrap();
 
         // Should result in 2 atomic expressions (one for each OR branch)
@@ -357,7 +394,7 @@ mod tests {
         for atomic in &atomic_constraints {
             assert_eq!(atomic.nucleons.len(), 2); // Each should have 2 constraints (AND)
             for nucleon in &atomic.nucleons {
-                assert_eq!(nucleon.column(), "timestamp");
+                assert_eq!(nucleon.column(), "user_id");
             }
         }
     }

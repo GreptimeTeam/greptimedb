@@ -12,10 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+//! Region pruning based on partition constraint satisfaction.
+//!
+//! This module implements constraint-based region pruning for distributed query execution.
+//! It determines which data regions can potentially contain results for a given query by
+//! comparing query constraints against partition definitions.
+//!
+//! ## Key Components
+//!
+//! - [`ConstraintPruner`]: Main pruning algorithm that uses constraint satisfaction
+//!
+//! ## Algorithm Overview
+//!
+//! The pruning algorithm works by:
+//! 1. **Unified Normalization**: Create a single Collider with both query and partition expressions
+//! 2. **Atomic Decomposition**: Break down complex expressions into atomic constraints (AND of nucleons)
+//! 3. **Constraint Matching**: Check if query atomics can be satisfied by partition atomics
+//! 4. **Conservative Fallback**: Include regions when constraint evaluation is uncertain
+//!
+//! ## Constraint Satisfaction Logic
+//!
+//! - **Query atomics**: Represent OR conditions (any atomic can satisfy the query)
+//! - **Partition atomics**: Represent OR conditions (any atomic defines the partition boundary)
+//! - **Nucleon compatibility**: Individual column constraints must be logically compatible
+//!
+//! ## Nucleon Compatibility Rules
+//!
+//! The algorithm checks if query constraints can be satisfied by partition constraints:
+//!
+//! | Query | Partition | Compatible |
+//! |-------|-----------|------------|
+//! | `x = 5` | `x = 5` | ✓ (exact match) |
+//! | `x = 5` | `x >= 3` | ✓ (5 satisfies >= 3) |
+//! | `x >= 10` | `x < 5` | ✗ (no overlap) |
+//! | `x >= 10` | `x >= 5` | ✓ (overlapping ranges) |
+//!
+//! ## Example
+//!
+//! Given:
+//! - Query: `timestamp >= 100 AND timestamp < 200`
+//! - Partition 1: `timestamp >= 0 AND timestamp < 150`
+//! - Partition 2: `timestamp >= 150 AND timestamp < 300`
+//!
+//! Both partitions would be included because:
+//! - Partition 1: Range [100,150) overlaps with query [100,200)
+//! - Partition 2: Range [150,200) overlaps with query [100,200)
 
 use common_telemetry::debug;
-use datatypes::value::{OrderedFloat, Value};
 use partition::collider::{AtomicExpr, Collider, GluonOp};
 use partition::expr::PartitionExpr;
 use partition::manager::PartitionInfo;
@@ -38,20 +81,20 @@ impl ConstraintPruner {
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
-        // Collect all partition expressions
-        let partition_expressions: Vec<PartitionExpr> = partitions
+        // Collect all partition expressions for unified normalization
+        let all_partition_expressions: Vec<PartitionExpr> = partitions
             .iter()
             .filter_map(|p| p.partition_expr.clone())
             .collect();
 
-        if partition_expressions.is_empty() {
+        if all_partition_expressions.is_empty() {
             // No partition expressions to match against, return all regions conservatively
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
-        // Create unified collider with all expressions for consistent normalization
+        // Create unified collider with both query and partition expressions for consistent normalization
         let mut all_expressions = query_expressions.to_vec();
-        all_expressions.extend(partition_expressions.clone());
+        all_expressions.extend(all_partition_expressions.iter().cloned());
 
         let collider = match Collider::new(&all_expressions) {
             Ok(collider) => collider,
@@ -73,10 +116,11 @@ impl ConstraintPruner {
 
         let mut candidate_regions = Vec::new();
 
+        // Process each partition with direct region mapping
         for partition in partitions {
             if let Some(ref partition_expr) = partition.partition_expr {
-                // Find partition atomic expressions in the unified collider
-                let partition_expr_index = partition_expressions
+                // Find atomic expressions for this specific partition expression
+                let partition_expr_index = all_partition_expressions
                     .iter()
                     .position(|expr| expr == partition_expr);
 
@@ -88,16 +132,13 @@ impl ConstraintPruner {
                         .filter(|atomic| atomic.source_expr_index == adjusted_index)
                         .collect();
 
-                    if Self::constraints_satisfied(
-                        &query_atomics,
-                        &partition_atomics,
-                        &collider.normalized_values,
-                    ) {
+                    // Check overlap between query and partition atomic expressions
+                    if Self::atomic_sets_overlap(&query_atomics, &partition_atomics) {
                         candidate_regions.push(partition.id);
                     }
                 } else {
-                    // Partition expression not found in unified collider, include conservatively
-                    debug!("Partition expression not found in unified collider for region {}, including conservatively", partition.id);
+                    // Partition expression not found in unified list, include conservatively
+                    debug!("Partition expression not found in unified list for region {}, including conservatively", partition.id);
                     candidate_regions.push(partition.id);
                 }
             } else {
@@ -119,12 +160,11 @@ impl ConstraintPruner {
         Ok(candidate_regions)
     }
 
-    /// Check if query constraints can be satisfied by partition constraints
-    /// Uses unified normalization for accurate constraint satisfaction
-    fn constraints_satisfied(
+    /// Check if query atomic expressions overlap with partition atomic expressions
+    /// Each atomic expression represents a constraint that can satisfy the query/partition
+    fn atomic_sets_overlap(
         query_atomics: &[&AtomicExpr],
         partition_atomics: &[&AtomicExpr],
-        _normalized_values: &HashMap<String, Vec<(Value, OrderedFloat<f64>)>>,
     ) -> bool {
         // Query represents OR of atomic expressions (any query atomic can be satisfied)
         // Partition represents OR of atomic expressions (any partition atomic defines the partition)
@@ -257,37 +297,37 @@ mod tests {
     #[test]
     fn test_constraint_pruning_equality() {
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
-            // Region 3: ts >= 200 AND ts < 300
+            // Region 3: user_id >= 200 AND user_id < 300
             create_test_partition_info(
                 3,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(200))
-                        .and(col("ts").lt(Value::Int64(300))),
+                        .and(col("user_id").lt(Value::Int64(300))),
                 ),
             ),
         ];
 
-        // Query: ts = 150 (should only match Region 2)
-        let query_exprs = vec![col("ts").eq(Value::Int64(150))];
+        // Query: user_id = 150 (should only match Region 2)
+        let query_exprs = vec![col("user_id").eq(Value::Int64(150))];
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
 
         // Should include Region 2, and potentially others due to conservative approach
@@ -297,44 +337,44 @@ mod tests {
     #[test]
     fn test_constraint_pruning_in_list() {
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
-            // Region 3: ts >= 200 AND ts < 300
+            // Region 3: user_id >= 200 AND user_id < 300
             create_test_partition_info(
                 3,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(200))
-                        .and(col("ts").lt(Value::Int64(300))),
+                        .and(col("user_id").lt(Value::Int64(300))),
                 ),
             ),
         ];
 
-        // Query: ts IN (50, 150, 250) - should match all regions
+        // Query: user_id IN (50, 150, 250) - should match all regions
         let query_exprs = vec![PartitionExpr::new(
             Operand::Expr(PartitionExpr::new(
-                Operand::Expr(col("ts").eq(Value::Int64(50))),
+                Operand::Expr(col("user_id").eq(Value::Int64(50))),
                 RestrictedOp::Or,
-                Operand::Expr(col("ts").eq(Value::Int64(150))),
+                Operand::Expr(col("user_id").eq(Value::Int64(150))),
             )),
             RestrictedOp::Or,
-            Operand::Expr(col("ts").eq(Value::Int64(250))),
+            Operand::Expr(col("user_id").eq(Value::Int64(250))),
         )];
 
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
@@ -346,43 +386,43 @@ mod tests {
     #[test]
     fn test_constraint_pruning_range() {
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
-            // Region 3: ts >= 200 AND ts < 300
+            // Region 3: user_id >= 200 AND user_id < 300
             create_test_partition_info(
                 3,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(200))
-                        .and(col("ts").lt(Value::Int64(300))),
+                        .and(col("user_id").lt(Value::Int64(300))),
                 ),
             ),
         ];
 
-        // Query: ts >= 150 (should include regions that can satisfy this constraint)
-        let query_exprs = vec![col("ts").gt_eq(Value::Int64(150))];
+        // Query: user_id >= 150 (should include regions that can satisfy this constraint)
+        let query_exprs = vec![col("user_id").gt_eq(Value::Int64(150))];
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
 
         // With constraint-based approach:
-        // Region 1: [0, 100) - ts >= 150 is not satisfiable
-        // Region 2: [100, 200) - ts >= 150 is satisfiable in range [150, 200)
-        // Region 3: [200, 300) - ts >= 150 is satisfiable (all values >= 200 satisfy ts >= 150)
+        // Region 1: [0, 100) - user_id >= 150 is not satisfiable
+        // Region 2: [100, 200) - user_id >= 150 is satisfiable in range [150, 200)
+        // Region 3: [200, 300) - user_id >= 150 is satisfiable (all values >= 200 satisfy user_id >= 150)
         // Conservative approach may include more regions, but should at least include regions 2 and 3
         assert!(pruned.len() >= 2);
         assert!(pruned.contains(&RegionId::new(1, 2))); // Region 2 should be included
@@ -409,40 +449,40 @@ mod tests {
         use partition::expr::col;
 
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
-            // Region 3: ts >= 200 AND ts < 300
+            // Region 3: user_id >= 200 AND user_id < 300
             create_test_partition_info(
                 3,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(200))
-                        .and(col("ts").lt(Value::Int64(300))),
+                        .and(col("user_id").lt(Value::Int64(300))),
                 ),
             ),
         ];
 
-        // Query: ts = 150 (should only match Region 2 which contains values [100, 200))
-        let query_exprs = vec![col("ts").eq(Value::Int64(150))];
+        // Query: user_id = 150 (should only match Region 2 which contains values [100, 200))
+        let query_exprs = vec![col("user_id").eq(Value::Int64(150))];
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
 
-        // ts = 150 should match Region 2 ([100, 200)) and potentially others due to conservative approach
+        // user_id = 150 should match Region 2 ([100, 200)) and potentially others due to conservative approach
         assert!(pruned.contains(&RegionId::new(1, 2)));
     }
 
@@ -452,39 +492,39 @@ mod tests {
         use partition::expr::{col, Operand, PartitionExpr, RestrictedOp};
 
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
-            // Region 3: ts >= 200 AND ts < 300
+            // Region 3: user_id >= 200 AND user_id < 300
             create_test_partition_info(
                 3,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(200))
-                        .and(col("ts").lt(Value::Int64(300))),
+                        .and(col("user_id").lt(Value::Int64(300))),
                 ),
             ),
         ];
 
-        // Query: ts = 50 OR ts = 150 OR ts = 250 - should match all 3 regions
-        let expr1 = col("ts").eq(Value::Int64(50));
-        let expr2 = col("ts").eq(Value::Int64(150));
-        let expr3 = col("ts").eq(Value::Int64(250));
+        // Query: user_id = 50 OR user_id = 150 OR user_id = 250 - should match all 3 regions
+        let expr1 = col("user_id").eq(Value::Int64(50));
+        let expr2 = col("user_id").eq(Value::Int64(150));
+        let expr3 = col("user_id").eq(Value::Int64(250));
 
         let or_expr = PartitionExpr::new(
             Operand::Expr(PartitionExpr::new(
@@ -509,28 +549,28 @@ mod tests {
     #[test]
     fn test_constraint_pruning_no_match() {
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
         ];
 
-        // Query: ts = 300 (should match no regions)
-        let query_exprs = vec![col("ts").eq(Value::Int64(300))];
+        // Query: user_id = 300 (should match no regions)
+        let query_exprs = vec![col("user_id").eq(Value::Int64(300))];
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
 
         // Should match no regions since 300 is outside both partition ranges
@@ -540,28 +580,28 @@ mod tests {
     #[test]
     fn test_constraint_pruning_partial_match() {
         let partitions = vec![
-            // Region 1: ts >= 0 AND ts < 100
+            // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
                 1,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(0))
-                        .and(col("ts").lt(Value::Int64(100))),
+                        .and(col("user_id").lt(Value::Int64(100))),
                 ),
             ),
-            // Region 2: ts >= 100 AND ts < 200
+            // Region 2: user_id >= 100 AND user_id < 200
             create_test_partition_info(
                 2,
                 Some(
-                    col("ts")
+                    col("user_id")
                         .gt_eq(Value::Int64(100))
-                        .and(col("ts").lt(Value::Int64(200))),
+                        .and(col("user_id").lt(Value::Int64(200))),
                 ),
             ),
         ];
 
-        // Query: ts >= 50 (should match both regions partially)
-        let query_exprs = vec![col("ts").gt_eq(Value::Int64(50))];
+        // Query: user_id >= 50 (should match both regions partially)
+        let query_exprs = vec![col("user_id").gt_eq(Value::Int64(50))];
         let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
 
         // Region 1: [0,100) intersects with [50,∞) -> includes [50,100)
