@@ -14,13 +14,19 @@
 
 //! Integration tests for staging state functionality.
 
-use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionAlterRequest, RegionRequest, RegionTruncateRequest};
+use std::fs;
+
+use api::v1::Rows;
+use store_api::region_engine::{RegionEngine, SettableRegionRoleState};
+use store_api::region_request::{
+    RegionAlterRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest,
+};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::request::WorkerRequest;
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_staging_state_integration() {
@@ -127,8 +133,6 @@ async fn test_staging_blocks_truncate_operations() {
 
 #[tokio::test]
 async fn test_staging_state_validation_patterns() {
-    use crate::region::{RegionLeaderState, RegionRoleState};
-
     // Test the state validation patterns used throughout the codebase
     let staging_state = RegionRoleState::Leader(RegionLeaderState::Staging);
     let writable_state = RegionRoleState::Leader(RegionLeaderState::Writable);
@@ -176,5 +180,86 @@ async fn test_staging_state_validation_patterns() {
     assert!(
         writable_is_flushable,
         "Writable regions should be flushable"
+    );
+}
+
+#[tokio::test]
+async fn test_staging_manifest_directory() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1024, 0);
+    let request = CreateRequestBuilder::new().build();
+
+    // Get column schemas before consuming the request
+    let column_schemas = rows_schema(&request);
+
+    // Check manifest files after region creation (before staging mode)
+    // Create region
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Check that manifest files exist after region creation
+    let data_home = env.data_home();
+
+    let region_dir = format!("{}/data/test/1024_0000000000", data_home.display());
+    let normal_manifest_dir = format!("{}/manifest", region_dir);
+    assert!(
+        fs::metadata(&normal_manifest_dir).is_ok(),
+        "Normal manifest directory should exist"
+    );
+
+    // Now test staging mode manifest creation
+    // Set region to staging mode using the engine API
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    // Put some data and flush in staging mode
+    let rows_data = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows_data).await;
+
+    // Force flush to generate manifest files in staging mode
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Check that manifest files are in staging directory
+    let staging_manifest_dir = format!("{}/staging/manifest", region_dir);
+    assert!(
+        fs::metadata(&staging_manifest_dir).is_ok(),
+        "Staging manifest directory should exist"
+    );
+
+    // Check what exists in normal manifest directory
+    let files: Vec<_> = fs::read_dir(&normal_manifest_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !files.is_empty(),
+        "Normal manifest directory should contain files"
+    );
+
+    // Check what exists in staging manifest directory
+    let staging_files = fs::read_dir(&staging_manifest_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        !staging_files.is_empty(),
+        "Staging manifest directory should contain files"
     );
 }

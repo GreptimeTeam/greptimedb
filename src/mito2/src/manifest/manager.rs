@@ -35,9 +35,7 @@ use crate::manifest::storage::{
     file_version, is_checkpoint_file, is_delta_file, ManifestObjectStore,
 };
 use crate::metrics::MANIFEST_OP_ELAPSED;
-#[cfg(test)]
-use crate::region::RegionLeaderState;
-use crate::region::RegionRoleState;
+use crate::region::{RegionLeaderState, RegionRoleState};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -167,7 +165,9 @@ impl RegionManifestManager {
         // Persist region change.
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
-        store.save(version, &action_list.encode()?).await?;
+        // Opened region is not in staging mode.
+        // TODO(ruihang): add staging mode support if needed.
+        store.save(version, &action_list.encode()?, false).await?;
 
         let checkpointer = Checkpointer::new(region_id, options, store.clone(), MIN_VERSION);
         manifest_version.store(version, Ordering::Relaxed);
@@ -454,7 +454,10 @@ impl RegionManifestManager {
         );
 
         let version = self.increase_version();
-        self.store.save(version, &action_list.encode()?).await?;
+        let is_staging = region_state == RegionRoleState::Leader(RegionLeaderState::Staging);
+        self.store
+            .save(version, &action_list.encode()?, is_staging)
+            .await?;
 
         let mut manifest_builder =
             RegionManifestBuilder::with_checkpoint(Some(self.manifest.as_ref().clone()));
