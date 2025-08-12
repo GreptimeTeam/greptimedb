@@ -27,15 +27,19 @@
 //!
 //! 1. **Extract Filters**: Traverse the logical plan to collect all filter expressions
 //! 2. **Convert Expressions**: Transform DataFusion expressions into PartitionExpr format
-//! 3. **Generate Atomics**: Use the Collider to break down complex expressions into atomic constraints
-//! 4. **Filter Relevance**: Only return constraints that involve specified partition columns
+//! 3. **Filter Relevance**: Only return expressions that involve specified partition columns
 //!
-//! ## Atomic Expressions
+//! ## Clean Separation of Concerns
 //!
-//! The module produces [`AtomicExpr`] objects that represent normalized constraint expressions:
-//! - Each atomic expression is a conjunction (AND) of nucleons
-//! - Multiple atomic expressions represent disjunctions (OR)
-//! - Nucleons are individual column constraints (e.g., `column >= value`)
+//! This module ONLY handles DataFusion → PartitionExpr conversion.
+//! The proper flow is: LogicalPlan → PredicateExtractor → Vec&lt;PartitionExpr&gt; → ConstraintPruner → Vec&lt;RegionId&gt;
+//!
+//! ## Expression Conversion
+//!
+//! The module converts DataFusion expressions to PartitionExpr format:
+//! - Handles complex expressions like InList, Between, Alias, Cast, NOT
+//! - Preserves logical structure for downstream processing
+//! - Does NOT generate atomic constraints - that's ConstraintPruner's responsibility
 //!
 //! ## Example
 //!
@@ -44,9 +48,12 @@
 //! WHERE (timestamp >= 100 AND timestamp < 200) OR timestamp = 300
 //! ```
 //!
-//! This produces two atomic expressions:
-//! - Atomic 1: `[timestamp >= 100, timestamp < 200]` (AND of nucleons)
-//! - Atomic 2: `[timestamp = 300]` (single nucleon)
+//! This produces a single PartitionExpr that preserves the logical structure:
+//! ```
+//! PartitionExpr(
+//!   (timestamp >= 100 AND timestamp < 200) OR timestamp = 300
+//! )
+//! ```
 
 use std::collections::HashSet;
 
@@ -55,7 +62,6 @@ use common_telemetry::debug;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::{Expr, LogicalPlan, Operator};
 use datatypes::value::Value;
-use partition::collider::{AtomicExpr, Collider};
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
 /// Converts DataFusion expressions to PartitionExpr
@@ -406,50 +412,6 @@ impl PredicateExtractor {
         }
     }
 
-    /// Extract atomic expressions for partition columns from logical plan
-    /// This is the new enhanced method that returns AtomicExpr
-    pub fn extract_atomic_constraints(
-        plan: &LogicalPlan,
-        partition_columns: &[String],
-    ) -> DfResult<Vec<AtomicExpr>> {
-        // Get the partition expressions first
-        let partition_exprs = Self::extract_partition_expressions(plan, partition_columns)?;
-
-        if partition_exprs.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Use Collider to process the expressions
-        match Collider::new(&partition_exprs) {
-            Ok(collider) => {
-                // Filter atomic expressions to only include relevant partition columns
-                let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
-                let filtered_atomics: Vec<AtomicExpr> = collider
-                    .atomic_exprs
-                    .into_iter()
-                    .filter(|atomic| {
-                        atomic.nucleons.iter().any(|nucleon| {
-                            // Check if any nucleon in this atomic expression involves partition columns
-                            partition_set.contains(nucleon.column())
-                        })
-                    })
-                    .collect();
-
-                debug!(
-                    "Extracted {} atomic constraints from logical plan for partition columns: {:?}",
-                    filtered_atomics.len(),
-                    partition_columns
-                );
-
-                Ok(filtered_atomics)
-            }
-            Err(err) => {
-                debug!("Failed to create collider from partition expressions: {}, returning empty constraints", err);
-                Ok(Vec::new())
-            }
-        }
-    }
-
     /// Collect all filter expressions from a logical plan
     fn collect_filter_expressions(plan: &LogicalPlan, expressions: &mut Vec<Expr>) -> DfResult<()> {
         if let LogicalPlan::Filter(filter) = plan {
@@ -469,13 +431,14 @@ impl PredicateExtractor {
 mod tests {
     use std::sync::Arc;
 
+    use common_time::Timestamp;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::Column;
     use datafusion::datasource::DefaultTableSource;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit, LogicalPlanBuilder};
-    use datatypes::value::OrderedFloat;
-    use partition::collider::{AtomicExpr, GluonOp, NucleonExpr};
+    use datatypes::value::Value;
+    use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
     use super::*;
 
@@ -502,7 +465,7 @@ mod tests {
     struct FilterTestCase {
         name: &'static str,
         filter_expr: Expr,
-        expected_atomics: Vec<AtomicExpr>,
+        expected_partition_exprs: Vec<PartitionExpr>,
         partition_columns: Vec<&'static str>,
     }
 
@@ -510,30 +473,20 @@ mod tests {
         fn new(
             name: &'static str,
             filter_expr: Expr,
-            expected_atomics: Vec<AtomicExpr>,
+            expected_partition_exprs: Vec<PartitionExpr>,
             partition_columns: Vec<&'static str>,
         ) -> Self {
             Self {
                 name,
                 filter_expr,
-                expected_atomics,
+                expected_partition_exprs,
                 partition_columns,
             }
         }
     }
 
-    /// Helper to check atomic constraints for a set of test cases.
-    fn check_atomic_constraints(cases: Vec<FilterTestCase>) {
-        fn sort_nucleons(exprs: &mut [partition::collider::AtomicExpr]) {
-            for atomic in exprs.iter_mut() {
-                atomic.nucleons.sort_by(|a, b| {
-                    a.column()
-                        .cmp(b.column())
-                        .then(a.op().cmp(b.op()))
-                        .then(a.value().partial_cmp(&b.value()).unwrap())
-                });
-            }
-        }
+    /// Helper to check partition expressions for a set of test cases.
+    fn check_partition_expressions(cases: Vec<FilterTestCase>) {
         for case in cases {
             let table_scan = create_test_table_scan();
             let filter = case.filter_expr.clone();
@@ -549,15 +502,14 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-            let mut atomic_constraints =
-                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
-            let mut expected = case.expected_atomics.clone();
-            sort_nucleons(&mut atomic_constraints);
-            sort_nucleons(&mut expected);
+            let partition_exprs =
+                PredicateExtractor::extract_partition_expressions(&plan, &partition_columns)
+                    .unwrap();
+            let expected = case.expected_partition_exprs.clone();
             assert_eq!(
-                atomic_constraints, expected,
-                "Test case '{}': expected atomic constraints {:?}, got {:?}",
-                case.name, expected, atomic_constraints
+                partition_exprs, expected,
+                "Test case '{}': expected partition expressions {:?}, got {:?}",
+                case.name, expected, partition_exprs
             );
         }
     }
@@ -574,13 +526,10 @@ mod tests {
             FilterTestCase::new(
                 "simple_constraint",
                 col("user_id").gt_eq(lit(100i64)),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::GtEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
@@ -589,16 +538,19 @@ mod tests {
                 col("user_id")
                     .eq(lit(100i64))
                     .or(col("user_id").eq(lit(200i64))),
-                vec![
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(1.0))],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
+                )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
@@ -609,26 +561,39 @@ mod tests {
                     .or(col("user_id")
                         .gt_eq(lit(300i64))
                         .and(col("user_id").lt(lit(400i64)))),
-                vec![
-                    AtomicExpr::new(
-                        vec![
-                            NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(0.0)),
-                            NucleonExpr::new("user_id", GluonOp::Lt, OrderedFloat(1.0)),
-                        ],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![
-                            NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(2.0)),
-                            NucleonExpr::new("user_id", GluonOp::Lt, OrderedFloat(3.0)),
-                        ],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(Value::Int64(100)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(Value::Int64(200)),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(Value::Int64(300)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(Value::Int64(400)),
+                        )),
+                    )),
+                )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -637,22 +602,20 @@ mod tests {
             FilterTestCase::new(
                 "simple_alias",
                 col("user_id").alias("uid").eq(lit(100i64)),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "nested_alias",
                 col("user_id").alias("uid").alias("u").gt_eq(lit(50i64)),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::GtEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(Value::Int64(50)),
                 )],
                 vec!["user_id"],
             ),
@@ -663,23 +626,31 @@ mod tests {
                     .gt_eq(lit(100i64))
                     .and(col("user_id").alias("u").lt(lit(200i64)))
                     .or(col("user_id").alias("id").eq(lit(300i64))),
-                vec![
-                    AtomicExpr::new(
-                        vec![
-                            NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(0.0)),
-                            NucleonExpr::new("user_id", GluonOp::Lt, OrderedFloat(1.0)),
-                        ],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(2.0))],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(Value::Int64(100)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Lt,
+                            Operand::Value(Value::Int64(200)),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(300)),
+                    )),
+                )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -688,31 +659,44 @@ mod tests {
             FilterTestCase::new(
                 "simple_inlist",
                 col("user_id").in_list(vec![lit(100i64), lit(200i64), lit(300i64)], false),
-                vec![
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(1.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(2.0))],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Eq,
+                            Operand::Value(Value::Int64(100)),
+                        )),
+                        RestrictedOp::Or,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Eq,
+                            Operand::Value(Value::Int64(200)),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(300)),
+                    )),
+                )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "negated_inlist",
                 col("user_id").in_list(vec![lit(100i64), lit(200i64)], true),
-                vec![AtomicExpr::new(
-                    vec![
-                        NucleonExpr::new("user_id", GluonOp::NotEq, OrderedFloat(0.0)),
-                        NucleonExpr::new("user_id", GluonOp::NotEq, OrderedFloat(1.0)),
-                    ],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::NotEq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::NotEq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
                 )],
                 vec!["user_id"],
             ),
@@ -721,20 +705,23 @@ mod tests {
                 col("user_id")
                     .alias("uid")
                     .in_list(vec![lit(100i64), lit(200i64)], false),
-                vec![
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(1.0))],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
+                )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -743,12 +730,18 @@ mod tests {
             FilterTestCase::new(
                 "simple_between",
                 col("user_id").between(lit(100i64), lit(200i64)),
-                vec![AtomicExpr::new(
-                    vec![
-                        NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(0.0)),
-                        NucleonExpr::new("user_id", GluonOp::LtEq, OrderedFloat(1.0)),
-                    ],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::LtEq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
                 )],
                 vec!["user_id"],
             ),
@@ -760,16 +753,19 @@ mod tests {
                     low: Box::new(lit(100i64)),
                     high: Box::new(lit(200i64)),
                 }),
-                vec![
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Lt, OrderedFloat(0.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Gt, OrderedFloat(1.0))],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Gt,
+                        Operand::Value(Value::Int64(200)),
+                    )),
+                )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
@@ -777,17 +773,23 @@ mod tests {
                 col("user_id")
                     .alias("uid")
                     .between(lit(100i64), lit(200i64)),
-                vec![AtomicExpr::new(
-                    vec![
-                        NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(0.0)),
-                        NucleonExpr::new("user_id", GluonOp::LtEq, OrderedFloat(1.0)),
-                    ],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::LtEq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
                 )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -796,36 +798,35 @@ mod tests {
             FilterTestCase::new(
                 "is_null",
                 col("user_id").is_null(),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Null),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "is_not_null",
                 col("user_id").is_not_null(),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::NotEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Null),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "null_with_alias",
                 col("user_id").alias("uid").is_null(),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Null),
                 )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -838,9 +839,10 @@ mod tests {
                     data_type: DataType::Int64,
                 })
                 .eq(lit(100i64)),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
@@ -851,9 +853,10 @@ mod tests {
                     data_type: DataType::Int64,
                 })
                 .eq(lit(100i64)),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
@@ -870,7 +873,7 @@ mod tests {
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -879,57 +882,45 @@ mod tests {
             FilterTestCase::new(
                 "not_equality",
                 Expr::Not(Box::new(col("user_id").eq(lit(100i64)))),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::NotEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "not_comparison",
                 Expr::Not(Box::new(col("user_id").lt(lit(100i64)))),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::GtEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "not_is_null",
                 Expr::Not(Box::new(col("user_id").is_null())),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::NotEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Null),
                 )],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
                 "not_with_alias",
                 Expr::Not(Box::new(col("user_id").alias("uid").eq(lit(100i64)))),
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "user_id",
-                        GluonOp::NotEq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -942,30 +933,28 @@ mod tests {
                         ScalarValue::TimestampMillisecond(Some(1672574400000), None);
                     col("timestamp").eq(Expr::Literal(timestamp_val))
                 },
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new(
-                        "timestamp",
-                        GluonOp::Eq,
-                        OrderedFloat(0.0),
-                    )],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("timestamp".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Timestamp(Timestamp::new_millisecond(1672574400000))),
                 )],
                 vec!["timestamp"],
             ),
             FilterTestCase::new(
-                "decimal_scalar",
+                "float_scalar",
                 {
-                    let decimal_val = ScalarValue::Decimal128(Some(12345), 5, 2);
-                    col("user_id").eq(Expr::Literal(decimal_val))
+                    let float_val = ScalarValue::Float64(Some(123.45));
+                    col("user_id").eq(Expr::Literal(float_val))
                 },
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Float64(123.45.into())),
                 )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 
     #[test]
@@ -977,9 +966,10 @@ mod tests {
                     let qualified_col = Expr::Column(Column::new(Some("test"), "user_id"));
                     qualified_col.eq(lit(100i64))
                 },
-                vec![AtomicExpr::new(
-                    vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                    0,
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
@@ -996,26 +986,38 @@ mod tests {
                     let between_expr = cast_expr.between(lit(300i64), lit(400i64));
                     in_expr.or(between_expr)
                 },
-                vec![
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(0.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![NucleonExpr::new("user_id", GluonOp::Eq, OrderedFloat(1.0))],
-                        0,
-                    ),
-                    AtomicExpr::new(
-                        vec![
-                            NucleonExpr::new("user_id", GluonOp::GtEq, OrderedFloat(2.0)),
-                            NucleonExpr::new("user_id", GluonOp::LtEq, OrderedFloat(3.0)),
-                        ],
-                        0,
-                    ),
-                ],
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Eq,
+                            Operand::Value(Value::Int64(100)),
+                        )),
+                        RestrictedOp::Or,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::Eq,
+                            Operand::Value(Value::Int64(200)),
+                        )),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::GtEq,
+                            Operand::Value(Value::Int64(300)),
+                        )),
+                        RestrictedOp::And,
+                        Operand::Expr(PartitionExpr::new(
+                            Operand::Column("user_id".to_string()),
+                            RestrictedOp::LtEq,
+                            Operand::Value(Value::Int64(400)),
+                        )),
+                    )),
+                )],
                 vec!["user_id"],
             ),
         ];
-        check_atomic_constraints(cases);
+        check_partition_expressions(cases);
     }
 }

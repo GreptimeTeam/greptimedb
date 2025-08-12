@@ -21,6 +21,8 @@
 //! ## Key Components
 //!
 //! - [`ConstraintPruner`]: Main pruning algorithm that uses constraint satisfaction
+//! - Takes PartitionExpr list from PredicateExtractor and partition info to return region IDs
+//! - Clean separation: PredicateExtractor → Vec&lt;PartitionExpr&gt; → ConstraintPruner → Vec&lt;RegionId&gt;
 //!
 //! ## Algorithm Overview
 //!
@@ -74,6 +76,14 @@ impl ConstraintPruner {
     /// Prune regions using constraint satisfaction approach
     /// Takes query expressions and partition info, returns matching region IDs
     pub fn prune_regions(
+        query_expressions: &[PartitionExpr],
+        partitions: &[PartitionInfo],
+    ) -> Result<Vec<RegionId>> {
+        Self::prune_regions_impl(query_expressions, partitions)
+    }
+
+    /// Internal implementation for region pruning
+    fn prune_regions_impl(
         query_expressions: &[PartitionExpr],
         partitions: &[PartitionInfo],
     ) -> Result<Vec<RegionId>> {
