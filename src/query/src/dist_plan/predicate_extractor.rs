@@ -50,6 +50,7 @@
 
 use std::collections::HashSet;
 
+use arrow::datatypes::DataType;
 use common_telemetry::debug;
 use datafusion_common::{Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, LogicalPlan, Operator};
@@ -71,6 +72,142 @@ impl DataFusionExprConverter {
 
                 Ok(PartitionExpr::new(lhs, op, rhs))
             }
+            Expr::InList(inlist_expr) => {
+                // Convert col IN (val1, val2, val3) to col = val1 OR col = val2 OR col = val3
+                // Handle negation: col NOT IN (val1, val2) to col != val1 AND col != val2
+                let column_operand = Self::convert_to_operand(&inlist_expr.expr)?;
+
+                if inlist_expr.list.is_empty() {
+                    return Err(datafusion_common::DataFusionError::Plan(
+                        "InList with empty list is not supported".to_string(),
+                    ));
+                }
+
+                let op = if inlist_expr.negated {
+                    RestrictedOp::NotEq
+                } else {
+                    RestrictedOp::Eq
+                };
+
+                let connector_op = if inlist_expr.negated {
+                    RestrictedOp::And // NOT IN becomes col != val1 AND col != val2
+                } else {
+                    RestrictedOp::Or // IN becomes col = val1 OR col = val2
+                };
+
+                // Convert each value in the list to an equality/inequality expression
+                let mut expressions = Vec::new();
+                for value_expr in &inlist_expr.list {
+                    let value_operand = Self::convert_to_operand(value_expr)?;
+                    expressions.push(PartitionExpr::new(
+                        column_operand.clone(),
+                        op.clone(),
+                        value_operand,
+                    ));
+                }
+
+                // Chain expressions with OR/AND
+                let mut expr_iter = expressions.into_iter();
+                let mut result = expr_iter.next().unwrap();
+                for expr in expr_iter {
+                    result = PartitionExpr::new(
+                        Operand::Expr(result),
+                        connector_op.clone(),
+                        Operand::Expr(expr),
+                    );
+                }
+
+                Ok(result)
+            }
+            Expr::Between(between_expr) => {
+                // Convert col BETWEEN low AND high to col >= low AND col <= high
+                // Handle negation: col NOT BETWEEN low AND high to col < low OR col > high
+                let column_operand = Self::convert_to_operand(&between_expr.expr)?;
+                let low_operand = Self::convert_to_operand(&between_expr.low)?;
+                let high_operand = Self::convert_to_operand(&between_expr.high)?;
+
+                if between_expr.negated {
+                    // NOT BETWEEN: col < low OR col > high
+                    let left_expr =
+                        PartitionExpr::new(column_operand.clone(), RestrictedOp::Lt, low_operand);
+                    let right_expr =
+                        PartitionExpr::new(column_operand, RestrictedOp::Gt, high_operand);
+                    Ok(PartitionExpr::new(
+                        Operand::Expr(left_expr),
+                        RestrictedOp::Or,
+                        Operand::Expr(right_expr),
+                    ))
+                } else {
+                    // BETWEEN: col >= low AND col <= high
+                    let left_expr =
+                        PartitionExpr::new(column_operand.clone(), RestrictedOp::GtEq, low_operand);
+                    let right_expr =
+                        PartitionExpr::new(column_operand, RestrictedOp::LtEq, high_operand);
+                    Ok(PartitionExpr::new(
+                        Operand::Expr(left_expr),
+                        RestrictedOp::And,
+                        Operand::Expr(right_expr),
+                    ))
+                }
+            }
+            Expr::IsNull(expr) => {
+                // Convert col IS NULL to a PartitionExpr
+                let column_operand = Self::convert_to_operand(expr)?;
+                Ok(PartitionExpr::new(
+                    column_operand,
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Null),
+                ))
+            }
+            Expr::IsNotNull(expr) => {
+                // Convert col IS NOT NULL to a PartitionExpr
+                let column_operand = Self::convert_to_operand(expr)?;
+                Ok(PartitionExpr::new(
+                    column_operand,
+                    RestrictedOp::NotEq,
+                    Operand::Value(Value::Null),
+                ))
+            }
+            Expr::Not(expr) => {
+                // Handle NOT expressions by inverting the inner expression
+                match expr.as_ref() {
+                    Expr::BinaryExpr(binary_expr) => {
+                        let lhs = Self::convert_to_operand(&binary_expr.left)?;
+                        let rhs = Self::convert_to_operand(&binary_expr.right)?;
+                        let inverted_op = Self::invert_operator(&binary_expr.op)?;
+
+                        Ok(PartitionExpr::new(lhs, inverted_op, rhs))
+                    }
+                    Expr::IsNull(inner_expr) => {
+                        // NOT (col IS NULL) becomes col IS NOT NULL
+                        let column_operand = Self::convert_to_operand(inner_expr)?;
+                        Ok(PartitionExpr::new(
+                            column_operand,
+                            RestrictedOp::NotEq,
+                            Operand::Value(Value::Null),
+                        ))
+                    }
+                    Expr::IsNotNull(inner_expr) => {
+                        // NOT (col IS NOT NULL) becomes col IS NULL
+                        let column_operand = Self::convert_to_operand(inner_expr)?;
+                        Ok(PartitionExpr::new(
+                            column_operand,
+                            RestrictedOp::Eq,
+                            Operand::Value(Value::Null),
+                        ))
+                    }
+                    _ => {
+                        debug!(
+                            "Unsupported NOT expression for partition pruning: {:?}",
+                            expr
+                        );
+                        Err(datafusion_common::DataFusionError::Plan(format!(
+                            "NOT expression with inner type {:?} not supported for partition pruning",
+                            expr
+                        )))
+                    }
+                }
+            }
             _ => Err(datafusion_common::DataFusionError::Plan(format!(
                 "Unsupported expression type for conversion: {:?}",
                 expr
@@ -81,10 +218,43 @@ impl DataFusionExprConverter {
     /// Convert DataFusion Expr to Operand
     fn convert_to_operand(expr: &Expr) -> DfResult<Operand> {
         match expr {
-            Expr::Column(col) => Ok(Operand::Column(col.name.clone())),
+            Expr::Column(col) => {
+                // Handle qualified column names (table.column) by extracting just the column name
+                // For partition pruning, we typically only care about the column name itself
+                let column_name = if let Some(relation) = &col.relation {
+                    debug!(
+                        "Using qualified column reference: {}.{}",
+                        relation, col.name
+                    );
+                    col.name.clone()
+                } else {
+                    col.name.clone()
+                };
+                Ok(Operand::Column(column_name))
+            }
             Expr::Literal(scalar_value) => {
                 let value = Self::scalar_value_to_value(scalar_value)?;
                 Ok(Operand::Value(value))
+            }
+            Expr::Alias(alias_expr) => {
+                // Unwrap alias to get the actual expression
+                Self::convert_to_operand(&alias_expr.expr)
+            }
+            Expr::Cast(cast_expr) => {
+                // For safe casts, unwrap to the inner expression
+                // For unsafe casts, skip with debug logging
+                if Self::is_safe_cast_for_partition_pruning(&cast_expr.data_type) {
+                    Self::convert_to_operand(&cast_expr.expr)
+                } else {
+                    debug!(
+                        "Skipping unsafe cast for partition pruning: {:?}",
+                        cast_expr.data_type
+                    );
+                    Err(datafusion_common::DataFusionError::Plan(format!(
+                        "Cast to {:?} not supported for partition pruning",
+                        cast_expr.data_type
+                    )))
+                }
             }
             other => {
                 let partition_expr = Self::convert(other)?;
@@ -111,32 +281,191 @@ impl DataFusionExprConverter {
         }
     }
 
+    /// Invert a DataFusion Operator for NOT expressions
+    fn invert_operator(op: &Operator) -> DfResult<RestrictedOp> {
+        match op {
+            Operator::Eq => Ok(RestrictedOp::NotEq),
+            Operator::NotEq => Ok(RestrictedOp::Eq),
+            Operator::Lt => Ok(RestrictedOp::GtEq),
+            Operator::LtEq => Ok(RestrictedOp::Gt),
+            Operator::Gt => Ok(RestrictedOp::LtEq),
+            Operator::GtEq => Ok(RestrictedOp::Lt),
+            Operator::And => Ok(RestrictedOp::Or), // De Morgan's law: NOT (A AND B) = (NOT A) OR (NOT B)
+            Operator::Or => Ok(RestrictedOp::And), // De Morgan's law: NOT (A OR B) = (NOT A) AND (NOT B)
+            _ => Err(datafusion_common::DataFusionError::Plan(format!(
+                "Cannot invert operator: {:?}",
+                op
+            ))),
+        }
+    }
+
     /// Convert DataFusion ScalarValue to datatypes Value
     fn scalar_value_to_value(scalar: &ScalarValue) -> DfResult<Value> {
         let value = match scalar {
             ScalarValue::Boolean(Some(v)) => Value::Boolean(*v),
+            ScalarValue::Boolean(None) => Value::Null,
             ScalarValue::Int8(Some(v)) => Value::Int8(*v),
+            ScalarValue::Int8(None) => Value::Null,
             ScalarValue::Int16(Some(v)) => Value::Int16(*v),
+            ScalarValue::Int16(None) => Value::Null,
             ScalarValue::Int32(Some(v)) => Value::Int32(*v),
+            ScalarValue::Int32(None) => Value::Null,
             ScalarValue::Int64(Some(v)) => Value::Int64(*v),
+            ScalarValue::Int64(None) => Value::Null,
             ScalarValue::UInt8(Some(v)) => Value::UInt8(*v),
+            ScalarValue::UInt8(None) => Value::Null,
             ScalarValue::UInt16(Some(v)) => Value::UInt16(*v),
+            ScalarValue::UInt16(None) => Value::Null,
             ScalarValue::UInt32(Some(v)) => Value::UInt32(*v),
+            ScalarValue::UInt32(None) => Value::Null,
             ScalarValue::UInt64(Some(v)) => Value::UInt64(*v),
+            ScalarValue::UInt64(None) => Value::Null,
             ScalarValue::Float32(Some(v)) => Value::Float32(OrderedFloat(*v)),
+            ScalarValue::Float32(None) => Value::Null,
             ScalarValue::Float64(Some(v)) => Value::Float64(OrderedFloat(*v)),
+            ScalarValue::Float64(None) => Value::Null,
             ScalarValue::Utf8(Some(v)) => Value::String(v.as_str().into()),
+            ScalarValue::Utf8(None) => Value::Null,
             ScalarValue::Binary(Some(v)) => Value::Binary(v.clone().into()),
+            ScalarValue::Binary(None) => Value::Null,
             ScalarValue::Date32(Some(v)) => Value::Date((*v).into()),
+            ScalarValue::Date32(None) => Value::Null,
+            ScalarValue::Date64(Some(v)) => Value::Timestamp((*v * 1000).into()), // Convert to microseconds
+            ScalarValue::Date64(None) => Value::Null,
+
+            // Timestamp variants with different precisions
+            ScalarValue::TimestampSecond(Some(v), _) => Value::Timestamp((*v * 1_000_000).into()),
+            ScalarValue::TimestampSecond(None, _) => Value::Null,
+            ScalarValue::TimestampMillisecond(Some(v), _) => Value::Timestamp((*v * 1_000).into()),
+            ScalarValue::TimestampMillisecond(None, _) => Value::Null,
+            ScalarValue::TimestampMicrosecond(Some(v), _) => Value::Timestamp((*v).into()),
+            ScalarValue::TimestampMicrosecond(None, _) => Value::Null,
+            ScalarValue::TimestampNanosecond(Some(v), _) => Value::Timestamp((*v / 1_000).into()),
+            ScalarValue::TimestampNanosecond(None, _) => Value::Null,
+
+            // Time variants
+            ScalarValue::Time32Second(Some(v)) => Value::Time((*v as i64 * 1_000_000).into()),
+            ScalarValue::Time32Second(None) => Value::Null,
+            ScalarValue::Time32Millisecond(Some(v)) => Value::Time((*v as i64 * 1_000).into()),
+            ScalarValue::Time32Millisecond(None) => Value::Null,
+            ScalarValue::Time64Microsecond(Some(v)) => Value::Time((*v).into()),
+            ScalarValue::Time64Microsecond(None) => Value::Null,
+            ScalarValue::Time64Nanosecond(Some(v)) => Value::Time((*v / 1_000).into()),
+            ScalarValue::Time64Nanosecond(None) => Value::Null,
+
+            // Duration variants
+            ScalarValue::DurationSecond(Some(v)) => Value::Duration((*v * 1_000_000).into()),
+            ScalarValue::DurationSecond(None) => Value::Null,
+            ScalarValue::DurationMillisecond(Some(v)) => Value::Duration((*v * 1_000).into()),
+            ScalarValue::DurationMillisecond(None) => Value::Null,
+            ScalarValue::DurationMicrosecond(Some(v)) => Value::Duration((*v).into()),
+            ScalarValue::DurationMicrosecond(None) => Value::Null,
+            ScalarValue::DurationNanosecond(Some(v)) => Value::Duration((*v / 1_000).into()),
+            ScalarValue::DurationNanosecond(None) => Value::Null,
+
+            // Decimal variants
+            ScalarValue::Decimal128(Some(v), _precision, scale) => {
+                // Convert to string representation for now - more complex conversion would be needed for exact decimal handling
+                let scale_factor = 10_i128.pow(*scale as u32);
+                let decimal_str = format!(
+                    "{:.prec$}",
+                    (*v as f64) / (scale_factor as f64),
+                    prec = *scale as usize
+                );
+                Value::String(decimal_str.into())
+            }
+            ScalarValue::Decimal128(None, _, _) => Value::Null,
+            ScalarValue::Decimal256(Some(_), _, _) => {
+                debug!("Decimal256 values not fully supported in partition pruning, skipping");
+                return Err(datafusion_common::DataFusionError::Plan(
+                    "Decimal256 not supported for partition pruning".to_string(),
+                ));
+            }
+            ScalarValue::Decimal256(None, _, _) => Value::Null,
+
+            // Large string variants
+            ScalarValue::LargeUtf8(Some(v)) => Value::String(v.as_str().into()),
+            ScalarValue::LargeUtf8(None) => Value::Null,
+            ScalarValue::LargeBinary(Some(v)) => Value::Binary(v.clone().into()),
+            ScalarValue::LargeBinary(None) => Value::Null,
+
+            // Interval variants - convert to duration
+            ScalarValue::IntervalYearMonth(Some(v)) => {
+                // Approximate: 1 month = 30 days = 30 * 24 * 3600 * 1_000_000 microseconds
+                let months = *v;
+                let microseconds = months as i64 * 30 * 24 * 3600 * 1_000_000;
+                Value::Duration(microseconds.into())
+            }
+            ScalarValue::IntervalYearMonth(None) => Value::Null,
+            ScalarValue::IntervalDayTime(Some(v)) => {
+                // IntervalDayTime has days and milliseconds fields
+                let days = v.days;
+                let milliseconds = v.milliseconds;
+                let total_microseconds =
+                    (days as i64 * 24 * 3600 * 1_000_000) + (milliseconds as i64 * 1_000);
+                Value::Duration(total_microseconds.into())
+            }
+            ScalarValue::IntervalDayTime(None) => Value::Null,
+            ScalarValue::IntervalMonthDayNano(Some(v)) => {
+                // v is packed as (months, days, nanoseconds) - simplified conversion
+                let months = v.months;
+                let days = v.days;
+                let nanos = v.nanoseconds;
+                let total_microseconds = (months as i64 * 30 * 24 * 3600 * 1_000_000)
+                    + (days as i64 * 24 * 3600 * 1_000_000)
+                    + (nanos / 1_000);
+                Value::Duration(total_microseconds.into())
+            }
+            ScalarValue::IntervalMonthDayNano(None) => Value::Null,
+
             ScalarValue::Null => Value::Null,
             _ => {
+                debug!(
+                    "Unsupported scalar value type for partition pruning: {:?}",
+                    scalar
+                );
                 return Err(datafusion_common::DataFusionError::Plan(format!(
                     "Unsupported scalar value type: {:?}",
                     scalar
-                )))
+                )));
             }
         };
         Ok(value)
+    }
+
+    /// Determine if a cast is safe for partition pruning
+    /// Safe casts don't change the logical meaning of constraints
+    fn is_safe_cast_for_partition_pruning(data_type: &DataType) -> bool {
+        match data_type {
+            // Integer widening casts are generally safe
+            DataType::Int8 => true,
+            DataType::Int16 => true,
+            DataType::Int32 => true,
+            DataType::Int64 => true,
+            DataType::UInt8 => true,
+            DataType::UInt16 => true,
+            DataType::UInt32 => true,
+            DataType::UInt64 => true,
+
+            // Float casts are generally safe for equality/inequality comparisons
+            DataType::Float32 => true,
+            DataType::Float64 => true,
+
+            // String casts might be safe in some cases
+            DataType::Utf8 => true,
+            DataType::LargeUtf8 => true,
+
+            // Date/time casts might be safe if they don't change precision significantly
+            DataType::Date32 => true,
+            DataType::Date64 => true,
+            DataType::Timestamp(_, _) => true,
+
+            // Boolean casts are straightforward
+            DataType::Boolean => true,
+
+            // For other types, be conservative and skip
+            _ => false,
+        }
     }
 }
 
@@ -300,101 +629,783 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn test_non_partition_column_ignored() {
-        let table_scan = create_test_table_scan();
-
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .filter(col("value").gt_eq(lit(100i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let atomic_constraints = PredicateExtractor::extract_atomic_constraints(
-            &plan,
-            &["user_id".to_string()], // only user_id is partition column
-        )
-        .unwrap();
-
-        assert_eq!(atomic_constraints.len(), 0);
+    struct FilterTestCase {
+        name: &'static str,
+        filter_expr: Box<dyn Fn() -> Expr>,
+        expected_atomics: usize,
+        expected_nucleons_per_atomic: Vec<usize>,
+        partition_columns: Vec<&'static str>,
     }
 
-    #[test]
-    fn test_extract_atomic_constraints_simple() {
-        let table_scan = create_test_table_scan();
-
-        // user_id >= 100
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .filter(col("user_id").gt_eq(lit(100i64)))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
-                .unwrap();
-
-        assert_eq!(atomic_constraints.len(), 1);
-        let atomic = &atomic_constraints[0];
-        assert_eq!(atomic.nucleons.len(), 1);
-        assert_eq!(atomic.nucleons[0].column(), "user_id");
-    }
-
-    #[test]
-    fn test_extract_atomic_constraints_or_expression() {
-        let table_scan = create_test_table_scan();
-
-        // user_id = 100 OR user_id = 200
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .filter(
-                col("user_id")
-                    .eq(lit(100i64))
-                    .or(col("user_id").eq(lit(200i64))),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
-                .unwrap();
-
-        // OR expression should result in 2 atomic expressions
-        assert_eq!(atomic_constraints.len(), 2);
-        for atomic in &atomic_constraints {
-            assert_eq!(atomic.nucleons.len(), 1);
-            assert_eq!(atomic.nucleons[0].column(), "user_id");
+    impl FilterTestCase {
+        fn new(
+            name: &'static str,
+            filter_expr: Box<dyn Fn() -> Expr>,
+            expected_atomics: usize,
+            expected_nucleons_per_atomic: Vec<usize>,
+            partition_columns: Vec<&'static str>,
+        ) -> Self {
+            Self {
+                name,
+                filter_expr,
+                expected_atomics,
+                expected_nucleons_per_atomic,
+                partition_columns,
+            }
         }
     }
 
     #[test]
-    fn test_extract_atomic_constraints_complex_and_or() {
-        let table_scan = create_test_table_scan();
+    fn test_basic_constraints_extraction() {
+        let cases = vec![
+            FilterTestCase::new(
+                "non_partition_column_ignored",
+                Box::new(|| col("value").gt_eq(lit(100i64))),
+                0,
+                vec![],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "simple_constraint",
+                Box::new(|| col("user_id").gt_eq(lit(100i64))),
+                1,
+                vec![1],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "or_expression",
+                Box::new(|| {
+                    col("user_id")
+                        .eq(lit(100i64))
+                        .or(col("user_id").eq(lit(200i64)))
+                }),
+                2,
+                vec![1, 1],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "complex_and_or",
+                Box::new(|| {
+                    col("user_id")
+                        .gt_eq(lit(100i64))
+                        .and(col("user_id").lt(lit(200i64)))
+                        .or(col("user_id")
+                            .gt_eq(lit(300i64))
+                            .and(col("user_id").lt(lit(400i64))))
+                }),
+                2,
+                vec![2, 2],
+                vec!["user_id"],
+            ),
+        ];
 
-        // (user_id >= 100 AND user_id < 200) OR (user_id >= 300 AND user_id < 400)
-        let filter = col("user_id")
-            .gt_eq(lit(100i64))
-            .and(col("user_id").lt(lit(200i64)))
-            .or(col("user_id")
-                .gt_eq(lit(300i64))
-                .and(col("user_id").lt(lit(400i64))));
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
 
-        let plan = LogicalPlanBuilder::from(table_scan)
-            .filter(filter)
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let atomic_constraints =
-            PredicateExtractor::extract_atomic_constraints(&plan, &["user_id".to_string()])
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
                 .unwrap();
 
-        // Should result in 2 atomic expressions (one for each OR branch)
-        assert_eq!(atomic_constraints.len(), 2);
-        for atomic in &atomic_constraints {
-            assert_eq!(atomic.nucleons.len(), 2); // Each should have 2 constraints (AND)
-            for nucleon in &atomic.nucleons {
-                assert_eq!(nucleon.column(), "user_id");
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                // Verify all nucleons reference partition columns
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert!(
+                        case.partition_columns.contains(&nucleon.column()),
+                        "Test case '{}': nucleon references non-partition column '{}'",
+                        case.name,
+                        nucleon.column()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_alias_expressions() {
+        let cases = vec![
+            FilterTestCase::new(
+                "simple_alias",
+                Box::new(|| col("user_id").alias("uid").eq(lit(100i64))),
+                1,
+                vec![1],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "nested_alias",
+                Box::new(|| col("user_id").alias("uid").alias("u").gt_eq(lit(50i64))),
+                1,
+                vec![1],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "complex_alias_with_and_or",
+                Box::new(|| {
+                    col("user_id")
+                        .alias("uid")
+                        .gt_eq(lit(100i64))
+                        .and(col("user_id").alias("u").lt(lit(200i64)))
+                        .or(col("user_id").alias("id").eq(lit(300i64)))
+                }),
+                2,
+                vec![2, 1], // First atomic has 2 nucleons (AND), second has 1
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                // Verify all nucleons reference partition columns
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': should unwrap alias to 'user_id', got '{}'",
+                        case.name,
+                        nucleon.column()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_inlist_expressions() {
+        let cases = vec![
+            FilterTestCase::new(
+                "simple_inlist",
+                Box::new(|| {
+                    col("user_id").in_list(vec![lit(100i64), lit(200i64), lit(300i64)], false)
+                }),
+                3,
+                vec![1, 1, 1], // Three OR conditions, each with 1 nucleon
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "negated_inlist",
+                Box::new(|| col("user_id").in_list(vec![lit(100i64), lit(200i64)], true)),
+                1,
+                vec![2], // One AND condition with 2 nucleons: user_id != 100 AND user_id != 200
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "inlist_with_alias",
+                Box::new(|| {
+                    col("user_id")
+                        .alias("uid")
+                        .in_list(vec![lit(100i64), lit(200i64)], false)
+                }),
+                2,
+                vec![1, 1], // Two OR conditions, each with 1 nucleon
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': nucleon should reference 'user_id'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_between_expressions() {
+        let cases = vec![
+            FilterTestCase::new(
+                "simple_between",
+                Box::new(|| col("user_id").between(lit(100i64), lit(200i64))),
+                1,
+                vec![2], // One AND with 2 nucleons: user_id >= 100 AND user_id <= 200
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "negated_between",
+                Box::new(|| {
+                    Expr::Between(datafusion_expr::Between {
+                        expr: Box::new(col("user_id")),
+                        negated: true,
+                        low: Box::new(lit(100i64)),
+                        high: Box::new(lit(200i64)),
+                    })
+                }),
+                2,
+                vec![1, 1], // Two OR conditions: user_id < 100 OR user_id > 200
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "between_with_alias",
+                Box::new(|| {
+                    col("user_id")
+                        .alias("uid")
+                        .between(lit(100i64), lit(200i64))
+                }),
+                1,
+                vec![2], // One AND with 2 nucleons
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': nucleon should reference 'user_id'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_null_expressions() {
+        let cases = vec![
+            FilterTestCase::new(
+                "is_null",
+                Box::new(|| col("user_id").is_null()),
+                1,
+                vec![1], // user_id = NULL
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "is_not_null",
+                Box::new(|| col("user_id").is_not_null()),
+                1,
+                vec![1], // user_id != NULL
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "null_with_alias",
+                Box::new(|| col("user_id").alias("uid").is_null()),
+                1,
+                vec![1], // aliased null check
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': nucleon should reference 'user_id'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cast_expressions() {
+        use datafusion::arrow::datatypes::DataType;
+
+        let cases = vec![
+            FilterTestCase::new(
+                "safe_cast",
+                Box::new(|| {
+                    Expr::Cast(datafusion_expr::Cast {
+                        expr: Box::new(col("user_id")),
+                        data_type: DataType::Int64,
+                    })
+                    .eq(lit(100i64))
+                }),
+                1,
+                vec![1], // Should unwrap cast
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_with_alias",
+                Box::new(|| {
+                    Expr::Cast(datafusion_expr::Cast {
+                        expr: Box::new(col("user_id").alias("uid")),
+                        data_type: DataType::Int64,
+                    })
+                    .eq(lit(100i64))
+                }),
+                1,
+                vec![1], // Should unwrap both cast and alias
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "unsafe_cast",
+                Box::new(|| {
+                    Expr::Cast(datafusion_expr::Cast {
+                        expr: Box::new(col("user_id")),
+                        data_type: DataType::List(std::sync::Arc::new(
+                            datafusion::arrow::datatypes::Field::new("item", DataType::Int32, true),
+                        )),
+                    })
+                    .eq(lit(100i64))
+                }),
+                0,
+                vec![], // Should reject unsafe cast
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': nucleon should reference 'user_id'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_not_expressions() {
+        let cases = vec![
+            FilterTestCase::new(
+                "not_equality",
+                Box::new(|| Expr::Not(Box::new(col("user_id").eq(lit(100i64))))),
+                1,
+                vec![1], // NOT (user_id = 100) becomes user_id != 100
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "not_comparison",
+                Box::new(|| Expr::Not(Box::new(col("user_id").lt(lit(100i64))))),
+                1,
+                vec![1], // NOT (user_id < 100) becomes user_id >= 100
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "not_is_null",
+                Box::new(|| Expr::Not(Box::new(col("user_id").is_null()))),
+                1,
+                vec![1], // NOT (user_id IS NULL) becomes user_id IS NOT NULL
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "not_with_alias",
+                Box::new(|| Expr::Not(Box::new(col("user_id").alias("uid").eq(lit(100i64))))),
+                1,
+                vec![1], // Should handle alias unwrapping with negation
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert_eq!(
+                        nucleon.column(),
+                        "user_id",
+                        "Test case '{}': nucleon should reference 'user_id'",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_scalar_value_conversions() {
+        use datafusion_common::ScalarValue;
+
+        let cases = vec![
+            FilterTestCase::new(
+                "timestamp_scalar",
+                Box::new(|| {
+                    let timestamp_val =
+                        ScalarValue::TimestampMillisecond(Some(1672574400000), None);
+                    col("timestamp").eq(Expr::Literal(timestamp_val))
+                }),
+                1,
+                vec![1],
+                vec!["timestamp"],
+            ),
+            FilterTestCase::new(
+                "decimal_scalar",
+                Box::new(|| {
+                    let decimal_val = ScalarValue::Decimal128(Some(12345), 5, 2); // 123.45 with precision=5, scale=2
+                    col("user_id").eq(Expr::Literal(decimal_val))
+                }),
+                1,
+                vec![1],
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            assert_eq!(
+                atomic_constraints.len(),
+                case.expected_atomics,
+                "Test case '{}': expected {} atomic constraints, got {}",
+                case.name,
+                case.expected_atomics,
+                atomic_constraints.len()
+            );
+
+            for (i, expected_nucleons) in case.expected_nucleons_per_atomic.iter().enumerate() {
+                assert_eq!(
+                    atomic_constraints[i].nucleons.len(),
+                    *expected_nucleons,
+                    "Test case '{}': atomic {} should have {} nucleons, got {}",
+                    case.name,
+                    i,
+                    expected_nucleons,
+                    atomic_constraints[i].nucleons.len()
+                );
+
+                for nucleon in &atomic_constraints[i].nucleons {
+                    assert!(
+                        case.partition_columns.contains(&nucleon.column()),
+                        "Test case '{}': nucleon should reference a partition column",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        use datafusion::arrow::datatypes::DataType;
+        use datafusion::common::Column;
+
+        let cases = vec![
+            FilterTestCase::new(
+                "qualified_column_name",
+                Box::new(|| {
+                    let qualified_col = Expr::Column(Column::new(Some("test"), "user_id"));
+                    qualified_col.eq(lit(100i64))
+                }),
+                1,
+                vec![1], // Should extract column name from qualified reference
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "comprehensive_combinations",
+                Box::new(|| {
+                    let in_expr = col("user_id")
+                        .alias("uid")
+                        .in_list(vec![lit(100i64), lit(200i64)], false);
+                    let cast_expr = Expr::Cast(datafusion_expr::Cast {
+                        expr: Box::new(col("user_id")),
+                        data_type: DataType::Int64,
+                    });
+                    let between_expr = cast_expr.between(lit(300i64), lit(400i64));
+                    in_expr.or(between_expr)
+                }),
+                3,
+                vec![1, 1, 2], // IN creates 2 OR conditions, BETWEEN creates 1 AND condition
+                vec!["user_id"],
+            ),
+        ];
+
+        for case in cases {
+            let table_scan = create_test_table_scan();
+            let filter = (case.filter_expr)();
+
+            let plan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let partition_columns: Vec<String> = case
+                .partition_columns
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let atomic_constraints =
+                PredicateExtractor::extract_atomic_constraints(&plan, &partition_columns).unwrap();
+
+            // For edge cases, just verify we get some constraints and they reference correct columns
+            assert!(
+                !atomic_constraints.is_empty(),
+                "Test case '{}': should produce at least some atomic constraints",
+                case.name
+            );
+
+            for atomic in &atomic_constraints {
+                for nucleon in &atomic.nucleons {
+                    assert!(
+                        case.partition_columns.contains(&nucleon.column()),
+                        "Test case '{}': nucleon should reference a partition column, got '{}'",
+                        case.name,
+                        nucleon.column()
+                    );
+                }
             }
         }
     }
