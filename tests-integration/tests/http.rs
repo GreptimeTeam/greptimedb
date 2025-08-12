@@ -548,6 +548,52 @@ pub async fn test_sql_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[tokio::test]
+async fn test_sql_format_api() {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(StorageType::File, "sql_format_api").await;
+    let client = TestClient::new(app).await;
+
+    // missing sql
+    let res = client.get("/v1/sql/format").send().await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
+    assert_eq!(body.code(), 1004);
+    assert_eq!(body.error(), "sql parameter is required.");
+
+    // with sql
+    let res = client
+        .get("/v1/sql/format?sql=select%201%20as%20x")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(formatted, "SELECT 1 AS x;");
+
+    // complex query
+    let complex_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let encoded_complex_query = encode(complex_query);
+
+    let query_params = format!("/v1/sql/format?sql={encoded_complex_query}");
+    let res = client.get(&query_params).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(formatted, "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;");
+
+    guard.remove_all().await;
+}
+
 pub async fn test_http_sql_slow_query(store_type: StorageType) {
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app).await;

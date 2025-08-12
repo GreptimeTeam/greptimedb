@@ -176,6 +176,49 @@ pub async fn sql_parse(
     Ok(stmts.into())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SqlFormatResponse {
+    pub formatted: String,
+}
+
+/// Handler to format sql string
+#[axum_macros::debug_handler]
+#[tracing::instrument(skip_all, fields(protocol = "http", request_type = "sql_format"))]
+pub async fn sql_format(
+    Query(query_params): Query<SqlQuery>,
+    Form(form_params): Form<SqlQuery>,
+) -> axum::response::Response {
+    let Some(sql) = query_params.sql.or(form_params.sql) else {
+        let resp = ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "sql parameter is required.".to_string(),
+        );
+        return HttpResponse::Error(resp).into_response();
+    };
+
+    // Parse using GreptimeDB dialect then reconstruct statements via Display
+    let stmts = match ParserContext::create_with_dialect(
+        &sql,
+        &GreptimeDbDialect {},
+        ParseOptions::default(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return HttpResponse::Error(ErrorResponse::from_error(e)).into_response(),
+    };
+
+    let mut parts: Vec<String> = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+        let mut s = format!("{:#}", stmt);
+        if !s.trim_end().ends_with(';') {
+            s.push(';');
+        }
+        parts.push(s);
+    }
+
+    let formatted = parts.join("\n");
+    Json(SqlFormatResponse { formatted }).into_response()
+}
+
 /// Create a response from query result
 pub async fn from_output(
     outputs: Vec<crate::error::Result<Output>>,
