@@ -2024,12 +2024,13 @@ impl PromPlanner {
         };
 
         // Create a set of available columns (tag columns + field columns + time index column)
-        let mut available_columns = std::collections::HashSet::new();
-        available_columns.extend(ctx.tag_columns.iter().cloned());
-        available_columns.extend(ctx.field_columns.iter().cloned());
-        if let Some(time_index) = &ctx.time_index_column {
-            available_columns.insert(time_index.clone());
-        }
+        let available_columns: HashSet<&str> = ctx
+            .tag_columns
+            .iter()
+            .chain(ctx.field_columns.iter())
+            .chain(ctx.time_index_column.as_ref())
+            .map(|s| s.as_str())
+            .collect();
 
         let src_labels = other_input_exprs
             .clone()
@@ -2040,7 +2041,7 @@ impl PromPlanner {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
                         if label.is_empty() {
                             Ok(DfExpr::Literal(ScalarValue::Null))
-                        } else if available_columns.contains(&label) {
+                        } else if available_columns.contains(label.as_str()) {
                             // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
                         } else {
