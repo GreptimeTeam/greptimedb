@@ -301,11 +301,11 @@ Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field
 
 TQL EVAL label_replace(demo_num_cpus, "~invalid", "", "src", "(.*)");
 
-Error: 1004(InvalidArguments), invalid destination label name in label_replace(): ~invalid
+Error: 1004(InvalidArguments), Invalid destination label name in label_replace(): ~invalid
 
 TQL EVAL label_replace(demo_num_cpus, "job", "value", "src", "(.*");
 
-Error: 1004(InvalidArguments), invalid regular expression in label_replace(): (.*
+Error: 1004(InvalidArguments), Invalid regular expression in label_replace(): (.*
 
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1

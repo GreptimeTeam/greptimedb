@@ -208,14 +208,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("invalid regular expression in label_replace(): {}", regex))]
+    #[snafu(display("Invalid regular expression in label_replace(): {}", regex))]
     InvalidRegularExpression {
         regex: String,
         #[snafu(implicit)]
         location: Location,
     },
 
-    #[snafu(display("invalid destination label name in label_replace(): {}", label_name))]
+    #[snafu(display("Invalid destination label name in label_replace(): {}", label_name))]
     InvalidDestinationLabelName {
         label_name: String,
         #[snafu(implicit)]
