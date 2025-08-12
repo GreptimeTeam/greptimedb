@@ -2033,8 +2033,7 @@ impl PromPlanner {
             .collect();
 
         let src_labels = other_input_exprs
-            .clone()
-            .into_iter()
+            .iter()
             .map(|expr| {
                 // Cast source label into column or null literal
                 match expr {
