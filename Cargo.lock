@@ -2785,6 +2785,7 @@ version = "0.17.0"
 dependencies = [
  "backtrace",
  "common-error",
+ "common-macro",
  "common-version",
  "console-subscriber",
  "greptime-proto",

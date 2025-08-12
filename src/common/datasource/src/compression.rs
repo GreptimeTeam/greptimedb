@@ -21,14 +21,14 @@ use async_compression::tokio::write;
 use bytes::Bytes;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use futures::Stream;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use strum::EnumIter;
 use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::{self, Error, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionType {
     /// Gzip-ed file
@@ -40,8 +40,18 @@ pub enum CompressionType {
     /// Zstd-ed file,
     Zstd,
     /// Uncompressed file
+    #[default]
     Uncompressed,
 }
+
+common_macro::impl_deserialize_with_empty_default!(
+    CompressionType,
+    Gzip => "gzip",
+    Bzip2 => "bzip2",
+    Xz => "xz",
+    Zstd => "zstd",
+    Uncompressed => "uncompressed",
+);
 
 impl FromStr for CompressionType {
     type Err = Error;

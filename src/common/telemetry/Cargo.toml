@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 backtrace = "0.3"
 common-error.workspace = true
+common-macro.workspace = true
 common-version.workspace = true
 console-subscriber = { version = "0.1", optional = true }
 greptime-proto.workspace = true

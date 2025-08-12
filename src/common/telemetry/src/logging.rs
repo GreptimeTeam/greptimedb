@@ -83,15 +83,22 @@ pub struct LoggingOptions {
 }
 
 /// The protocol of OTLP export.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OtlpExportProtocol {
     /// GRPC protocol.
     Grpc,
 
     /// HTTP protocol with binary protobuf.
+    #[default]
     Http,
 }
+
+common_macro::impl_deserialize_with_empty_default!(
+    OtlpExportProtocol,
+    Grpc => "grpc",
+    Http => "http",
+);
 
 /// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -138,23 +145,11 @@ pub enum SlowQueriesRecordType {
     Log,
 }
 
-impl<'de> serde::Deserialize<'de> for SlowQueriesRecordType {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "" => Ok(SlowQueriesRecordType::default()),
-            "system_table" => Ok(SlowQueriesRecordType::SystemTable),
-            "log" => Ok(SlowQueriesRecordType::Log),
-            _ => Err(serde::de::Error::unknown_variant(
-                &s,
-                &["system_table", "log"],
-            )),
-        }
-    }
-}
+common_macro::impl_deserialize_with_empty_default!(
+    SlowQueriesRecordType,
+    SystemTable => "system_table",
+    Log => "log",
+);
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -164,20 +159,11 @@ pub enum LogFormat {
     Text,
 }
 
-impl<'de> serde::Deserialize<'de> for LogFormat {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "" => Ok(LogFormat::default()),
-            "json" => Ok(LogFormat::Json),
-            "text" => Ok(LogFormat::Text),
-            _ => Err(serde::de::Error::unknown_variant(&s, &["json", "text"])),
-        }
-    }
-}
+common_macro::impl_deserialize_with_empty_default!(
+    LogFormat,
+    Json => "json",
+    Text => "text",
+);
 
 impl PartialEq for LoggingOptions {
     fn eq(&self, other: &Self) -> bool {
@@ -651,5 +637,25 @@ mod tests {
         // Missing record_type should use default (SystemTable)
         assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
         assert!(!opts.enable);
+    }
+
+    #[test]
+    fn test_otlp_export_protocol_deserialization_empty_string() {
+        let json = r#""""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (Http)
+        assert_eq!(protocol, OtlpExportProtocol::Http);
+    }
+
+    #[test]
+    fn test_otlp_export_protocol_deserialization_valid_values() {
+        let grpc_json = r#""grpc""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(grpc_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Grpc);
+
+        let http_json = r#""http""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(http_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Http);
     }
 }

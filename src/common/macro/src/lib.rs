@@ -16,6 +16,7 @@ mod admin_fn;
 mod aggr_func;
 mod print_caller;
 mod range_fn;
+mod serde_with_default;
 mod stack_trace_debug;
 mod utils;
 
@@ -185,4 +186,38 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     };
 
     gen.into()
+}
+
+/// Generates a custom `Deserialize` implementation for enums that treats empty strings as default values.
+///
+/// This macro is useful for configuration enums where an empty string should be treated as
+/// the default variant instead of causing a deserialization error.
+///
+/// # Example
+/// ```rust
+/// use common_macro::impl_deserialize_with_empty_default;
+/// use serde::{Serialize, Deserialize};
+///
+/// #[derive(Clone, Debug, Serialize, Default, PartialEq)]
+/// pub enum LogFormat {
+///     Json,
+///     #[default]
+///     Text,
+/// }
+///
+/// impl_deserialize_with_empty_default!(
+///     LogFormat,
+///     Json => "json",
+///     Text => "text",
+/// );
+/// ```
+///
+/// With this implementation:
+/// - `""` deserializes to `LogFormat::default()` (Text)
+/// - `"json"` deserializes to `LogFormat::Json`
+/// - `"text"` deserializes to `LogFormat::Text`
+/// - Any other string causes a deserialization error
+#[proc_macro]
+pub fn impl_deserialize_with_empty_default(input: TokenStream) -> TokenStream {
+    serde_with_default::impl_deserialize_with_empty_default(input)
 }
