@@ -14,46 +14,7 @@
 
 //! Predicate extraction for partition pruning.
 //!
-//! This module extracts predicate expressions from DataFusion logical plans and converts them
-//! into atomic constraints suitable for partition pruning. It serves as a bridge between
-//! DataFusion's query representation and GreptimeDB's partition constraint system.
-//!
-//! ## Key Components
-//!
-//! - [`DataFusionExprConverter`]: Converts DataFusion expressions into PartitionExpr format
-//! - [`PredicateExtractor`]: Main entry point for extracting predicates from logical plans
-//!
-//! ## Core Workflow
-//!
-//! 1. **Extract Filters**: Traverse the logical plan to collect all filter expressions
-//! 2. **Convert Expressions**: Transform DataFusion expressions into PartitionExpr format
-//! 3. **Filter Relevance**: Only return expressions that involve specified partition columns
-//!
-//! ## Clean Separation of Concerns
-//!
-//! This module ONLY handles DataFusion → PartitionExpr conversion.
-//! The proper flow is: LogicalPlan → PredicateExtractor → Vec&lt;PartitionExpr&gt; → ConstraintPruner → Vec&lt;RegionId&gt;
-//!
-//! ## Expression Conversion
-//!
-//! The module converts DataFusion expressions to PartitionExpr format:
-//! - Handles complex expressions like InList, Between, Alias, Cast, NOT
-//! - Preserves logical structure for downstream processing
-//! - Does NOT generate atomic constraints - that's ConstraintPruner's responsibility
-//!
-//! ## Example
-//!
-//! Given a SQL WHERE clause like:
-//! ```sql
-//! WHERE (timestamp >= 100 AND timestamp < 200) OR timestamp = 300
-//! ```
-//!
-//! This produces a single PartitionExpr that preserves the logical structure:
-//! ```
-//! PartitionExpr(
-//!   (timestamp >= 100 AND timestamp < 200) OR timestamp = 300
-//! )
-//! ```
+//! [`PredicateExtractor`] extract a list of [`PartitionExpr`] from given [`LogicalPlan`].
 
 use std::collections::HashSet;
 
@@ -63,6 +24,150 @@ use datafusion_common::Result as DfResult;
 use datafusion_expr::{Expr, LogicalPlan, Operator};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+
+/// Result of analyzing an expression for partition pruning safety
+#[derive(Debug, Clone)]
+enum ExpressionAnalysisResult {
+    /// Expression is safe to use as-is for pruning (only involves partition columns)
+    UseAsIs(PartitionExpr),
+    /// Extract only these parts for AND expressions (mixed with non-partition columns)
+    UsePartial(Vec<PartitionExpr>),
+    /// Drop the entire expression (unsafe for pruning, e.g., OR with non-partition columns)
+    Drop,
+}
+
+/// Analyzes expressions to determine safe pruning strategies for mixed partition/non-partition expressions
+struct ExpressionAnalyzer;
+
+impl ExpressionAnalyzer {
+    /// Analyze a partition expression to determine how it should be handled for safe pruning
+    fn analyze_expression_for_pruning(
+        expr: &PartitionExpr,
+        partition_columns: &HashSet<String>,
+    ) -> ExpressionAnalysisResult {
+        match expr.op() {
+            RestrictedOp::And => {
+                // For AND expressions, we can extract only the partition-related parts
+                // because if any part fails, the entire AND fails
+                let mut partition_constraints = Vec::new();
+                Self::extract_and_constraints(expr, partition_columns, &mut partition_constraints);
+
+                if partition_constraints.is_empty() {
+                    ExpressionAnalysisResult::Drop
+                } else if Self::expr_only_involves_partition_columns(expr, partition_columns) {
+                    // If the entire expression only involves partition columns, use as-is
+                    ExpressionAnalysisResult::UseAsIs(expr.clone())
+                } else {
+                    // Mixed expression: return only the partition parts
+                    ExpressionAnalysisResult::UsePartial(partition_constraints)
+                }
+            }
+            RestrictedOp::Or => {
+                // For OR expressions, we can only use them if ALL branches involve only partition columns
+                // because if any branch involves non-partition columns, we cannot safely prune
+                if Self::expr_only_involves_partition_columns(expr, partition_columns) {
+                    ExpressionAnalysisResult::UseAsIs(expr.clone())
+                } else {
+                    // Mixed OR expression: must drop entirely for safety
+                    ExpressionAnalysisResult::Drop
+                }
+            }
+            _ => {
+                // For comparison operations (=, <, >, etc.), check if they involve partition columns
+                if Self::operand_involves_partition_columns(expr.lhs(), partition_columns)
+                    || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
+                {
+                    if Self::expr_only_involves_partition_columns(expr, partition_columns) {
+                        ExpressionAnalysisResult::UseAsIs(expr.clone())
+                    } else {
+                        // This shouldn't happen for simple comparisons, but handle defensively
+                        ExpressionAnalysisResult::Drop
+                    }
+                } else {
+                    ExpressionAnalysisResult::Drop
+                }
+            }
+        }
+    }
+
+    /// Extract partition-related constraints from AND expressions recursively
+    fn extract_and_constraints(
+        expr: &PartitionExpr,
+        partition_columns: &HashSet<String>,
+        result: &mut Vec<PartitionExpr>,
+    ) {
+        if let RestrictedOp::And = expr.op() {
+            // Recursively process both sides of AND
+            Self::extract_constraints_from_operand(expr.lhs(), partition_columns, result);
+            Self::extract_constraints_from_operand(expr.rhs(), partition_columns, result);
+        } else {
+            // Non-AND expression: check if it involves partition columns
+            if Self::expr_involves_partition_columns(expr, partition_columns) {
+                result.push(expr.clone());
+            }
+        }
+    }
+
+    /// Extract constraints from an operand (which might be a column, value, or nested expression)
+    fn extract_constraints_from_operand(
+        operand: &Operand,
+        partition_columns: &HashSet<String>,
+        result: &mut Vec<PartitionExpr>,
+    ) {
+        match operand {
+            Operand::Column(_) | Operand::Value(_) => {
+                // This shouldn't happen in well-formed expressions
+            }
+            Operand::Expr(expr) => {
+                Self::extract_and_constraints(expr, partition_columns, result);
+            }
+        }
+    }
+
+    /// Check if an expression involves ANY partition columns (existing logic)
+    fn expr_involves_partition_columns(
+        expr: &PartitionExpr,
+        partition_columns: &HashSet<String>,
+    ) -> bool {
+        Self::operand_involves_partition_columns(expr.lhs(), partition_columns)
+            || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
+    }
+
+    /// Check if an expression involves ONLY partition columns (stricter check)
+    fn expr_only_involves_partition_columns(
+        expr: &PartitionExpr,
+        partition_columns: &HashSet<String>,
+    ) -> bool {
+        Self::operand_only_involves_partition_columns(expr.lhs(), partition_columns)
+            && Self::operand_only_involves_partition_columns(expr.rhs(), partition_columns)
+    }
+
+    /// Check if an operand involves any partition columns
+    fn operand_involves_partition_columns(
+        operand: &Operand,
+        partition_columns: &HashSet<String>,
+    ) -> bool {
+        match operand {
+            Operand::Column(col) => partition_columns.contains(col),
+            Operand::Value(_) => false,
+            Operand::Expr(expr) => Self::expr_involves_partition_columns(expr, partition_columns),
+        }
+    }
+
+    /// Check if an operand involves only partition columns or values
+    fn operand_only_involves_partition_columns(
+        operand: &Operand,
+        partition_columns: &HashSet<String>,
+    ) -> bool {
+        match operand {
+            Operand::Column(col) => partition_columns.contains(col),
+            Operand::Value(_) => true, // Values are always safe
+            Operand::Expr(expr) => {
+                Self::expr_only_involves_partition_columns(expr, partition_columns)
+            }
+        }
+    }
+}
 
 /// Converts DataFusion expressions to PartitionExpr
 pub struct DataFusionExprConverter;
@@ -361,15 +466,29 @@ impl PredicateExtractor {
         }
 
         // Convert each DataFusion filter expression to PartitionExpr
-        let mut partition_exprs = Vec::new();
+        let mut partition_exprs = Vec::with_capacity(filter_exprs.len());
         let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
 
         for filter_expr in filter_exprs {
             match DataFusionExprConverter::convert(&filter_expr) {
                 Ok(partition_expr) => {
-                    // Check if this expression involves partition columns
-                    if Self::expr_involves_partition_columns(&partition_expr, &partition_set) {
-                        partition_exprs.push(partition_expr);
+                    // Analyze expression for safe partition pruning
+                    match ExpressionAnalyzer::analyze_expression_for_pruning(
+                        &partition_expr,
+                        &partition_set,
+                    ) {
+                        ExpressionAnalysisResult::UseAsIs(expr) => {
+                            partition_exprs.push(expr);
+                        }
+                        ExpressionAnalysisResult::UsePartial(exprs) => {
+                            partition_exprs.extend(exprs);
+                        }
+                        ExpressionAnalysisResult::Drop => {
+                            debug!(
+                                "Dropping mixed expression for correctness: {}",
+                                partition_expr
+                            );
+                        }
                     }
                 }
                 Err(err) => {
@@ -389,27 +508,6 @@ impl PredicateExtractor {
         );
 
         Ok(partition_exprs)
-    }
-
-    /// Check if a partition expression involves any partition columns
-    fn expr_involves_partition_columns(
-        expr: &PartitionExpr,
-        partition_columns: &HashSet<String>,
-    ) -> bool {
-        Self::operand_involves_partition_columns(expr.lhs(), partition_columns)
-            || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
-    }
-
-    /// Check if an operand involves any partition columns
-    fn operand_involves_partition_columns(
-        operand: &Operand,
-        partition_columns: &HashSet<String>,
-    ) -> bool {
-        match operand {
-            Operand::Column(col) => partition_columns.contains(col),
-            Operand::Value(_) => false,
-            Operand::Expr(expr) => Self::expr_involves_partition_columns(expr, partition_columns),
-        }
     }
 
     /// Collect all filter expressions from a logical plan
@@ -1014,6 +1112,128 @@ mod tests {
                             Operand::Value(Value::Int64(400)),
                         )),
                     )),
+                )],
+                vec!["user_id"],
+            ),
+        ];
+        check_partition_expressions(cases);
+    }
+
+    #[test]
+    fn test_mixed_partition_non_partition_expressions() {
+        let cases = vec![
+            // Mixed AND expression - should extract only partition part
+            FilterTestCase::new(
+                "mixed_and_expression",
+                col("user_id")
+                    .eq(lit(100i64))
+                    .and(col("value").gt(lit(50i64))),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(100)),
+                )],
+                vec!["user_id"],
+            ),
+            // Mixed OR expression - should be dropped entirely
+            FilterTestCase::new(
+                "mixed_or_expression",
+                col("user_id")
+                    .between(lit(1i64), lit(10i64))
+                    .or(col("value").gt(lit(50i64))),
+                vec![], // Empty result - expression should be dropped
+                vec!["user_id"],
+            ),
+            // Complex mixed AND expression with multiple parts
+            FilterTestCase::new(
+                "complex_mixed_and",
+                col("user_id")
+                    .gt_eq(lit(100i64))
+                    .and(col("value").eq(lit(200i64)))
+                    .and(col("timestamp").lt(lit(1000i64))),
+                vec![
+                    PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(Value::Int64(100)),
+                    ),
+                    PartitionExpr::new(
+                        Operand::Column("timestamp".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(Value::Int64(1000)),
+                    ),
+                ],
+                vec!["user_id", "timestamp"], // Both partition columns
+            ),
+            // Pure partition expression - should be kept as-is
+            FilterTestCase::new(
+                "pure_partition_and",
+                col("user_id")
+                    .gt_eq(lit(100i64))
+                    .and(col("timestamp").lt(lit(1000i64))),
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::GtEq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::And,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("timestamp".to_string()),
+                        RestrictedOp::Lt,
+                        Operand::Value(Value::Int64(1000)),
+                    )),
+                )],
+                vec!["user_id", "timestamp"],
+            ),
+            // Pure partition OR expression - should be kept as-is
+            FilterTestCase::new(
+                "pure_partition_or",
+                col("user_id")
+                    .eq(lit(100i64))
+                    .or(col("user_id").eq(lit(200i64))),
+                vec![PartitionExpr::new(
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(100)),
+                    )),
+                    RestrictedOp::Or,
+                    Operand::Expr(PartitionExpr::new(
+                        Operand::Column("user_id".to_string()),
+                        RestrictedOp::Eq,
+                        Operand::Value(Value::Int64(200)),
+                    )),
+                )],
+                vec!["user_id"],
+            ),
+            // Pure non-partition expression - should be dropped
+            FilterTestCase::new(
+                "pure_non_partition",
+                col("value").gt_eq(lit(100i64)),
+                vec![], // Empty result - no partition columns involved
+                vec!["user_id"],
+            ),
+            // Complex nested mixed expression
+            FilterTestCase::new(
+                "nested_mixed_expression",
+                (col("user_id")
+                    .eq(lit(100i64))
+                    .and(col("value").gt(lit(50i64))))
+                .or(col("user_id").eq(lit(200i64))),
+                vec![], // Empty result - OR with mixed sub-expression should be dropped
+                vec!["user_id"],
+            ),
+            // AND with nested OR (mixed) - should extract partition parts only
+            FilterTestCase::new(
+                "and_with_nested_mixed_or",
+                col("user_id")
+                    .gt_eq(lit(100i64))
+                    .and(col("value").eq(lit(1i64)).or(col("value").eq(lit(2i64)))),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(Value::Int64(100)),
                 )],
                 vec!["user_id"],
             ),
