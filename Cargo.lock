@@ -12394,6 +12394,7 @@ dependencies = [
  "futures",
  "humantime",
  "lazy_static",
+ "num_enum 0.7.3",
  "prometheus",
  "prost 0.13.5",
  "serde",
