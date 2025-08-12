@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(duration_constructors)]
 
 pub mod logging;
 mod macros;
