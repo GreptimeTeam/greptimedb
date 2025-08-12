@@ -12,53 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Region pruning based on partition constraint satisfaction.
-//!
-//! This module implements constraint-based region pruning for distributed query execution.
-//! It determines which data regions can potentially contain results for a given query by
-//! comparing query constraints against partition definitions.
-//!
-//! ## Key Components
-//!
-//! - [`ConstraintPruner`]: Main pruning algorithm that uses constraint satisfaction
-//! - Takes PartitionExpr list from PredicateExtractor and partition info to return region IDs
-//! - Clean separation: PredicateExtractor → Vec&lt;PartitionExpr&gt; → ConstraintPruner → Vec&lt;RegionId&gt;
-//!
-//! ## Algorithm Overview
-//!
-//! The pruning algorithm works by:
-//! 1. **Unified Normalization**: Create a single Collider with both query and partition expressions
-//! 2. **Atomic Decomposition**: Break down complex expressions into atomic constraints (AND of nucleons)
-//! 3. **Constraint Matching**: Check if query atomics can be satisfied by partition atomics
-//! 4. **Conservative Fallback**: Include regions when constraint evaluation is uncertain
-//!
-//! ## Constraint Satisfaction Logic
-//!
-//! - **Query atomics**: Represent OR conditions (any atomic can satisfy the query)
-//! - **Partition atomics**: Represent OR conditions (any atomic defines the partition boundary)
-//! - **Nucleon compatibility**: Individual column constraints must be logically compatible
-//!
-//! ## Nucleon Compatibility Rules
-//!
-//! The algorithm checks if query constraints can be satisfied by partition constraints:
-//!
-//! | Query | Partition | Compatible |
-//! |-------|-----------|------------|
-//! | `x = 5` | `x = 5` | ✓ (exact match) |
-//! | `x = 5` | `x >= 3` | ✓ (5 satisfies >= 3) |
-//! | `x >= 10` | `x < 5` | ✗ (no overlap) |
-//! | `x >= 10` | `x >= 5` | ✓ (overlapping ranges) |
-//!
-//! ## Example
-//!
-//! Given:
-//! - Query: `timestamp >= 100 AND timestamp < 200`
-//! - Partition 1: `timestamp >= 0 AND timestamp < 150`
-//! - Partition 2: `timestamp >= 150 AND timestamp < 300`
-//!
-//! Both partitions would be included because:
-//! - Partition 1: Range [100,150) overlaps with query [100,200)
-//! - Partition 2: Range [150,200) overlaps with query [100,200)
+//! [`ConstraintPruner`] prunes partition info based on given expressions.
 
 use common_telemetry::debug;
 use partition::collider::{AtomicExpr, Collider, GluonOp};
@@ -69,7 +23,6 @@ use GluonOp::*;
 
 use crate::error::Result;
 
-/// Unified constraint-based pruning algorithm
 pub struct ConstraintPruner;
 
 impl ConstraintPruner {
