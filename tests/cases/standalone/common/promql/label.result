@@ -299,6 +299,14 @@ TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), 
 
 Error: 3000(PlanQuery), Internal error during building DataFusion plan: No field named addr. Valid fields are test.ts, test.host, test.idc, test.val.
 
+TQL EVAL label_replace(demo_num_cpus, "~invalid", "", "src", "(.*)");
+
+Error: 1004(InvalidArguments), invalid destination label name in label_replace(): ~invalid
+
+TQL EVAL label_replace(demo_num_cpus, "job", "value", "src", "(.*");
+
+Error: 1004(InvalidArguments), invalid regular expression in label_replace(): (.*
+
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "idc99", "idc", "idc2.*") == 1.0;

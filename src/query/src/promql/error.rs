@@ -207,6 +207,20 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("invalid regular expression in label_replace(): {}", regex))]
+    InvalidRegularExpression {
+        regex: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("invalid destination label name in label_replace(): {}", label_name))]
+    InvalidDestinationLabelName {
+        label_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -228,7 +242,9 @@ impl ErrorExt for Error {
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
             | SameLabelSet { .. }
-            | TimestampOutOfRange { .. } => StatusCode::InvalidArguments,
+            | TimestampOutOfRange { .. }
+            | InvalidRegularExpression { .. }
+            | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } => StatusCode::Internal,
 
