@@ -29,7 +29,8 @@ use crate::{CatalogManager, CatalogManagerRef};
 pub struct DummyCatalogManager;
 
 impl DummyCatalogManager {
-    pub fn new() -> CatalogManagerRef {
+    /// Returns a new `CatalogManagerRef` instance.
+    pub fn arc() -> CatalogManagerRef {
         Arc::new(Self)
     }
 }

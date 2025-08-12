@@ -377,7 +377,7 @@ impl DatanodeBuilder {
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            DummyCatalogManager::new(),
+            DummyCatalogManager::arc(),
             None,
             None,
             None,
