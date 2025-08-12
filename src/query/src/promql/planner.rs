@@ -3310,6 +3310,7 @@ mod test {
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::test_util::DummyDecoder;
+    use datafusion::functions_aggregate::count::count;
     use datafusion_optimizer::OptimizerContext;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -4967,7 +4968,88 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(Millisecond, None), field_0:
     SubqueryAlias: rhs [time:Timestamp(Millisecond, None), value:Float64;N]
       EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]"#;
 
-        println!("{}", plan.display_indent_schema().to_string());
+        let rhs = LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                EmptyMetric::new(
+                    0,
+                    -1,
+                    5000,
+                    "time".to_string(),
+                    "value".to_string(),
+                    Some(lit(0.0f64)),
+                )
+                .unwrap(),
+            ),
+        }))
+        .alias("rhs")
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let full = LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                EmptyMetric::new(
+                    0,
+                    -1,
+                    5000,
+                    "time".to_string(),
+                    "value".to_string(),
+                    Some(lit(0.0f64)),
+                )
+                .unwrap(),
+            ),
+        }))
+        .aggregate(
+            vec![col(Column::new(Some(""), "time"))],
+            vec![count(col(Column::new(Some(""), "value")))],
+        )
+        .unwrap()
+        .sort(vec![SortExpr::new(
+            col(Column::new(Some(""), "time")),
+            true,
+            false,
+        )])
+        .unwrap()
+        .aggregate(
+            vec![col(Column::new(Some(""), "time"))],
+            vec![count(col("count(.value)"))],
+        )
+        .unwrap()
+        .sort(vec![SortExpr::new(
+            col(Column::new(Some(""), "time")),
+            true,
+            false,
+        )])
+        .unwrap()
+        .alias("lhs")
+        .unwrap()
+        .project(vec![
+            col("lhs.time"),
+            col(Column::new(Some("lhs"), "count(count(.value))")),
+        ])
+        .unwrap()
+        .join(
+            rhs,
+            JoinType::Inner,
+            (
+                vec![Column::new(Some("lhs"), "time")],
+                vec![Column::new(Some("rhs"), "time")],
+            ),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        dbg!(&full);
+        {
+            let optimizer = datafusion_optimizer::Optimizer::new();
+            let optimized_full_plan = optimizer
+                .optimize(full, &OptimizerContext::default(), |_, _| {})
+                .unwrap();
+        }
+        return;
+
         assert_eq!(plan.display_indent_schema().to_string(), expected);
         let optimizer = datafusion_optimizer::Optimizer::new();
         let optimized_plan = optimizer
