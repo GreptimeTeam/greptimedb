@@ -284,7 +284,11 @@ impl RegionFlushTask {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
-        let worker_request = match self.flush_memtables(&version_data).await {
+        // Check if the region is in staging mode
+        let is_staging = self.manifest_ctx.current_state()
+            == RegionRoleState::Leader(RegionLeaderState::Staging);
+
+        let worker_request = match self.flush_memtables(&version_data, is_staging).await {
             Ok(edit) => {
                 let memtables_to_remove = version_data
                     .version
@@ -301,6 +305,7 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
+                    is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -325,7 +330,11 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
     /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
+    async fn flush_memtables(
+        &self,
+        version_data: &VersionControlData,
+        is_staging: bool,
+    ) -> Result<RegionEdit> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -385,10 +394,6 @@ impl RegionFlushTask {
                 };
                 Source::Reader(maybe_dedup)
             };
-
-            // Check if the region is in staging mode
-            let is_staging = self.manifest_ctx.current_state()
-                == RegionRoleState::Leader(RegionLeaderState::Staging);
 
             // Flush to level 0.
             let write_request = SstWriteRequest {
@@ -463,7 +468,13 @@ impl RegionFlushTask {
         let expected_state = if matches!(self.reason, FlushReason::Downgrading) {
             RegionLeaderState::Downgrading
         } else {
-            RegionLeaderState::Writable
+            // Check if region is in staging mode
+            let current_state = self.manifest_ctx.current_state();
+            if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+                RegionLeaderState::Staging
+            } else {
+                RegionLeaderState::Writable
+            }
         };
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.

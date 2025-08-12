@@ -209,11 +209,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        region.version_control.apply_edit(
-            request.edit.clone(),
-            &request.memtables_to_remove,
-            region.file_purger.clone(),
-        );
+        if request.is_staging {
+            info!(
+                "Skipping region metadata update for region {} in staging mode",
+                region_id
+            );
+        } else {
+            region.version_control.apply_edit(
+                request.edit.clone(),
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
+        }
 
         region.update_flush_millis();
 

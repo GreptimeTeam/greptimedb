@@ -803,6 +803,8 @@ pub(crate) struct FlushFinished {
     pub(crate) edit: RegionEdit,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
+    /// Whether this flush was done in staging mode.
+    pub(crate) is_staging: bool,
 }
 
 impl FlushFinished {
