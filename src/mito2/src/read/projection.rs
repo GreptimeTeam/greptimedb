@@ -109,8 +109,8 @@ impl ProjectionMapper {
         }
     }
 
-    /// Returns the plain projection mapper or None if this is not a plain mapper.
-    pub fn as_plain(&self) -> Option<&FlatProjectionMapper> {
+    /// Returns the flat projection mapper or None if this is not a flat mapper.
+    pub fn as_flat(&self) -> Option<&FlatProjectionMapper> {
         match self {
             ProjectionMapper::PrimaryKey(_) => None,
             ProjectionMapper::Flat(m) => Some(m),
@@ -712,11 +712,11 @@ mod tests {
                 (4, ConcreteDataType::int64_datatype()),
                 (0, ConcreteDataType::timestamp_millisecond_datatype())
             ],
-            mapper.as_plain().unwrap().batch_schema()
+            mapper.as_flat().unwrap().batch_schema()
         );
 
         let batch = new_flat_batch(Some(0), &[(1, 1), (2, 2)], &[(3, 3), (4, 4)], 3);
-        let record_batch = mapper.as_plain().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
         let expect = "\
 +---------------------+----+----+----+----+
 | ts                  | k0 | k1 | v0 | v1 |
@@ -744,11 +744,11 @@ mod tests {
                 (1, ConcreteDataType::int64_datatype()),
                 (4, ConcreteDataType::int64_datatype())
             ],
-            mapper.as_plain().unwrap().batch_schema()
+            mapper.as_flat().unwrap().batch_schema()
         );
 
         let batch = new_flat_batch(None, &[(1, 1)], &[(4, 4)], 3);
-        let record_batch = mapper.as_plain().unwrap().convert(&batch).unwrap();
+        let record_batch = mapper.as_flat().unwrap().convert(&batch).unwrap();
         let expect = "\
 +----+----+
 | v1 | k0 |
@@ -772,7 +772,7 @@ mod tests {
         let mapper = ProjectionMapper::new(&metadata, [].into_iter(), true).unwrap();
         assert_eq!([0], mapper.column_ids()); // Should still read the time index column
         assert!(mapper.output_schema().is_empty());
-        let plain_mapper = mapper.as_plain().unwrap();
+        let plain_mapper = mapper.as_flat().unwrap();
         assert!(plain_mapper.batch_schema().is_empty());
 
         let batch = new_flat_batch(Some(0), &[], &[], 3);

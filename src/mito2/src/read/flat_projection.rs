@@ -179,7 +179,7 @@ impl FlatProjectionMapper {
     pub(crate) fn convert(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
-    ) -> common_recordbatch::error::Result<common_recordbatch::RecordBatch> {
+    ) -> common_recordbatch::error::Result<RecordBatch> {
         if self.is_empty_projection {
             return RecordBatch::new_with_count(self.output_schema.clone(), batch.num_rows());
         }
