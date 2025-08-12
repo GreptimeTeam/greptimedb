@@ -1921,10 +1921,7 @@ impl PromPlanner {
     fn validate_label_name(label_name: &str) -> Result<()> {
         // Check if label name starts with double underscores (reserved)
         if label_name.starts_with("__") {
-            return InvalidDestinationLabelNameSnafu {
-                label_name: label_name.to_string(),
-            }
-            .fail();
+            return InvalidDestinationLabelNameSnafu { label_name }.fail();
         }
         // Check if label name matches the required pattern
         if !LABEL_NAME_REGEX.is_match(label_name) {
