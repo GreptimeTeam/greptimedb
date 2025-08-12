@@ -13,6 +13,13 @@
 // limitations under the License.
 
 //! GC worker which periodically checks and removes unused/obsolete  SST files.
+//!
+//! `expel time`: the time when the file is considered as removed, as in removed from the manifest.
+//! `lingering time`: the time duration before deleting files after they are removed from manifest.
+//! `delta manifest`: the manifest files after the last checkpoint that contains the changes to the manifest.
+//! `delete time`: the time when the file is actually deleted from the object store.
+//! `unknown files`: files that are not recorded in the manifest, usually due to saved checkpoint which remove actions before the checkpoint.
+//!
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -122,7 +129,7 @@ impl LocalGcWorker {
             let last_modified_time = entry.metadata().last_modified();
             let ts = last_modified_time.map(|t| Timestamp::new_millisecond(t.timestamp_millis()));
             let action_list = RegionMetaActionList::decode(
-                &delta_manifests
+                delta_manifests
                     .get(&manifest_version)
                     .with_context(|| UnexpectedSnafu {
                         reason: format!(
