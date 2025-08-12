@@ -1716,8 +1716,11 @@ impl PromPlanner {
             }
 
             "label_join" => {
-                let (concat_expr, dst_label) =
-                    Self::build_concat_labels_expr(&mut other_input_exprs, query_engine_state)?;
+                let (concat_expr, dst_label) = Self::build_concat_labels_expr(
+                    &mut other_input_exprs,
+                    &self.ctx,
+                    query_engine_state,
+                )?;
 
                 // Reserve the current field columns except the `dst_label`.
                 for value in &self.ctx.field_columns {
@@ -2000,6 +2003,7 @@ impl PromPlanner {
     /// Build expr for `label_join` function
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
+        ctx: &PromPlannerContext,
         query_engine_state: &QueryEngineState,
     ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
@@ -2018,17 +2022,30 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
+        // Create a set of available columns (tag columns + field columns + time index column)
+        let mut available_columns = std::collections::HashSet::new();
+        available_columns.extend(ctx.tag_columns.iter().cloned());
+        available_columns.extend(ctx.field_columns.iter().cloned());
+        if let Some(time_index) = &ctx.time_index_column {
+            available_columns.insert(time_index.clone());
+        }
+
         let src_labels = other_input_exprs
             .clone()
             .into_iter()
             .map(|expr| {
-                // Cast source label into column
+                // Cast source label into column or null literal
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
                         if label.is_empty() {
                             Ok(DfExpr::Literal(ScalarValue::Null))
-                        } else {
+                        } else if available_columns.contains(&label) {
+                            // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
+                        } else {
+                            // Label doesn't exist, treat as empty string (null)
+                            Ok(DfExpr::Literal(ScalarValue::Null))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {

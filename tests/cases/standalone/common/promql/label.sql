@@ -34,6 +34,9 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host");
 
+-- Should return empty result instead of error
+tql eval label_join(demo_num_cpus, "new_label", "-", "instance", "job");
+
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "$2", "idc", "(.*):(.*)");
 
