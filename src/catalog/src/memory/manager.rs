@@ -38,7 +38,7 @@ use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, Regis
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
 
-/// Simple in-memory list of catalogs
+/// Simple in-memory list of catalogs used for tests.
 #[derive(Clone)]
 pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables

@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::memory::MemoryCatalogManager;
+use catalog::dummy::DummyCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -377,7 +377,7 @@ impl DatanodeBuilder {
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
+            DummyCatalogManager::new(),
             None,
             None,
             None,
