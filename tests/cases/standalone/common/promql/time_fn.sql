@@ -6,7 +6,7 @@
 -- Note: time() returns current timestamp, so we test relative behavior instead of absolute values
 
 -- Test that time() returns a reasonable timestamp (after 2020-01-01)
-tql eval (3000, 3000, '1s') time() > bool 1577836800; -- 2020-01-01
+tql eval (3000, 3000, '1s') time() > bool 1577836800;
 
 -- Test that time() is consistent within the same evaluation
 tql eval (0, 0, '1s') time() == bool time();
