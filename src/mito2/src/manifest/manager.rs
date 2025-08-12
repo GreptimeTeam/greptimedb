@@ -565,6 +565,10 @@ impl RegionManifestManager {
         }
     }
 
+    pub fn store(&self) -> ManifestObjectStore {
+        self.store.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn checkpointer(&self) -> &Checkpointer {
         &self.checkpointer
@@ -578,10 +582,6 @@ impl RegionManifestManager {
         assert_eq!(manifest.metadata, *expect);
         assert_eq!(self.manifest.manifest_version, self.last_version());
         assert_eq!(last_version, self.last_version());
-    }
-
-    pub fn store(&self) -> ManifestObjectStore {
-        self.store.clone()
     }
 }
 

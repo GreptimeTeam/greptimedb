@@ -14,26 +14,50 @@
 
 //! GC worker which periodically checks and removes unused/obsolete  SST files.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use common_telemetry::warn;
+use common_time::Timestamp;
 use object_store::Entry;
-use snafu::ResultExt as _;
+use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt as _};
 use store_api::storage::RegionId;
+use store_api::{MAX_VERSION, MIN_VERSION};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{JoinSnafu, OpenDalSnafu, Result};
+use crate::error::{JoinSnafu, OpenDalSnafu, Result, UnexpectedSnafu};
+use crate::manifest::action::{RegionManifestBuilder, RegionMetaAction, RegionMetaActionList};
+use crate::manifest::manager::RegionManifestManager;
 use crate::region::ManifestContextRef;
-use crate::sst::file::{FileId, RegionFileId};
+use crate::sst::file::{FileId, FileMeta, RegionFileId};
 use crate::sst::location;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileGcOption {
+    /// Lingering time before deleting files.
+    #[serde(with = "humantime_serde")]
+    pub lingering_time: Duration,
+    /// Lingering time before deleting unknown files(files with undetermine expel time).
+    /// expel time is the time when the file is considered as removed, as in removed from the manifest.
+    #[serde(with = "humantime_serde")]
+    pub unknown_file_lingering_time: Duration,
+}
+
+impl Default for FileGcOption {
+    fn default() -> Self {
+        Self {
+            lingering_time: Duration::from_secs(60 * 30), // 30 minutes
+            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 24), // 1 day
+        }
+    }
+}
 pub struct LocalGcWorker {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) manifest_ctx: ManifestContextRef,
     /// Lingering time before deleting files.
-    pub(crate) lingering_time: Duration,
+    pub(crate) opt: FileGcOption,
 }
 
 impl LocalGcWorker {
@@ -45,35 +69,101 @@ impl LocalGcWorker {
         let manifest = self.manifest_ctx.manifest().await;
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
+
+        let recently_removed_files = self.get_removed_files_expel_times().await?;
+
         let concurrency = current_files.len() / Self::CONCURRENCY_LIST_PER_FILES;
         let unused_files = self
             .list_unused_files(
                 region_id,
                 current_files.keys().cloned().collect(),
+                recently_removed_files,
                 concurrency,
             )
             .await?;
 
-        let old_unused_files = unused_files
-            .into_iter()
-            .filter(|e| {
-                // TODO(discord9): is use last_modified time correct?
-                if let Some(last_modified) = e.metadata().last_modified() {
-                    last_modified
-                        < (chrono::Utc::now()
-                            - chrono::Duration::from_std(self.lingering_time).unwrap())
-                } else {
-                    // if last modified is not set, we consider it as old enough
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
-
         self.access_layer
             .object_store()
-            .delete_iter(old_unused_files.iter().map(|e| e.name()))
+            .delete_iter(unused_files.iter().map(|e| e.name()))
             .await
             .context(OpenDalSnafu)
+    }
+
+    /// Get all the removed files in delta manifest files and their expel times.
+    /// The expel time is the time when the file is considered as removed.
+    /// Which is the last modified time of delta manifest which contains the remove action.
+    ///
+    pub async fn get_removed_files_expel_times(
+        &self,
+    ) -> Result<BTreeMap<Option<Timestamp>, HashSet<FileMeta>>> {
+        let mut store = self.manifest_ctx.manifest_manager.read().await.store();
+        let last_checkpoint = RegionManifestManager::last_checkpoint(&mut store).await?;
+        let min_version = if let Some((checkpoint, _)) = &last_checkpoint {
+            checkpoint.last_version() + 1
+        } else {
+            MIN_VERSION
+        };
+
+        let mut manifest_builder = if let Some((checkpoint, _)) = last_checkpoint {
+            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
+        } else {
+            RegionManifestBuilder::default()
+        };
+
+        // search in delta manifests for removed files and their expel times
+        // TODO(discord9): remove twice scan
+        let action_entries = store.scan(min_version, MAX_VERSION).await?;
+        let delta_manifests = store.fetch_manifests(min_version, MAX_VERSION).await?;
+        let delta_manifests = delta_manifests.into_iter().collect::<HashMap<_, _>>();
+
+        let mut ret = BTreeMap::new();
+
+        for (manifest_version, entry) in action_entries {
+            let last_modified_time = entry.metadata().last_modified();
+            let ts = last_modified_time.map(|t| Timestamp::new_millisecond(t.timestamp_millis()));
+            let action_list = RegionMetaActionList::decode(
+                &delta_manifests
+                    .get(&manifest_version)
+                    .with_context(|| UnexpectedSnafu {
+                        reason: format!(
+                            "Failed to find manifest for version {} in all delta versions: {:?}",
+                            manifest_version,
+                            delta_manifests.keys()
+                        ),
+                    })?,
+            )?;
+            // try and collect all removed files& their expel times
+            // set manifest size after last checkpoint
+            let mut removed_files = HashSet::new();
+            for action in action_list.actions {
+                match action {
+                    RegionMetaAction::Change(action) => {
+                        manifest_builder.apply_change(manifest_version, action);
+                    }
+                    RegionMetaAction::Edit(action) => {
+                        removed_files.extend(action.files_to_remove.clone());
+                        manifest_builder.apply_edit(manifest_version, action);
+                    }
+                    RegionMetaAction::Remove(_) => {}
+                    RegionMetaAction::Truncate(action) => {
+                        match &action.kind {
+                            crate::manifest::action::TruncateKind::All { .. } => {
+                                removed_files.extend(manifest_builder.files().values().cloned());
+                            }
+                            crate::manifest::action::TruncateKind::Partial { files_to_remove } => {
+                                removed_files.extend(files_to_remove.clone());
+                            }
+                        }
+                        manifest_builder.apply_truncate(manifest_version, action);
+                    }
+                }
+            }
+            ret.entry(ts)
+                .or_insert_with(HashSet::new)
+                .extend(removed_files);
+        }
+
+        Ok(ret)
     }
 
     /// Concurrently list unused files in the region dir
@@ -83,8 +173,64 @@ impl LocalGcWorker {
         &self,
         region_id: RegionId,
         in_used: HashSet<FileId>,
+        recently_removed_files: BTreeMap<Option<Timestamp>, HashSet<FileMeta>>,
         concurrency: usize,
     ) -> Result<Vec<Entry>> {
+        let may_linger_until =
+            chrono::Utc::now() - chrono::Duration::from_std(self.opt.lingering_time).unwrap();
+
+        let unknown_file_may_linger_until = chrono::Utc::now()
+            - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).unwrap();
+
+        // files that may linger, which means they are not in use but may still be kept for a while
+        let may_linger_filenames = recently_removed_files
+            .iter()
+            .filter_map(|(ts, files)| {
+                if let Some(ts) = ts {
+                    if *ts < Timestamp::new_millisecond(may_linger_until.timestamp_millis()) {
+                        // if the expel time is before the may linger time, we can delete it
+                        return None;
+                    }
+                }
+                Some(files)
+            })
+            .flatten()
+            .flat_map(|meta| {
+                [
+                    location::sst_file_path(
+                        self.access_layer.table_dir(),
+                        meta.file_id(),
+                        self.access_layer.path_type(),
+                    ),
+                    location::index_file_path(
+                        self.access_layer.table_dir(),
+                        meta.file_id(),
+                        self.access_layer.path_type(),
+                    ),
+                ]
+            })
+            .collect::<HashSet<_>>();
+
+        let all_files_appear_in_delta_manifests = recently_removed_files
+            .values()
+            .flat_map(|files| {
+                files.iter().flat_map(|meta| {
+                    [
+                        location::sst_file_path(
+                            self.access_layer.table_dir(),
+                            meta.file_id(),
+                            self.access_layer.path_type(),
+                        ),
+                        location::index_file_path(
+                            self.access_layer.table_dir(),
+                            meta.file_id(),
+                            self.access_layer.path_type(),
+                        ),
+                    ]
+                })
+            })
+            .collect::<HashSet<_>>();
+
         // in use filenames, include sst and index files
         let in_use_filenames = in_used
             .iter()
@@ -168,7 +314,22 @@ impl LocalGcWorker {
                 stream
                     .into_iter()
                     .filter_map(Result::ok)
-                    .filter(|e| !in_use_filenames.contains(e.name())),
+                    .filter(|e| !in_use_filenames.contains(e.name()))
+                    .filter(|e| !may_linger_filenames.contains(e.name()))
+                    .filter(|e| {
+                        if !all_files_appear_in_delta_manifests.contains(e.name()) {
+                            // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
+                            // using it's last modified time
+                            // notice unknown files use a different lingering time
+                            e.metadata()
+                                .last_modified()
+                                .map(|t| t < unknown_file_may_linger_until)
+                                .unwrap_or(false)
+                        } else {
+                            // if the file did appear in manifest delta(and passes previous predicate), we can delete it immediately
+                            true
+                        }
+                    }),
             );
         }
 

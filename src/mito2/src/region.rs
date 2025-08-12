@@ -499,7 +499,7 @@ impl MitoRegion {
 #[derive(Debug)]
 pub(crate) struct ManifestContext {
     /// Manager to maintain manifest for this region.
-    manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,

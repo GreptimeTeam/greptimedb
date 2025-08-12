@@ -177,6 +177,10 @@ impl RegionManifestBuilder {
         }
     }
 
+    pub fn files(&self) -> &HashMap<FileId, FileMeta> {
+        &self.files
+    }
+
     /// Check if the builder keeps a [RegionMetadata](store_api::metadata::RegionMetadata).
     pub fn contains_metadata(&self) -> bool {
         self.metadata.is_some()
