@@ -66,6 +66,13 @@ impl AtomicExpr {
             .unwrap();
         result
     }
+
+    pub fn new(nucleons: Vec<NucleonExpr>, source_expr_index: usize) -> Self {
+        Self {
+            nucleons,
+            source_expr_index,
+        }
+    }
 }
 
 impl PartialOrd for AtomicExpr {
@@ -107,6 +114,14 @@ impl NucleonExpr {
     /// Get the operation
     pub fn op(&self) -> &GluonOp {
         &self.op
+    }
+
+    pub fn new(column: impl Into<String>, op: GluonOp, value: OrderedF64) -> Self {
+        Self {
+            column: column.into(),
+            op,
+            value,
+        }
     }
 }
 
