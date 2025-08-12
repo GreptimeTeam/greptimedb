@@ -21,6 +21,7 @@ use store_api::storage::ScanRequest;
 
 use crate::error::UnsupportedSnafu;
 use crate::metadata::{FilterPushDownType, TableInfoRef};
+use crate::table::PartitionRules;
 use crate::{Table, TableRef};
 
 #[derive(Clone)]
@@ -30,6 +31,20 @@ impl DistTable {
     pub fn table(table_info: TableInfoRef) -> TableRef {
         let data_source = Arc::new(DummyDataSource);
         let table = Table::new(table_info, FilterPushDownType::Inexact, data_source);
+        Arc::new(table)
+    }
+
+    pub fn table_partitioned(
+        table_info: TableInfoRef,
+        partition_rule: Option<PartitionRules>,
+    ) -> TableRef {
+        let data_source = Arc::new(DummyDataSource);
+        let table = Table::new_partitioned(
+            table_info,
+            FilterPushDownType::Inexact,
+            data_source,
+            partition_rule,
+        );
         Arc::new(table)
     }
 }

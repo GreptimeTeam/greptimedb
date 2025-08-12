@@ -52,6 +52,16 @@ lazy_static! {
     };
 }
 
+/// Defines partition rules for a table.
+/// TODO(discord9): add the entire partition exprs rules here later
+pub struct PartitionRules {
+    /// The physical partition columns that are not in the logical table.
+    /// only used in kvbackend manager to store the physical partition columns that are not in the logical table.
+    /// This is used to avoid the partition columns in the physical table that are not in the logical table
+    /// to prevent certain optimizations, if table is not a logical table, this should be empty
+    pub extra_phy_cols_not_in_logical_table: Vec<String>,
+}
+
 pub type TableRef = Arc<Table>;
 
 /// Table handle.
@@ -61,6 +71,7 @@ pub struct Table {
     data_source: DataSourceRef,
     /// Columns default [`Expr`]
     column_defaults: HashMap<String, Expr>,
+    partition_rules: Option<PartitionRules>,
 }
 
 impl Table {
@@ -74,6 +85,22 @@ impl Table {
             table_info,
             filter_pushdown,
             data_source,
+            partition_rules: None,
+        }
+    }
+
+    pub fn new_partitioned(
+        table_info: TableInfoRef,
+        filter_pushdown: FilterPushDownType,
+        data_source: DataSourceRef,
+        partition_rules: Option<PartitionRules>,
+    ) -> Self {
+        Self {
+            column_defaults: collect_column_defaults(table_info.meta.schema.column_schemas()),
+            table_info,
+            filter_pushdown,
+            data_source,
+            partition_rules,
         }
     }
 
@@ -99,6 +126,10 @@ impl Table {
     /// Get the type of this table for metadata/catalog purposes.
     pub fn table_type(&self) -> TableType {
         self.table_info.table_type
+    }
+
+    pub fn partition_rules(&self) -> Option<&PartitionRules> {
+        self.partition_rules.as_ref()
     }
 
     pub async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
