@@ -60,6 +60,7 @@ pub struct LoggingOptions {
     pub level: Option<String>,
 
     /// The log format that can be one of "json" or "text". Default is "text".
+    #[serde(default)]
     pub log_format: LogFormat,
 
     /// The maximum number of log files set by default.
@@ -99,6 +100,7 @@ pub struct SlowQueryOptions {
     pub enable: bool,
 
     /// The record type of slow queries.
+    #[serde(default)]
     pub record_type: SlowQueriesRecordType,
 
     /// The threshold of slow queries.
@@ -126,7 +128,7 @@ impl Default for SlowQueryOptions {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Copy, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     /// Record the slow query in the system table.
@@ -136,12 +138,45 @@ pub enum SlowQueriesRecordType {
     Log,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+impl<'de> serde::Deserialize<'de> for SlowQueriesRecordType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "" => Ok(SlowQueriesRecordType::default()),
+            "system_table" => Ok(SlowQueriesRecordType::SystemTable),
+            "log" => Ok(SlowQueriesRecordType::Log),
+            _ => Err(serde::de::Error::unknown_variant(
+                &s,
+                &["system_table", "log"],
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     Json,
     #[default]
     Text,
+}
+
+impl<'de> serde::Deserialize<'de> for LogFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "" => Ok(LogFormat::default()),
+            "json" => Ok(LogFormat::Json),
+            "text" => Ok(LogFormat::Text),
+            _ => Err(serde::de::Error::unknown_variant(&s, &["json", "text"])),
+        }
+    }
 }
 
 impl PartialEq for LoggingOptions {
@@ -529,5 +564,92 @@ where
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_logging_options_deserialization_default() {
+        let json = r#"{}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "");
+        assert_eq!(opts.level, None);
+        assert!(opts.append_stdout);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_empty_log_format() {
+        let json = r#"{"log_format": ""}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_valid_log_format() {
+        let json_format = r#"{"log_format": "json"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Json);
+
+        let text_format = r#"{"log_format": "text"}"#;
+        let opts: LoggingOptions = serde_json::from_str(text_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_missing_log_format() {
+        let json = r#"{"dir": "/tmp/logs"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Missing log_format should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "/tmp/logs");
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_default() {
+        let json = r#"{"enable": true, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_empty_record_type() {
+        let json = r#"{"enable": true, "record_type": "", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_valid_record_type() {
+        let system_table_json =
+            r#"{"enable": true, "record_type": "system_table", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(system_table_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+
+        let log_json = r#"{"enable": true, "record_type": "log", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(log_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::Log);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_missing_record_type() {
+        let json = r#"{"enable": false, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Missing record_type should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(!opts.enable);
     }
 }
