@@ -63,6 +63,7 @@ use partition::collider::{AtomicExpr, Collider, GluonOp};
 use partition::expr::PartitionExpr;
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
+use GluonOp::*;
 
 use crate::error::Result;
 
@@ -224,8 +225,6 @@ impl ConstraintPruner {
         query_nucleon: &partition::collider::NucleonExpr,
         partition_nucleon: &partition::collider::NucleonExpr,
     ) -> bool {
-        use GluonOp::*;
-
         // Both nucleons operate on normalized values from separate colliders
         // We need to compare the actual original values, not normalized ones
         // For now, use the normalized values but fix the logic
@@ -445,9 +444,6 @@ mod tests {
 
     #[test]
     fn test_prune_regions_with_simple_equality() {
-        use datatypes::value::Value;
-        use partition::expr::col;
-
         let partitions = vec![
             // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
@@ -488,9 +484,6 @@ mod tests {
 
     #[test]
     fn test_prune_regions_with_or_constraint() {
-        use datatypes::value::Value;
-        use partition::expr::{col, Operand, PartitionExpr, RestrictedOp};
-
         let partitions = vec![
             // Region 1: user_id >= 0 AND user_id < 100
             create_test_partition_info(
