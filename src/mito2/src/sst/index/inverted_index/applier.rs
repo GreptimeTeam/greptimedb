@@ -215,7 +215,7 @@ impl InvertedIndexApplier {
             .puffin_manager_factory
             .build(
                 self.store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type, false),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
@@ -265,7 +265,7 @@ mod tests {
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare, false),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer
@@ -319,7 +319,7 @@ mod tests {
 
         let puffin_manager = puffin_manager_factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare, false),
         );
         let mut writer = puffin_manager.writer(&file_id).await.unwrap();
         writer

@@ -581,7 +581,7 @@ impl IndexSource {
             .puffin_manager_factory
             .build(
                 self.remote_store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type, false),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
