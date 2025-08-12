@@ -61,7 +61,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::BoxedBatchReader;
 use crate::region::options::MergeMode;
 use crate::region::version::VersionControlRef;
-use crate::region::ManifestContextRef;
+use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
@@ -142,6 +142,17 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         max_parallelism: usize,
     ) -> Result<()> {
+        // skip compaction if region is in staging state
+        let current_state = manifest_ctx.current_state();
+        if current_state == RegionRoleState::Leader(RegionLeaderState::Staging) {
+            info!(
+                "Skipping compaction for region {} in staging mode, options: {:?}",
+                region_id, compact_options
+            );
+            waiter.send(Ok(0));
+            return Ok(());
+        }
+
         if let Some(status) = self.region_status.get_mut(&region_id) {
             match compact_options {
                 Options::Regular(_) => {
@@ -526,14 +537,12 @@ impl CompactionStatus {
 
     /// Set pending compaction request or replace current value if already exist.
     fn set_pending_request(&mut self, pending: PendingCompaction) {
-        if let Some(mut prev) = self.pending_request.replace(pending) {
+        if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
                 "Replace pending compaction options with new request {:?} for region: {}",
                 prev.options, self.region_id
             );
-            if let Some(waiter) = prev.waiter.take_inner() {
-                waiter.send(ManualCompactionOverrideSnafu.fail());
-            }
+            prev.waiter.send(ManualCompactionOverrideSnafu.fail());
         }
     }
 
@@ -741,9 +750,12 @@ struct PendingCompaction {
 #[cfg(test)]
 mod tests {
     use api::v1::region::StrictWindow;
+    use common_datasource::compression::CompressionType;
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::region::ManifestContext;
     use crate::test_util::mock_schema_metadata_manager;
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
@@ -1045,5 +1057,60 @@ mod tests {
 
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
         assert!(status.pending_request.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compaction_bypass_in_staging_mode() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+
+        // Create version control and manifest context for staging mode
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = version_control.current().version.metadata.region_id;
+
+        // Create staging manifest context using the same pattern as SchedulerEnv
+        let staging_manifest_ctx = {
+            let manager = RegionManifestManager::new(
+                version_control.current().version.metadata.clone(),
+                RegionManifestOptions {
+                    manifest_dir: "".to_string(),
+                    object_store: env.access_layer.object_store().clone(),
+                    compress_type: CompressionType::Uncompressed,
+                    checkpoint_distance: 10,
+                },
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            Arc::new(ManifestContext::new(
+                manager,
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            ))
+        };
+
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        // Test regular compaction bypass in staging mode
+        let (tx, rx) = oneshot::channel();
+        scheduler
+            .schedule_compaction(
+                region_id,
+                compact_request::Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::new(Some(OutputTx::new(tx))),
+                &staging_manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let result = rx.await.unwrap();
+        assert_eq!(result.unwrap(), 0); // is there a better way to check this?
+        assert_eq!(0, scheduler.region_status.len());
     }
 }
