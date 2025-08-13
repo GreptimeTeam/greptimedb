@@ -279,10 +279,12 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         let region_stats = Self::load_region_stats(&region_server_clone);
+                        let topic_stats = region_server_clone.topic_stats();
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
                             region_stats,
+                            topic_stats,
                             duration_since_epoch,
                             ..heartbeat_request.clone()
                         };

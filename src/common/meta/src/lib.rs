@@ -46,6 +46,7 @@ pub mod rpc;
 pub mod sequence;
 pub mod snapshot;
 pub mod state_store;
+pub mod stats;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod util;

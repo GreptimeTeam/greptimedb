@@ -104,6 +104,21 @@ pub(crate) fn sequence_column_index(num_columns: usize) -> usize {
     num_columns - 2
 }
 
+/// Returns the position of the time index column.
+pub(crate) fn time_index_column_index(num_columns: usize) -> usize {
+    num_columns - 4
+}
+
+/// Returns the position of the primary key column.
+pub(crate) fn primary_key_column_index(num_columns: usize) -> usize {
+    num_columns - 3
+}
+
+/// Returns the position of the op type key column.
+pub(crate) fn op_type_column_index(num_columns: usize) -> usize {
+    num_columns - 1
+}
+
 // TODO(yingwen): Add an option to skip reading internal columns.
 /// Helper for reading the flat SST format with projection.
 ///
@@ -269,7 +284,7 @@ impl FlatReadFormat {
 /// Returns a map that the key is the column id and the value is the column position
 /// in the SST.
 /// It only supports SSTs with raw primary key columns.
-fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
+pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<ColumnId, usize> {
     let mut id_to_index = HashMap::with_capacity(metadata.column_metadatas.len());
     let mut column_index = 0;
     // keys

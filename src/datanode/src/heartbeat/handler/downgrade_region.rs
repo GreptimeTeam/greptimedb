@@ -50,6 +50,15 @@ impl HandlerContext {
                     error: None,
                 }))
             }
+            Ok(SetRegionRoleStateResponse::InvalidTransition(err)) => {
+                error!(err; "Failed to convert region to follower - invalid transition");
+                Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id: None,
+                    metadata_last_entry_id: None,
+                    exists: true,
+                    error: Some(format!("{err:?}")),
+                }))
+            }
             Err(err) => {
                 error!(err; "Failed to convert region to {}", SettableRegionRoleState::Follower);
                 Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
@@ -115,6 +124,15 @@ impl HandlerContext {
                         metadata_last_entry_id: None,
                         exists: false,
                         error: None,
+                    }));
+                }
+                Ok(SetRegionRoleStateResponse::InvalidTransition(err)) => {
+                    error!(err; "Failed to convert region to downgrading leader - invalid transition");
+                    return Some(InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                        last_entry_id: None,
+                        metadata_last_entry_id: None,
+                        exists: true,
+                        error: Some(format!("{err:?}")),
                     }));
                 }
                 Err(err) => {

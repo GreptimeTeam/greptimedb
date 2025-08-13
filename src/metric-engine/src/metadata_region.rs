@@ -17,8 +17,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::helper::row;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, Rows, SemanticType};
 use async_stream::try_stream;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
@@ -497,18 +498,12 @@ impl MetadataRegion {
             schema: cols,
             rows: kv
                 .into_iter()
-                .map(|(key, value)| Row {
-                    values: vec![
-                        Value {
-                            value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue(key)),
-                        },
-                        Value {
-                            value_data: Some(ValueData::StringValue(value)),
-                        },
-                    ],
+                .map(|(key, value)| {
+                    row(vec![
+                        ValueData::TimestampMillisecondValue(0),
+                        ValueData::StringValue(key),
+                        ValueData::StringValue(value),
+                    ])
                 })
                 .collect(),
         };
@@ -533,15 +528,11 @@ impl MetadataRegion {
         ];
         let rows = keys
             .iter()
-            .map(|key| Row {
-                values: vec![
-                    Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                    },
-                    Value {
-                        value_data: Some(ValueData::StringValue(key.to_string())),
-                    },
-                ],
+            .map(|key| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(0),
+                    ValueData::StringValue(key.to_string()),
+                ])
             })
             .collect();
         let rows = Rows { schema: cols, rows };

@@ -1051,6 +1051,10 @@ impl HttpServer {
                 routing::get(handler::sql_parse).post(handler::sql_parse),
             )
             .route(
+                "/sql/format",
+                routing::get(handler::sql_format).post(handler::sql_format),
+            )
+            .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
             )

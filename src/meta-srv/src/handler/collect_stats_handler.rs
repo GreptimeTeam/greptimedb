@@ -217,49 +217,15 @@ async fn rewrite_node_address(ctx: &mut Context, stat: &Stat) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::datanode::DatanodeStatKey;
-    use common_meta::key::TableMetadataManager;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::region_registry::LeaderRegionRegistry;
-    use common_meta::sequence::SequenceBuilder;
 
     use super::*;
-    use crate::cluster::MetaPeerClientBuilder;
-    use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::service::store::cached_kv::LeaderCachedKvBackend;
+    use crate::handler::test_utils::TestEnv;
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
-        let in_memory = Arc::new(MemoryKvBackend::new());
-        let kv_backend = Arc::new(MemoryKvBackend::new());
-        let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
-            kv_backend.clone(),
-        ));
-        let seq = SequenceBuilder::new("test_seq", kv_backend.clone()).build();
-        let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
-        let meta_peer_client = MetaPeerClientBuilder::default()
-            .election(None)
-            .in_memory(in_memory.clone())
-            .build()
-            .map(Arc::new)
-            // Safety: all required fields set at initialization
-            .unwrap();
-        let ctx = Context {
-            server_addr: "127.0.0.1:0000".to_string(),
-            in_memory,
-            kv_backend: kv_backend.clone(),
-            leader_cached_kv_backend,
-            meta_peer_client,
-            mailbox,
-            election: None,
-            is_infancy: false,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
-            cache_invalidator: Arc::new(DummyCacheInvalidator),
-            leader_region_registry: Arc::new(LeaderRegionRegistry::new()),
-        };
+        let env = TestEnv::new();
+        let ctx = env.ctx();
 
         let handler = CollectStatsHandler::default();
         handle_request_many_times(ctx.clone(), &handler, 1).await;

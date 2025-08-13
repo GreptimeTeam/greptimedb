@@ -70,6 +70,8 @@ impl RegionUsage {
 pub enum RegionLeaderState {
     /// The region is opened and is writable.
     Writable,
+    /// The region is in staging mode - writable but no checkpoint/compaction.
+    Staging,
     /// The region is altering.
     Altering,
     /// The region is dropping.
@@ -122,7 +124,7 @@ pub struct MitoRegion {
     /// The topic's latest entry id since the region's last flushing.
     /// **Only used for remote WAL pruning.**
     ///
-    /// The value will be updated to the high watermark of the topic
+    /// The value will be updated to the latest offset of the topic
     /// if region receives a flush request or schedules a periodic flush task
     /// and the region's memtable is empty.    
     ///
@@ -200,7 +202,11 @@ impl MitoRegion {
 
     /// Returns whether the region is writable.
     pub(crate) fn is_writable(&self) -> bool {
-        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable)
+        matches!(
+            self.manifest_ctx.state.load(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Staging)
+        )
     }
 
     /// Returns whether the region is flushable.
@@ -208,6 +214,7 @@ impl MitoRegion {
         matches!(
             self.manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
+                | RegionRoleState::Leader(RegionLeaderState::Staging)
                 | RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
     }
@@ -218,6 +225,12 @@ impl MitoRegion {
             self.manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Downgrading)
         )
+    }
+
+    /// Returns whether the region is in staging mode.
+    #[allow(dead_code)]
+    pub(crate) fn is_staging(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Staging)
     }
 
     pub fn region_id(&self) -> RegionId {
@@ -279,12 +292,134 @@ impl MitoRegion {
         )
     }
 
-    /// Sets the region to readonly gracefully. This acquires the manifest write lock.
-    pub(crate) async fn set_role_state_gracefully(&self, state: SettableRegionRoleState) {
+    /// Sets the staging state.
+    /// You should call this method in the worker loop.
+    /// Transitions from Writable to Staging state.
+    pub(crate) fn set_staging(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Writable,
+            RegionRoleState::Leader(RegionLeaderState::Staging),
+        )
+    }
+
+    /// Exits the staging state back to writable.
+    /// You should call this method in the worker loop.
+    /// Transitions from Staging to Writable state.
+    pub(crate) fn exit_staging(&self) -> Result<()> {
+        self.compare_exchange_state(
+            RegionLeaderState::Staging,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        )
+    }
+
+    /// Sets the region role state gracefully. This acquires the manifest write lock.
+    pub(crate) async fn set_role_state_gracefully(
+        &self,
+        state: SettableRegionRoleState,
+    ) -> Result<()> {
         let _manager = self.manifest_ctx.manifest_manager.write().await;
-        // We acquires the write lock of the manifest manager to ensure that no one is updating the manifest.
-        // Then we change the state.
-        self.set_role(state.into());
+        let current_state = self.state();
+
+        match state {
+            SettableRegionRoleState::Leader => {
+                // Exit staging mode and return to normal writable leader
+                // Only allowed from staging state
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!("Exiting staging mode for region {}", self.region_id);
+                        self.exit_staging()?;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in normal leader mode", self.region_id);
+                    }
+                    _ => {
+                        // Only staging -> leader transition is allowed
+                        return Err(RegionStateSnafu {
+                            region_id: self.region_id,
+                            state: current_state,
+                            expect: RegionRoleState::Leader(RegionLeaderState::Staging),
+                        }
+                        .build());
+                    }
+                }
+            }
+
+            SettableRegionRoleState::StagingLeader => {
+                // Enter staging mode from normal writable leader
+                // Only allowed from writable leader state
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        info!("Entering staging mode for region {}", self.region_id);
+                        self.set_staging()?;
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in staging mode", self.region_id);
+                    }
+                    _ => {
+                        return Err(RegionStateSnafu {
+                            region_id: self.region_id,
+                            state: current_state,
+                            expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+                        }
+                        .build());
+                    }
+                }
+            }
+
+            SettableRegionRoleState::Follower => {
+                // Make this region a follower
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!(
+                            "Exiting staging and demoting region {} to follower",
+                            self.region_id
+                        );
+                        self.exit_staging()?;
+                        self.set_role(RegionRole::Follower);
+                    }
+                    RegionRoleState::Leader(_) => {
+                        info!("Demoting region {} from leader to follower", self.region_id);
+                        self.set_role(RegionRole::Follower);
+                    }
+                    RegionRoleState::Follower => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in follower mode", self.region_id);
+                    }
+                }
+            }
+
+            SettableRegionRoleState::DowngradingLeader => {
+                // downgrade this region to downgrading leader
+                match current_state {
+                    RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        info!(
+                            "Exiting staging and entering downgrade for region {}",
+                            self.region_id
+                        );
+                        self.exit_staging()?;
+                        self.set_role(RegionRole::DowngradingLeader);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                        info!("Starting downgrade for region {}", self.region_id);
+                        self.set_role(RegionRole::DowngradingLeader);
+                    }
+                    RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
+                        // Already in desired state - no-op
+                        info!("Region {} already in downgrading mode", self.region_id);
+                    }
+                    _ => {
+                        warn!(
+                            "Cannot start downgrade for region {} from state {:?}",
+                            self.region_id, current_state
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Switches the region state to `RegionRoleState::Leader(RegionLeaderState::Writable)` if the current state is `expect`.
@@ -390,6 +525,11 @@ impl ManifestContext {
         self.manifest_manager.read().await.has_update().await
     }
 
+    /// Returns the current region role state.
+    pub(crate) fn current_state(&self) -> RegionRoleState {
+        self.state.load()
+    }
+
     /// Installs the manifest changes from the current version to the target version (inclusive).
     ///
     /// Returns installed [RegionManifest].
@@ -485,7 +625,7 @@ impl ManifestContext {
         }
 
         // Now we can update the manifest.
-        let version = manager.update(action_list).await.inspect_err(
+        let version = manager.update(action_list, current_state).await.inspect_err(
             |e| error!(e; "Failed to update manifest, region_id: {}", manifest.metadata.region_id),
         )?;
 
@@ -701,6 +841,22 @@ impl RegionMap {
         }
     }
 
+    /// Gets writable non-staging region by region id.
+    ///
+    /// Returns error if the region does not exist, is readonly, or is in staging mode.
+    pub(crate) fn writable_non_staging_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self.writable_region(region_id)?;
+        if region.is_staging() {
+            return Err(crate::error::RegionStateSnafu {
+                region_id,
+                state: region.state(),
+                expect: RegionRoleState::Leader(RegionLeaderState::Writable),
+            }
+            .build());
+        }
+        Ok(region)
+    }
+
     /// Gets flushable region by region id.
     ///
     /// Returns error if the region does not exist or is not operable.
@@ -830,13 +986,27 @@ impl ManifestStats {
 mod tests {
     use std::sync::Arc;
 
+    use common_datasource::compression::CompressionType;
+    use common_test_util::temp_dir::create_temp_dir;
     use crossbeam_utils::atomic::AtomicCell;
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
+    use store_api::logstore::provider::Provider;
     use store_api::region_engine::RegionRole;
+    use store_api::region_request::PathType;
     use store_api::storage::RegionId;
 
-    use crate::region::{RegionLeaderState, RegionRoleState};
+    use crate::access_layer::AccessLayer;
+    use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+    use crate::region::{
+        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+    };
+    use crate::sst::index::intermediate::IntermediateManager;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::test_util::memtable_util::EmptyMemtableBuilder;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
+    use crate::time_provider::StdTimeProvider;
 
     #[test]
     fn test_region_state_lock_free() {
@@ -893,5 +1063,141 @@ mod tests {
             manifest_ctx.state.load(),
             RegionRoleState::Leader(RegionLeaderState::Writable)
         );
+    }
+
+    #[tokio::test]
+    async fn test_staging_state_validation() {
+        let env = SchedulerEnv::new().await;
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+
+        // Create context with staging state using the correct pattern from SchedulerEnv
+        let staging_ctx = {
+            let manager = RegionManifestManager::new(
+                version_control.current().version.metadata.clone(),
+                RegionManifestOptions {
+                    manifest_dir: "".to_string(),
+                    object_store: env.access_layer.object_store().clone(),
+                    compress_type: CompressionType::Uncompressed,
+                    checkpoint_distance: 10,
+                },
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            Arc::new(ManifestContext::new(
+                manager,
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            ))
+        };
+
+        // Test staging state behavior
+        assert_eq!(
+            staging_ctx.current_state(),
+            RegionRoleState::Leader(RegionLeaderState::Staging)
+        );
+
+        // Test writable context for comparison
+        let writable_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+
+        assert_eq!(
+            writable_ctx.current_state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_staging_state_transitions() {
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let metadata = version_control.current().version.metadata.clone();
+
+        // Create MitoRegion for testing state transitions
+        let temp_dir = create_temp_dir("");
+        let path_str = temp_dir.path().display().to_string();
+        let fs_builder = Fs::default().root(&path_str);
+        let object_store = ObjectStore::new(fs_builder).unwrap().finish();
+
+        let index_aux_path = temp_dir.path().join("index_aux");
+        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let access_layer = Arc::new(AccessLayer::new(
+            "",
+            PathType::Bare,
+            object_store,
+            puffin_mgr,
+            intm_mgr,
+        ));
+
+        let manager = RegionManifestManager::new(
+            metadata.clone(),
+            RegionManifestOptions {
+                manifest_dir: "".to_string(),
+                object_store: access_layer.object_store().clone(),
+                compress_type: CompressionType::Uncompressed,
+                checkpoint_distance: 10,
+            },
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        ));
+
+        let region = MitoRegion {
+            region_id: metadata.region_id,
+            version_control,
+            access_layer,
+            manifest_ctx,
+            file_purger: crate::test_util::new_noop_file_purger(),
+            provider: Provider::noop_provider(),
+            last_flush_millis: Default::default(),
+            last_compaction_millis: Default::default(),
+            time_provider: Arc::new(StdTimeProvider),
+            topic_latest_entry_id: Default::default(),
+            memtable_builder: Arc::new(EmptyMemtableBuilder::default()),
+            stats: ManifestStats::default(),
+        };
+
+        // Test initial state
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+        assert!(!region.is_staging());
+
+        // Test transition to staging
+        region.set_staging().unwrap();
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Staging)
+        );
+        assert!(region.is_staging());
+
+        // Test transition back to writable
+        region.exit_staging().unwrap();
+        assert_eq!(
+            region.state(),
+            RegionRoleState::Leader(RegionLeaderState::Writable)
+        );
+        assert!(!region.is_staging());
+
+        // Test invalid transitions
+        assert!(region.set_staging().is_ok()); // Writable -> Staging should work
+        assert!(region.set_staging().is_err()); // Staging -> Staging should fail
+        assert!(region.exit_staging().is_ok()); // Staging -> Writable should work
+        assert!(region.exit_staging().is_err()); // Writable -> Writable should fail
     }
 }

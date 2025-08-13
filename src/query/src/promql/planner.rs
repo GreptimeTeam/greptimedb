@@ -50,6 +50,7 @@ use datafusion_expr::{col, lit, ExprSchemable, SortExpr};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use promql::extension_plan::{
     build_special_time_expr, Absent, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
     RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
@@ -67,6 +68,7 @@ use promql_parser::parser::{
     NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr,
     VectorMatchCardinality, VectorSelector,
 };
+use regex::{self, Regex};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
@@ -75,12 +77,13 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidTimeRangeSnafu,
-    MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
-    NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
+    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
+    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
+    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -96,6 +99,11 @@ const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
 const SPECIAL_VECTOR_FUNCTION: &str = "vector";
 /// `le` column for conventional histogram.
 const LE_COLUMN_NAME: &str = "le";
+
+/// Static regex for validating label names according to Prometheus specification.
+/// Label names must match the regex: [a-zA-Z_][a-zA-Z0-9_]*
+static LABEL_NAME_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
 
 const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
@@ -1360,12 +1368,12 @@ impl PromPlanner {
             let single_time_range = time_index_expr
                 .clone()
                 .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                    Some(self.ctx.start - offset_duration - self.ctx.lookback_delta - range),
+                    Some(self.ctx.start + offset_duration - self.ctx.lookback_delta - range),
                     None,
                 )))
                 .and(
                     time_index_expr.lt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(self.ctx.end - offset_duration + self.ctx.lookback_delta),
+                        Some(self.ctx.end + offset_duration + self.ctx.lookback_delta),
                         None,
                     ))),
                 );
@@ -1379,12 +1387,12 @@ impl PromPlanner {
                 time_index_expr
                     .clone()
                     .gt_eq(DfExpr::Literal(ScalarValue::TimestampMillisecond(
-                        Some(timestamp - offset_duration - lookback_delta - range),
+                        Some(timestamp + offset_duration - lookback_delta - range),
                         None,
                     )))
                     .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
                         ScalarValue::TimestampMillisecond(
-                            Some(timestamp - offset_duration + lookback_delta),
+                            Some(timestamp + offset_duration + lookback_delta),
                             None,
                         ),
                     ))),
@@ -1716,8 +1724,11 @@ impl PromPlanner {
             }
 
             "label_join" => {
-                let (concat_expr, dst_label) =
-                    Self::build_concat_labels_expr(&mut other_input_exprs, query_engine_state)?;
+                let (concat_expr, dst_label) = Self::build_concat_labels_expr(
+                    &mut other_input_exprs,
+                    &self.ctx,
+                    query_engine_state,
+                )?;
 
                 // Reserve the current field columns except the `dst_label`.
                 for value in &self.ctx.field_columns {
@@ -1907,6 +1918,22 @@ impl PromPlanner {
         Ok((exprs, new_tags))
     }
 
+    /// Validate label name according to Prometheus specification.
+    /// Label names must match the regex: [a-zA-Z_][a-zA-Z0-9_]*
+    /// Additionally, label names starting with double underscores are reserved for internal use.
+    fn validate_label_name(label_name: &str) -> Result<()> {
+        // Check if label name starts with double underscores (reserved)
+        if label_name.starts_with("__") {
+            return InvalidDestinationLabelNameSnafu { label_name }.fail();
+        }
+        // Check if label name matches the required pattern
+        if !LABEL_NAME_REGEX.is_match(label_name) {
+            return InvalidDestinationLabelNameSnafu { label_name }.fail();
+        }
+
+        Ok(())
+    }
+
     /// Build expr for `label_replace` function
     fn build_regexp_replace_label_expr(
         &self,
@@ -1921,6 +1948,9 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
+        // Validate the destination label name
+        Self::validate_label_name(&dst_label)?;
         let replacement = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(r)))) => r,
             other => UnexpectedPlanExprSnafu {
@@ -1943,6 +1973,15 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
+        // Validate the regex before using it
+        // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
+        regex::Regex::new(&regex).map_err(|_| {
+            InvalidRegularExpressionSnafu {
+                regex: regex.clone(),
+            }
+            .build()
+        })?;
 
         // If the src_label exists and regex is empty, keep everything unchanged.
         if self.ctx.tag_columns.contains(&src_label) && regex.is_empty() {
@@ -2000,6 +2039,7 @@ impl PromPlanner {
     /// Build expr for `label_join` function
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
+        ctx: &PromPlannerContext,
         query_engine_state: &QueryEngineState,
     ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
@@ -2018,17 +2058,30 @@ impl PromPlanner {
             }
             .fail()?,
         };
+
+        // Create a set of available columns (tag columns + field columns + time index column)
+        let available_columns: HashSet<&str> = ctx
+            .tag_columns
+            .iter()
+            .chain(ctx.field_columns.iter())
+            .chain(ctx.time_index_column.as_ref())
+            .map(|s| s.as_str())
+            .collect();
+
         let src_labels = other_input_exprs
-            .clone()
-            .into_iter()
+            .iter()
             .map(|expr| {
-                // Cast source label into column
+                // Cast source label into column or null literal
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label))) => {
                         if label.is_empty() {
                             Ok(DfExpr::Literal(ScalarValue::Null))
-                        } else {
+                        } else if available_columns.contains(label.as_str()) {
+                            // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
+                        } else {
+                            // Label doesn't exist, treat as empty string (null)
+                            Ok(DfExpr::Literal(ScalarValue::Null))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {

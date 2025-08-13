@@ -157,7 +157,7 @@ pub struct StandaloneOptions {
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
     pub max_in_flight_write_bytes: Option<ReadableSize>,
-    pub slow_query: Option<SlowQueryOptions>,
+    pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
 }
@@ -191,7 +191,7 @@ impl Default for StandaloneOptions {
             init_regions_in_background: false,
             init_regions_parallelism: 16,
             max_in_flight_write_bytes: None,
-            slow_query: Some(SlowQueryOptions::default()),
+            slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
         }
@@ -486,7 +486,7 @@ impl StartCommand {
             &opts.component.logging,
             &opts.component.tracing,
             None,
-            opts.component.slow_query.as_ref(),
+            Some(&opts.component.slow_query),
         );
 
         log_versions(verbose_version(), short_version(), APP_NAME);

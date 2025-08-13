@@ -1264,8 +1264,9 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use api::helper::ColumnDataTypeWrapper;
+    use api::v1::helper::row;
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, Row, Rows, SemanticType};
+    use api::v1::{Mutation, Rows, SemanticType};
     use common_time::Timestamp;
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
     use datatypes::schema::ColumnSchema;
@@ -1507,24 +1508,14 @@ mod tests {
             .collect();
 
         let rows = (0..len)
-            .map(|i| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(k0.clone())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(k1)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::I64Value(i as i64)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(i as f64)),
-                    },
-                ],
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue(k0.clone()),
+                    ValueData::I64Value(k1),
+                    ValueData::TimestampMillisecondValue(i as i64),
+                    ValueData::I64Value(i as i64),
+                    ValueData::F64Value(i as f64),
+                ])
             })
             .collect();
         let mutation = api::v1::Mutation {
@@ -1578,30 +1569,13 @@ mod tests {
                             sequence: j as u64,
                             rows: Some(Rows {
                                 schema: column_schemas.clone(),
-                                rows: vec![Row {
-                                    values: vec![
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::StringValue(format!(
-                                                "{}",
-                                                j
-                                            ))),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::I64Value(j as i64)),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::TimestampMillisecondValue(
-                                                j as i64,
-                                            )),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::I64Value(j as i64)),
-                                        },
-                                        api::v1::Value {
-                                            value_data: Some(ValueData::F64Value(j as f64)),
-                                        },
-                                    ],
-                                }],
+                                rows: vec![row(vec![
+                                    ValueData::StringValue(format!("{}", j)),
+                                    ValueData::I64Value(j as i64),
+                                    ValueData::TimestampMillisecondValue(j as i64),
+                                    ValueData::I64Value(j as i64),
+                                    ValueData::F64Value(j as f64),
+                                ])],
                             }),
                             write_hint: None,
                         },

@@ -374,8 +374,8 @@ impl ScanRegion {
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
-            None => ProjectionMapper::all(&self.version.metadata)?,
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
+            None => ProjectionMapper::all(&self.version.metadata, false)?,
         };
 
         let ssts = &self.version.ssts;
@@ -451,8 +451,8 @@ impl ScanRegion {
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters);
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
-            None => ProjectionMapper::all(&self.version.metadata)?,
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied(), false)?,
+            None => ProjectionMapper::all(&self.version.metadata, false)?,
         };
 
         let input = ScanInput::new(self.access_layer, mapper)
@@ -476,8 +476,9 @@ impl ScanRegion {
         #[cfg(feature = "enterprise")]
         let input = if let Some(provider) = self.extension_range_provider {
             let ranges = provider
-                .find_extension_ranges(time_range, &self.request)
+                .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
                 .await?;
+            debug!("Find extension ranges: {ranges:?}");
             input.with_extension_ranges(ranges)
         } else {
             input
@@ -1101,7 +1102,7 @@ impl StreamContext {
             num_file_ranges,
         )?;
         if num_other_ranges > 0 {
-            write!(f, r#"", other_ranges":{}"#, num_other_ranges)?;
+            write!(f, r#", "other_ranges":{}"#, num_other_ranges)?;
         }
         write!(f, "}}")?;
 
@@ -1156,7 +1157,7 @@ impl StreamContext {
                 let mut delimiter = "";
                 write!(f, ", extension_ranges: [")?;
                 for range in self.input.extension_ranges() {
-                    write!(f, "{}{}", delimiter, range)?;
+                    write!(f, "{}{:?}", delimiter, range)?;
                     delimiter = ", ";
                 }
                 write!(f, "]")?;

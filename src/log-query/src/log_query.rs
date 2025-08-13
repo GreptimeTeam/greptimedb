@@ -43,7 +43,7 @@ pub struct LogQuery {
     /// Conjunction of filters to apply for the raw logs.
     ///
     /// Filters here can apply to any LogExpr.
-    pub filters: Vec<ColumnFilters>,
+    pub filters: Filters,
     /// Adjacent lines to return. Applies to all filters above.
     ///
     /// TODO(ruihang): Do we need per-filter context?
@@ -52,6 +52,44 @@ pub struct LogQuery {
     // Processors
     /// Expressions to calculate after filter.
     pub exprs: Vec<LogExpr>,
+}
+
+/// Nested filter structure that supports and/or relationships
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Filters {
+    /// Single filter condition
+    Single(ColumnFilters),
+    /// Multiple filters with AND relationship
+    And(Vec<Filters>),
+    /// Multiple filters with OR relationship
+    Or(Vec<Filters>),
+    Not(Box<Filters>),
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Filters::And(vec![])
+    }
+}
+
+impl From<ColumnFilters> for Filters {
+    fn from(filter: ColumnFilters) -> Self {
+        Filters::Single(filter)
+    }
+}
+
+impl Filters {
+    pub fn and<T: Into<Filters>>(other: Vec<T>) -> Filters {
+        Filters::And(other.into_iter().map(Into::into).collect())
+    }
+
+    pub fn or<T: Into<Filters>>(other: Vec<T>) -> Filters {
+        Filters::Or(other.into_iter().map(Into::into).collect())
+    }
+
+    pub fn single(filter: ColumnFilters) -> Filters {
+        Filters::Single(filter)
+    }
 }
 
 /// Expression to calculate on log after filtering.
@@ -99,7 +137,7 @@ impl Default for LogQuery {
         Self {
             table: TableName::new("", "", ""),
             time_filter: Default::default(),
-            filters: vec![],
+            filters: Filters::And(vec![]),
             limit: Limit::default(),
             context: Default::default(),
             columns: vec![],
@@ -291,6 +329,50 @@ pub struct ColumnFilters {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum EqualValue {
+    /// Exact match with a string value.
+    String(String),
+    /// Exact match with a boolean value.
+    Boolean(bool),
+    /// Exact match with a number value.
+    Int(i64),
+    /// Exact match with an unsigned integer value.
+    UInt(u64),
+    /// Exact match with a float value.
+    Float(f64),
+}
+
+impl From<String> for EqualValue {
+    fn from(value: String) -> Self {
+        EqualValue::String(value)
+    }
+}
+
+impl From<bool> for EqualValue {
+    fn from(value: bool) -> Self {
+        EqualValue::Boolean(value)
+    }
+}
+
+impl From<i64> for EqualValue {
+    fn from(value: i64) -> Self {
+        EqualValue::Int(value)
+    }
+}
+
+impl From<f64> for EqualValue {
+    fn from(value: f64) -> Self {
+        EqualValue::Float(value)
+    }
+}
+
+impl From<u64> for EqualValue {
+    fn from(value: u64) -> Self {
+        EqualValue::UInt(value)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
     // Search-based filters
     /// Only match the exact content.
@@ -328,6 +410,7 @@ pub enum ContentFilter {
     In(Vec<String>),
     IsTrue,
     IsFalse,
+    Equal(EqualValue),
 
     // Compound filters
     Compound(Vec<ContentFilter>, ConjunctionOperator),
