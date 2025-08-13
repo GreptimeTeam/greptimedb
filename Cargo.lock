@@ -3871,7 +3871,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cache",
- "catalog",
  "client",
  "common-base",
  "common-config",
