@@ -425,6 +425,9 @@ impl LogQueryPlanner {
 
         // Try to infer literal types based on the other operand
         match (left, right) {
+            (LogExpr::Literal(_), LogExpr::Literal(_)) => {
+                // both are literal, do nothing
+            }
             (LogExpr::Literal(literal), _) => {
                 // Left is literal, try to infer from right
                 if let Ok(right_type) = right_expr.get_type(schema) {
