@@ -34,6 +34,9 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host");
 
+-- Should return empty result instead of error
+tql eval label_join(demo_num_cpus, "new_label", "-", "instance", "job");
+
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "$2", "idc", "(.*):(.*)");
 
@@ -81,6 +84,10 @@ TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), 
 -- Empty regex and not existing label in left expression
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "addr", "host1", "instance", "");
+
+TQL EVAL label_replace(demo_num_cpus, "~invalid", "", "src", "(.*)");
+
+TQL EVAL label_replace(demo_num_cpus, "job", "value", "src", "(.*");
 
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1

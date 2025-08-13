@@ -329,6 +329,42 @@ pub struct ColumnFilters {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum EqualValue {
+    /// Exact match with a string value.
+    String(String),
+    /// Exact match with a boolean value.
+    Boolean(bool),
+    /// Exact match with a number value.
+    Int(i64),
+    /// Exact match with a float value.
+    Float(f64),
+}
+
+impl From<String> for EqualValue {
+    fn from(value: String) -> Self {
+        EqualValue::String(value)
+    }
+}
+
+impl From<bool> for EqualValue {
+    fn from(value: bool) -> Self {
+        EqualValue::Boolean(value)
+    }
+}
+
+impl From<i64> for EqualValue {
+    fn from(value: i64) -> Self {
+        EqualValue::Int(value)
+    }
+}
+
+impl From<f64> for EqualValue {
+    fn from(value: f64) -> Self {
+        EqualValue::Float(value)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContentFilter {
     // Search-based filters
     /// Only match the exact content.
@@ -366,6 +402,7 @@ pub enum ContentFilter {
     In(Vec<String>),
     IsTrue,
     IsFalse,
+    Equal(EqualValue),
 
     // Compound filters
     Compound(Vec<ContentFilter>, ConjunctionOperator),

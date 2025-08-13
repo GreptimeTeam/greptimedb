@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
+
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, RawSchema};
+use snafu::OptionExt;
+
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::error::Result;
 use crate::key::table_route::TableRouteValue;
@@ -27,6 +33,89 @@ impl CreateLogicalTablesProcedure {
             .map(|(_, route)| TableRouteValue::Physical(route).region_numbers())?;
 
         self.data.physical_region_numbers = physical_region_numbers;
+
+        // Extract partition column names from the physical table
+        let physical_table_info = self
+            .context
+            .table_metadata_manager
+            .table_info_manager()
+            .get(self.data.physical_table_id)
+            .await?
+            .with_context(|| crate::error::TableInfoNotFoundSnafu {
+                table: format!("physical table {}", self.data.physical_table_id),
+            })?;
+
+        let physical_partition_columns: Vec<String> = physical_table_info
+            .table_info
+            .meta
+            .partition_key_indices
+            .iter()
+            .map(|&idx| {
+                physical_table_info.table_info.meta.schema.column_schemas[idx]
+                    .name
+                    .clone()
+            })
+            .collect();
+
+        self.data.physical_partition_columns = physical_partition_columns;
+
+        Ok(())
+    }
+
+    pub(crate) fn merge_partition_columns_into_logical_tables(&mut self) -> Result<()> {
+        let partition_columns = &self.data.physical_partition_columns;
+
+        // Skip if no partition columns to add
+        if partition_columns.is_empty() {
+            return Ok(());
+        }
+
+        for task in &mut self.data.tasks {
+            // Get existing column names in the logical table
+            let existing_column_names: HashSet<_> = task
+                .table_info
+                .meta
+                .schema
+                .column_schemas
+                .iter()
+                .map(|c| &c.name)
+                .collect();
+
+            let mut new_columns = Vec::new();
+            let mut new_primary_key_indices = task.table_info.meta.primary_key_indices.clone();
+
+            // Add missing partition columns
+            for partition_column in partition_columns {
+                if !existing_column_names.contains(partition_column) {
+                    let new_column_index =
+                        task.table_info.meta.schema.column_schemas.len() + new_columns.len();
+
+                    // Create new column schema for the partition column
+                    let column_schema = ColumnSchema::new(
+                        partition_column.clone(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    );
+                    new_columns.push(column_schema);
+
+                    // Add to primary key indices (partition columns are part of primary key)
+                    new_primary_key_indices.push(new_column_index);
+                }
+            }
+
+            // If we added new columns, update the table info
+            if !new_columns.is_empty() {
+                let mut updated_columns = task.table_info.meta.schema.column_schemas.clone();
+                updated_columns.extend(new_columns);
+
+                // Create new schema with updated columns
+                let new_schema = RawSchema::new(updated_columns);
+
+                // Update the table info
+                task.table_info.meta.schema = new_schema;
+                task.table_info.meta.primary_key_indices = new_primary_key_indices;
+            }
+        }
 
         Ok(())
     }

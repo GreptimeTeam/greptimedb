@@ -28,9 +28,11 @@ use common_catalog::consts::{
     trace_services_table_name, DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME,
 };
 use common_error::status_code::StatusCode as ErrorCode;
+use common_frontend::slow_query_event::{
+    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use frontend::slow_query_recorder::{SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME};
 use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -1383,7 +1385,7 @@ enable = true
 record_type = "system_table"
 threshold = "1s"
 sample_ratio = 1.0
-ttl = "30d"
+ttl = "2months 29days 2h 52m 48s"
 
 [query]
 parallelism = 0
