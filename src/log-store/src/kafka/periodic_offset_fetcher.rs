@@ -42,8 +42,8 @@ impl PeriodicOffsetFetcher {
     /// This spawns a task that periodically queries Kafka for the latest
     /// offset values for all registered topics and updates the shared map.
     pub(crate) async fn run(self) {
-        info!("PeriodicOffsetFetcher started");
         common_runtime::spawn_global(async move {
+            info!("PeriodicOffsetFetcher started");
             let mut interval = interval(self.interval);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
