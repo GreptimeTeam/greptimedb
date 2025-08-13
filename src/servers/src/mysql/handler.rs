@@ -257,7 +257,7 @@ impl MysqlInstanceShim {
                 stmt_key,
             )
             .map_err(|e| {
-                warn!(e; "Failed to save prepared statement");
+                error!(e; "Failed to save prepared statement");
                 e
             })?;
         } else {
@@ -271,7 +271,7 @@ impl MysqlInstanceShim {
                 stmt_key,
             )
             .map_err(|e| {
-                warn!(e; "Failed to save prepared statement");
+                error!(e; "Failed to save prepared statement");
                 e
             })?;
         }

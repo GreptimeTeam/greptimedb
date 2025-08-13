@@ -77,7 +77,7 @@ pub struct MysqlSpawnConfig {
     keep_alive_secs: u64,
     // other shim config
     reject_no_database: bool,
-    // prepared statement config
+    // prepared statement cache capacity
     prepared_stmt_cache_size: usize,
 }
 
