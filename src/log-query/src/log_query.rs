@@ -337,7 +337,7 @@ pub enum EqualValue {
     /// Exact match with a number value.
     Int(i64),
     /// Exact match with an unsigned integer value.
-    Uint(u64),
+    UInt(u64),
     /// Exact match with a float value.
     Float(f64),
 }
