@@ -55,7 +55,7 @@ pub struct TopicStat {
     ///
     /// The latest offset is updated in two ways:
     /// - Automatically when the producer successfully commits data to Kafka
-    /// - Periodically by the [HighWatermarkManager](crate::kafka::high_watermark_manager::HighWatermarkManager).
+    /// - Periodically by the [PeriodicOffsetFetcher](crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher).
     ///
     pub latest_offset: u64,
     /// Total size in bytes of records appended to the topic.
