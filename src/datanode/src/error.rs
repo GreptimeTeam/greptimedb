@@ -79,13 +79,6 @@ pub enum Error {
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Catalog not found: {}", name))]
-    CatalogNotFound {
-        name: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound {
         name: String,
@@ -157,13 +150,6 @@ pub enum Error {
         name: String,
         #[snafu(implicit)]
         location: Location,
-    },
-
-    #[snafu(display("Failed to access catalog"))]
-    Catalog {
-        #[snafu(implicit)]
-        location: Location,
-        source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to initialize meta client"))]
@@ -429,12 +415,10 @@ impl ErrorExt for Error {
             InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
-            | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | SchemaExists { .. }
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
-            | Catalog { .. }
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
             | ParseAddr { .. }
