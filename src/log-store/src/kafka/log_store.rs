@@ -90,13 +90,19 @@ struct PeriodicTopicStatsReporter {
 
 impl PeriodicTopicStatsReporter {
     fn align_ts(ts: i64, report_interval_millis: i64) -> i64 {
-        ts - ts % report_interval_millis
+        (ts / report_interval_millis) * report_interval_millis
     }
 
+    /// Creates a new [PeriodicTopicStatsReporter].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `report_interval` is zero.
     fn new(
         topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
         report_interval: Duration,
     ) -> Self {
+        assert!(!report_interval.is_zero());
         let report_interval_millis = report_interval.as_millis() as i64;
         let last_reported_timestamp_millis =
             Self::align_ts(current_time_millis(), report_interval_millis);

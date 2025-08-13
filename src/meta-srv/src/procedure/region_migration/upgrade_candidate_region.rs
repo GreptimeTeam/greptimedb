@@ -63,12 +63,8 @@ impl State for UpgradeCandidateRegion {
     ) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
 
+        let region_wal_option = self.get_region_wal_option(ctx).await?;
         let region_id = ctx.persistent_ctx.region_id;
-        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
-        let region_wal_options =
-            parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
-                .context(error::ParseWalOptionsSnafu)?;
-        let region_wal_option = region_wal_options.get(&region_id.region_number());
         if region_wal_option.is_none() {
             warn!(
                 "Region {} wal options not found, during upgrade candidate region",
@@ -77,7 +73,7 @@ impl State for UpgradeCandidateRegion {
         }
 
         if self
-            .upgrade_region_with_retry(ctx, procedure_ctx, region_wal_option)
+            .upgrade_region_with_retry(ctx, procedure_ctx, region_wal_option.as_ref())
             .await
         {
             ctx.update_upgrade_candidate_region_elapsed(now);
@@ -94,6 +90,26 @@ impl State for UpgradeCandidateRegion {
 }
 
 impl UpgradeCandidateRegion {
+    async fn get_region_wal_option(&self, ctx: &mut Context) -> Result<Option<WalOptions>> {
+        let region_id = ctx.persistent_ctx.region_id;
+        match ctx.get_from_peer_datanode_table_value().await {
+            Ok(datanode_table_value) => {
+                let region_wal_options =
+                    parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
+                        .context(error::ParseWalOptionsSnafu)?;
+                Ok(region_wal_options.get(&region_id.region_number()).cloned())
+            }
+            Err(error::Error::DatanodeTableNotFound { datanode_id, .. }) => {
+                warn!(
+                    "Datanode table not found, during upgrade candidate region, the target region might already been migrated, region_id: {}, datanode_id: {}",
+                    region_id, datanode_id
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Builds upgrade region instruction.
     fn build_upgrade_region_instruction(
         &self,
