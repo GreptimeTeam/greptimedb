@@ -475,7 +475,7 @@ impl LogQueryPlanner {
             EqualValue::Float(n) => lit(ScalarValue::Float64(Some(n))),
             EqualValue::Int(n) => lit(ScalarValue::Int64(Some(n))),
             EqualValue::Boolean(b) => lit(ScalarValue::Boolean(Some(b))),
-            EqualValue::Uint(n) => lit(ScalarValue::UInt64(Some(n))),
+            EqualValue::UInt(n) => lit(ScalarValue::UInt64(Some(n))),
         }
     }
 

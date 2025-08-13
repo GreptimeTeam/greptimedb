@@ -368,7 +368,7 @@ impl From<f64> for EqualValue {
 
 impl From<u64> for EqualValue {
     fn from(value: u64) -> Self {
-        EqualValue::Uint(value)
+        EqualValue::UInt(value)
     }
 }
 
