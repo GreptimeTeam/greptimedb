@@ -36,7 +36,7 @@ impl BackgroundProducerWorker {
             Ok(offset) => match self.topic_stats.entry(self.provider.clone()) {
                 dashmap::Entry::Occupied(mut occupied_entry) => {
                     let offset = offset as u64;
-                    if occupied_entry.get().latest_offset > offset {
+                    if occupied_entry.get().latest_offset < offset {
                         occupied_entry.get_mut().latest_offset = offset;
                         debug!(
                             "Updated latest offset for topic {} to {}",
