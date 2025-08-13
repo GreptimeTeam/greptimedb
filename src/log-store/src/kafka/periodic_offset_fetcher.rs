@@ -30,9 +30,9 @@ pub(crate) struct PeriodicOffsetFetcher {
 }
 
 impl PeriodicOffsetFetcher {
-    pub(crate) fn new(update_interval: Duration, client_manager: ClientManagerRef) -> Self {
+    pub(crate) fn new(interval: Duration, client_manager: ClientManagerRef) -> Self {
         Self {
-            interval: update_interval,
+            interval,
             client_manager,
         }
     }

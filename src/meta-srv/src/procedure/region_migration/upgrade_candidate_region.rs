@@ -226,12 +226,18 @@ impl UpgradeCandidateRegion {
         loop {
             let timer = Instant::now();
             // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
-            if let WalOptions::Kafka(kafka_wal_options) = wal_options {
-                let _guard = procedure_ctx
-                    .provider
-                    .acquire_lock(&(RemoteWalLock::Read(kafka_wal_options.topic.clone()).into()))
-                    .await;
-            }
+            let _guard = if let WalOptions::Kafka(kafka_wal_options) = wal_options {
+                Some(
+                    procedure_ctx
+                        .provider
+                        .acquire_lock(
+                            &(RemoteWalLock::Read(kafka_wal_options.topic.clone()).into()),
+                        )
+                        .await,
+                )
+            } else {
+                None
+            };
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);

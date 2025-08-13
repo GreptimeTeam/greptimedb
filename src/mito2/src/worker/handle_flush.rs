@@ -17,7 +17,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
@@ -266,11 +266,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 .unwrap_or(0);
             let topic_last_entry_id = region.topic_latest_entry_id.load(Ordering::Relaxed);
 
-            if latest_offset != 0 && latest_offset > topic_last_entry_id {
+            if latest_offset > topic_last_entry_id {
                 region
                     .topic_latest_entry_id
                     .store(latest_offset, Ordering::Relaxed);
-                info!(
+                debug!(
                     "Region {} latest entry id updated to {}",
                     region.region_id, latest_offset
                 );
