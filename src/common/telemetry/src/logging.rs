@@ -103,14 +103,15 @@ pub struct SlowQueryOptions {
 
     /// The threshold of slow queries.
     #[serde(with = "humantime_serde")]
-    pub threshold: Option<Duration>,
+    pub threshold: Duration,
 
     /// The sample ratio of slow queries.
-    pub sample_ratio: Option<f64>,
+    pub sample_ratio: f64,
 
-    /// The table TTL of `slow_queries` system table. Default is "30d".
+    /// The table TTL of `slow_queries` system table. Default is "90d".
     /// It's used when `record_type` is `SystemTable`.
-    pub ttl: Option<String>,
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
 }
 
 impl Default for SlowQueryOptions {
@@ -118,9 +119,9 @@ impl Default for SlowQueryOptions {
         Self {
             enable: true,
             record_type: SlowQueriesRecordType::SystemTable,
-            threshold: Some(Duration::from_secs(30)),
-            sample_ratio: Some(1.0),
-            ttl: Some("30d".to_string()),
+            threshold: Duration::from_secs(30),
+            sample_ratio: 1.0,
+            ttl: Duration::from_days(90),
         }
     }
 }
@@ -128,7 +129,9 @@ impl Default for SlowQueryOptions {
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
+    /// Record the slow query in the system table.
     SystemTable,
+    /// Record the slow query in a specific logs file.
     Log,
 }
 

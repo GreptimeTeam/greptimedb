@@ -189,12 +189,15 @@ impl procedure_service_server::ProcedureService for Metasrv {
                     parallelism,
                 } = database;
                 let resolve_strategy = parse_resolve_strategy(resolve_strategy)?;
-                self.reconciliation_manager().reconcile_database(
-                    catalog_name,
-                    database_name,
-                    resolve_strategy.into(),
-                    parallelism as usize,
-                )
+                self.reconciliation_manager()
+                    .reconcile_database(
+                        catalog_name,
+                        database_name,
+                        resolve_strategy.into(),
+                        parallelism as usize,
+                    )
+                    .await
+                    .context(error::SubmitReconcileProcedureSnafu)?
             }
             Target::ReconcileCatalog(catalog) => {
                 let ReconcileCatalog {
@@ -203,11 +206,10 @@ impl procedure_service_server::ProcedureService for Metasrv {
                     parallelism,
                 } = catalog;
                 let resolve_strategy = parse_resolve_strategy(resolve_strategy)?;
-                self.reconciliation_manager().reconcile_catalog(
-                    catalog_name,
-                    resolve_strategy.into(),
-                    parallelism as usize,
-                )
+                self.reconciliation_manager()
+                    .reconcile_catalog(catalog_name, resolve_strategy.into(), parallelism as usize)
+                    .await
+                    .context(error::SubmitReconcileProcedureSnafu)?
             }
         };
         Ok(Response::new(ReconcileResponse {

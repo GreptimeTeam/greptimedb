@@ -330,12 +330,12 @@ impl GreptimeDbStandaloneBuilder {
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             // Enable slow query log with 1s threshold to run the slow query test.
-            slow_query: Some(SlowQueryOptions {
+            slow_query: SlowQueryOptions {
                 enable: true,
                 // Set the threshold to 1s to run the slow query test.
-                threshold: Some(Duration::from_secs(1)),
+                threshold: Duration::from_secs(1),
                 ..Default::default()
-            }),
+            },
             ..StandaloneOptions::default()
         };
 

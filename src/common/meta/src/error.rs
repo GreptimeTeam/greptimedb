@@ -375,6 +375,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region not found: {}", region_id))]
+    RegionNotFound {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("View not found: '{}'", view_name))]
     ViewNotFound {
         view_name: String,
@@ -1116,7 +1123,9 @@ impl ErrorExt for Error {
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
             FlowAlreadyExists { .. } => StatusCode::FlowAlreadyExists,
 
-            ViewNotFound { .. } | TableNotFound { .. } => StatusCode::TableNotFound,
+            ViewNotFound { .. } | TableNotFound { .. } | RegionNotFound { .. } => {
+                StatusCode::TableNotFound
+            }
             ViewAlreadyExists { .. } | TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
             SubmitProcedure { source, .. }

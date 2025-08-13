@@ -25,6 +25,36 @@ use store_api::storage::RegionId;
 use crate::config::MitoConfig;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
+/// Helper function to assert a successful response with expected entry id
+fn assert_success_response(response: &SetRegionRoleStateResponse, expected_entry_id: u64) {
+    match response {
+        SetRegionRoleStateResponse::Success(SetRegionRoleStateSuccess::Mito { last_entry_id }) => {
+            assert_eq!(*last_entry_id, expected_entry_id);
+        }
+        _ => panic!("Expected success response, got: {:?}", response),
+    }
+}
+
+/// Helper function to assert a NotFound response
+fn assert_not_found_response(response: &SetRegionRoleStateResponse) {
+    match response {
+        SetRegionRoleStateResponse::NotFound => {
+            // Expected - do nothing
+        }
+        _ => panic!("Expected NotFound response, got: {:?}", response),
+    }
+}
+
+/// Helper function to assert an InvalidTransition response
+fn assert_invalid_transition_response(response: &SetRegionRoleStateResponse) {
+    match response {
+        SetRegionRoleStateResponse::InvalidTransition(_) => {
+            // Expected - do nothing
+        }
+        _ => panic!("Expected InvalidTransition response, got: {:?}", response),
+    }
+}
+
 #[tokio::test]
 async fn test_set_role_state_gracefully() {
     let settable_role_states = [
@@ -48,20 +78,14 @@ async fn test_set_role_state_gracefully() {
             .set_region_role_state_gracefully(region_id, settable_role_state)
             .await
             .unwrap();
-        assert_eq!(
-            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(0)),
-            result
-        );
+        assert_success_response(&result, 0);
 
         // set Follower again.
         let result = engine
             .set_region_role_state_gracefully(region_id, settable_role_state)
             .await
             .unwrap();
-        assert_eq!(
-            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(0)),
-            result
-        );
+        assert_success_response(&result, 0);
 
         let rows = Rows {
             schema: column_schemas,
@@ -92,10 +116,7 @@ async fn test_set_role_state_gracefully() {
             .await
             .unwrap();
 
-        assert_eq!(
-            SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(1)),
-            result
-        );
+        assert_success_response(&result, 1);
     }
 }
 
@@ -111,7 +132,7 @@ async fn test_set_role_state_gracefully_not_exist() {
         .set_region_role_state_gracefully(non_exist_region_id, SettableRegionRoleState::Follower)
         .await
         .unwrap();
-    assert_eq!(SetRegionRoleStateResponse::NotFound, result);
+    assert_not_found_response(&result);
 }
 
 #[tokio::test]
@@ -138,10 +159,7 @@ async fn test_write_downgrading_region() {
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
         .await
         .unwrap();
-    assert_eq!(
-        SetRegionRoleStateResponse::success(SetRegionRoleStateSuccess::mito(1)),
-        result
-    );
+    assert_success_response(&result, 1);
 
     let rows = Rows {
         schema: column_schemas,
@@ -158,4 +176,186 @@ async fn test_write_downgrading_region() {
         .await
         .unwrap_err();
     assert_eq!(err.status_code(), StatusCode::RegionNotReady)
+}
+
+#[tokio::test]
+async fn test_unified_state_transitions() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Test all transitions from normal leader state
+
+    // Leader -> StagingLeader -> Leader
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // Leader -> StagingLeader -> Follower (exit staging via demotion)
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // Note: Direct Follower -> Leader promotion is no longer allowed
+    // Use existing set_region_role method for follower -> leader promotion
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    // Leader -> StagingLeader -> DowngradingLeader (exit staging via downgrade)
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::DowngradingLeader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // Note: Direct DowngradingLeader -> Leader is no longer allowed
+    // Use existing set_region_role method for downgrading -> leader promotion
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    // Test idempotent operations (no-op cases)
+
+    // Leader -> Leader (should be no-op)
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // StagingLeader -> StagingLeader (should be no-op)
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // Back to follower for final test
+    engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+
+    // Follower -> Follower (should be no-op)
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+}
+
+#[tokio::test]
+async fn test_restricted_state_transitions() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Test that Leader transition from follower is rejected with InvalidTransition
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_invalid_transition_response(&result);
+
+    // Test that Leader transition from downgrading is rejected with InvalidTransition
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::DowngradingLeader)
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_invalid_transition_response(&result);
+
+    // Test that StagingLeader transition from follower is rejected with InvalidTransition
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_invalid_transition_response(&result);
+
+    // Test that StagingLeader transition from downgrading is rejected with InvalidTransition
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::DowngradingLeader)
+        .unwrap();
+
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_invalid_transition_response(&result);
+
+    // Test that valid staging workflow still works
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    // Writable Leader -> StagingLeader should work
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
+
+    // Staging -> Leader should work
+    let result = engine
+        .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    assert_success_response(&result, 0);
 }
