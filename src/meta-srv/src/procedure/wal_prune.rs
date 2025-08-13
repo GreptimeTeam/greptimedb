@@ -211,10 +211,6 @@ impl WalPruneProcedure {
             .into_iter()
             .map(|(region_id, region)| {
                 let prunable_entry_id = region.manifest.prunable_entry_id();
-                info!(
-                    "Region {}, topic: {}, prunable_entry_id: {}",
-                    region_id, self.data.topic, prunable_entry_id
-                );
                 (region_id, prunable_entry_id)
             })
             .collect();
@@ -250,13 +246,6 @@ impl WalPruneProcedure {
                     self.data.regions_to_flush.push(region_id);
                 }
             }
-            info!(
-                "Flush regions: {:?}, trigger_flush_threshold: {}, prunable_entry_id: {}, max_prunable_entry_id: {}",
-                self.data.regions_to_flush,
-                self.data.trigger_flush_threshold,
-                self.data.prunable_entry_id,
-                max_prunable_entry_id
-            );
             self.data.state = WalPruneState::FlushRegion;
         } else {
             self.data.state = WalPruneState::Prune;
