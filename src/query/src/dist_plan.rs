@@ -17,6 +17,8 @@ mod commutativity;
 mod merge_scan;
 mod merge_sort;
 mod planner;
+#[allow(dead_code)]
+mod predicate_extractor;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
