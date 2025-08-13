@@ -28,6 +28,7 @@ use range_fn::process_range_fn;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 use crate::admin_fn::process_admin_fn;
+use crate::serde_with_default::impl_deserialize_with_empty_default_derive;
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
@@ -188,28 +189,24 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
     gen.into()
 }
 
-/// Generates a custom `Deserialize` implementation for enums that treats empty strings as default values.
+/// Derive macro that generates a custom `Deserialize` implementation for enums
+/// that treats empty strings as default values.
 ///
-/// This macro is useful for configuration enums where an empty string should be treated as
-/// the default variant instead of causing a deserialization error.
+/// This macro automatically derives the string representations from the enum variants,
+/// respecting serde rename attributes, and doesn't require manually listing all variants.
 ///
 /// # Example
 /// ```rust
-/// use common_macro::impl_deserialize_with_empty_default;
+/// use common_macro::DeserializeWithEmptyDefault;
 /// use serde::{Serialize, Deserialize};
 ///
-/// #[derive(Clone, Debug, Serialize, Default, PartialEq)]
+/// #[derive(Clone, Debug, Serialize, Default, PartialEq, DeserializeWithEmptyDefault)]
+/// #[serde(rename_all = "snake_case")]
 /// pub enum LogFormat {
 ///     Json,
 ///     #[default]
 ///     Text,
 /// }
-///
-/// impl_deserialize_with_empty_default!(
-///     LogFormat,
-///     Json => "json",
-///     Text => "text",
-/// );
 /// ```
 ///
 /// With this implementation:
@@ -217,7 +214,12 @@ pub fn derive_meta_builder(input: TokenStream) -> TokenStream {
 /// - `"json"` deserializes to `LogFormat::Json`
 /// - `"text"` deserializes to `LogFormat::Text`
 /// - Any other string causes a deserialization error
-#[proc_macro]
-pub fn impl_deserialize_with_empty_default(input: TokenStream) -> TokenStream {
-    serde_with_default::impl_deserialize_with_empty_default(input)
+///
+/// The macro automatically handles:
+/// - `#[serde(rename_all = "...")]` container attributes
+/// - `#[serde(rename = "...")]` field attributes
+/// - Enums that implement `Default`
+#[proc_macro_derive(DeserializeWithEmptyDefault)]
+pub fn deserialize_with_empty_default_derive(input: TokenStream) -> TokenStream {
+    impl_deserialize_with_empty_default_derive(input)
 }

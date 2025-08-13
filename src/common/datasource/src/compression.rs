@@ -19,6 +19,7 @@ use std::str::FromStr;
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
 use async_compression::tokio::write;
 use bytes::Bytes;
+use common_macro::DeserializeWithEmptyDefault;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use futures::Stream;
 use serde::Serialize;
@@ -28,7 +29,18 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::{self, Error, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, Serialize, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumIter,
+    Serialize,
+    Default,
+    DeserializeWithEmptyDefault,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionType {
     /// Gzip-ed file
@@ -43,15 +55,6 @@ pub enum CompressionType {
     #[default]
     Uncompressed,
 }
-
-common_macro::impl_deserialize_with_empty_default!(
-    CompressionType,
-    Gzip => "gzip",
-    Bzip2 => "bzip2",
-    Xz => "xz",
-    Zstd => "zstd",
-    Uncompressed => "uncompressed",
-);
 
 impl FromStr for CompressionType {
     type Err = Error;

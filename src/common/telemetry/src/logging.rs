@@ -18,6 +18,7 @@ use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use common_macro::DeserializeWithEmptyDefault;
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{Protocol, SpanExporterBuilder, WithExportConfig};
@@ -83,7 +84,7 @@ pub struct LoggingOptions {
 }
 
 /// The protocol of OTLP export.
-#[derive(Clone, Debug, Serialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, PartialEq, Default, DeserializeWithEmptyDefault)]
 #[serde(rename_all = "snake_case")]
 pub enum OtlpExportProtocol {
     /// GRPC protocol.
@@ -93,12 +94,6 @@ pub enum OtlpExportProtocol {
     #[default]
     Http,
 }
-
-common_macro::impl_deserialize_with_empty_default!(
-    OtlpExportProtocol,
-    Grpc => "grpc",
-    Http => "http",
-);
 
 /// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -135,7 +130,7 @@ impl Default for SlowQueryOptions {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Copy, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Copy, PartialEq, Default, DeserializeWithEmptyDefault)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     /// Record the slow query in the system table.
@@ -145,25 +140,13 @@ pub enum SlowQueriesRecordType {
     Log,
 }
 
-common_macro::impl_deserialize_with_empty_default!(
-    SlowQueriesRecordType,
-    SystemTable => "system_table",
-    Log => "log",
-);
-
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Default, DeserializeWithEmptyDefault)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     Json,
     #[default]
     Text,
 }
-
-common_macro::impl_deserialize_with_empty_default!(
-    LogFormat,
-    Json => "json",
-    Text => "text",
-);
 
 impl PartialEq for LoggingOptions {
     fn eq(&self, other: &Self) -> bool {
