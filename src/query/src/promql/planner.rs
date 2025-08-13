@@ -1562,12 +1562,11 @@ impl PromPlanner {
         for arg in args {
             // First try to parse as literal expression (including binary expressions like 100.0 + 3.0)
             if Self::try_build_literal_expr(arg).is_some() {
-                let expr =
-                    Self::get_param_as_literal_expr(&Some(Box::new(*arg.clone())), None, None)?;
+                let expr = Self::get_param_as_literal_expr(&Some(arg.clone()), None, None)?;
                 result.literals.push(expr);
             } else {
                 // If not a literal, treat as vector input
-                match *arg.clone() {
+                match arg.as_ref() {
                     PromExpr::Subquery(_)
                     | PromExpr::VectorSelector(_)
                     | PromExpr::MatrixSelector(_)
@@ -1583,11 +1582,7 @@ impl PromPlanner {
                     }
 
                     _ => {
-                        let expr = Self::get_param_as_literal_expr(
-                            &Some(Box::new(*arg.clone())),
-                            None,
-                            None,
-                        )?;
+                        let expr = Self::get_param_as_literal_expr(&Some(arg.clone()), None, None)?;
                         result.literals.push(expr);
                     }
                 }
