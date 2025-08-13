@@ -38,25 +38,29 @@ pub fn impl_deserialize_with_empty_default_derive(input: TokenStream) -> TokenSt
     // Extract container-level serde rename_all attribute
     let rename_all = extract_rename_all(&input.attrs);
 
-    // Generate variant matches
-    let variant_matches = data_enum.variants.iter().map(|variant| {
+    let mut variant_data = Vec::new();
+    for variant in &data_enum.variants {
         let variant_ident = &variant.ident;
-        let variant_str = get_variant_string(variant, &rename_all);
+        let variant_str = match get_variant_string(variant, &rename_all) {
+            Ok(s) => s,
+            Err(e) => {
+                return Error::new_spanned(variant, e).to_compile_error().into();
+            }
+        };
+        variant_data.push((variant_ident, variant_str));
+    }
 
+    // Generate variant matches
+    let variant_matches = variant_data.iter().map(|(variant_ident, variant_str)| {
         quote! {
             #variant_str => Ok(#enum_name::#variant_ident),
         }
     });
 
     // Generate variant strings for error message
-    let variant_strings: Vec<_> = data_enum
-        .variants
-        .iter()
-        .map(|variant| {
-            let variant_str = get_variant_string(variant, &rename_all);
-            quote! { #variant_str }
-        })
-        .collect();
+    let variant_strings = variant_data.iter().map(|(_, variant_str)| {
+        quote! { #variant_str }
+    });
 
     let expanded = quote! {
         impl<'de> serde::Deserialize<'de> for #enum_name {
@@ -80,8 +84,8 @@ pub fn impl_deserialize_with_empty_default_derive(input: TokenStream) -> TokenSt
     TokenStream::from(expanded)
 }
 
-/// Extract the rename_all attribute from container attributes
-fn extract_rename_all(attrs: &[Attribute]) -> Option<String> {
+/// Extract a string value from serde attributes for a given key
+fn extract_serde_string_value(attrs: &[Attribute], key: &str) -> Option<String> {
     for attr in attrs {
         if attr.path().is_ident("serde") {
             if let Ok(meta_list) =
@@ -89,7 +93,7 @@ fn extract_rename_all(attrs: &[Attribute]) -> Option<String> {
             {
                 for meta in meta_list {
                     if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                        if path.is_ident("rename_all") {
+                        if path.is_ident(key) {
                             if let Expr::Lit(ExprLit {
                                 lit: Lit::Str(lit_str),
                                 ..
@@ -106,29 +110,16 @@ fn extract_rename_all(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
+/// Extract the rename_all attribute from container attributes
+fn extract_rename_all(attrs: &[Attribute]) -> Option<String> {
+    extract_serde_string_value(attrs, "rename_all")
+}
+
 /// Get the string representation of a variant, considering serde rename attributes
-fn get_variant_string(variant: &Variant, rename_all: &Option<String>) -> String {
-    // Check for field-level rename attribute
-    for attr in &variant.attrs {
-        if attr.path().is_ident("serde") {
-            if let Ok(meta_list) =
-                attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            {
-                for meta in meta_list {
-                    if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
-                        if path.is_ident("rename") {
-                            if let Expr::Lit(ExprLit {
-                                lit: Lit::Str(lit_str),
-                                ..
-                            }) = value
-                            {
-                                return lit_str.value();
-                            }
-                        }
-                    }
-                }
-            }
-        }
+fn get_variant_string(variant: &Variant, rename_all: &Option<String>) -> Result<String, String> {
+    // Check for field-level rename attribute first
+    if let Some(renamed) = extract_serde_string_value(&variant.attrs, "rename") {
+        return Ok(renamed);
     }
 
     // Apply container-level rename_all if no field-level rename
@@ -136,21 +127,24 @@ fn get_variant_string(variant: &Variant, rename_all: &Option<String>) -> String 
     if let Some(rename_style) = rename_all {
         apply_rename_style(&variant_name, rename_style)
     } else {
-        variant_name
+        Ok(variant_name)
     }
 }
 
 /// Apply the rename style to a variant name
-fn apply_rename_style(name: &str, style: &str) -> String {
+fn apply_rename_style(name: &str, style: &str) -> Result<String, String> {
     match style {
-        "snake_case" => to_snake_case(name),
-        "kebab-case" => to_kebab_case(name),
-        "camelCase" => to_camel_case(name),
-        "PascalCase" => name.to_string(), // Already in PascalCase
-        "SCREAMING_SNAKE_CASE" => to_screaming_snake_case(name),
-        "lowercase" => name.to_lowercase(),
-        "UPPERCASE" => name.to_uppercase(),
-        _ => name.to_string(), // Unknown style, use as-is
+        "snake_case" => Ok(to_snake_case(name)),
+        "kebab-case" => Ok(to_kebab_case(name)),
+        "camelCase" => Ok(to_camel_case(name)),
+        "PascalCase" => Ok(name.to_string()), // Already in PascalCase
+        "SCREAMING_SNAKE_CASE" => Ok(to_screaming_snake_case(name)),
+        "lowercase" => Ok(name.to_lowercase()),
+        "UPPERCASE" => Ok(name.to_uppercase()),
+        unknown => Err(format!(
+            "Unknown serde rename style: '{}'. Supported styles: snake_case, kebab-case, camelCase, PascalCase, SCREAMING_SNAKE_CASE, lowercase, UPPERCASE",
+            unknown
+        )),
     }
 }
 
@@ -235,23 +229,67 @@ mod tests {
 
     #[test]
     fn test_apply_rename_style() {
-        assert_eq!(apply_rename_style("Json", "snake_case"), "json");
-        assert_eq!(apply_rename_style("LogFormat", "snake_case"), "log_format");
-        assert_eq!(apply_rename_style("Json", "kebab-case"), "json");
-        assert_eq!(apply_rename_style("LogFormat", "kebab-case"), "log-format");
-        assert_eq!(apply_rename_style("Json", "camelCase"), "json");
-        assert_eq!(apply_rename_style("LogFormat", "camelCase"), "logFormat");
-        assert_eq!(apply_rename_style("Json", "PascalCase"), "Json");
-        assert_eq!(apply_rename_style("LogFormat", "PascalCase"), "LogFormat");
-        assert_eq!(apply_rename_style("Json", "SCREAMING_SNAKE_CASE"), "JSON");
+        assert_eq!(
+            apply_rename_style("Json", "snake_case"),
+            Ok("json".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "snake_case"),
+            Ok("log_format".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("Json", "kebab-case"),
+            Ok("json".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "kebab-case"),
+            Ok("log-format".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("Json", "camelCase"),
+            Ok("json".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "camelCase"),
+            Ok("logFormat".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("Json", "PascalCase"),
+            Ok("Json".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "PascalCase"),
+            Ok("LogFormat".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("Json", "SCREAMING_SNAKE_CASE"),
+            Ok("JSON".to_string())
+        );
         assert_eq!(
             apply_rename_style("LogFormat", "SCREAMING_SNAKE_CASE"),
-            "LOG_FORMAT"
+            Ok("LOG_FORMAT".to_string())
         );
-        assert_eq!(apply_rename_style("Json", "lowercase"), "json");
-        assert_eq!(apply_rename_style("LogFormat", "lowercase"), "logformat");
-        assert_eq!(apply_rename_style("Json", "UPPERCASE"), "JSON");
-        assert_eq!(apply_rename_style("LogFormat", "UPPERCASE"), "LOGFORMAT");
-        assert_eq!(apply_rename_style("Json", "unknown"), "Json");
+        assert_eq!(
+            apply_rename_style("Json", "lowercase"),
+            Ok("json".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "lowercase"),
+            Ok("logformat".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("Json", "UPPERCASE"),
+            Ok("JSON".to_string())
+        );
+        assert_eq!(
+            apply_rename_style("LogFormat", "UPPERCASE"),
+            Ok("LOGFORMAT".to_string())
+        );
+
+        // Test error case for unknown style
+        assert!(apply_rename_style("Json", "unknown").is_err());
+        let error = apply_rename_style("Json", "unknown").unwrap_err();
+        assert!(error.contains("Unknown serde rename style: 'unknown'"));
+        assert!(error.contains("snake_case"));
     }
 }
