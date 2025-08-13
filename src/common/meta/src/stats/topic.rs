@@ -360,8 +360,11 @@ fn calculate_topic_stat(
         return None;
     }
 
-    let avg_record_size = ((last_stat.record_size - target_stat.record_size)
-        / (last_stat.record_num - target_stat.record_num)) as usize;
+    // Safety: the last stat's record size and record num must be greater than the target stat's record size and record num.
+    let record_size = last_stat.record_size - target_stat.record_size;
+    let record_num = last_stat.record_num - target_stat.record_num;
+    let avg_record_size = record_size.checked_div(record_num).unwrap_or(0) as usize;
+
     let start_ts = target_stat.start_ts;
     let end_ts = last_stat.start_ts;
     Some(CalculatedTopicStat {
