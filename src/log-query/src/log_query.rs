@@ -336,6 +336,8 @@ pub enum EqualValue {
     Boolean(bool),
     /// Exact match with a number value.
     Int(i64),
+    /// Exact match with an unsigned integer value.
+    Uint(u64),
     /// Exact match with a float value.
     Float(f64),
 }
@@ -361,6 +363,12 @@ impl From<i64> for EqualValue {
 impl From<f64> for EqualValue {
     fn from(value: f64) -> Self {
         EqualValue::Float(value)
+    }
+}
+
+impl From<u64> for EqualValue {
+    fn from(value: u64) -> Self {
+        EqualValue::Uint(value)
     }
 }
 

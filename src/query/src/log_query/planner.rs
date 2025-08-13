@@ -201,7 +201,7 @@ impl LogQueryPlanner {
             .try_collect::<Vec<_>>()?;
 
         if filter_exprs.is_empty() {
-            return Ok(None);
+            return Ok(Some(col_expr.is_true()));
         }
 
         // Combine all filters with AND logic
@@ -475,6 +475,7 @@ impl LogQueryPlanner {
             EqualValue::Float(n) => lit(ScalarValue::Float64(Some(n))),
             EqualValue::Int(n) => lit(ScalarValue::Int64(Some(n))),
             EqualValue::Boolean(b) => lit(ScalarValue::Boolean(Some(b))),
+            EqualValue::Uint(n) => lit(ScalarValue::UInt64(Some(n))),
         }
     }
 
