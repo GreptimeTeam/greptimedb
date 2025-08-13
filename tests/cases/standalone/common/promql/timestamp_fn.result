@@ -93,17 +93,15 @@ tql eval (0, 60, '30s') timestamp(timestamp_test) > bool 30;
 +---------------------+---------------------+
 
 -- Test timestamp() with time functions
--- Instead of testing timestamp() - time() which is unstable,
--- test that time() behaves correctly in expressions
-tql eval (0, 60, '30s') time() > bool 1000;
+tql eval (0, 60, '30s') timestamp(timestamp_test) - time();
 
-+---------------------+-------+
-| time                | value |
-+---------------------+-------+
-| 1970-01-01T00:00:00 | 1.0   |
-| 1970-01-01T00:00:30 | 1.0   |
-| 1970-01-01T00:01:00 | 1.0   |
-+---------------------+-------+
++---------------------+----------------------------------------------+
+| time                | timestamp_test.value - .time / Float64(1000) |
++---------------------+----------------------------------------------+
+| 1970-01-01T00:00:00 | 0.0                                          |
+| 1970-01-01T00:00:30 | -29.0                                        |
+| 1970-01-01T00:01:00 | 0.0                                          |
++---------------------+----------------------------------------------+
 
 -- Test timestamp() with other functions
 tql eval (0, 60, '30s') abs(timestamp(timestamp_test) - avg(timestamp(timestamp_test))) > 20;

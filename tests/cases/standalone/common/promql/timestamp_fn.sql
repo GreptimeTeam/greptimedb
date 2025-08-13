@@ -31,9 +31,7 @@ tql eval (0, 60, '30s') timestamp(timestamp_test) + 1;
 tql eval (0, 60, '30s') timestamp(timestamp_test) > bool 30;
 
 -- Test timestamp() with time functions
--- Instead of testing timestamp() - time() which is unstable,
--- test that time() behaves correctly in expressions
-tql eval (0, 60, '30s') time() > bool 1000;
+tql eval (0, 60, '30s') timestamp(timestamp_test) - time();
 
 -- Test timestamp() with other functions
 tql eval (0, 60, '30s') abs(timestamp(timestamp_test) - avg(timestamp(timestamp_test))) > 20;

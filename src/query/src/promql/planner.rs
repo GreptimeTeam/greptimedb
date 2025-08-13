@@ -1646,7 +1646,8 @@ impl PromPlanner {
                 // time() function should return evaluation time
                 // For instant queries with start=end=0, use current timestamp
                 // For range queries, use build_special_time_expr to get time from time column
-                if self.ctx.start == 0 && self.ctx.end == 0 {
+                if self.ctx.start == 0 && self.ctx.end == 0 && self.ctx.interval == 300000 {
+                    // default value as time instant
                     // Instant query without specified time - use current timestamp
                     let now = current_timestamp();
                     exprs.push(DfExpr::Literal(ScalarValue::Float64(Some(now))));
