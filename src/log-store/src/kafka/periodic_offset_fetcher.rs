@@ -79,7 +79,8 @@ impl PeriodicOffsetFetcher {
 mod tests {
     use std::sync::Arc;
 
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;
 
@@ -88,37 +89,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_update_latest_offset() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let (manager, topics) =
-                    prepare("test_try_update_latest_offset", 1, broker_endpoints).await;
-                let manager = Arc::new(manager);
-                let fetcher =
-                    PeriodicOffsetFetcher::new(Duration::from_millis(100), manager.clone());
-                let topic_stats = manager.topic_stats().clone();
-                fetcher.run().await;
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
 
-                let topic = topics[0].clone();
-                let provider = Arc::new(KafkaProvider::new(topic.to_string()));
-                let producer = manager
-                    .get_or_insert(&provider)
-                    .await
-                    .unwrap()
-                    .producer()
-                    .clone();
+        let (manager, topics) = prepare("test_try_update_latest_offset", 1, broker_endpoints).await;
+        let manager = Arc::new(manager);
+        let fetcher = PeriodicOffsetFetcher::new(Duration::from_millis(100), manager.clone());
+        let topic_stats = manager.topic_stats().clone();
+        fetcher.run().await;
 
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
-                assert_eq!(current_latest_offset, 0);
+        let topic = topics[0].clone();
+        let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+        let producer = manager
+            .get_or_insert(&provider)
+            .await
+            .unwrap()
+            .producer()
+            .clone();
 
-                let record = vec![record()];
-                let region = RegionId::new(1, 1);
-                producer.produce(region, record.clone()).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
-                assert_eq!(current_latest_offset, record.len() as u64);
-            })
-        })
-        .await
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
+        assert_eq!(current_latest_offset, 0);
+
+        let record = vec![record()];
+        let region = RegionId::new(1, 1);
+        producer.produce(region, record.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let current_latest_offset = topic_stats.get(&provider).unwrap().latest_offset;
+        assert_eq!(current_latest_offset, record.len() as u64);
     }
 }
