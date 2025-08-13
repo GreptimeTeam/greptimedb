@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 backtrace = "0.3"
+common-base.workspace = true
 common-error.workspace = true
 common-version.workspace = true
 console-subscriber = { version = "0.1", optional = true }
