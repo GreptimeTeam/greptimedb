@@ -53,6 +53,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, watch, Notify, RwLock};
 
 use crate::error::{self, DeserializeFromJsonSnafu, Result, UnexpectedInstructionReplySnafu};
+use crate::handler::collect_topic_stats_handler::CollectTopicStatsHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
 use crate::metasrv::Context;
 use crate::metrics::{METRIC_META_HANDLER_EXECUTE, METRIC_META_HEARTBEAT_CONNECTION_NUM};
@@ -65,6 +66,7 @@ pub mod check_leader_handler;
 pub mod collect_cluster_info_handler;
 pub mod collect_leader_region_handler;
 pub mod collect_stats_handler;
+pub mod collect_topic_stats_handler;
 pub mod extract_stat_handler;
 pub mod failure_handler;
 pub mod filter_inactive_region_stats;
@@ -76,6 +78,8 @@ pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
 pub mod remap_flow_peer_handler;
 pub mod response_header_handler;
+#[cfg(test)]
+pub mod test_utils;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
@@ -619,6 +623,7 @@ impl HeartbeatHandlerGroupBuilder {
             self.add_handler_last(publish_heartbeat_handler);
         }
         self.add_handler_last(CollectLeaderRegionHandler);
+        self.add_handler_last(CollectTopicStatsHandler);
         self.add_handler_last(CollectStatsHandler::new(self.flush_stats_factor));
         self.add_handler_last(RemapFlowPeerHandler::default());
 

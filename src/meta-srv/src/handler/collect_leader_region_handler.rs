@@ -59,51 +59,13 @@ impl HeartbeatHandler for CollectLeaderRegionHandler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
-    use common_meta::key::TableMetadataManager;
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::region_registry::{LeaderRegionManifestInfo, LeaderRegionRegistry};
-    use common_meta::sequence::SequenceBuilder;
+    use common_meta::region_registry::LeaderRegionManifestInfo;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::cluster::MetaPeerClientBuilder;
-    use crate::handler::{HeartbeatMailbox, Pushers};
-    use crate::service::store::cached_kv::LeaderCachedKvBackend;
-
-    fn mock_ctx() -> Context {
-        let in_memory = Arc::new(MemoryKvBackend::new());
-        let kv_backend = Arc::new(MemoryKvBackend::new());
-        let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
-            kv_backend.clone(),
-        ));
-        let seq = SequenceBuilder::new("test_seq", kv_backend.clone()).build();
-        let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
-        let meta_peer_client = MetaPeerClientBuilder::default()
-            .election(None)
-            .in_memory(in_memory.clone())
-            .build()
-            .map(Arc::new)
-            // Safety: all required fields set at initialization
-            .unwrap();
-        Context {
-            server_addr: "127.0.0.1:0000".to_string(),
-            in_memory,
-            kv_backend: kv_backend.clone(),
-            leader_cached_kv_backend,
-            meta_peer_client,
-            mailbox,
-            election: None,
-            is_infancy: false,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
-            cache_invalidator: Arc::new(DummyCacheInvalidator),
-            leader_region_registry: Arc::new(LeaderRegionRegistry::new()),
-        }
-    }
+    use crate::handler::test_utils::TestEnv;
 
     fn new_region_stat(id: RegionId, manifest_version: u64, role: RegionRole) -> RegionStat {
         RegionStat {
@@ -130,7 +92,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_collect_leader_region() {
-        let mut ctx = mock_ctx();
+        let env = TestEnv::new();
+        let mut ctx = env.ctx();
 
         let mut acc = HeartbeatAccumulator {
             stat: Some(Stat {
