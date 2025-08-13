@@ -20,9 +20,7 @@ use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use meta_srv::bootstrap::create_etcd_client_with_tls;
-use meta_srv::bootstrap::create_etcd_client_with_tls;
 use meta_srv::metasrv::BackendImpl;
-use servers::tls::{TlsMode, TlsOption};
 use servers::tls::{TlsMode, TlsOption};
 
 use crate::error::{EmptyStoreAddrsSnafu, UnsupportedMemoryBackendSnafu};
