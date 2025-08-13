@@ -41,6 +41,7 @@
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `mysql.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
+| `mysql.prepared_stmt_cache_size` | Integer | `10000` | -- |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
@@ -248,6 +249,7 @@
 | `mysql.addr` | String | `127.0.0.1:4002` | The addr to bind the MySQL server. |
 | `mysql.runtime_size` | Integer | `2` | The number of server worker threads. |
 | `mysql.keep_alive` | String | `0s` | Server-side keep-alive time.<br/>Set to 0 (default) to disable. |
+| `mysql.prepared_stmt_cache_size` | Integer | `10000` | -- |
 | `mysql.tls` | -- | -- | -- |
 | `mysql.tls.mode` | String | `disable` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- `disable` (default value)<br/>- `prefer`<br/>- `require`<br/>- `verify-ca`<br/>- `verify-full` |
 | `mysql.tls.cert_path` | String | Unset | Certificate file path. |
