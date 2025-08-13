@@ -34,7 +34,9 @@ use store_api::{MAX_VERSION, MIN_VERSION};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{JoinSnafu, OpenDalSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu,
+};
 use crate::manifest::action::{RegionManifestBuilder, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::ManifestContextRef;
@@ -62,7 +64,7 @@ impl Default for FileGcOption {
 }
 pub struct LocalGcWorker {
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) manifest_ctx: ManifestContextRef,
+    pub(crate) manifest_ctxs: HashMap<RegionId, ManifestContextRef>,
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
 }
@@ -71,13 +73,27 @@ impl LocalGcWorker {
     /// concurrency of listing files per region.
     /// This is used to limit the number of concurrent listing operations and speed up listing
     pub const CONCURRENCY_LIST_PER_FILES: usize = 512;
-    pub async fn do_region_gc(&self) -> Result<()> {
+
+    /// Perform GC for the region.
+    /// 1. Get all the removed files in delta manifest files and their expel times
+    /// 2. List all files in the region dir concurrently
+    /// 3. Filter out the files that are still in use or may still be kept for a while
+    /// 4. Delete the unused files
+    ///
+    /// Note that the files that are still in use or may still be kept for a while are not deleted
+    /// to avoid deleting files that are still needed.
+    pub async fn do_region_gc(&self, region_id: RegionId) -> Result<()> {
         // TODO(discord9): impl gc worker
-        let manifest = self.manifest_ctx.manifest().await;
+        let manifest = self
+            .manifest_ctxs
+            .get(&region_id)
+            .context(RegionNotFoundSnafu { region_id })?
+            .manifest()
+            .await;
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
-        let recently_removed_files = self.get_removed_files_expel_times().await?;
+        let recently_removed_files = self.get_removed_files_expel_times(region_id).await?;
 
         let concurrency = current_files.len() / Self::CONCURRENCY_LIST_PER_FILES;
         let unused_files = self
@@ -102,8 +118,16 @@ impl LocalGcWorker {
     ///
     pub async fn get_removed_files_expel_times(
         &self,
+        region_id: RegionId,
     ) -> Result<BTreeMap<Option<Timestamp>, HashSet<FileMeta>>> {
-        let mut store = self.manifest_ctx.manifest_manager.read().await.store();
+        let mut store = self
+            .manifest_ctxs
+            .get(&region_id)
+            .context(RegionNotFoundSnafu { region_id })?
+            .manifest_manager
+            .read()
+            .await
+            .store();
         let last_checkpoint = RegionManifestManager::last_checkpoint(&mut store).await?;
         let min_version = if let Some((checkpoint, _)) = &last_checkpoint {
             checkpoint.last_version() + 1
@@ -183,11 +207,19 @@ impl LocalGcWorker {
         recently_removed_files: BTreeMap<Option<Timestamp>, HashSet<FileMeta>>,
         concurrency: usize,
     ) -> Result<Vec<Entry>> {
-        let may_linger_until =
-            chrono::Utc::now() - chrono::Duration::from_std(self.opt.lingering_time).unwrap();
+        let may_linger_until = chrono::Utc::now()
+            - chrono::Duration::from_std(self.opt.lingering_time).with_context(|_| {
+                DurationOutOfRangeSnafu {
+                    input: self.opt.lingering_time,
+                }
+            })?;
 
         let unknown_file_may_linger_until = chrono::Utc::now()
-            - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).unwrap();
+            - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).with_context(
+                |_| DurationOutOfRangeSnafu {
+                    input: self.opt.unknown_file_lingering_time,
+                },
+            )?;
 
         // files that may linger, which means they are not in use but may still be kept for a while
         let may_linger_filenames = recently_removed_files
