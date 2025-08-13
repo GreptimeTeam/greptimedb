@@ -132,6 +132,32 @@ impl LeaderRegionManifestInfo {
             }
         }
     }
+
+    /// A region is considered inactive if the flushed entry id is less than the topic's latest entry id.
+    ///
+    /// The `topic_latest_entry_id` of a region is updated only when its memtable is empty during a flush.
+    /// This means that within the range `[flushed_entry_id, topic_latest_entry_id]`,
+    /// there is no data written to the memtable.
+    /// Therefore, such a region can be considered inactive.
+    pub fn is_inactive(&self) -> bool {
+        match *self {
+            LeaderRegionManifestInfo::Mito {
+                flushed_entry_id,
+                topic_latest_entry_id,
+                ..
+            } => flushed_entry_id < topic_latest_entry_id,
+            LeaderRegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                data_topic_latest_entry_id,
+                metadata_flushed_entry_id,
+                metadata_topic_latest_entry_id,
+                ..
+            } => {
+                data_flushed_entry_id < data_topic_latest_entry_id
+                    || metadata_flushed_entry_id < metadata_topic_latest_entry_id
+            }
+        }
+    }
 }
 
 pub type LeaderRegionRegistryRef = Arc<LeaderRegionRegistry>;

@@ -25,6 +25,7 @@ use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_telemetry::{debug, error, info};
 use common_time::util::current_time_millis;
+use itertools::Itertools;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -191,27 +192,34 @@ impl RegionFlushTrigger {
             return Ok(());
         }
 
-        let regions = self
+        let (inactive_regions, active_regions): (Vec<_>, Vec<_>) = self
             .leader_region_registry
             .batch_get(region_ids.iter().cloned())
             .into_iter()
-            .map(|(region_id, region)| {
-                let prunable_entry_id = region.manifest.prunable_entry_id();
-                (region_id, prunable_entry_id)
+            .partition_map(|(region_id, region)| {
+                if !region.manifest.is_inactive() {
+                    itertools::Either::Left(region_id)
+                } else {
+                    itertools::Either::Right((region_id, region.manifest.prunable_entry_id()))
+                }
             });
 
-        let regions_to_flush = select_regions_to_flush(
+        let mut regions_to_flush = select_regions_to_flush(
             topic,
-            regions,
+            active_regions.into_iter(),
             stat.avg_record_size as u64,
             latest_entry_id,
             self.flush_trigger_size,
         );
+        let inactive_region_num = inactive_regions.len();
+        // Always flush inactive regions to update the region's topic latest entry id.
+        regions_to_flush.extend(inactive_regions);
         if !regions_to_flush.is_empty() {
             self.send_flush_instructions(&regions_to_flush).await?;
             debug!(
-                "Sent {} flush instructions to datanodes for topic: '{}'",
+                "Sent {} flush instructions to datanodes for topic: '{}' ({} inactive regions)",
                 regions_to_flush.len(),
+                inactive_region_num,
                 topic
             );
         }
