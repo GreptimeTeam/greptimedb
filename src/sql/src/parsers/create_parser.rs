@@ -385,6 +385,12 @@ impl<'a> ParserContext<'a> {
                 reason: format!("cannot cast {} to interval type", interval_expr),
             })?;
         if let ScalarValue::IntervalMonthDayNano(Some(interval)) = interval {
+            if interval.months != 0 {
+                return InvalidIntervalSnafu {
+                    reason: format!("month interval is not allowed: {:?}", interval),
+                }
+                .fail()?;
+            }
             Ok(
                 interval.nanoseconds / 1_000_000_000
                     + interval.days as i64 * 60 * 60 * 24
