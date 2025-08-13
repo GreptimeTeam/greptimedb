@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use common_meta::instruction::{FlushRegions, InstructionReply, SimpleReply};
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
