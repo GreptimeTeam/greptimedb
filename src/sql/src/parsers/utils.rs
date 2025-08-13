@@ -96,8 +96,17 @@ pub fn parser_expr_to_scalar_value_literal(
 
     // 2. simplify logical expr
     let execution_props = ExecutionProps::new().with_query_execution_start_time(Utc::now());
-    let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema));
-    let simplified_expr = ExprSimplifier::new(info)
+    let info =
+        SimplifyContext::new(&execution_props).with_schema(Arc::new(empty_df_schema.clone()));
+
+    let simplifier = ExprSimplifier::new(info);
+
+    // Coerce the logical expression so simplifier can handle it correctly. This is necessary for const eval with possible type mismatch. i.e.: `now() - now() + '15s'::interval` which is `TimestampNanosecond - TimestampNanosecond + IntervalMonthDayNano`.
+    let logical_expr = simplifier
+        .coerce(logical_expr, &empty_df_schema)
+        .context(SimplificationSnafu)?;
+
+    let simplified_expr = simplifier
         .simplify(logical_expr)
         .context(SimplificationSnafu)?;
 
@@ -221,4 +230,61 @@ pub fn convert_month_day_nano_to_duration(
     let nanos_remainder = nanos_remainder as u32;
 
     Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::DateTime;
+    use datafusion::functions::datetime::expr_fn::now;
+    use datafusion_expr::lit;
+    use datatypes::arrow::datatypes::TimestampNanosecondType;
+
+    use super::*;
+
+    /// Keep this test to make sure we are using datafusion's `ExprSimplifier` correctly.
+    #[test]
+    fn test_simplifier() {
+        let now_time = DateTime::from_timestamp(61, 0).unwrap();
+        let lit_now = lit(ScalarValue::new_timestamp::<TimestampNanosecondType>(
+            now_time.timestamp_nanos_opt(),
+            None,
+        ));
+        let testcases = vec![
+            (now(), lit_now),
+            (now() - now(), lit(ScalarValue::DurationNanosecond(Some(0)))),
+            (
+                now() + lit(ScalarValue::new_interval_dt(0, 1500)),
+                lit(ScalarValue::new_timestamp::<TimestampNanosecondType>(
+                    Some(62500000000),
+                    None,
+                )),
+            ),
+            (
+                now() - (now() + lit(ScalarValue::new_interval_dt(0, 1500))),
+                lit(ScalarValue::DurationNanosecond(Some(-1500000000))),
+            ),
+            // this one failed if type is not coerced
+            (
+                now() - now() + lit(ScalarValue::new_interval_dt(0, 1500)),
+                lit(ScalarValue::new_interval_mdn(0, 0, 1500000000)),
+            ),
+        ];
+
+        let execution_props = ExecutionProps::new().with_query_execution_start_time(now_time);
+        let info = SimplifyContext::new(&execution_props).with_schema(Arc::new(DFSchema::empty()));
+
+        let simplifier = ExprSimplifier::new(info);
+        for (expr, expected) in testcases {
+            let expr_name = expr.schema_name().to_string();
+            let expr = simplifier.coerce(expr, &DFSchema::empty()).unwrap();
+
+            let simplified_expr = simplifier.simplify(expr).unwrap();
+            assert_eq!(
+                simplified_expr, expected,
+                "Failed to simplify expression: {expr_name}"
+            );
+        }
+    }
 }
