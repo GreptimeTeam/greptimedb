@@ -166,7 +166,7 @@ async fn test_reconcile_dropped_column() {
     )
     .await;
 
-    // Not we should able to query table again.
+    // Now we should able to query table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
     let expected = r#"+---------------------+-------+-------------+---------+
 | ts                  | host  | method_name | latency |
@@ -202,7 +202,7 @@ async fn test_reconcile_dropped_column() {
     let output = execute_sql(&frontend, INSERT_DATA_SQL_WITH_CLOUD_PROVIDER).await;
     assert_affected_rows(output.data).await;
 
-    // Not we should able to query table again.
+    // Now we should able to query table again.
     let output = execute_sql(&frontend, "SELECT * FROM grpc_latencies ORDER BY host").await;
     let expected = r#"+---------------------+-------+-------------+---------+----------------+
 | ts                  | host  | method_name | latency | cloud_provider |

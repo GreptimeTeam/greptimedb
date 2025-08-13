@@ -399,10 +399,6 @@ impl ManagerContext {
     /// Returns the [Watcher] of specific `procedure_id`.
     fn watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
         let procedures = self.procedures.read().unwrap();
-        info!("query: {:?}", procedure_id);
-        for (id, _) in procedures.iter() {
-            info!("procedure_id: {:?}", id);
-        }
         procedures
             .get(&procedure_id)
             .map(|meta| meta.state_receiver.clone())
