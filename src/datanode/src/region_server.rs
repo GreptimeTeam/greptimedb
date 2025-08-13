@@ -248,7 +248,7 @@ impl RegionServer {
             None
         };
 
-        let ctx: Option<session::context::QueryContext> = request.header.as_ref().map(|h| h.into());
+        let ctx = request.header.as_ref().map(|h| h.into());
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
         let provider = self

@@ -18,7 +18,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -44,7 +43,7 @@ use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
-use query::dummy_catalog::TableProviderFactoryRef;
+use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
@@ -377,7 +376,7 @@ impl DatanodeBuilder {
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
+            DummyCatalogManager::arc(),
             None,
             None,
             None,

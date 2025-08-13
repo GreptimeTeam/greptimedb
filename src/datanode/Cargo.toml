@@ -16,7 +16,6 @@ api.workspace = true
 arrow-flight.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
-catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
 common-config.workspace = true
