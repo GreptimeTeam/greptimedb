@@ -119,12 +119,14 @@ impl RegionFlushTrigger {
     async fn run(&mut self) {
         while let Some(event) = self.receiver.recv().await {
             match event {
-                Event::Tick => {
-                    if let Err(e) = self.trigger_flush().await {
-                        error!(e; "Failed to trigger flush");
-                    }
-                }
+                Event::Tick => self.handle_tick().await,
             }
+        }
+    }
+
+    async fn handle_tick(&self) {
+        if let Err(e) = self.trigger_flush().await {
+            error!(e; "Failed to trigger flush");
         }
     }
 
@@ -138,7 +140,15 @@ impl RegionFlushTrigger {
             .context(error::TableMetadataManagerSnafu)?;
 
         for topic in &topics {
-            self.trigger_flush_for_topic(topic).await?;
+            let Some((latest_entry_id, avg_record_size)) = self.retrive_topic_stat(topic) else {
+                continue;
+            };
+            if let Err(e) = self
+                .flush_regions_in_topic(topic, latest_entry_id, avg_record_size)
+                .await
+            {
+                error!(e; "Failed to flush regions in topic: {}", topic);
+            }
         }
 
         debug!(
@@ -149,12 +159,15 @@ impl RegionFlushTrigger {
         Ok(())
     }
 
-    async fn trigger_flush_for_topic(&self, topic: &str) -> Result<()> {
+    /// Retrieves the latest entry id and average record size of a topic.
+    ///
+    /// Returns `None` if the topic is not found or the latest entry id is not recent.
+    fn retrive_topic_stat(&self, topic: &str) -> Option<(u64, usize)> {
         let Some((latest_entry_id, timestamp)) =
             self.topic_stats_registry.get_latest_entry_id(topic)
         else {
             debug!("No latest entry id found for topic: {}", topic);
-            return Ok(());
+            return None;
         };
 
         let Some(stat) = self
@@ -162,7 +175,7 @@ impl RegionFlushTrigger {
             .get_calculated_topic_stat(topic, TICKER_INTERVAL)
         else {
             debug!("No topic stat found for topic: {}", topic);
-            return Ok(());
+            return None;
         };
 
         let now = current_time_millis();
@@ -171,24 +184,33 @@ impl RegionFlushTrigger {
                 "Latest entry id of topic '{}': is not recent (now: {}, stat timestamp: {})",
                 topic, timestamp, now
             );
-            return Ok(());
+            return None;
         }
         if !is_recent(stat.end_ts, now, RECENT_DURATION) {
             debug!(
                 "Calculated stat of topic '{}': is not recent (now: {}, stat timestamp: {})",
                 topic, stat.end_ts, now
             );
-            return Ok(());
+            return None;
         }
 
+        Some((latest_entry_id, stat.avg_record_size))
+    }
+
+    async fn flush_regions_in_topic(
+        &self,
+        topic: &str,
+        latest_entry_id: u64,
+        avg_record_size: usize,
+    ) -> Result<()> {
         let region_ids = self
             .table_metadata_manager
             .topic_region_manager()
             .regions(topic)
             .await
             .context(error::TableMetadataManagerSnafu)?;
-
         if region_ids.is_empty() {
+            debug!("No regions found for topic: {}", topic);
             return Ok(());
         }
 
@@ -198,28 +220,41 @@ impl RegionFlushTrigger {
             .into_iter()
             .partition_map(|(region_id, region)| {
                 if !region.manifest.is_inactive() {
-                    itertools::Either::Left(region_id)
+                    itertools::Either::Left((region_id, region.manifest.prunable_entry_id()))
                 } else {
                     itertools::Either::Right((region_id, region.manifest.prunable_entry_id()))
                 }
             });
 
+        // Selects regions to flush from the set of active regions.
         let mut regions_to_flush = select_regions_to_flush(
             topic,
             active_regions.into_iter(),
-            stat.avg_record_size as u64,
+            avg_record_size as u64,
             latest_entry_id,
             self.flush_trigger_size,
         );
-        let inactive_region_num = inactive_regions.len();
-        // Always flush inactive regions to update the region's topic latest entry id.
-        regions_to_flush.extend(inactive_regions);
+
+        // Selects regions to flush from the set of inactive regions.
+        // For inactive regions, we use a lower flush trigger size (half of the normal size)
+        // to encourage more aggressive flushing to update the region's topic latest entry id.
+        let inactive_regions_to_flush = select_regions_to_flush(
+            topic,
+            inactive_regions.into_iter(),
+            avg_record_size as u64,
+            latest_entry_id,
+            self.flush_trigger_size / 2,
+        );
+        let inactive_regions_to_flush_num = inactive_regions_to_flush.len();
+        regions_to_flush.extend(inactive_regions_to_flush);
+
+        // Sends flush instructions to datanodes.
         if !regions_to_flush.is_empty() {
             self.send_flush_instructions(&regions_to_flush).await?;
             debug!(
                 "Sent {} flush instructions to datanodes for topic: '{}' ({} inactive regions)",
                 regions_to_flush.len(),
-                inactive_region_num,
+                inactive_regions_to_flush_num,
                 topic
             );
         }
@@ -261,6 +296,11 @@ impl RegionFlushTrigger {
     }
 }
 
+/// Select regions to flush based on the estimated replay size.
+///
+/// The regions are selected if the estimated replay size exceeds the flush trigger size.
+/// The estimated replay size is calculated as:
+/// `(latest_entry_id - prunable_entry_id) * avg_record_size`
 fn select_regions_to_flush<I: Iterator<Item = (RegionId, u64)>>(
     topic: &str,
     regions: I,

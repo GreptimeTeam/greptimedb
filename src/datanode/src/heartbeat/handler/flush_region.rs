@@ -44,10 +44,7 @@ impl HandlerContext {
                         );
                     }
                     Err(err) => {
-                        warn!(
-                            "Failed to flush region: {}, error: {}",
-                            region_id, err
-                        );
+                        warn!("Failed to flush region: {}, error: {}", region_id, err);
                     }
                 }
             }
