@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use api::v1::meta::{HeartbeatRequest, Role};
-use common_telemetry::debug;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
@@ -34,7 +33,6 @@ impl HeartbeatHandler for CollectTopicStatsHandler {
         acc: &mut HeartbeatAccumulator,
     ) -> Result<HandleControl> {
         let Some(current_stat) = acc.stat.as_ref() else {
-            debug!("No topic stat found in heartbeat request");
             return Ok(HandleControl::Continue);
         };
 

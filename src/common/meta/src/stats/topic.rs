@@ -61,6 +61,10 @@ impl TopicStatsRegistry {
 
     /// Adds a list of topic stats for a given datanode at a specific timestamp.
     pub fn add_stats(&self, datanode_id: DatanodeId, stats: &Vec<TopicStat>, millis_ts: i64) {
+        if stats.is_empty() {
+            return;
+        }
+
         let mut inner = self.inner.write().unwrap();
         for stat in stats {
             inner.add_stat(datanode_id, stat, millis_ts);
@@ -248,7 +252,7 @@ impl TopicStatsStore {
 
     /// Aligns the timestamp to the nearest second.
     fn align_ts(millis_ts: i64) -> i64 {
-        millis_ts - millis_ts % 1000
+        (millis_ts / 1000) * 1000
     }
 
     fn rotate_active_bucket(&mut self, start_ts: i64) {
@@ -326,7 +330,7 @@ pub struct CalculatedTopicStat {
 /// Returns `Some(CalculatedTopicStat)` if the calculation is successful, or `None` if insufficient data is available.
 fn calculate_topic_stat(
     stats: &VecDeque<HistoryTopicStat>,
-    perdiod: Duration,
+    period: Duration,
 ) -> Option<CalculatedTopicStat> {
     if stats.len() < 2 {
         return None;
@@ -335,7 +339,7 @@ fn calculate_topic_stat(
     let last_stat = stats.back().unwrap();
     let first_stat = stats.front().unwrap();
     // Not enough stats data.
-    if first_stat.start_ts + perdiod.as_millis() as i64 > last_stat.start_ts {
+    if first_stat.start_ts + period.as_millis() as i64 > last_stat.start_ts {
         return None;
     }
 
@@ -345,7 +349,7 @@ fn calculate_topic_stat(
         .iter()
         .rev()
         .skip(1)
-        .find(|stat| (stat.start_ts + perdiod.as_millis() as i64) < last_stat.start_ts);
+        .find(|stat| (stat.start_ts + period.as_millis() as i64) < last_stat.start_ts);
 
     let target_stat = target_stat?;
 

@@ -902,8 +902,6 @@ mod tests {
             .unwrap();
 
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -917,10 +915,11 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -939,8 +938,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(15, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -955,10 +952,11 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -974,8 +972,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(15, handlers.len());
-
         let names = [
             "CollectStatsHandler",
             "ResponseHeaderHandler",
@@ -990,10 +986,11 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -1009,8 +1006,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(15, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -1025,10 +1020,11 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -1044,8 +1040,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(15, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -1059,11 +1053,12 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "ResponseHeaderHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -1079,8 +1074,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -1094,10 +1087,12 @@ mod tests {
             "CollectStatsHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
 
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -1113,8 +1108,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
-
         let names = [
             "ResponseHeaderHandler",
             "DatanodeKeepLeaseHandler",
@@ -1128,10 +1121,12 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "ResponseHeaderHandler",
             "RemapFlowPeerHandler",
         ];
 
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
@@ -1147,8 +1142,6 @@ mod tests {
 
         let group = builder.build().unwrap();
         let handlers = group.handlers;
-        assert_eq!(14, handlers.len());
-
         let names = [
             "CollectStatsHandler",
             "DatanodeKeepLeaseHandler",
@@ -1162,10 +1155,11 @@ mod tests {
             "MailboxHandler",
             "FilterInactiveRegionStatsHandler",
             "CollectLeaderRegionHandler",
+            "CollectTopicStatsHandler",
             "CollectStatsHandler",
             "RemapFlowPeerHandler",
         ];
-
+        assert_eq!(names.len(), handlers.len());
         for (handler, name) in handlers.iter().zip(names.into_iter()) {
             assert_eq!(handler.name, name);
         }
