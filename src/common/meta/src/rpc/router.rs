@@ -280,6 +280,11 @@ pub enum LeaderState {
     /// - The [`Region`] was planned to migrate to another [`Peer`].
     #[serde(alias = "Downgraded")]
     Downgrading,
+    /// The [`Region`] is in staging mode.
+    ///
+    /// Disables checkpoint and compaction while maintaining write capability.
+    /// But data ingested during this period are not visible to the user (hence staging).
+    Staging,
 }
 
 impl RegionRoute {
@@ -292,6 +297,11 @@ impl RegionRoute {
     ///
     pub fn is_leader_downgrading(&self) -> bool {
         matches!(self.leader_state, Some(LeaderState::Downgrading))
+    }
+
+    /// Returns true if the Leader [`Region`] is in staging mode.
+    pub fn is_leader_staging(&self) -> bool {
+        matches!(self.leader_state, Some(LeaderState::Staging))
     }
 
     /// Marks the Leader [`Region`] as [`RegionState::Downgrading`].
@@ -308,6 +318,21 @@ impl RegionRoute {
     pub fn downgrade_leader(&mut self) {
         self.leader_down_since = Some(current_time_millis());
         self.leader_state = Some(LeaderState::Downgrading)
+    }
+
+    /// Sets the Leader [`Region`] to staging mode.
+    pub fn set_leader_staging(&mut self) {
+        self.leader_state = Some(LeaderState::Staging);
+        // Reset leader_down_since as it's specific to downgrading
+        self.leader_down_since = None;
+    }
+
+    /// Clears the leader staging state, returning to normal leader mode.
+    pub fn clear_leader_staging(&mut self) {
+        if self.leader_state == Some(LeaderState::Staging) {
+            self.leader_state = None;
+            self.leader_down_since = None;
+        }
     }
 
     /// Returns how long since the leader is in `Downgraded` state.

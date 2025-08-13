@@ -18,3 +18,4 @@ pub(crate) mod reconcile_database;
 pub(crate) mod reconcile_logical_tables;
 pub(crate) mod reconcile_table;
 pub(crate) mod utils;
+pub use reconcile_table::resolve_column_metadata::ResolveStrategy;

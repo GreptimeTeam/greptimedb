@@ -44,6 +44,10 @@ use crate::storage::{RegionId, ScanRequest, SequenceNumber};
 pub enum SettableRegionRoleState {
     Follower,
     DowngradingLeader,
+    /// Exit staging mode and return to normal leader state. Only allowed from staging state.
+    Leader,
+    /// Enter staging mode. Region remains writable but disables checkpoint and compaction. Only allowed from normal leader state.
+    StagingLeader,
 }
 
 impl Display for SettableRegionRoleState {
@@ -51,6 +55,8 @@ impl Display for SettableRegionRoleState {
         match self {
             SettableRegionRoleState::Follower => write!(f, "Follower"),
             SettableRegionRoleState::DowngradingLeader => write!(f, "Leader(Downgrading)"),
+            SettableRegionRoleState::Leader => write!(f, "Leader"),
+            SettableRegionRoleState::StagingLeader => write!(f, "Leader(Staging)"),
         }
     }
 }
@@ -60,6 +66,8 @@ impl From<SettableRegionRoleState> for RegionRole {
         match value {
             SettableRegionRoleState::Follower => RegionRole::Follower,
             SettableRegionRoleState::DowngradingLeader => RegionRole::DowngradingLeader,
+            SettableRegionRoleState::Leader => RegionRole::Leader,
+            SettableRegionRoleState::StagingLeader => RegionRole::Leader, // Still a leader role
         }
     }
 }
@@ -128,10 +136,11 @@ impl SetRegionRoleStateSuccess {
 }
 
 /// The response of setting region role state.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum SetRegionRoleStateResponse {
     Success(SetRegionRoleStateSuccess),
     NotFound,
+    InvalidTransition(BoxedError),
 }
 
 impl SetRegionRoleStateResponse {
@@ -140,9 +149,19 @@ impl SetRegionRoleStateResponse {
         Self::Success(success)
     }
 
+    /// Returns a [SetRegionRoleStateResponse::InvalidTransition] with the error.
+    pub fn invalid_transition(error: BoxedError) -> Self {
+        Self::InvalidTransition(error)
+    }
+
     /// Returns true if the response is a [SetRegionRoleStateResponse::NotFound].
     pub fn is_not_found(&self) -> bool {
         matches!(self, SetRegionRoleStateResponse::NotFound)
+    }
+
+    /// Returns true if the response is a [SetRegionRoleStateResponse::InvalidTransition].
+    pub fn is_invalid_transition(&self) -> bool {
+        matches!(self, SetRegionRoleStateResponse::InvalidTransition(_))
     }
 }
 

@@ -143,6 +143,7 @@ define_timestamp_with_unit!(Millisecond);
 define_timestamp_with_unit!(Microsecond);
 define_timestamp_with_unit!(Nanosecond);
 
+/// Converts a timestamp array to a primitive array and the time unit.
 pub fn timestamp_array_to_primitive(
     ts_array: &ArrayRef,
 ) -> Option<(

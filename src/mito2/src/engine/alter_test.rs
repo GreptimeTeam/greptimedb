@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::helper::{row, tag_column_schema};
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_error::ext::ErrorExt;
@@ -224,21 +225,13 @@ fn build_rows_for_tags(
 ) -> Vec<Row> {
     (start..end)
         .enumerate()
-        .map(|(idx, ts)| Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(tag0.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(tag1.to_string())),
-                },
-            ],
+        .map(|(idx, ts)| {
+            row(vec![
+                ValueData::StringValue(tag0.to_string()),
+                ValueData::F64Value((value_start + idx) as f64),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+                ValueData::StringValue(tag1.to_string()),
+            ])
         })
         .collect()
 }
@@ -317,12 +310,7 @@ async fn test_put_after_alter() {
     put_rows(&engine, region_id, rows).await;
 
     // Push tag_1 to schema.
-    column_schemas.push(api::v1::ColumnSchema {
-        column_name: "tag_1".to_string(),
-        datatype: ColumnDataType::String as i32,
-        semantic_type: SemanticType::Tag as i32,
-        ..Default::default()
-    });
+    column_schemas.push(tag_column_schema("tag_1", ColumnDataType::String));
     // Put with new schema.
     let rows = Rows {
         schema: column_schemas.clone(),

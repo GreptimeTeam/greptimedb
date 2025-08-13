@@ -379,8 +379,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use api::v1::helper::{field_column_schema, row, tag_column_schema, time_index_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use api::v1::{Mutation, OpType, Rows, SemanticType};
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -723,24 +724,14 @@ mod tests {
             .zip(ts_id.iter())
             .zip(labels.iter())
             .zip(values.iter())
-            .map(|((((ts, table_id), ts_id), label), val)| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::U32Value(*table_id)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::U64Value(*ts_id)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(label.to_string())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(*ts)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::F64Value(*val)),
-                    },
-                ],
+            .map(|((((ts, table_id), ts_id), label), val)| {
+                row(vec![
+                    ValueData::U32Value(*table_id),
+                    ValueData::U64Value(*ts_id),
+                    ValueData::StringValue(label.to_string()),
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::F64Value(*val),
+                ])
             })
             .collect();
         let mutation = api::v1::Mutation {
@@ -840,24 +831,9 @@ mod tests {
 
     fn kv_column_schemas() -> Vec<api::v1::ColumnSchema> {
         vec![
-            api::v1::ColumnSchema {
-                column_name: "ts".to_string(),
-                datatype: api::v1::ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Timestamp as i32,
-                ..Default::default()
-            },
-            api::v1::ColumnSchema {
-                column_name: "k".to_string(),
-                datatype: api::v1::ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            api::v1::ColumnSchema {
-                column_name: "v".to_string(),
-                datatype: api::v1::ColumnDataType::String as i32,
-                semantic_type: SemanticType::Field as i32,
-                ..Default::default()
-            },
+            time_index_column_schema("ts", api::v1::ColumnDataType::TimestampMillisecond),
+            tag_column_schema("k", api::v1::ColumnDataType::String),
+            field_column_schema("v", api::v1::ColumnDataType::String),
         ]
     }
 
@@ -866,18 +842,12 @@ mod tests {
         keys: impl Iterator<Item = T>,
     ) -> KeyValues {
         let rows = keys
-            .map(|c| Row {
-                values: vec![
-                    api::v1::Value {
-                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
-                    },
-                    api::v1::Value {
-                        value_data: Some(ValueData::StringValue(c.as_ref().to_string())),
-                    },
-                ],
+            .map(|c| {
+                row(vec![
+                    ValueData::TimestampMillisecondValue(0),
+                    ValueData::StringValue(c.as_ref().to_string()),
+                    ValueData::StringValue(c.as_ref().to_string()),
+                ])
             })
             .collect();
         let mutation = Mutation {

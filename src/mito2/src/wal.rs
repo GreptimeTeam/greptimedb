@@ -221,9 +221,10 @@ impl<S: LogStore> WalWriter<S> {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::helper::{tag_column_schema, time_index_column_schema};
     use api::v1::{
-        bulk_wal_entry, value, ArrowIpc, BulkWalEntry, ColumnDataType, ColumnSchema, Mutation,
-        OpType, Row, Rows, SemanticType, Value,
+        bulk_wal_entry, value, ArrowIpc, BulkWalEntry, ColumnDataType, Mutation, OpType, Row, Rows,
+        Value,
     };
     use common_recordbatch::DfRecordBatch;
     use common_test_util::flight::encode_to_flight_data;
@@ -281,18 +282,8 @@ mod tests {
             })
             .collect();
         let schema = vec![
-            ColumnSchema {
-                column_name: "tag".to_string(),
-                datatype: ColumnDataType::String as i32,
-                semantic_type: SemanticType::Tag as i32,
-                ..Default::default()
-            },
-            ColumnSchema {
-                column_name: "ts".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
-                semantic_type: SemanticType::Timestamp as i32,
-                ..Default::default()
-            },
+            tag_column_schema("tag", ColumnDataType::String),
+            time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
         ];
 
         Mutation {
