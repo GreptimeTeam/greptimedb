@@ -284,11 +284,7 @@ impl RegionFlushTask {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
-        // Check if the region is in staging mode
-        let is_staging = self.manifest_ctx.current_state()
-            == RegionRoleState::Leader(RegionLeaderState::Staging);
-
-        let worker_request = match self.flush_memtables(&version_data, is_staging).await {
+        let worker_request = match self.flush_memtables(&version_data).await {
             Ok(edit) => {
                 let memtables_to_remove = version_data
                     .version
@@ -305,7 +301,6 @@ impl RegionFlushTask {
                     _timer: timer,
                     edit,
                     memtables_to_remove,
-                    is_staging,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -330,11 +325,7 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs and updates the manifest.
     /// Returns the [RegionEdit] to apply.
-    async fn flush_memtables(
-        &self,
-        version_data: &VersionControlData,
-        is_staging: bool,
-    ) -> Result<RegionEdit> {
+    async fn flush_memtables(&self, version_data: &VersionControlData) -> Result<RegionEdit> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -407,7 +398,6 @@ impl RegionFlushTask {
                 inverted_index_config: self.engine_config.inverted_index.clone(),
                 fulltext_index_config: self.engine_config.fulltext_index.clone(),
                 bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
-                is_staging,
             };
 
             let (ssts_written, metrics) = self

@@ -293,7 +293,7 @@ impl BloomFilterIndexApplier {
             .puffin_manager_factory
             .build(
                 self.object_store.clone(),
-                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type, false),
+                RegionFilePathFactory::new(self.table_dir.clone(), self.path_type),
             )
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
@@ -443,7 +443,7 @@ mod tests {
 
         let puffin_manager = factory.build(
             object_store.clone(),
-            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare, false),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
         );
 
         let mut puffin_writer = puffin_manager.writer(&file_id).await.unwrap();

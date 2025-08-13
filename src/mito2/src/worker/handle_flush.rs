@@ -209,7 +209,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if request.is_staging {
+        // Check if region is currently in staging mode
+        let is_staging = region.manifest_ctx.current_state()
+            == crate::region::RegionRoleState::Leader(crate::region::RegionLeaderState::Staging);
+
+        if is_staging {
             info!(
                 "Skipping region metadata update for region {} in staging mode",
                 region_id

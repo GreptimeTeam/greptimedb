@@ -234,7 +234,6 @@ impl AccessLayer {
         let cache_manager = request.cache_manager.clone();
 
         let (sst_info, metrics) = if let Some(write_cache) = cache_manager.write_cache() {
-            let is_staging = request.is_staging;
             // Write to the write cache.
             write_cache
                 .write_and_upload_sst(
@@ -243,7 +242,6 @@ impl AccessLayer {
                         dest_path_provider: RegionFilePathFactory::new(
                             self.table_dir.clone(),
                             self.path_type,
-                            is_staging,
                         ),
                         remote_store: self.object_store.clone(),
                     },
@@ -254,11 +252,7 @@ impl AccessLayer {
         } else {
             // Write cache is disabled.
             let store = self.object_store.clone();
-            let path_provider = RegionFilePathFactory::new(
-                self.table_dir.clone(),
-                self.path_type,
-                request.is_staging,
-            );
+            let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
             let indexer_builder = IndexerBuilderImpl {
                 op_type: request.op_type,
                 metadata: request.metadata.clone(),
@@ -330,9 +324,6 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
-
-    /// Whether the region is in staging mode
-    pub is_staging: bool,
 }
 
 /// Cleaner to remove temp files on the atomic write dir.
@@ -474,35 +465,24 @@ impl FilePathProvider for WriteCachePathProvider {
 pub(crate) struct RegionFilePathFactory {
     pub(crate) table_dir: String,
     pub(crate) path_type: PathType,
-    /// Whether the region is in staging mode
-    pub(crate) is_staging: bool,
 }
 
 impl RegionFilePathFactory {
     /// Creates a new `RegionFilePathFactory` instance.
-    pub fn new(table_dir: String, path_type: PathType, is_staging: bool) -> Self {
+    pub fn new(table_dir: String, path_type: PathType) -> Self {
         Self {
             table_dir,
             path_type,
-            is_staging,
         }
     }
 }
 
 impl FilePathProvider for RegionFilePathFactory {
     fn build_index_file_path(&self, file_id: RegionFileId) -> String {
-        if self.is_staging {
-            location::staging_index_file_path(&self.table_dir, file_id, self.path_type)
-        } else {
-            location::index_file_path(&self.table_dir, file_id, self.path_type)
-        }
+        location::index_file_path(&self.table_dir, file_id, self.path_type)
     }
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
-        if self.is_staging {
-            location::staging_sst_file_path(&self.table_dir, file_id, self.path_type)
-        } else {
-            location::sst_file_path(&self.table_dir, file_id, self.path_type)
-        }
+        location::sst_file_path(&self.table_dir, file_id, self.path_type)
     }
 }

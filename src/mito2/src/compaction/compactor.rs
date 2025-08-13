@@ -366,8 +366,6 @@ impl Compactor for DefaultCompactor {
                             inverted_index_config,
                             fulltext_index_config,
                             bloom_filter_index_config,
-                            // Compaction is disabled in staging mode
-                            is_staging: false,
                         },
                         &write_opts,
                         WriteType::Compaction,
