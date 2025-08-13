@@ -165,7 +165,7 @@ impl RegionManifestManager {
         // Persist region change.
         let action_list =
             RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange { metadata }));
-        // Opened region is not in staging mode.
+        // New region is not in staging mode.
         // TODO(ruihang): add staging mode support if needed.
         store.save(version, &action_list.encode()?, false).await?;
 
