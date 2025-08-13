@@ -251,11 +251,11 @@ pub async fn test_kafka_topic_pool(
 }
 
 #[macro_export]
-/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+/// Skip the test if the environment variable `GT_POSTGRES_ENDPOINTS` is not set.
 ///
 /// The format of the environment variable is:
 /// ```
-/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// GT_POSTGRES_ENDPOINTS=localhost:9092,localhost:9093
 /// ```
 macro_rules! maybe_skip_postgres_integration_test {
     () => {
@@ -267,11 +267,11 @@ macro_rules! maybe_skip_postgres_integration_test {
 }
 
 #[macro_export]
-/// Skip the test if the environment variable `GT_KAFKA_ENDPOINTS` is not set.
+/// Skip the test if the environment variable `GT_MYSQL_ENDPOINTS` is not set.
 ///
 /// The format of the environment variable is:
 /// ```
-/// GT_KAFKA_ENDPOINTS=localhost:9092,localhost:9093
+/// GT_MYSQL_ENDPOINTS=localhost:9092,localhost:9093
 /// ```
 macro_rules! maybe_skip_mysql_integration_test {
     () => {

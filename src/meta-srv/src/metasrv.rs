@@ -40,6 +40,7 @@ use common_meta::reconciliation::manager::ReconciliationManagerRef;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::sequence::SequenceRef;
+use common_meta::stats::topic::TopicStatsRegistryRef;
 use common_meta::wal_options_allocator::WalOptionsAllocatorRef;
 use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
@@ -308,6 +309,7 @@ pub struct Context {
     pub table_metadata_manager: TableMetadataManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     pub leader_region_registry: LeaderRegionRegistryRef,
+    pub topic_stats_registry: TopicStatsRegistryRef,
 }
 
 impl Context {
@@ -458,6 +460,7 @@ pub struct Metasrv {
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
+    topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
@@ -756,6 +759,7 @@ impl Metasrv {
         let table_metadata_manager = self.table_metadata_manager.clone();
         let cache_invalidator = self.cache_invalidator.clone();
         let leader_region_registry = self.leader_region_registry.clone();
+        let topic_stats_registry = self.topic_stats_registry.clone();
 
         Context {
             server_addr,
@@ -769,6 +773,7 @@ impl Metasrv {
             table_metadata_manager,
             cache_invalidator,
             leader_region_registry,
+            topic_stats_registry,
         }
     }
 }

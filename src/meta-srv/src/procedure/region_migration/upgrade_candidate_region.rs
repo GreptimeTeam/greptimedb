@@ -16,9 +16,12 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_meta::lock_key::RemoteWalLock;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::error;
+use common_telemetry::{error, warn};
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::time::{sleep, Instant};
@@ -56,10 +59,23 @@ impl State for UpgradeCandidateRegion {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         let now = Instant::now();
-        if self.upgrade_region_with_retry(ctx).await {
+
+        let region_wal_option = self.get_region_wal_option(ctx).await?;
+        let region_id = ctx.persistent_ctx.region_id;
+        if region_wal_option.is_none() {
+            warn!(
+                "Region {} wal options not found, during upgrade candidate region",
+                region_id
+            );
+        }
+
+        if self
+            .upgrade_region_with_retry(ctx, procedure_ctx, region_wal_option.as_ref())
+            .await
+        {
             ctx.update_upgrade_candidate_region_elapsed(now);
             Ok((Box::new(UpdateMetadata::Upgrade), Status::executing(false)))
         } else {
@@ -74,6 +90,26 @@ impl State for UpgradeCandidateRegion {
 }
 
 impl UpgradeCandidateRegion {
+    async fn get_region_wal_option(&self, ctx: &mut Context) -> Result<Option<WalOptions>> {
+        let region_id = ctx.persistent_ctx.region_id;
+        match ctx.get_from_peer_datanode_table_value().await {
+            Ok(datanode_table_value) => {
+                let region_wal_options =
+                    parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
+                        .context(error::ParseWalOptionsSnafu)?;
+                Ok(region_wal_options.get(&region_id.region_number()).cloned())
+            }
+            Err(error::Error::DatanodeTableNotFound { datanode_id, .. }) => {
+                warn!(
+                    "Datanode table not found, during upgrade candidate region, the target region might already been migrated, region_id: {}, datanode_id: {}",
+                    region_id, datanode_id
+                );
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Builds upgrade region instruction.
     fn build_upgrade_region_instruction(
         &self,
@@ -196,12 +232,30 @@ impl UpgradeCandidateRegion {
     /// Upgrades a candidate region.
     ///
     /// Returns true if the candidate region is upgraded successfully.
-    async fn upgrade_region_with_retry(&self, ctx: &mut Context) -> bool {
+    async fn upgrade_region_with_retry(
+        &self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+        wal_options: Option<&WalOptions>,
+    ) -> bool {
         let mut retry = 0;
         let mut upgraded = false;
 
         loop {
             let timer = Instant::now();
+            // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
+            let _guard = if let Some(WalOptions::Kafka(kafka_wal_options)) = wal_options {
+                Some(
+                    procedure_ctx
+                        .provider
+                        .acquire_lock(
+                            &(RemoteWalLock::Read(kafka_wal_options.topic.clone()).into()),
+                        )
+                        .await,
+                )
+            } else {
+                None
+            };
             if let Err(err) = self.upgrade_region(ctx).await {
                 retry += 1;
                 ctx.update_operations_elapsed(timer);

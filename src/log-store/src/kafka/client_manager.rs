@@ -28,6 +28,7 @@ use crate::error::{
     BuildClientSnafu, BuildPartitionClientSnafu, ResolveKafkaEndpointSnafu, Result, TlsConfigSnafu,
 };
 use crate::kafka::index::{GlobalIndexCollector, NoopCollector};
+use crate::kafka::log_store::TopicStat;
 use crate::kafka::producer::{OrderedBatchProducer, OrderedBatchProducerRef};
 
 // Each topic only has one partition for now.
@@ -66,8 +67,8 @@ pub(crate) struct ClientManager {
     flush_batch_size: usize,
     compression: Compression,
 
-    /// High watermark for each topic.
-    high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
+    /// The stats of each topic.
+    topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
 }
 
 impl ClientManager {
@@ -75,7 +76,7 @@ impl ClientManager {
     pub(crate) async fn try_new(
         config: &DatanodeKafkaConfig,
         global_index_collector: Option<GlobalIndexCollector>,
-        high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
+        topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
     ) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let broker_endpoints = common_wal::resolve_to_ipv4(&config.connection.broker_endpoints)
@@ -101,7 +102,7 @@ impl ClientManager {
             flush_batch_size: config.max_batch_bytes.as_bytes() as usize,
             compression: Compression::Lz4,
             global_index_collector,
-            high_watermark,
+            topic_stats,
         })
     }
 
@@ -117,7 +118,8 @@ impl ClientManager {
                     .write()
                     .await
                     .insert(provider.clone(), client.clone());
-                self.high_watermark.insert(provider.clone(), 0);
+                self.topic_stats
+                    .insert(provider.clone(), TopicStat::default());
                 Ok(client)
             }
         }
@@ -166,7 +168,7 @@ impl ClientManager {
             self.compression,
             self.flush_batch_size,
             index_collector,
-            self.high_watermark.clone(),
+            self.topic_stats.clone(),
         ));
 
         Ok(Client { client, producer })
@@ -176,9 +178,14 @@ impl ClientManager {
         self.global_index_collector.as_ref()
     }
 
+    /// Lists all topics.
+    pub(crate) async fn list_topics(&self) -> Vec<Arc<KafkaProvider>> {
+        self.instances.read().await.keys().cloned().collect()
+    }
+
     #[cfg(test)]
-    pub(crate) fn high_watermark(&self) -> &Arc<DashMap<Arc<KafkaProvider>, u64>> {
-        &self.high_watermark
+    pub(crate) fn topic_stats(&self) -> &Arc<DashMap<Arc<KafkaProvider>, TopicStat>> {
+        &self.topic_stats
     }
 }
 
@@ -192,7 +199,8 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use tokio::sync::Barrier;
 
     use super::*;
@@ -201,70 +209,64 @@ mod tests {
     /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
     async fn test_sequential() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let (manager, topics) = prepare("test_sequential", 128, broker_endpoints).await;
-                // Assigns multiple regions to a topic.
-                let region_topic = (0..512)
-                    .map(|region_id| (region_id, &topics[region_id % topics.len()]))
-                    .collect::<HashMap<_, _>>();
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let (manager, topics) = prepare("test_sequential", 128, broker_endpoints).await;
+        // Assigns multiple regions to a topic.
+        let region_topic = (0..512)
+            .map(|region_id| (region_id, &topics[region_id % topics.len()]))
+            .collect::<HashMap<_, _>>();
 
-                // Gets all clients sequentially.
-                for (_, topic) in region_topic {
-                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
-                    manager.get_or_insert(&provider).await.unwrap();
-                }
+        // Gets all clients sequentially.
+        for (_, topic) in region_topic {
+            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            manager.get_or_insert(&provider).await.unwrap();
+        }
 
-                // Ensures all clients exist.
-                let client_pool = manager.instances.read().await;
-                let all_exist = topics.iter().all(|topic| {
-                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
-                    client_pool.contains_key(&provider)
-                });
-                assert!(all_exist);
-            })
-        })
-        .await;
+        // Ensures all clients exist.
+        let client_pool = manager.instances.read().await;
+        let all_exist = topics.iter().all(|topic| {
+            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            client_pool.contains_key(&provider)
+        });
+        assert!(all_exist);
     }
 
     /// Sends `get_or_insert` requests in parallel to the client manager, and checks if it could handle them correctly.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_parallel() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let (manager, topics) = prepare("test_parallel", 128, broker_endpoints).await;
-                // Assigns multiple regions to a topic.
-                let region_topic = (0..512)
-                    .map(|region_id| (region_id, topics[region_id % topics.len()].clone()))
-                    .collect::<HashMap<_, _>>();
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let (manager, topics) = prepare("test_parallel", 128, broker_endpoints).await;
+        // Assigns multiple regions to a topic.
+        let region_topic = (0..512)
+            .map(|region_id| (region_id, topics[region_id % topics.len()].clone()))
+            .collect::<HashMap<_, _>>();
 
-                // Gets all clients in parallel.
-                let manager = Arc::new(manager);
-                let barrier = Arc::new(Barrier::new(region_topic.len()));
-                let tasks = region_topic
-                    .into_values()
-                    .map(|topic| {
-                        let manager = manager.clone();
-                        let barrier = barrier.clone();
+        // Gets all clients in parallel.
+        let manager = Arc::new(manager);
+        let barrier = Arc::new(Barrier::new(region_topic.len()));
+        let tasks = region_topic
+            .into_values()
+            .map(|topic| {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
 
-                        tokio::spawn(async move {
-                            barrier.wait().await;
-                            let provider = Arc::new(KafkaProvider::new(topic));
-                            assert!(manager.get_or_insert(&provider).await.is_ok());
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                futures::future::try_join_all(tasks).await.unwrap();
-
-                // Ensures all clients exist.
-                let client_pool = manager.instances.read().await;
-                let all_exist = topics.iter().all(|topic| {
-                    let provider = Arc::new(KafkaProvider::new(topic.to_string()));
-                    client_pool.contains_key(&provider)
-                });
-                assert!(all_exist);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let provider = Arc::new(KafkaProvider::new(topic));
+                    assert!(manager.get_or_insert(&provider).await.is_ok());
+                })
             })
-        })
-        .await;
+            .collect::<Vec<_>>();
+        futures::future::try_join_all(tasks).await.unwrap();
+
+        // Ensures all clients exist.
+        let client_pool = manager.instances.read().await;
+        let all_exist = topics.iter().all(|topic| {
+            let provider = Arc::new(KafkaProvider::new(topic.to_string()));
+            client_pool.contains_key(&provider)
+        });
+        assert!(all_exist);
     }
 }

@@ -26,14 +26,12 @@ use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_runtime::runtime::BuilderBuild;
 use common_runtime::{Builder as RuntimeBuilder, Runtime};
-use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
-use futures::future::BoxFuture;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
 };
@@ -731,23 +729,4 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         )
         .await
         .unwrap();
-}
-
-pub async fn run_test_with_kafka_wal<F>(test: F)
-where
-    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
-{
-    let _ = dotenv::dotenv();
-    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
-    if endpoints.is_empty() {
-        warn!("The endpoints is empty, skipping the test");
-        return;
-    }
-
-    let endpoints = endpoints
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect::<Vec<_>>();
-
-    test(endpoints).await
 }

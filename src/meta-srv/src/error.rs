@@ -882,6 +882,13 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to parse wal options"))]
+    ParseWalOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to build kafka client."))]
     BuildKafkaClient {
         #[snafu(implicit)]
@@ -1050,7 +1057,8 @@ impl ErrorExt for Error {
             | Error::RuntimeSwitchManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. }
-            | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
+            | Error::UpdateTopicNameValue { source, .. }
+            | Error::ParseWalOptions { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }

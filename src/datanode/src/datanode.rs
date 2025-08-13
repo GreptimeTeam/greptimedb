@@ -18,11 +18,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
+use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
 use common_meta::key::{SchemaMetadataManager, SchemaMetadataManagerRef};
@@ -44,7 +44,7 @@ use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
-use query::dummy_catalog::TableProviderFactoryRef;
+use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::server::ServerHandlers;
@@ -163,6 +163,7 @@ pub struct DatanodeBuilder {
     meta_client: Option<MetaClientRef>,
     kv_backend: KvBackendRef,
     cache_registry: Option<Arc<LayeredCacheRegistry>>,
+    topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
 }
@@ -178,6 +179,7 @@ impl DatanodeBuilder {
             cache_registry: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
+            topic_stats_reporter: None,
         }
     }
 
@@ -377,7 +379,7 @@ impl DatanodeBuilder {
 
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
+            DummyCatalogManager::arc(),
             None,
             None,
             None,
@@ -414,6 +416,9 @@ impl DatanodeBuilder {
             .await?;
         for engine in engines {
             region_server.register_engine(engine);
+        }
+        if let Some(topic_stats_reporter) = self.topic_stats_reporter.take() {
+            region_server.set_topic_stats_reporter(topic_stats_reporter);
         }
 
         Ok(region_server)
@@ -528,10 +533,13 @@ impl DatanodeBuilder {
                     None
                 };
 
+                let log_store =
+                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?;
+                self.topic_stats_reporter = Some(log_store.topic_stats_reporter());
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
                     config,
-                    Self::build_kafka_log_store(kafka_config, global_index_collector).await?,
+                    log_store,
                     object_store_manager,
                     schema_metadata_manager,
                     plugins,
