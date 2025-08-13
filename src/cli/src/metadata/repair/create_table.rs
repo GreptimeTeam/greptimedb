@@ -74,11 +74,19 @@ pub fn make_create_region_request_for_peer(
     let catalog = &create_table_expr.catalog_name;
     let schema = &create_table_expr.schema_name;
     let storage_path = region_storage_path(catalog, schema);
+    let partition_exprs = region_routes
+        .iter()
+        .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+        .collect::<HashMap<_, _>>();
 
     for region_number in &regions_on_this_peer {
         let region_id = RegionId::new(logical_table_id, *region_number);
-        let region_request =
-            request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
+        let region_request = request_builder.build_one(
+            region_id,
+            storage_path.clone(),
+            &HashMap::new(),
+            &partition_exprs,
+        );
         requests.push(region_request);
     }
 

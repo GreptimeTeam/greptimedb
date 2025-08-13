@@ -153,6 +153,12 @@ pub struct RegionMetadata {
 
     /// Primary key encoding mode.
     pub primary_key_encoding: PrimaryKeyEncoding,
+
+    /// Partition expression serialized as a JSON string.
+    /// Compatibility behavior:
+    /// - None: no partition expr was ever set in the manifest (legacy regions).
+    /// - Some(""): an explicit “single-region/no-partition” designation. This is distinct from None and should be preserved as-is.
+    pub partition_expr: Option<String>,
 }
 
 impl fmt::Debug for RegionMetadata {
@@ -163,6 +169,7 @@ impl fmt::Debug for RegionMetadata {
             .field("primary_key", &self.primary_key)
             .field("region_id", &self.region_id)
             .field("schema_version", &self.schema_version)
+            .field("partition_expr", &self.partition_expr)
             .finish()
     }
 }
@@ -183,6 +190,8 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             schema_version: u64,
             #[serde(default)]
             primary_key_encoding: PrimaryKeyEncoding,
+            #[serde(default)]
+            partition_expr: Option<String>,
         }
 
         let without_schema = RegionMetadataWithoutSchema::deserialize(deserializer)?;
@@ -198,6 +207,7 @@ impl<'de> Deserialize<'de> for RegionMetadata {
             region_id: without_schema.region_id,
             schema_version: without_schema.schema_version,
             primary_key_encoding: without_schema.primary_key_encoding,
+            partition_expr: without_schema.partition_expr,
         })
     }
 }
@@ -350,6 +360,7 @@ impl RegionMetadata {
             region_id: self.region_id,
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
+            partition_expr: self.partition_expr.clone(),
         })
     }
 
@@ -524,6 +535,7 @@ pub struct RegionMetadataBuilder {
     primary_key: Vec<ColumnId>,
     schema_version: u64,
     primary_key_encoding: PrimaryKeyEncoding,
+    partition_expr: Option<String>,
 }
 
 impl RegionMetadataBuilder {
@@ -535,6 +547,7 @@ impl RegionMetadataBuilder {
             primary_key: vec![],
             schema_version: 0,
             primary_key_encoding: PrimaryKeyEncoding::Dense,
+            partition_expr: None,
         }
     }
 
@@ -546,12 +559,19 @@ impl RegionMetadataBuilder {
             region_id: existing.region_id,
             schema_version: existing.schema_version,
             primary_key_encoding: existing.primary_key_encoding,
+            partition_expr: existing.partition_expr,
         }
     }
 
     /// Sets the primary key encoding mode.
     pub fn primary_key_encoding(&mut self, encoding: PrimaryKeyEncoding) -> &mut Self {
         self.primary_key_encoding = encoding;
+        self
+    }
+
+    /// Sets the partition expression in JSON string form.
+    pub fn partition_expr_json(&mut self, expr_json: Option<String>) -> &mut Self {
+        self.partition_expr = expr_json;
         self
     }
 
@@ -623,6 +643,7 @@ impl RegionMetadataBuilder {
             region_id: self.region_id,
             schema_version: self.schema_version,
             primary_key_encoding: self.primary_key_encoding,
+            partition_expr: self.partition_expr,
         };
 
         meta.validate()?;
@@ -1258,7 +1279,8 @@ mod test {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 3,
             })
-            .primary_key(vec![1]);
+            .primary_key(vec![1])
+            .partition_expr_json(Some("".to_string()));
         builder.build().unwrap()
     }
 
@@ -1901,7 +1923,7 @@ mod test {
     fn test_debug_for_column_metadata() {
         let region_metadata = build_test_region_metadata();
         let formatted = format!("{:?}", region_metadata);
-        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
+        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c TimestampMillisecond not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0, partition_expr: Some(\"\") }");
     }
 
     #[test]

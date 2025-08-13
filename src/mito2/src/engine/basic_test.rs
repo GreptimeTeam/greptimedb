@@ -657,6 +657,7 @@ async fn test_cache_null_primary_key() {
         options: HashMap::new(),
         table_dir: "test".to_string(),
         path_type: PathType::Bare,
+        partition_expr_json: Some("".to_string()),
     };
 
     let column_schemas = rows_schema(&request);

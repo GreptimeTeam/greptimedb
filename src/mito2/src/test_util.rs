@@ -646,6 +646,7 @@ pub struct CreateRequestBuilder {
     ts_type: ConcreteDataType,
     /// kafka topic name
     kafka_topic: Option<String>,
+    partition_expr_json: Option<String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -660,6 +661,7 @@ impl Default for CreateRequestBuilder {
             engine: MITO_ENGINE_NAME.to_string(),
             ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
             kafka_topic: None,
+            partition_expr_json: None,
         }
     }
 }
@@ -715,6 +717,12 @@ impl CreateRequestBuilder {
     #[must_use]
     pub fn kafka_topic(mut self, topic: Option<String>) -> Self {
         self.kafka_topic = topic;
+        self
+    }
+
+    #[must_use]
+    pub fn partition_expr_json(mut self, partition_expr_json: Option<String>) -> Self {
+        self.partition_expr_json = partition_expr_json;
         self
     }
 
@@ -775,6 +783,7 @@ impl CreateRequestBuilder {
             options,
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: self.partition_expr_json.clone(),
         }
     }
 }

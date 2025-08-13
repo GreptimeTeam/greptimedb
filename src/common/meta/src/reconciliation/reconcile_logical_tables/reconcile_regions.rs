@@ -21,7 +21,7 @@ use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future;
 use serde::{Deserialize, Serialize};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::ddl::utils::{add_peer_context_if_needed, region_storage_path};
@@ -112,16 +112,23 @@ impl ReconcileRegions {
         let create_tables = &ctx.persistent_ctx.create_tables;
 
         let mut requests = Vec::with_capacity(region_numbers.len() * create_tables.len());
+
         for (table_id, table_info) in create_tables {
             let request_builder =
                 create_region_request_from_raw_table_info(table_info, physical_table_id)?;
             let storage_path =
                 region_storage_path(&table_name.catalog_name, &table_name.schema_name);
+            let partition_exprs = prepare_partition_exprs(ctx, *table_id);
 
             for region_number in region_numbers {
                 let region_id = RegionId::new(*table_id, *region_number);
-                let one_region_request =
-                    request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
+
+                let one_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    &HashMap::new(),
+                    &partition_exprs,
+                );
                 requests.push(one_region_request);
             }
         }
@@ -143,4 +150,21 @@ fn create_region_request_from_raw_table_info(
 ) -> Result<CreateRequestBuilder> {
     let template = build_template_from_raw_table_info(raw_table_info)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
+}
+
+fn prepare_partition_exprs(
+    ctx: &ReconcileLogicalTablesContext,
+    table_id: TableId,
+) -> HashMap<RegionNumber, String> {
+    ctx.persistent_ctx
+        .physical_table_route
+        .as_ref()
+        .map(|r| {
+            r.region_routes
+                .iter()
+                .filter(|r| r.region.id.table_id() == table_id)
+                .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default()
 }

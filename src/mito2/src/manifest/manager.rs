@@ -642,6 +642,36 @@ mod test {
     }
 
     #[tokio::test]
+    async fn manifest_with_partition_expr_roundtrip() {
+        let env = TestEnv::new().await;
+        let expr_json =
+            r#"{"Expr":{"lhs":{"Column":"a"},"op":"GtEq","rhs":{"Value":{"UInt32":10}}}}"#;
+        let mut metadata = basic_region_metadata();
+        metadata.partition_expr = Some(expr_json.to_string());
+        let metadata = Arc::new(metadata);
+        let mut manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // persisted manifest should contain the same partition_expr JSON
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
+
+        manager.stop().await;
+
+        // Reopen and check again
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let manifest = manager.manifest();
+        assert_eq!(manifest.metadata.partition_expr.as_deref(), Some(expr_json));
+    }
+
+    #[tokio::test]
     async fn region_change_add_column() {
         let metadata = Arc::new(basic_region_metadata());
         let env = TestEnv::new().await;
@@ -783,6 +813,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1204);
+        assert_eq!(manifest_size, 1226);
     }
 }

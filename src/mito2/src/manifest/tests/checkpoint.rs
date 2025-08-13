@@ -179,7 +179,7 @@ async fn manager_with_checkpoint_distance_1() {
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
     let expected_json =
-        "{\"size\":879,\"version\":10,\"checksum\":2245967096,\"extend_metadata\":{}}";
+        "{\"size\":901,\"version\":10,\"checksum\":2571452538,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager

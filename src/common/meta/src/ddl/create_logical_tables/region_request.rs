@@ -40,6 +40,10 @@ impl CreateLogicalTablesProcedure {
         let table_ids_already_exists = &self.data.table_ids_already_exists;
         let regions_on_this_peer = find_leader_regions(region_routes, peer);
         let mut requests = Vec::with_capacity(tasks.len() * regions_on_this_peer.len());
+        let partition_exprs = region_routes
+            .iter()
+            .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+            .collect();
         for (task, table_id_already_exists) in tasks.iter().zip(table_ids_already_exists) {
             if table_id_already_exists.is_some() {
                 continue;
@@ -57,8 +61,12 @@ impl CreateLogicalTablesProcedure {
 
             for region_number in &regions_on_this_peer {
                 let region_id = RegionId::new(logical_table_id, *region_number);
-                let one_region_request =
-                    request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
+                let one_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    &HashMap::new(),
+                    &partition_exprs,
+                );
                 requests.push(one_region_request);
             }
         }
