@@ -14,7 +14,7 @@
 
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,10 @@ pub struct RegionManifest {
     pub metadata: RegionMetadataRef,
     /// SST files.
     pub files: HashMap<FileId, FileMeta>,
+    /// Removed files, which are not in the current manifest but may still be kept for a while.
+    /// The key is the manifest version when the file is removed from manifest, which is used to
+    /// determine when the file can be safely deleted.
+    pub removed_files: BTreeMap<ManifestVersion, HashSet<FileMeta>>,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
     /// Last sequence of flushed data.
@@ -108,6 +112,7 @@ pub struct RegionManifest {
 pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,
     files: HashMap<FileId, FileMeta>,
+    removed_files: BTreeMap<ManifestVersion, HashSet<FileMeta>>,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
@@ -122,6 +127,7 @@ impl RegionManifestBuilder {
             Self {
                 metadata: Some(s.metadata),
                 files: s.files,
+                removed_files: s.removed_files,
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
                 flushed_sequence: s.flushed_sequence,
@@ -143,6 +149,10 @@ impl RegionManifestBuilder {
         for file in edit.files_to_add {
             self.files.insert(file.file_id, file);
         }
+        self.removed_files
+            .entry(manifest_version)
+            .or_default()
+            .extend(edit.files_to_remove.iter().cloned());
         for file in edit.files_to_remove {
             self.files.remove(&file.file_id);
         }
@@ -168,8 +178,16 @@ impl RegionManifestBuilder {
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
                 self.files.clear();
+                self.removed_files
+                    .entry(manifest_version)
+                    .or_default()
+                    .extend(self.files.values().cloned());
             }
             TruncateKind::Partial { files_to_remove } => {
+                self.removed_files
+                    .entry(manifest_version)
+                    .or_default()
+                    .extend(files_to_remove.iter().cloned());
                 for file in files_to_remove {
                     self.files.remove(&file.file_id);
                 }
@@ -191,6 +209,7 @@ impl RegionManifestBuilder {
         Ok(RegionManifest {
             metadata,
             files: self.files,
+            removed_files: self.removed_files,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             manifest_version: self.manifest_version,
