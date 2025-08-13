@@ -1479,7 +1479,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
-EXPIRE AFTER '1 month 2 days 1h 2 min'
+EXPIRE AFTER '2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
@@ -1490,7 +1490,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     ]),
                     or_replace: false,
                     if_not_exists: false,
-                    expire_after: Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60),
+                    expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     comment: None,
                 },
             ),
@@ -1668,7 +1668,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 r"
 CREATE FLOW `task_2`
 SINK TO schema_1.table_1
-EXPIRE AFTER '1 month 2 days 1h 2 min'
+EXPIRE AFTER '2 days 1h 2 min'
 AS
 SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 CreateFlowWoutQuery {
@@ -1679,7 +1679,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     ]),
                     or_replace: false,
                     if_not_exists: false,
-                    expire_after: Some(86400 * 3044 / 1000 + 2 * 86400 + 3600 + 2 * 60),
+                    expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     eval_interval: None,
                     comment: None,
                 },
@@ -1706,6 +1706,26 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             let recreated = parse_create_flow(&show_create);
             assert_eq!(recreated, expected, "input sql is:\n{show_create}");
         }
+    }
+
+    #[test]
+    fn test_create_flow_no_month() {
+        let sql = r"
+CREATE FLOW `task_2`
+SINK TO schema_1.table_1
+EXPIRE AFTER '1 month 2 days 1h 2 min'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;";
+        let stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmts.is_err()
+                && stmts
+                    .unwrap_err()
+                    .to_string()
+                    .contains("month interval is not allowed")
+        );
     }
 
     #[test]
