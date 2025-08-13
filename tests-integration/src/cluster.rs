@@ -315,7 +315,7 @@ impl GreptimeDbClusterBuilder {
         meta_peer_client: &MetaPeerClientRef,
         expected_datanodes: usize,
     ) {
-        for _ in 0..10 {
+        for _ in 0..100 {
             let alive_datanodes = meta_srv::lease::alive_datanodes(meta_peer_client, u64::MAX)
                 .await
                 .unwrap()
@@ -323,7 +323,7 @@ impl GreptimeDbClusterBuilder {
             if alive_datanodes == expected_datanodes {
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await
+            tokio::time::sleep(Duration::from_micros(100)).await
         }
         panic!("Some Datanodes are not alive in 10 seconds!")
     }
