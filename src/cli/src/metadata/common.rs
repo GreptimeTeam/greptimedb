@@ -57,25 +57,25 @@ pub(crate) struct StoreConfig {
     #[clap(long, default_value = common_meta::kv_backend::DEFAULT_META_TABLE_NAME)]
     meta_table_name: String,
 
-    /// TLS mode for etcd client connections
-    #[clap(long = "etcd-tls-mode", value_enum, default_value = "disable")]
-    etcd_tls_mode: TlsMode,
+    /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
+    #[clap(long = "backend-tls-mode", value_enum, default_value = "disable")]
+    backend_tls_mode: TlsMode,
 
-    /// Path to TLS certificate file for etcd client connections
-    #[clap(long = "etcd-tls-cert-path", default_value = "")]
-    etcd_tls_cert_path: String,
+    /// Path to TLS certificate file for backend store connections
+    #[clap(long = "backend-tls-cert-path", default_value = "")]
+    backend_tls_cert_path: String,
 
-    /// Path to TLS private key file for etcd client connections
-    #[clap(long = "etcd-tls-key-path", default_value = "")]
-    etcd_tls_key_path: String,
+    /// Path to TLS private key file for backend store connections
+    #[clap(long = "backend-tls-key-path", default_value = "")]
+    backend_tls_key_path: String,
 
-    /// Path to TLS CA certificate file for etcd client connections
-    #[clap(long = "etcd-tls-ca-cert-path", default_value = "")]
-    etcd_tls_ca_cert_path: String,
+    /// Path to TLS CA certificate file for backend store connections
+    #[clap(long = "backend-tls-ca-cert-path", default_value = "")]
+    backend_tls_ca_cert_path: String,
 
     /// Enable watching TLS certificate files for changes
-    #[clap(long = "etcd-tls-watch")]
-    etcd_tls_watch: bool,
+    #[clap(long = "backend-tls-watch")]
+    backend_tls_watch: bool,
 }
 
 impl StoreConfig {
@@ -88,13 +88,13 @@ impl StoreConfig {
         } else {
             let kvbackend = match self.backend {
                 BackendImpl::EtcdStore => {
-                    let tls_config = if self.etcd_tls_mode != TlsMode::Disable {
+                    let tls_config = if self.backend_tls_mode != TlsMode::Disable {
                         Some(TlsOption {
-                            mode: self.etcd_tls_mode.clone(),
-                            cert_path: self.etcd_tls_cert_path.clone(),
-                            key_path: self.etcd_tls_key_path.clone(),
-                            ca_cert_path: self.etcd_tls_ca_cert_path.clone(),
-                            watch: self.etcd_tls_watch,
+                            mode: self.backend_tls_mode.clone(),
+                            cert_path: self.backend_tls_cert_path.clone(),
+                            key_path: self.backend_tls_key_path.clone(),
+                            ca_cert_path: self.backend_tls_ca_cert_path.clone(),
+                            watch: self.backend_tls_watch,
                         })
                     } else {
                         None

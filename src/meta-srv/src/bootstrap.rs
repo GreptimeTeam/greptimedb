@@ -289,7 +289,7 @@ pub async fn metasrv_builder(
         (None, BackendImpl::MemoryStore) => (Arc::new(MemoryKvBackend::new()) as _, None),
         (None, BackendImpl::EtcdStore) => {
             let etcd_client =
-                create_etcd_client_with_tls(&opts.store_addrs, opts.etcd_tls.as_ref()).await?;
+                create_etcd_client_with_tls(&opts.store_addrs, opts.backend_tls.as_ref()).await?;
             let kv_backend = EtcdStore::with_etcd_client(etcd_client.clone(), opts.max_txn_ops);
             let election = EtcdElection::with_etcd_client(
                 &opts.grpc.server_addr,
@@ -452,37 +452,45 @@ pub async fn create_etcd_client_with_tls(
         .collect::<Vec<_>>();
 
     let connect_options = if let Some(tls_config) = tls_config {
-        use std::fs;
+        use servers::tls::TlsMode;
 
-        use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
+        // If TLS is disabled, treat it as no TLS config
+        if tls_config.mode == TlsMode::Disable {
+            None
+        } else {
+            use std::fs;
 
-        let mut etcd_tls_opts = TlsOptions::new();
+            use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
 
-        // Set CA certificate if provided
-        if !tls_config.ca_cert_path.is_empty() {
-            let ca_cert_pem = fs::read(&tls_config.ca_cert_path).context(error::FileIoSnafu {
-                path: &tls_config.ca_cert_path,
-            })?;
-            let ca_cert = Certificate::from_pem(ca_cert_pem);
-            etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
+            let mut etcd_tls_opts = TlsOptions::new();
+
+            // Set CA certificate if provided
+            if !tls_config.ca_cert_path.is_empty() {
+                let ca_cert_pem =
+                    fs::read(&tls_config.ca_cert_path).context(error::FileIoSnafu {
+                        path: &tls_config.ca_cert_path,
+                    })?;
+                let ca_cert = Certificate::from_pem(ca_cert_pem);
+                etcd_tls_opts = etcd_tls_opts.ca_certificate(ca_cert);
+            }
+
+            // Set client identity (cert + key) if both are provided
+            if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
+                let cert_pem = fs::read(&tls_config.cert_path).context(error::FileIoSnafu {
+                    path: &tls_config.cert_path,
+                })?;
+                let key_pem = fs::read(&tls_config.key_path).context(error::FileIoSnafu {
+                    path: &tls_config.key_path,
+                })?;
+                let identity = Identity::from_pem(cert_pem, key_pem);
+                etcd_tls_opts = etcd_tls_opts.identity(identity);
+            }
+
+            // Enable native TLS roots for additional trust anchors
+            etcd_tls_opts = etcd_tls_opts.with_native_roots();
+
+            Some(ConnectOptions::new().with_tls(etcd_tls_opts))
         }
-
-        // Set client identity (cert + key) if both are provided
-        if !tls_config.cert_path.is_empty() && !tls_config.key_path.is_empty() {
-            let cert_pem = fs::read(&tls_config.cert_path).context(error::FileIoSnafu {
-                path: &tls_config.cert_path,
-            })?;
-            let key_pem = fs::read(&tls_config.key_path).context(error::FileIoSnafu {
-                path: &tls_config.key_path,
-            })?;
-            let identity = Identity::from_pem(cert_pem, key_pem);
-            etcd_tls_opts = etcd_tls_opts.identity(identity);
-        }
-
-        // Enable native TLS roots for additional trust anchors
-        etcd_tls_opts = etcd_tls_opts.with_native_roots();
-
-        Some(ConnectOptions::new().with_tls(etcd_tls_opts))
     } else {
         None
     };
