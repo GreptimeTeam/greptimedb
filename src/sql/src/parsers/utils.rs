@@ -270,6 +270,18 @@ mod tests {
                 now() - now() + lit(ScalarValue::new_interval_dt(0, 1500)),
                 lit(ScalarValue::new_interval_mdn(0, 0, 1500000000)),
             ),
+            (
+                lit(ScalarValue::new_interval_mdn(
+                    0,
+                    0,
+                    61 * 86400 * 1_000_000_000,
+                )),
+                lit(ScalarValue::new_interval_mdn(
+                    0,
+                    0,
+                    61 * 86400 * 1_000_000_000,
+                )),
+            ),
         ];
 
         let execution_props = ExecutionProps::new().with_query_execution_start_time(now_time);
