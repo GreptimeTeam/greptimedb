@@ -14,7 +14,11 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Attribute, Data, DeriveInput, Error, Meta, Variant};
+use syn::punctuated::Punctuated;
+use syn::{
+    parse_macro_input, Attribute, Data, DeriveInput, Error, Expr, ExprLit, Lit, Meta,
+    MetaNameValue, Token, Variant,
+};
 
 /// Implementation for the derive macro that automatically generates the deserialize implementation
 pub fn impl_deserialize_with_empty_default_derive(input: TokenStream) -> TokenStream {
@@ -80,16 +84,18 @@ pub fn impl_deserialize_with_empty_default_derive(input: TokenStream) -> TokenSt
 fn extract_rename_all(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
         if attr.path().is_ident("serde") {
-            if let Meta::List(meta_list) = &attr.meta {
-                // Parse the meta list manually by looking for rename_all
-                let tokens_str = meta_list.tokens.to_string();
-                if let Some(start) = tokens_str.find("rename_all") {
-                    if let Some(eq_pos) = tokens_str[start..].find('=') {
-                        let after_eq = &tokens_str[start + eq_pos + 1..];
-                        if let Some(quote_start) = after_eq.find('"') {
-                            if let Some(quote_end) = after_eq[quote_start + 1..].find('"') {
-                                let value = &after_eq[quote_start + 1..quote_start + 1 + quote_end];
-                                return Some(value.to_string());
+            if let Ok(meta_list) =
+                attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            {
+                for meta in meta_list {
+                    if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
+                        if path.is_ident("rename_all") {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(lit_str),
+                                ..
+                            }) = value
+                            {
+                                return Some(lit_str.value());
                             }
                         }
                     }
@@ -105,19 +111,18 @@ fn get_variant_string(variant: &Variant, rename_all: &Option<String>) -> String 
     // Check for field-level rename attribute
     for attr in &variant.attrs {
         if attr.path().is_ident("serde") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-                if let Some(start) = tokens_str.find("rename") {
-                    // Make sure it's not "rename_all"
-                    if !tokens_str[start..].starts_with("rename_all") {
-                        if let Some(eq_pos) = tokens_str[start..].find('=') {
-                            let after_eq = &tokens_str[start + eq_pos + 1..];
-                            if let Some(quote_start) = after_eq.find('"') {
-                                if let Some(quote_end) = after_eq[quote_start + 1..].find('"') {
-                                    let value =
-                                        &after_eq[quote_start + 1..quote_start + 1 + quote_end];
-                                    return value.to_string();
-                                }
+            if let Ok(meta_list) =
+                attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            {
+                for meta in meta_list {
+                    if let Meta::NameValue(MetaNameValue { path, value, .. }) = meta {
+                        if path.is_ident("rename") {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(lit_str),
+                                ..
+                            }) = value
+                            {
+                                return lit_str.value();
                             }
                         }
                     }
