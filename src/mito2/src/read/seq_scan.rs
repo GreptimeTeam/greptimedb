@@ -274,7 +274,7 @@ impl SeqScan {
                 stream_ctx.input.num_memtables(),
                 stream_ctx.input.num_files(),
             ));
-            let mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
+            let _mapper = stream_ctx.input.mapper.as_primary_key().context(UnexpectedSnafu {
                 reason: "Unexpected format",
             })?;
             // Scans each part.
@@ -312,7 +312,7 @@ impl SeqScan {
                     #[cfg(debug_assertions)]
                     checker.ensure_part_range_batch(
                         "SeqScan",
-                        mapper.metadata().region_id,
+                        _mapper.metadata().region_id,
                         partition,
                         part_range,
                         &batch,
