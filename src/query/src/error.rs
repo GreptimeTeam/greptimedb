@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::time::Duration;
+use std::time::{Duration, TryFromFloatSecsError};
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -337,6 +337,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert float seconds to duration, raw: {}", raw))]
+    TryIntoDuration {
+        raw: String,
+        #[snafu(source)]
+        error: TryFromFloatSecsError,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -360,7 +369,8 @@ impl ErrorExt for Error {
             | ColumnSchemaIncompatible { .. }
             | UnsupportedVariable { .. }
             | ColumnSchemaNoDefault { .. }
-            | CteColumnSchemaMismatch { .. } => StatusCode::InvalidArguments,
+            | CteColumnSchemaMismatch { .. }
+            | TryIntoDuration { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 

@@ -33,7 +33,7 @@ use sql::statements::statement::Statement;
 
 use crate::error::{
     AddSystemTimeOverflowSnafu, MultipleStatementsSnafu, ParseFloatSnafu, ParseTimestampSnafu,
-    QueryParseSnafu, Result, UnimplementedSnafu,
+    QueryParseSnafu, Result, TryIntoDurationSnafu, UnimplementedSnafu,
 };
 use crate::metrics::{PARSE_PROMQL_ELAPSED, PARSE_SQL_ELAPSED};
 
@@ -206,7 +206,8 @@ impl QueryLanguageParser {
             // also report rfc3339 error if float parsing fails
             .map_err(|_| rfc3339_result.unwrap_err())?;
 
-        let duration = Duration::from_secs_f64(secs);
+        let duration =
+            Duration::try_from_secs_f64(secs).context(TryIntoDurationSnafu { raw: timestamp })?;
         SystemTime::UNIX_EPOCH
             .checked_add(duration)
             .context(AddSystemTimeOverflowSnafu { duration })
