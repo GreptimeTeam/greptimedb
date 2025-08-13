@@ -336,6 +336,9 @@ impl RegionEngine for MetricEngine {
             SetRegionRoleStateResponse::NotFound => {
                 return Ok(SetRegionRoleStateResponse::NotFound)
             }
+            SetRegionRoleStateResponse::InvalidTransition(error) => {
+                return Ok(SetRegionRoleStateResponse::InvalidTransition(error))
+            }
         };
 
         let data_result = match self
@@ -347,6 +350,9 @@ impl RegionEngine for MetricEngine {
             SetRegionRoleStateResponse::Success(success) => success,
             SetRegionRoleStateResponse::NotFound => {
                 return Ok(SetRegionRoleStateResponse::NotFound)
+            }
+            SetRegionRoleStateResponse::InvalidTransition(error) => {
+                return Ok(SetRegionRoleStateResponse::InvalidTransition(error))
             }
         };
 

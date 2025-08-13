@@ -185,6 +185,14 @@ impl PrometheusJsonResponse {
         metric_name: Option<String>,
         result_type: ValueType,
     ) -> Result<PrometheusResponse> {
+        // Return empty result if no batches
+        if batches.iter().next().is_none() {
+            return Ok(PrometheusResponse::PromData(PromData {
+                result_type: result_type.to_string(),
+                ..Default::default()
+            }));
+        }
+
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;

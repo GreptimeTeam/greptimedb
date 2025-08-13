@@ -22,6 +22,7 @@ use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_config::Configurable;
 #[cfg(feature = "pg_kvbackend")]
+#[cfg(feature = "pg_kvbackend")]
 use common_error::ext::BoxedError;
 #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
 use common_meta::distributed_time_constants::META_LEASE_SECS;
@@ -438,6 +439,13 @@ pub async fn metasrv_builder(
 }
 
 pub async fn create_etcd_client(store_addrs: &[String]) -> Result<Client> {
+    create_etcd_client_with_tls(store_addrs, None).await
+}
+
+pub async fn create_etcd_client_with_tls(
+    store_addrs: &[String],
+    tls_config: Option<&TlsOption>,
+) -> Result<Client> {
     create_etcd_client_with_tls(store_addrs, None).await
 }
 

@@ -607,7 +607,7 @@ mod tests {
     fn test_parse_alter_trigger_labels() {
         // Passed case: SET LABELS.
         // Note: "ALTER TRIGGER" is matched.
-        let sql = r#"test_trigger SET LABELS (Key1='value1', 'KEY2'='value2')"#;
+        let sql = r#"test_trigger SET LABELS (Key1='value1', 'KEY2'='VALUE2')"#;
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
         let stmt = ctx.parse_alter_trigger().unwrap();
         let Statement::AlterTrigger(alter) = stmt else {
@@ -616,8 +616,10 @@ mod tests {
         let Some(LabelOperations::ReplaceAll(labels)) = alter.operation.label_operations else {
             panic!("Expected ReplaceAll label operations");
         };
+
+        assert_eq!(labels.len(), 2);
         assert_eq!(labels.get("key1"), Some(&"value1".to_string()));
-        assert_eq!(labels.get("KEY2"), Some(&"value2".to_string()));
+        assert_eq!(labels.get("key2"), Some(&"VALUE2".to_string()));
 
         // Passed case: multiple ADD/DROP/MODIFY LABELS.
         let sql = r#"test_trigger ADD LABELS (key1='value1') MODIFY LABELS (key2='value2') DROP LABELS ('key3')"#;
