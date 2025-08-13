@@ -16,7 +16,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common_base::Plugins;
 use common_error::ext::BoxedError;
@@ -670,6 +670,7 @@ async fn open_all_regions(
         ));
     }
 
+    let now = Instant::now();
     let open_regions = region_server
         .handle_batch_open_requests(
             init_regions_parallelism,
@@ -677,6 +678,11 @@ async fn open_all_regions(
             ignore_nonexistent_region,
         )
         .await?;
+    info!(
+        "Opened {} regions in {:?}",
+        open_regions.len(),
+        now.elapsed()
+    );
     if !ignore_nonexistent_region {
         ensure!(
             open_regions.len() == num_regions,
@@ -708,6 +714,8 @@ async fn open_all_regions(
 
     #[cfg(feature = "enterprise")]
     if !follower_regions.is_empty() {
+        use tokio::time::Instant;
+
         info!(
             "going to open {} follower region(s)",
             follower_regions.len()
@@ -728,6 +736,7 @@ async fn open_all_regions(
             ));
         }
 
+        let now = Instant::now();
         let open_regions = region_server
             .handle_batch_open_requests(
                 init_regions_parallelism,
@@ -735,6 +744,11 @@ async fn open_all_regions(
                 ignore_nonexistent_region,
             )
             .await?;
+        info!(
+            "Opened {} follower regions in {:?}",
+            open_regions.len(),
+            now.elapsed()
+        );
 
         if !ignore_nonexistent_region {
             ensure!(
@@ -749,10 +763,10 @@ async fn open_all_regions(
             );
         } else if open_regions.len() != num_regions {
             warn!(
-                "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
-                num_regions,
-                open_regions.len()
-            );
+                    "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
+                    num_regions,
+                    open_regions.len()
+                );
         }
     }
 
