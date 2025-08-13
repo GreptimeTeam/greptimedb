@@ -17,7 +17,6 @@ use std::sync::Arc;
 use common_telemetry::warn;
 use dashmap::DashMap;
 use rskafka::client::partition::{Compression, OffsetAt, PartitionClient};
-use rskafka::client::producer::ProduceResult;
 use rskafka::record::Record;
 use store_api::logstore::provider::KafkaProvider;
 use store_api::storage::RegionId;
@@ -112,6 +111,11 @@ impl OrderedBatchProducer {
     }
 }
 
+pub struct ProduceResult {
+    pub offsets: Vec<i64>,
+    pub encoded_request_size: usize,
+}
+
 #[async_trait::async_trait]
 pub trait ProducerClient: std::fmt::Debug + Send + Sync {
     async fn produce(
@@ -144,7 +148,10 @@ impl ProducerClient for PartitionClient {
             .with_label_values(&[self.topic(), &partition])
             .inc();
 
-        Ok(result)
+        Ok(ProduceResult {
+            offsets: result.offsets,
+            encoded_request_size: result.encoded_request_size,
+        })
     }
 
     async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64> {
