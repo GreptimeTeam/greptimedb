@@ -43,3 +43,9 @@ pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
 
 /// The default mailbox round-trip timeout.
 pub const MAILBOX_RTT_SECS: u64 = 1;
+
+/// The interval of reporting topic stats.
+pub const TOPIC_STATS_REPORT_INTERVAL_SECS: u64 = 15;
+
+/// The retention seconds of topic stats.
+pub const TOPIC_STATS_RETENTION_SECS: u64 = TOPIC_STATS_REPORT_INTERVAL_SECS * 100;

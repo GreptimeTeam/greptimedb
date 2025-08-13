@@ -211,6 +211,10 @@ impl WalPruneProcedure {
             .into_iter()
             .map(|(region_id, region)| {
                 let prunable_entry_id = region.manifest.prunable_entry_id();
+                info!(
+                    "Region {}, topic: {}, prunable_entry_id: {}",
+                    region_id, self.data.topic, prunable_entry_id
+                );
                 (region_id, prunable_entry_id)
             })
             .collect();
@@ -246,6 +250,13 @@ impl WalPruneProcedure {
                     self.data.regions_to_flush.push(region_id);
                 }
             }
+            info!(
+                "Flush regions: {:?}, trigger_flush_threshold: {}, prunable_entry_id: {}, max_prunable_entry_id: {}",
+                self.data.regions_to_flush,
+                self.data.trigger_flush_threshold,
+                self.data.prunable_entry_id,
+                max_prunable_entry_id
+            );
             self.data.state = WalPruneState::FlushRegion;
         } else {
             self.data.state = WalPruneState::Prune;
@@ -420,7 +431,8 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::meta::HeartbeatResponse;
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use rskafka::record::Record;
     use tokio::sync::mpsc::Receiver;
 
@@ -490,7 +502,8 @@ mod tests {
                     rskafka::client::partition::Compression::NoCompression,
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .offsets;
             offsets.extend(offset);
         }
         offsets
@@ -550,103 +563,101 @@ mod tests {
 
     #[tokio::test]
     async fn test_procedure_execution() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                common_telemetry::init_default_ut_logging();
-                let mut topic_name = uuid::Uuid::new_v4().to_string();
-                // Topic should start with a letter.
-                topic_name = format!("test_procedure_execution-{}", topic_name);
-                let mut env = TestEnv::new();
-                let context = env.build_wal_prune_context(broker_endpoints).await;
-                TestEnv::prepare_topic(&context.client, &topic_name).await;
-                let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
 
-                // Before any data in kvbackend is mocked, should return a retryable error.
-                let result = procedure.on_prune().await;
-                assert_matches!(result, Err(e) if e.is_retryable());
+        common_telemetry::init_default_ut_logging();
+        let mut topic_name = uuid::Uuid::new_v4().to_string();
+        // Topic should start with a letter.
+        topic_name = format!("test_procedure_execution-{}", topic_name);
+        let mut env = TestEnv::new();
+        let context = env.build_wal_prune_context(broker_endpoints).await;
+        TestEnv::prepare_topic(&context.client, &topic_name).await;
+        let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, 10, None);
 
-                let (prunable_entry_id, regions_to_flush) = mock_test_data(&procedure).await;
+        // Before any data in kvbackend is mocked, should return a retryable error.
+        let result = procedure.on_prune().await;
+        assert_matches!(result, Err(e) if e.is_retryable());
 
-                // Step 1: Test `on_prepare`.
-                let status = procedure.on_prepare().await.unwrap();
-                assert_matches!(
-                    status,
-                    Status::Executing {
-                        persist: true,
-                        clean_poisons: false
-                    }
-                );
-                assert_matches!(procedure.data.state, WalPruneState::FlushRegion);
-                assert_eq!(procedure.data.prunable_entry_id, prunable_entry_id);
-                assert_eq!(
-                    procedure.data.regions_to_flush.len(),
-                    regions_to_flush.len()
-                );
-                for region_id in &regions_to_flush {
-                    assert!(procedure.data.regions_to_flush.contains(region_id));
-                }
+        let (prunable_entry_id, regions_to_flush) = mock_test_data(&procedure).await;
 
-                // Step 2: Test `on_sending_flush_request`.
-                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                env.mailbox
-                    .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
-                    .await;
-                let status = procedure.on_sending_flush_request().await.unwrap();
-                check_flush_request(&mut rx, &regions_to_flush).await;
-                assert_matches!(
-                    status,
-                    Status::Executing {
-                        persist: true,
-                        clean_poisons: false
-                    }
-                );
-                assert_matches!(procedure.data.state, WalPruneState::Prune);
+        // Step 1: Test `on_prepare`.
+        let status = procedure.on_prepare().await.unwrap();
+        assert_matches!(
+            status,
+            Status::Executing {
+                persist: true,
+                clean_poisons: false
+            }
+        );
+        assert_matches!(procedure.data.state, WalPruneState::FlushRegion);
+        assert_eq!(procedure.data.prunable_entry_id, prunable_entry_id);
+        assert_eq!(
+            procedure.data.regions_to_flush.len(),
+            regions_to_flush.len()
+        );
+        for region_id in &regions_to_flush {
+            assert!(procedure.data.regions_to_flush.contains(region_id));
+        }
 
-                // Step 3: Test `on_prune`.
-                let status = procedure.on_prune().await.unwrap();
-                assert_matches!(status, Status::Done { output: None });
-                // Check if the entry ids after(include) `prunable_entry_id` still exist.
-                check_entry_id_existence(
-                    procedure.context.client.clone(),
-                    &topic_name,
-                    procedure.data.prunable_entry_id as i64,
-                    true,
-                )
-                .await;
-                // Check if the entry ids before `prunable_entry_id` are deleted.
-                check_entry_id_existence(
-                    procedure.context.client.clone(),
-                    &topic_name,
-                    procedure.data.prunable_entry_id as i64 - 1,
-                    false,
-                )
-                .await;
+        // Step 2: Test `on_sending_flush_request`.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        env.mailbox
+            .insert_heartbeat_response_receiver(Channel::Datanode(1), tx)
+            .await;
+        let status = procedure.on_sending_flush_request().await.unwrap();
+        check_flush_request(&mut rx, &regions_to_flush).await;
+        assert_matches!(
+            status,
+            Status::Executing {
+                persist: true,
+                clean_poisons: false
+            }
+        );
+        assert_matches!(procedure.data.state, WalPruneState::Prune);
 
-                let value = env
-                    .table_metadata_manager
-                    .topic_name_manager()
-                    .get(&topic_name)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
-
-                // Step 4: Test `on_prepare`, `check_heartbeat_collected_region_ids` fails.
-                // Should log a warning and return `Status::Done`.
-                procedure.context.leader_region_registry.reset();
-                let status = procedure.on_prepare().await.unwrap();
-                assert_matches!(status, Status::Done { output: None });
-
-                // Step 5: Test `on_prepare`, don't flush regions.
-                procedure.data.trigger_flush_threshold = 0;
-                procedure.on_prepare().await.unwrap();
-                assert_matches!(procedure.data.state, WalPruneState::Prune);
-                assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
-
-                // Clean up the topic.
-                delete_topic(procedure.context.client, &topic_name).await;
-            })
-        })
+        // Step 3: Test `on_prune`.
+        let status = procedure.on_prune().await.unwrap();
+        assert_matches!(status, Status::Done { output: None });
+        // Check if the entry ids after(include) `prunable_entry_id` still exist.
+        check_entry_id_existence(
+            procedure.context.client.clone(),
+            &topic_name,
+            procedure.data.prunable_entry_id as i64,
+            true,
+        )
         .await;
+        // Check if the entry ids before `prunable_entry_id` are deleted.
+        check_entry_id_existence(
+            procedure.context.client.clone(),
+            &topic_name,
+            procedure.data.prunable_entry_id as i64 - 1,
+            false,
+        )
+        .await;
+
+        let value = env
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(&topic_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
+
+        // Step 4: Test `on_prepare`, `check_heartbeat_collected_region_ids` fails.
+        // Should log a warning and return `Status::Done`.
+        procedure.context.leader_region_registry.reset();
+        let status = procedure.on_prepare().await.unwrap();
+        assert_matches!(status, Status::Done { output: None });
+
+        // Step 5: Test `on_prepare`, don't flush regions.
+        procedure.data.trigger_flush_threshold = 0;
+        procedure.on_prepare().await.unwrap();
+        assert_matches!(procedure.data.state, WalPruneState::Prune);
+        assert_eq!(value.pruned_entry_id, procedure.data.prunable_entry_id);
+
+        // Clean up the topic.
+        delete_topic(procedure.context.client, &topic_name).await;
     }
 }

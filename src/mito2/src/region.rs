@@ -124,7 +124,7 @@ pub struct MitoRegion {
     /// The topic's latest entry id since the region's last flushing.
     /// **Only used for remote WAL pruning.**
     ///
-    /// The value will be updated to the high watermark of the topic
+    /// The value will be updated to the latest offset of the topic
     /// if region receives a flush request or schedules a periodic flush task
     /// and the region's memtable is empty.    
     ///

@@ -108,6 +108,24 @@ pub struct RegionStat {
     pub metadata_topic_latest_entry_id: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicStat {
+    /// The topic name.
+    pub topic: String,
+    /// The latest entry id of the topic.
+    pub latest_entry_id: u64,
+    /// The total size in bytes of records appended to the topic.
+    pub record_size: u64,
+    /// The total number of records appended to the topic.
+    pub record_num: u64,
+}
+
+/// Trait for reporting statistics about topics.
+pub trait TopicStatsReporter: Send + Sync {
+    /// Returns a list of topic statistics that can be reported.
+    fn reportable_topics(&mut self) -> Vec<TopicStat>;
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RegionManifestInfo {
     Mito {

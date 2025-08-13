@@ -484,7 +484,7 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
-    fn high_watermark(&self, provider: &Provider) -> Result<EntryId> {
+    fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
         let ns = provider
             .as_raft_engine_provider()
             .with_context(|| InvalidProviderSnafu {

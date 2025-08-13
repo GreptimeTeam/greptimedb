@@ -13,9 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod dump_index;
+pub(crate) mod fetch_latest_offset;
 pub(crate) mod flush;
 pub(crate) mod produce;
-pub(crate) mod update_high_watermark;
 
 use std::sync::Arc;
 
@@ -33,13 +33,14 @@ use tokio::sync::oneshot::{self};
 
 use crate::error::{self, NoMaxValueSnafu, Result};
 use crate::kafka::index::{IndexCollector, IndexEncoder};
+use crate::kafka::log_store::TopicStat;
 use crate::kafka::producer::ProducerClient;
 
 pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
     TruncateIndex(TruncateIndexRequest),
     DumpIndex(DumpIndexRequest),
-    UpdateHighWatermark,
+    FetchLatestOffset,
 }
 
 impl WorkerRequest {
@@ -160,8 +161,8 @@ pub(crate) struct BackgroundProducerWorker {
     pub(crate) max_batch_bytes: usize,
     /// Collecting ids of WAL entries.
     pub(crate) index_collector: Box<dyn IndexCollector>,
-    /// High watermark for all topics.
-    pub(crate) high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
+    /// The stats of each topic.
+    pub(crate) topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
 }
 
 impl BackgroundProducerWorker {
@@ -199,8 +200,8 @@ impl BackgroundProducerWorker {
                     entry_id,
                 }) => self.index_collector.truncate(region_id, entry_id),
                 WorkerRequest::DumpIndex(req) => self.dump_index(req).await,
-                WorkerRequest::UpdateHighWatermark => {
-                    self.update_high_watermark().await;
+                WorkerRequest::FetchLatestOffset => {
+                    self.fetch_latest_offset().await;
                 }
             }
         }

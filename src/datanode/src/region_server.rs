@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use api::region::RegionResponse;
+use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
     region_request, ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest,
@@ -29,6 +30,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_meta::datanode::TopicStatsReporter;
 use common_query::request::QueryRequest;
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
@@ -135,8 +137,14 @@ impl RegionServer {
         }
     }
 
+    /// Registers an engine.
     pub fn register_engine(&mut self, engine: RegionEngineRef) {
         self.inner.register_engine(engine);
+    }
+
+    /// Sets the topic stats.
+    pub fn set_topic_stats_reporter(&mut self, topic_stats_reporter: Box<dyn TopicStatsReporter>) {
+        self.inner.set_topic_stats_reporter(topic_stats_reporter);
     }
 
     /// Finds the region's engine by its id. If the region is not ready, returns `None`.
@@ -301,6 +309,24 @@ impl RegionServer {
                     engine: e.value().name().to_string(),
                     role,
                 })
+            })
+            .collect()
+    }
+
+    /// Returns the reportable topics.
+    pub fn topic_stats(&self) -> Vec<TopicStat> {
+        let mut reporter = self.inner.topic_stats_reporter.write().unwrap();
+        let Some(reporter) = reporter.as_mut() else {
+            return vec![];
+        };
+        reporter
+            .reportable_topics()
+            .into_iter()
+            .map(|stat| TopicStat {
+                topic_name: stat.topic,
+                record_size: stat.record_size,
+                record_num: stat.record_num,
+                latest_entry_id: stat.latest_entry_id,
             })
             .collect()
     }
@@ -669,6 +695,8 @@ struct RegionServerInner {
     // The number of queries allowed to be executed at the same time.
     // Act as last line of defense on datanode to prevent query overloading.
     parallelism: Option<RegionServerParallelism>,
+    // The topic stats reporter.
+    topic_stats_reporter: RwLock<Option<Box<dyn TopicStatsReporter>>>,
 }
 
 struct RegionServerParallelism {
@@ -734,6 +762,7 @@ impl RegionServerInner {
             event_listener,
             table_provider_factory,
             parallelism,
+            topic_stats_reporter: RwLock::new(None),
         }
     }
 
@@ -744,6 +773,11 @@ impl RegionServerInner {
             .write()
             .unwrap()
             .insert(engine_name.to_string(), engine);
+    }
+
+    pub fn set_topic_stats_reporter(&self, topic_stats_reporter: Box<dyn TopicStatsReporter>) {
+        info!("Set topic stats reporter");
+        *self.topic_stats_reporter.write().unwrap() = Some(topic_stats_reporter);
     }
 
     fn get_engine(

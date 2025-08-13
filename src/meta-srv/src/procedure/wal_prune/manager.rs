@@ -334,7 +334,8 @@ mod test {
     use std::assert_matches::assert_matches;
 
     use common_meta::key::topic_name::TopicNameKey;
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use tokio::time::{sleep, timeout};
 
     use super::*;
@@ -413,27 +414,24 @@ mod test {
 
     #[tokio::test]
     async fn test_wal_prune_manager() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let limit = 6;
-                let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
-                let topics = (0..limit * 2)
-                    .map(|_| uuid::Uuid::new_v4().to_string())
-                    .collect::<Vec<_>>();
-                mock_topics(&manager, &topics).await;
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let limit = 6;
+        let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
+        let topics = (0..limit * 2)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        mock_topics(&manager, &topics).await;
 
-                let tracker = manager.tracker.clone();
-                let handler =
-                    common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
-                handler.await.unwrap();
+        let tracker = manager.tracker.clone();
+        let handler =
+            common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
+        handler.await.unwrap();
 
-                tx.send(Event::Tick).await.unwrap();
-                // Wait for at least one procedure to be submitted.
-                timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
-                    .await
-                    .unwrap();
-            })
-        })
-        .await;
+        tx.send(Event::Tick).await.unwrap();
+        // Wait for at least one procedure to be submitted.
+        timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
+            .await
+            .unwrap();
     }
 }

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use common_meta::instruction::{FlushRegions, InstructionReply, SimpleReply};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -27,26 +29,38 @@ impl HandlerContext {
         flush_regions: FlushRegions,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
-            for region_id in flush_regions.region_ids {
+            let start_time = Instant::now();
+            for region_id in &flush_regions.region_ids {
                 let request = RegionRequest::Flush(RegionFlushRequest {
                     row_group_size: None,
                 });
-                let result = self.region_server.handle_request(region_id, request).await;
+                let now = Instant::now();
+                let result = self.region_server.handle_request(*region_id, request).await;
+                let elapsed = now.elapsed();
+                info!("Flush region: {}, elapsed: {:?}", region_id, elapsed);
 
                 match result {
                     Ok(_) => {}
                     Err(error::Error::RegionNotFound { .. }) => {
-                        warn!("Received a flush region instruction from meta, but target region: {region_id} is not found.");
+                        warn!(
+                            "Received a flush region instruction from meta, but target region: {} is not found., elapsed: {:?}",
+                            region_id,
+                            elapsed
+                        );
                     }
                     Err(err) => {
                         warn!(
-                            "Failed to flush region: {region_id}, error: {err}",
-                            region_id = region_id,
-                            err = err,
+                            "Failed to flush region: {}, error: {}, elapsed: {:?}",
+                            region_id, err, elapsed
                         );
                     }
                 }
             }
+            let elapsed = start_time.elapsed();
+            info!(
+                "Flush regions: {:?}, elapsed: {:?}",
+                flush_regions.region_ids, elapsed
+            );
             None
         })
     }
