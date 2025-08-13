@@ -20,7 +20,7 @@ use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_meta::lock_key::RemoteWalLock;
 use common_procedure::{Context as ProcedureContext, Status};
-use common_telemetry::error;
+use common_telemetry::{error, warn};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -68,12 +68,14 @@ impl State for UpgradeCandidateRegion {
         let region_wal_options =
             parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
                 .context(error::ParseWalOptionsSnafu)?;
-        let region_wal_option =
-            region_wal_options
-                .get(&region_id.region_number())
-                .context(error::UnexpectedSnafu {
-                    violated: format!("Region {} wal options not found", region_id),
-                })?;
+        let region_wal_option = region_wal_options.get(&region_id.region_number());
+        if region_wal_option.is_none() {
+            warn!(
+                "Region {} wal options not found, during upgrade candidate region",
+                region_id
+            );
+        }
+
         if self
             .upgrade_region_with_retry(ctx, procedure_ctx, region_wal_option)
             .await
@@ -218,7 +220,7 @@ impl UpgradeCandidateRegion {
         &self,
         ctx: &mut Context,
         procedure_ctx: &ProcedureContext,
-        wal_options: &WalOptions,
+        wal_options: Option<&WalOptions>,
     ) -> bool {
         let mut retry = 0;
         let mut upgraded = false;
@@ -226,7 +228,7 @@ impl UpgradeCandidateRegion {
         loop {
             let timer = Instant::now();
             // If using Kafka WAL, acquire a read lock on the topic to prevent WAL pruning during the upgrade.
-            let _guard = if let WalOptions::Kafka(kafka_wal_options) = wal_options {
+            let _guard = if let Some(WalOptions::Kafka(kafka_wal_options)) = wal_options {
                 Some(
                     procedure_ctx
                         .provider
