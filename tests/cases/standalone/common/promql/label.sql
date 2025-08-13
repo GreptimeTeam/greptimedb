@@ -85,6 +85,10 @@ TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "addr", "host1", "instance", "");
 
+TQL EVAL label_replace(demo_num_cpus, "~invalid", "", "src", "(.*)");
+
+TQL EVAL label_replace(demo_num_cpus, "job", "value", "src", "(.*");
+
 -- Issue 6438 --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "idc99", "idc", "idc2.*") == 1.0;
