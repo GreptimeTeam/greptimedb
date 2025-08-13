@@ -22,11 +22,13 @@ use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::arrow_array::BinaryArray;
 use datatypes::timestamp::timestamp_array_to_primitive;
+use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::SequenceNumber;
 
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::BoxedRecordBatchIterator;
+use crate::read::BoxedRecordBatchStream;
 use crate::sst::parquet::flat_format::{
     primary_key_column_index, sequence_column_index, time_index_column_index,
 };
@@ -534,6 +536,275 @@ impl FlatMergeIterator {
         if batch.num_rows() > 0 {
             *output_batch = Some(batch);
         }
+    }
+}
+
+impl Iterator for FlatMergeIterator {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch().transpose()
+    }
+}
+
+/// Iterator to merge multiple sorted iterators into a single sorted iterator.
+///
+/// All iterators must be sorted by primary key, time index, sequence desc.
+pub struct MergeReader {
+    /// The merge algorithm to maintain heaps.
+    algo: MergeAlgo<StreamNode>,
+    /// Current buffered rows to output.
+    in_progress: BatchBuilder,
+    /// Non-empty batch to output.
+    output_batch: Option<RecordBatch>,
+    /// Batch size to merge rows.
+    /// This is not a hard limit, the iterator may return smaller batches to avoid concatenating
+    /// rows.
+    batch_size: usize,
+}
+
+impl MergeReader {
+    /// Creates a new iterator to merge sorted `iters`.
+    pub async fn new(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchStream>,
+        batch_size: usize,
+    ) -> Result<Self> {
+        let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
+        let mut nodes = Vec::with_capacity(iters.len());
+        // Initialize nodes and the buffer.
+        for (node_index, iter) in iters.into_iter().enumerate() {
+            let mut node = StreamNode {
+                node_index,
+                iter,
+                cursor: None,
+            };
+            if let Some(batch) = node.advance_batch().await? {
+                in_progress.push_batch(node_index, batch);
+                nodes.push(node);
+            }
+        }
+
+        let algo = MergeAlgo::new(nodes);
+
+        Ok(Self {
+            algo,
+            in_progress,
+            output_batch: None,
+            batch_size,
+        })
+    }
+
+    /// Fetches next sorted batch.
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        while self.algo.has_rows() && self.output_batch.is_none() {
+            if self.algo.can_fetch_batch() && !self.in_progress.is_empty() {
+                // Only one batch in the hot heap, but we have pending rows, output the pending rows first.
+                self.output_batch = self.in_progress.build_record_batch()?;
+                debug_assert!(self.output_batch.is_some());
+            } else if self.algo.can_fetch_batch() {
+                self.fetch_batch_from_hottest().await?;
+            } else {
+                self.fetch_row_from_hottest().await?;
+            }
+        }
+
+        if let Some(batch) = self.output_batch.take() {
+            Ok(Some(batch))
+        } else {
+            // No more batches.
+            Ok(None)
+        }
+    }
+
+    /// Fetches a batch from the hottest node.
+    async fn fetch_batch_from_hottest(&mut self) -> Result<()> {
+        debug_assert!(self.in_progress.is_empty());
+
+        // Safety: next_batch() ensures the heap is not empty.
+        let mut hottest = self.algo.pop_hot().unwrap();
+        debug_assert!(!hottest.current_cursor().is_finished());
+        let next = hottest.advance_batch().await?;
+        // The node is the heap is not empty, so it must have existing rows in the builder.
+        let batch = self
+            .in_progress
+            .take_remaining_rows(hottest.node_index, next);
+        Self::maybe_output_batch(batch, &mut self.output_batch);
+        self.algo.reheap(hottest);
+
+        Ok(())
+    }
+
+    /// Fetches a row from the hottest node.
+    async fn fetch_row_from_hottest(&mut self) -> Result<()> {
+        // Safety: next_batch() ensures the heap has more than 1 element.
+        let mut hottest = self.algo.pop_hot().unwrap();
+        debug_assert!(!hottest.current_cursor().is_finished());
+        self.in_progress.push_row(hottest.node_index);
+        if self.in_progress.len() >= self.batch_size {
+            // We buffered enough rows.
+            if let Some(output) = self.in_progress.build_record_batch()? {
+                Self::maybe_output_batch(output, &mut self.output_batch);
+            }
+        }
+
+        if let Some(next) = hottest.advance_row().await? {
+            self.in_progress.push_batch(hottest.node_index, next);
+        }
+
+        self.algo.reheap(hottest);
+        Ok(())
+    }
+
+    /// Adds the batch to the output batch if it is not empty.
+    fn maybe_output_batch(batch: RecordBatch, output_batch: &mut Option<RecordBatch>) {
+        debug_assert!(output_batch.is_none());
+        if batch.num_rows() > 0 {
+            *output_batch = Some(batch);
+        }
+    }
+}
+
+/// A sync node in the merge iterator.
+struct GenericNode<T> {
+    /// Index of the node.
+    node_index: usize,
+    /// Iterator of this `Node`.
+    iter: T,
+    /// Current batch to be read. The node should ensure the batch is not empty (The
+    /// cursor is not finished).
+    ///
+    /// `None` means the `iter` has reached EOF.
+    cursor: Option<RowCursor>,
+}
+
+impl<T> NodeCmp for GenericNode<T> {
+    fn is_eof(&self) -> bool {
+        self.cursor.is_none()
+    }
+
+    fn is_behind(&self, other: &Self) -> bool {
+        debug_assert!(!self.current_cursor().is_finished());
+        debug_assert!(!other.current_cursor().is_finished());
+
+        // We only compare pk and timestamp so nodes in the cold
+        // heap don't have overlapping timestamps with the hottest node
+        // in the hot heap.
+        self.current_cursor()
+            .first_primary_key()
+            .cmp(other.current_cursor().last_primary_key())
+            .then_with(|| {
+                self.current_cursor()
+                    .first_timestamp()
+                    .cmp(&other.current_cursor().last_timestamp())
+            })
+            == Ordering::Greater
+    }
+}
+
+impl<T> PartialEq for GenericNode<T> {
+    fn eq(&self, other: &GenericNode<T>) -> bool {
+        self.cursor == other.cursor
+    }
+}
+
+impl<T> Eq for GenericNode<T> {}
+
+impl<T> PartialOrd for GenericNode<T> {
+    fn partial_cmp(&self, other: &GenericNode<T>) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for GenericNode<T> {
+    fn cmp(&self, other: &GenericNode<T>) -> Ordering {
+        // The std binary heap is a max heap, but we want the nodes are ordered in
+        // ascend order, so we compare the nodes in reverse order.
+        other.cursor.cmp(&self.cursor)
+    }
+}
+
+impl<T> GenericNode<T> {
+    /// Returns current cursor.
+    ///
+    /// # Panics
+    /// Panics if the node has reached EOF.
+    fn current_cursor(&self) -> &RowCursor {
+        self.cursor.as_ref().unwrap()
+    }
+}
+
+impl GenericNode<BoxedRecordBatchIterator> {
+    /// Fetches a new batch from the iter and updates the cursor.
+    /// It advances the current batch.
+    /// Returns the fetched new batch.
+    fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let batch = self.advance_inner_iter()?;
+        let columns = batch.as_ref().map(SortColumns::new);
+        self.cursor = columns.map(RowCursor::new);
+
+        Ok(batch)
+    }
+
+    /// Skips one row.
+    /// Returns the next batch if the current batch is finished.
+    fn advance_row(&mut self) -> Result<Option<RecordBatch>> {
+        let cursor = self.cursor.as_mut().unwrap();
+        cursor.advance();
+        if !cursor.is_finished() {
+            return Ok(None);
+        }
+
+        // Finished current batch, need to fetch a new batch.
+        self.advance_batch()
+    }
+
+    /// Fetches a non-empty batch from the iter.
+    fn advance_inner_iter(&mut self) -> Result<Option<RecordBatch>> {
+        while let Some(batch) = self.iter.next().transpose()? {
+            if batch.num_rows() > 0 {
+                return Ok(Some(batch));
+            }
+        }
+        Ok(None)
+    }
+}
+
+type StreamNode = GenericNode<BoxedRecordBatchStream>;
+
+impl GenericNode<BoxedRecordBatchStream> {
+    /// Fetches a new batch from the iter and updates the cursor.
+    /// It advances the current batch.
+    /// Returns the fetched new batch.
+    async fn advance_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let batch = self.advance_inner_iter().await?;
+        let columns = batch.as_ref().map(SortColumns::new);
+        self.cursor = columns.map(RowCursor::new);
+
+        Ok(batch)
+    }
+
+    /// Skips one row.
+    /// Returns the next batch if the current batch is finished.
+    async fn advance_row(&mut self) -> Result<Option<RecordBatch>> {
+        let cursor = self.cursor.as_mut().unwrap();
+        cursor.advance();
+        if !cursor.is_finished() {
+            return Ok(None);
+        }
+
+        // Finished current batch, need to fetch a new batch.
+        self.advance_batch().await
+    }
+
+    /// Fetches a non-empty batch from the iter.
+    async fn advance_inner_iter(&mut self) -> Result<Option<RecordBatch>> {
+        while let Some(batch) = self.iter.try_next().await? {
+            if batch.num_rows() > 0 {
+                return Ok(Some(batch));
+            }
+        }
+        Ok(None)
     }
 }
 
