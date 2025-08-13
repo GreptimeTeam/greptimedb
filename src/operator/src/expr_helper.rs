@@ -850,6 +850,18 @@ mod tests {
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmt.is_err(),
+            "Expected error for invalid TQL EVAL parameters: {:#?}",
+            stmt
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
+        let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
                 .pop()
@@ -870,7 +882,7 @@ TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         );
         assert!(expr.source_table_names.is_empty());
         assert_eq!(
-            r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+            r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
         );
     }
