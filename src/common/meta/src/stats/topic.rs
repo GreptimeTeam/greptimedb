@@ -60,7 +60,7 @@ impl TopicStatsRegistry {
     }
 
     /// Adds a list of topic stats for a given datanode at a specific timestamp.
-    pub fn add_stats(&self, datanode_id: DatanodeId, stats: &Vec<TopicStat>, millis_ts: i64) {
+    pub fn add_stats(&self, datanode_id: DatanodeId, stats: &[TopicStat], millis_ts: i64) {
         if stats.is_empty() {
             return;
         }
