@@ -47,7 +47,7 @@ use crate::error::{
     Result, StaleLogEntrySnafu,
 };
 use crate::manifest::action::RegionManifest;
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::time_partition::TimePartitions;
@@ -491,6 +491,10 @@ impl RegionOpener {
             // Currently, the manifest storage doesn't have good support for changing compression algorithms.
             compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                keep_count: config.manifest_keep_removed_file_count,
+                keep_ttl: config.manifest_keep_removed_file_ttl,
+            },
         })
     }
 }

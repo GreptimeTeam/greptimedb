@@ -36,7 +36,7 @@ use crate::compaction::{find_ttl, CompactionSstReaderBuilder};
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, JoinSnafu, ObjectStoreNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::metrics;
 use crate::read::Source;
@@ -165,6 +165,10 @@ pub async fn open_compaction_region(
             object_store: object_store.clone(),
             compress_type: manifest_compress_type(mito_config.compress_manifest),
             checkpoint_distance: mito_config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                keep_count: mito_config.manifest_keep_removed_file_count,
+                keep_ttl: mito_config.manifest_keep_removed_file_ttl,
+            },
         };
 
         RegionManifestManager::open(

@@ -47,6 +47,18 @@ pub struct RegionManifestOptions {
     /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
     /// Set to 0 to disable checkpoint.
     pub checkpoint_distance: u64,
+    pub remove_file_options: RemoveFileOptions,
+}
+
+/// Options for updating `removed_files` field in [RegionManifest].
+#[derive(Debug, Clone)]
+pub struct RemoveFileOptions {
+    /// Number of removed files to keep in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
+    pub keep_count: usize,
+    /// Duration to keep removed files in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Only remove files when both `keep_count` and `keep_duration` is reached.
+    pub keep_ttl: std::time::Duration,
 }
 
 // rewrite note:
@@ -481,7 +493,10 @@ impl RegionManifestManager {
             }
         }
         let new_manifest = manifest_builder.try_build()?;
-        self.manifest = Arc::new(new_manifest);
+        let updated_manifest = self
+            .checkpointer
+            .update_manifest_removed_files(new_manifest)?;
+        self.manifest = Arc::new(updated_manifest);
 
         self.checkpointer
             .maybe_do_checkpoint(self.manifest.as_ref(), region_state);

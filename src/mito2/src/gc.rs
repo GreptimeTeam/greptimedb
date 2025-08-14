@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use common_telemetry::warn;
+use common_telemetry::{error, warn};
 use common_time::Timestamp;
 use object_store::Entry;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ use crate::error::{DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, RegionNotFo
 use crate::manifest::action::{RegionManifestBuilder, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::ManifestContextRef;
-use crate::sst::file::{FileId, FileMeta, RegionFileId};
+use crate::sst::file::{FileId, FileMeta};
 use crate::sst::location;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ impl Default for FileGcOption {
             unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
             // prevent manifest from growing too large
             keep_removed_file_count: 256,
-            // 1 hour, should be long enough
+            // 1 hour, should be long enough and larger than `lingering_time`
             keep_removed_file_ttl: Duration::from_secs(60 * 60),
         }
     }
@@ -141,7 +141,7 @@ impl LocalGcWorker {
     pub async fn get_removed_files_expel_times(
         &self,
         region_id: RegionId,
-    ) -> Result<BTreeMap<Option<Timestamp>, HashSet<FileMeta>>> {
+    ) -> Result<BTreeMap<Timestamp, HashSet<FileMeta>>> {
         let mut store = self
             .manifest_ctxs
             .get(&region_id)
@@ -189,9 +189,15 @@ impl LocalGcWorker {
         }
 
         let region_manifest = manifest_builder.try_build()?;
-        let removed_files = region_manifest.removed_files.clone();
 
-        todo!()
+        let mut ret = BTreeMap::new();
+        for (files, expel_time) in &region_manifest.removed_files {
+            let expel_time = Timestamp::new_millisecond(*expel_time);
+            let set = ret.entry(expel_time).or_insert_with(HashSet::new);
+            set.extend(files.iter().cloned());
+        }
+
+        Ok(ret)
     }
 
     /// Concurrently list unused files in the region dir
@@ -201,7 +207,7 @@ impl LocalGcWorker {
         &self,
         region_id: RegionId,
         in_used: HashSet<FileId>,
-        recently_removed_files: BTreeMap<Option<Timestamp>, HashSet<FileMeta>>,
+        recently_removed_files: BTreeMap<Timestamp, HashSet<FileMeta>>,
         concurrency: usize,
     ) -> Result<Vec<Entry>> {
         let may_linger_until = chrono::Utc::now()
@@ -222,69 +228,24 @@ impl LocalGcWorker {
         let may_linger_filenames = recently_removed_files
             .iter()
             .filter_map(|(ts, files)| {
-                if let Some(ts) = ts {
-                    if *ts < Timestamp::new_millisecond(may_linger_until.timestamp_millis()) {
-                        // if the expel time is before the may linger time, we can delete it
-                        return None;
-                    }
+                if *ts < Timestamp::new_millisecond(may_linger_until.timestamp_millis()) {
+                    // if the expel time is before the may linger time, we can delete it
+                    return None;
                 }
+
                 Some(files)
             })
             .flatten()
-            .flat_map(|meta| {
-                [
-                    location::sst_file_path(
-                        self.access_layer.table_dir(),
-                        meta.file_id(),
-                        self.access_layer.path_type(),
-                    ),
-                    location::index_file_path(
-                        self.access_layer.table_dir(),
-                        meta.file_id(),
-                        self.access_layer.path_type(),
-                    ),
-                ]
-            })
+            .map(|meta| meta.file_id)
             .collect::<HashSet<_>>();
 
         let all_files_appear_in_delta_manifests = recently_removed_files
             .values()
-            .flat_map(|files| {
-                files.iter().flat_map(|meta| {
-                    [
-                        location::sst_file_path(
-                            self.access_layer.table_dir(),
-                            meta.file_id(),
-                            self.access_layer.path_type(),
-                        ),
-                        location::index_file_path(
-                            self.access_layer.table_dir(),
-                            meta.file_id(),
-                            self.access_layer.path_type(),
-                        ),
-                    ]
-                })
-            })
+            .flat_map(|files| files.iter().map(|meta| meta.file_id))
             .collect::<HashSet<_>>();
 
         // in use filenames, include sst and index files
-        let in_use_filenames = in_used
-            .iter()
-            .flat_map(|id| {
-                [
-                    location::sst_file_path(
-                        self.access_layer.table_dir(),
-                        RegionFileId::new(region_id, *id),
-                        self.access_layer.path_type(),
-                    ),
-                    location::index_file_path(
-                        self.access_layer.table_dir(),
-                        RegionFileId::new(region_id, *id),
-                        self.access_layer.path_type(),
-                    ),
-                ]
-            })
-            .collect::<HashSet<_>>();
+        let in_use_filenames = in_used.iter().collect::<HashSet<_>>();
 
         let region_dir = self.access_layer.build_region_dir(region_id);
 
@@ -344,32 +305,41 @@ impl LocalGcWorker {
         drop(tx); // Close the channel to stop receiving
 
         // Collect all entries from the channel
-        let mut entries = vec![];
+        let mut all_unused_files_ready_for_delete = vec![];
         while let Some(stream) = rx.recv().await {
-            entries.extend(
-                stream
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|e| !in_use_filenames.contains(e.name()))
-                    .filter(|e| !may_linger_filenames.contains(e.name()))
-                    .filter(|e| {
-                        if !all_files_appear_in_delta_manifests.contains(e.name()) {
-                            // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
-                            // using it's last modified time
-                            // notice unknown files use a different lingering time
-                            e.metadata()
-                                .last_modified()
-                                .map(|t| t < unknown_file_may_linger_until)
-                                .unwrap_or(false)
-                        } else {
-                            // if the file did appear in manifest delta(and passes previous predicate), we can delete it immediately
-                            true
+            all_unused_files_ready_for_delete.extend(
+                stream.into_iter().filter_map(Result::ok).filter(|e| {
+                    let file_id = match location::parse_file_id_from_path(e.name()) {
+                        Ok(file_id) => file_id,
+                        Err(err) => {
+                            error!(err; "Failed to parse file id from path: {}", e.name());
+                            // if we can't parse the file id, it means it's not a sst or index file
+                            // shouldn't delete it because we don't know what it is
+                            return false;
                         }
-                    }),
+                    };
+                    let should_delete = !in_use_filenames.contains(&file_id)
+                        && !may_linger_filenames.contains(&file_id)
+                        && {
+                            if !all_files_appear_in_delta_manifests.contains(&file_id) {
+                                // if the file's expel time is unknown(because not appear in delta manifest), we keep it for a while
+                                // using it's last modified time
+                                // notice unknown files use a different lingering time
+                                e.metadata()
+                                    .last_modified()
+                                    .map(|t| t < unknown_file_may_linger_until)
+                                    .unwrap_or(false)
+                            } else {
+                                // if the file did appear in manifest delta(and passes previous predicate), we can delete it immediately
+                                true
+                            }
+                        };
+                    should_delete
+                }),
             );
         }
 
-        Ok(entries)
+        Ok(all_unused_files_ready_for_delete)
     }
 }
 
