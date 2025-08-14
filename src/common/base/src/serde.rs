@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bit_vec;
-pub mod bytes;
-pub mod cancellation;
-pub mod plugins;
-pub mod range_read;
-#[allow(clippy::all)]
-pub mod readable_size;
-pub mod secrets;
-pub mod serde;
+use serde::{Deserialize, Deserializer};
 
-pub type AffectedRows = usize;
+/// Deserialize an empty string as the default value.
+pub fn empty_string_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let s = String::deserialize(deserializer)?;
 
-pub use bit_vec::BitVec;
-pub use plugins::Plugins;
+    if s.is_empty() {
+        Ok(T::default())
+    } else {
+        T::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(s))
+            .map_err(serde::de::Error::custom)
+    }
+}
