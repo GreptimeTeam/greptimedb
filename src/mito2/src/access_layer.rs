@@ -239,10 +239,10 @@ impl AccessLayer {
                 .write_and_upload_sst(
                     request,
                     SstUploadRequest {
-                        dest_path_provider: RegionFilePathFactory {
-                            table_dir: self.table_dir.clone(),
-                            path_type: self.path_type,
-                        },
+                        dest_path_provider: RegionFilePathFactory::new(
+                            self.table_dir.clone(),
+                            self.path_type,
+                        ),
                         remote_store: self.object_store.clone(),
                     },
                     write_opts,
