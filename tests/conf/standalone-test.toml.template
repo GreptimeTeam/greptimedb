@@ -27,6 +27,7 @@ runtime_size = 8
 enable = true
 addr = "{mysql_addr}"
 runtime_size = 2
+prepared_stmt_cache_size= 10000
 
 [mysql.tls]
 mode = "disable"

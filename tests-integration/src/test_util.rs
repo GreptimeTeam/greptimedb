@@ -645,6 +645,7 @@ pub async fn setup_mysql_server_with_user_provider(
             ),
             0,
             opts.reject_no_database.unwrap_or(false),
+            opts.prepared_stmt_cache_size,
         )),
         None,
     );

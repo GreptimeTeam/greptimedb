@@ -1249,6 +1249,7 @@ enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 keep_alive = "0s"
+prepared_stmt_cache_size = 10000
 
 [mysql.tls]
 mode = "disable"
