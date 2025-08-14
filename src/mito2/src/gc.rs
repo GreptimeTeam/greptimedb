@@ -44,6 +44,10 @@ use crate::sst::location;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileGcOption {
     /// Lingering time before deleting files.
+    /// Should be long enough to allow long running queries to finish.
+    ///
+    /// TODO(discord9): long running queries should actively write tmp manifest files
+    /// to prevent deletion of files they are using.
     #[serde(with = "humantime_serde")]
     pub lingering_time: Duration,
     /// Lingering time before deleting unknown files(files with undetermine expel time).
@@ -55,16 +59,28 @@ pub struct FileGcOption {
     /// Number of removed files to keep in manifest's `removed_files` field before also
     /// remove them from `removed_files`. Mostly for debugging purpose.
     pub keep_removed_file_count: usize,
+    /// How long to keep removed files in the `removed_files` field of manifest
+    /// after they are removed from manifest.
+    /// files will only be removed from `removed_files` field
+    /// if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached.
+    ///
+    /// Should be longer than `lingering_time` to ensure gc worker can see removed files
+    /// and delete them.
+    #[serde(with = "humantime_serde")]
+    pub keep_removed_file_ttl: Duration,
 }
 
 impl Default for FileGcOption {
     fn default() -> Self {
         Self {
-            // 30 minutes, because usually long running queries are within 30 minutes
+            // 30 minutes, because expect long running queries to be finished within 30 minutes
             lingering_time: Duration::from_secs(60 * 30),
-            // don't when this file get removed from manifest, so keep it longer
-            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6), // 1 day
+            // 6 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
+            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6),
+            // prevent manifest from growing too large
             keep_removed_file_count: 256,
+            // 1 hour, should be long enough
+            keep_removed_file_ttl: Duration::from_secs(60 * 60),
         }
     }
 }
