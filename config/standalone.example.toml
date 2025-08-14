@@ -85,7 +85,8 @@ runtime_size = 2
 ## Server-side keep-alive time.
 ## Set to 0 (default) to disable.
 keep_alive = "0s"
-
+## Maximum entries in the MySQL prepared statement cache; default is 10,000.
+prepared_stmt_cache_size= 10000
 # MySQL server TLS options.
 [mysql.tls]
 

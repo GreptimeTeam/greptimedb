@@ -18,6 +18,7 @@ use std::io::IsTerminal;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use common_base::serde::empty_string_as_default;
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{Protocol, SpanExporterBuilder, WithExportConfig};
@@ -60,6 +61,7 @@ pub struct LoggingOptions {
     pub level: Option<String>,
 
     /// The log format that can be one of "json" or "text". Default is "text".
+    #[serde(default, deserialize_with = "empty_string_as_default")]
     pub log_format: LogFormat,
 
     /// The maximum number of log files set by default.
@@ -94,11 +96,13 @@ pub enum OtlpExportProtocol {
 
 /// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
     pub enable: bool,
 
     /// The record type of slow queries.
+    #[serde(deserialize_with = "empty_string_as_default")]
     pub record_type: SlowQueriesRecordType,
 
     /// The threshold of slow queries.
@@ -126,19 +130,21 @@ impl Default for SlowQueryOptions {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowQueriesRecordType {
     /// Record the slow query in the system table.
+    #[default]
     SystemTable,
     /// Record the slow query in a specific logs file.
     Log,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
     Json,
+    #[default]
     Text,
 }
 
@@ -527,5 +533,103 @@ where
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_logging_options_deserialization_default() {
+        let json = r#"{}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "");
+        assert_eq!(opts.level, None);
+        assert!(opts.append_stdout);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_empty_log_format() {
+        let json = r#"{"log_format": ""}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_valid_log_format() {
+        let json_format = r#"{"log_format": "json"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Json);
+
+        let text_format = r#"{"log_format": "text"}"#;
+        let opts: LoggingOptions = serde_json::from_str(text_format).unwrap();
+        assert_eq!(opts.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_missing_log_format() {
+        let json = r#"{"dir": "/tmp/logs"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        // Missing log_format should use default (Text)
+        assert_eq!(opts.log_format, LogFormat::Text);
+        assert_eq!(opts.dir, "/tmp/logs");
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_default() {
+        let json = r#"{"enable": true, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_empty_record_type() {
+        let json = r#"{"enable": true, "record_type": "", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Empty string should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(opts.enable);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_valid_record_type() {
+        let system_table_json =
+            r#"{"enable": true, "record_type": "system_table", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(system_table_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+
+        let log_json = r#"{"enable": true, "record_type": "log", "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(log_json).unwrap();
+        assert_eq!(opts.record_type, SlowQueriesRecordType::Log);
+    }
+
+    #[test]
+    fn test_slow_query_options_deserialization_missing_record_type() {
+        let json = r#"{"enable": false, "threshold": "30s"}"#;
+        let opts: SlowQueryOptions = serde_json::from_str(json).unwrap();
+
+        // Missing record_type should use default (SystemTable)
+        assert_eq!(opts.record_type, SlowQueriesRecordType::SystemTable);
+        assert!(!opts.enable);
+    }
+
+    #[test]
+    fn test_otlp_export_protocol_deserialization_valid_values() {
+        let grpc_json = r#""grpc""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(grpc_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Grpc);
+
+        let http_json = r#""http""#;
+        let protocol: OtlpExportProtocol = serde_json::from_str(http_json).unwrap();
+        assert_eq!(protocol, OtlpExportProtocol::Http);
     }
 }

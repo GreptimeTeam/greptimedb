@@ -20,6 +20,7 @@ pub mod range_read;
 #[allow(clippy::all)]
 pub mod readable_size;
 pub mod secrets;
+pub mod serde;
 
 pub type AffectedRows = usize;
 

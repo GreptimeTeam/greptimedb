@@ -252,6 +252,18 @@ impl PartitionExpr {
         Ok(expr)
     }
 
+    pub fn lhs(&self) -> &Operand {
+        &self.lhs
+    }
+
+    pub fn rhs(&self) -> &Operand {
+        &self.rhs
+    }
+
+    pub fn op(&self) -> &RestrictedOp {
+        &self.op
+    }
+
     pub fn try_as_physical_expr(
         &self,
         schema: &arrow::datatypes::SchemaRef,

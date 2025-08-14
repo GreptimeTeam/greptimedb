@@ -242,7 +242,8 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
                 match region.state() {
-                    RegionRoleState::Leader(RegionLeaderState::Writable) => {
+                    RegionRoleState::Leader(RegionLeaderState::Writable)
+                    | RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         let region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,

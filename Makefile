@@ -22,7 +22,7 @@ SQLNESS_OPTS ?=
 ETCD_VERSION ?= v3.5.9
 ETCD_IMAGE ?= quay.io/coreos/etcd:${ETCD_VERSION}
 RETRY_COUNT ?= 3
-NEXTEST_OPTS := --retries ${RETRY_COUNT}
+NEXTEST_OPTS := --retries ${RETRY_COUNT} --features pg_kvbackend,mysql_kvbackend
 BUILD_JOBS ?= $(shell which nproc 1>/dev/null && expr $$(nproc) / 2) # If nproc is not available, we don't set the build jobs.
 ifeq ($(BUILD_JOBS), 0) # If the number of cores is less than 2, set the build jobs to 1.
   BUILD_JOBS := 1

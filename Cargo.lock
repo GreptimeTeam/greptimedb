@@ -2784,6 +2784,7 @@ name = "common-telemetry"
 version = "0.17.0"
 dependencies = [
  "backtrace",
+ "common-base",
  "common-error",
  "common-version",
  "console-subscriber",

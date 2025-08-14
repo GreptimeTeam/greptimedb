@@ -33,7 +33,7 @@ use crate::key::TableMetadataManager;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::kv_backend::KvBackendRef;
 use crate::node_manager::{
-    Datanode, DatanodeRef, Flownode, FlownodeRef, NodeManager, NodeManagerRef,
+    Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef, NodeManagerRef,
 };
 use crate::peer::{Peer, PeerLookupService};
 use crate::region_keeper::MemoryRegionKeeper;
@@ -120,15 +120,18 @@ impl<T: MockDatanodeHandler> Datanode for MockNode<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: MockDatanodeHandler + 'static> NodeManager for MockDatanodeManager<T> {
+impl<T: MockDatanodeHandler + 'static> DatanodeManager for MockDatanodeManager<T> {
     async fn datanode(&self, peer: &Peer) -> DatanodeRef {
         Arc::new(MockNode {
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
     }
+}
 
-    async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+#[async_trait::async_trait]
+impl<T: 'static + Send + Sync> FlownodeManager for MockDatanodeManager<T> {
+    async fn flownode(&self, _peer: &Peer) -> FlownodeRef {
         unimplemented!()
     }
 }
@@ -149,16 +152,19 @@ impl<T: MockFlownodeHandler> Flownode for MockNode<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: MockFlownodeHandler + 'static> NodeManager for MockFlownodeManager<T> {
-    async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
-        unimplemented!()
-    }
-
+impl<T: MockFlownodeHandler + 'static> FlownodeManager for MockFlownodeManager<T> {
     async fn flownode(&self, peer: &Peer) -> FlownodeRef {
         Arc::new(MockNode {
             peer: peer.clone(),
             handler: self.handler.clone(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: 'static + Send + Sync> DatanodeManager for MockFlownodeManager<T> {
+    async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
+        unimplemented!()
     }
 }
 

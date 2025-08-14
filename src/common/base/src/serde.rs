@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod analyzer;
-mod commutativity;
-mod merge_scan;
-mod merge_sort;
-mod planner;
-#[allow(dead_code)]
-mod predicate_extractor;
+use serde::{Deserialize, Deserializer};
 
-pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
-pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
+/// Deserialize an empty string as the default value.
+pub fn empty_string_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+
+    if s.is_empty() {
+        Ok(T::default())
+    } else {
+        T::deserialize(serde::de::value::StringDeserializer::<D::Error>::new(s))
+            .map_err(serde::de::Error::custom)
+    }
+}

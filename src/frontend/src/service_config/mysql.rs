@@ -29,6 +29,7 @@ pub struct MysqlOptions {
     #[serde(default = "Default::default")]
     #[serde(with = "humantime_serde")]
     pub keep_alive: std::time::Duration,
+    pub prepared_stmt_cache_size: usize,
 }
 
 impl Default for MysqlOptions {
@@ -40,6 +41,7 @@ impl Default for MysqlOptions {
             tls: TlsOption::default(),
             reject_no_database: None,
             keep_alive: std::time::Duration::from_secs(0),
+            prepared_stmt_cache_size: 10000,
         }
     }
 }

@@ -911,7 +911,7 @@ mod tests {
     use crate::key::flow::FlowMetadataManager;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
+    use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
@@ -923,11 +923,14 @@ mod tests {
     pub struct DummyDatanodeManager;
 
     #[async_trait::async_trait]
-    impl NodeManager for DummyDatanodeManager {
+    impl DatanodeManager for DummyDatanodeManager {
         async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
             unimplemented!()
         }
+    }
 
+    #[async_trait::async_trait]
+    impl FlownodeManager for DummyDatanodeManager {
         async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             unimplemented!()
         }

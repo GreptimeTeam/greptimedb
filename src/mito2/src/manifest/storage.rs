@@ -134,6 +134,7 @@ pub struct ManifestObjectStore {
     object_store: ObjectStore,
     compress_type: CompressionType,
     path: String,
+    staging_path: String,
     /// Stores the size of each manifest file.
     manifest_size_map: Arc<RwLock<HashMap<FileKey, u64>>>,
     total_manifest_size: Arc<AtomicU64>,
@@ -146,18 +147,30 @@ impl ManifestObjectStore {
         compress_type: CompressionType,
         total_manifest_size: Arc<AtomicU64>,
     ) -> Self {
+        let path = util::normalize_dir(path);
+        let staging_path = {
+            // Convert "region_dir/manifest/" to "region_dir/staging/manifest/"
+            let parent_dir = path.trim_end_matches("manifest/").trim_end_matches('/');
+            util::normalize_dir(&format!("{}/staging/manifest", parent_dir))
+        };
         Self {
             object_store,
             compress_type,
-            path: util::normalize_dir(path),
+            path,
+            staging_path,
             manifest_size_map: Arc::new(RwLock::new(HashMap::new())),
             total_manifest_size,
         }
     }
 
     /// Returns the delta file path under the **current** compression algorithm
-    fn delta_file_path(&self, version: ManifestVersion) -> String {
-        gen_path(&self.path, &delta_file(version), self.compress_type)
+    fn delta_file_path(&self, version: ManifestVersion, is_staging: bool) -> String {
+        let base_path = if is_staging {
+            &self.staging_path
+        } else {
+            &self.path
+        };
+        gen_path(base_path, &delta_file(version), self.compress_type)
     }
 
     /// Returns the checkpoint file path under the **current** compression algorithm
@@ -390,8 +403,13 @@ impl ManifestObjectStore {
     }
 
     /// Save the delta manifest file.
-    pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
-        let path = self.delta_file_path(version);
+    pub async fn save(
+        &mut self,
+        version: ManifestVersion,
+        bytes: &[u8],
+        is_staging: bool,
+    ) -> Result<()> {
+        let path = self.delta_file_path(version, is_staging);
         debug!("Save log to manifest storage, version: {}", version);
         let data = self
             .compress_type
@@ -724,7 +742,7 @@ mod tests {
     async fn test_manifest_log_store_case(mut log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -797,7 +815,7 @@ mod tests {
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -817,7 +835,7 @@ mod tests {
         // write compressed data to stimulate compress algorithm take effect
         for v in 5..10 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -873,7 +891,7 @@ mod tests {
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
@@ -912,7 +930,7 @@ mod tests {
         // write 5 manifest files
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {v}").as_bytes())
+                .save(v, format!("hello, {v}").as_bytes(), false)
                 .await
                 .unwrap();
         }
