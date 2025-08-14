@@ -96,55 +96,38 @@ pub enum OtlpExportProtocol {
 
 /// The options of slow query.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct SlowQueryOptions {
     /// Whether to enable slow query log.
-    #[serde(default = "return_true")]
     pub enable: bool,
 
     /// The record type of slow queries.
-    #[serde(default, deserialize_with = "empty_string_as_default")]
+    #[serde(deserialize_with = "empty_string_as_default")]
     pub record_type: SlowQueriesRecordType,
 
     /// The threshold of slow queries.
-    #[serde(with = "humantime_serde", default = "default_threshold")]
+    #[serde(with = "humantime_serde")]
     pub threshold: Duration,
 
     /// The sample ratio of slow queries.
-    #[serde(default = "default_sample_ratio")]
     pub sample_ratio: f64,
 
     /// The table TTL of `slow_queries` system table. Default is "90d".
     /// It's used when `record_type` is `SystemTable`.
-    #[serde(with = "humantime_serde", default = "default_ttl")]
+    #[serde(with = "humantime_serde")]
     pub ttl: Duration,
 }
 
 impl Default for SlowQueryOptions {
     fn default() -> Self {
         Self {
-            enable: return_true(),
+            enable: true,
             record_type: SlowQueriesRecordType::SystemTable,
-            threshold: default_threshold(),
-            sample_ratio: default_sample_ratio(),
-            ttl: default_ttl(),
+            threshold: Duration::from_secs(30),
+            sample_ratio: 1.0,
+            ttl: Duration::from_days(90),
         }
     }
-}
-
-fn default_threshold() -> Duration {
-    Duration::from_secs(30)
-}
-
-fn default_ttl() -> Duration {
-    Duration::from_days(90)
-}
-
-fn default_sample_ratio() -> f64 {
-    1.0
-}
-
-fn return_true() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Default)]
