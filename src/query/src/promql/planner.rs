@@ -1560,23 +1560,30 @@ impl PromPlanner {
         let mut result = FunctionArgs::default();
 
         for arg in args {
-            match *arg.clone() {
-                PromExpr::Subquery(_)
-                | PromExpr::VectorSelector(_)
-                | PromExpr::MatrixSelector(_)
-                | PromExpr::Extension(_)
-                | PromExpr::Aggregate(_)
-                | PromExpr::Paren(_)
-                | PromExpr::Call(_) => {
-                    if result.input.replace(*arg.clone()).is_some() {
-                        MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
+            // First try to parse as literal expression (including binary expressions like 100.0 + 3.0)
+            if let Some(expr) = Self::try_build_literal_expr(arg) {
+                result.literals.push(expr);
+            } else {
+                // If not a literal, treat as vector input
+                match arg.as_ref() {
+                    PromExpr::Subquery(_)
+                    | PromExpr::VectorSelector(_)
+                    | PromExpr::MatrixSelector(_)
+                    | PromExpr::Extension(_)
+                    | PromExpr::Aggregate(_)
+                    | PromExpr::Paren(_)
+                    | PromExpr::Call(_)
+                    | PromExpr::Binary(_)
+                    | PromExpr::Unary(_) => {
+                        if result.input.replace(*arg.clone()).is_some() {
+                            MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
+                        }
                     }
-                }
 
-                _ => {
-                    let expr =
-                        Self::get_param_as_literal_expr(&Some(Box::new(*arg.clone())), None, None)?;
-                    result.literals.push(expr);
+                    _ => {
+                        let expr = Self::get_param_as_literal_expr(&Some(arg.clone()), None, None)?;
+                        result.literals.push(expr);
+                    }
                 }
             }
         }
