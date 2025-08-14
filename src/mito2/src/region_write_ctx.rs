@@ -25,6 +25,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::error::{Error, Result, WriteGroupSnafu};
 use crate::memtable::bulk::part::BulkPart;
 use crate::memtable::KeyValues;
+use crate::meter::rate_meter::RateMeter;
 use crate::metrics;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
@@ -106,6 +107,8 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) put_num: usize,
     /// Rows to delete.
     pub(crate) delete_num: usize,
+    /// Write bytes per second.
+    pub(crate) write_bytes_per_sec: RateMeter,
 }
 
 impl RegionWriteCtx {
@@ -114,6 +117,7 @@ impl RegionWriteCtx {
         region_id: RegionId,
         version_control: &VersionControlRef,
         provider: Provider,
+        write_bytes_per_sec: RateMeter,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -136,6 +140,7 @@ impl RegionWriteCtx {
             put_num: 0,
             delete_num: 0,
             bulk_parts: vec![],
+            write_bytes_per_sec,
         }
     }
 
@@ -214,6 +219,7 @@ impl RegionWriteCtx {
         }
 
         let mutable = self.version.memtables.mutable.clone();
+        let prev_memory_usage = mutable.memory_usage();
         let mutations = mem::take(&mut self.wal_entry.mutations)
             .into_iter()
             .enumerate()
@@ -246,6 +252,9 @@ impl RegionWriteCtx {
             }
         }
 
+        let new_memory_usage = mutable.memory_usage();
+        let written_bytes = new_memory_usage.saturating_sub(prev_memory_usage);
+        self.write_bytes_per_sec.inc_by(written_bytes as u64);
         // Updates region sequence and entry id. Since we stores last sequence and entry id in region, we need
         // to decrease `next_sequence` and `next_entry_id` by 1.
         self.version_control
@@ -280,6 +289,8 @@ impl RegionWriteCtx {
             .with_label_values(&["write_bulk"])
             .start_timer();
 
+        let region = &self.version.memtables.mutable;
+        let prev_memory_usage = region.memory_usage();
         if self.bulk_parts.len() == 1 {
             let part = self.bulk_parts.swap_remove(0);
             let num_rows = part.num_rows();
@@ -293,7 +304,7 @@ impl RegionWriteCtx {
 
         let mut tasks = FuturesUnordered::new();
         for (i, part) in self.bulk_parts.drain(..).enumerate() {
-            let mutable = self.version.memtables.mutable.clone();
+            let mutable = region.clone();
             tasks.push(common_runtime::spawn_blocking_global(move || {
                 let num_rows = part.num_rows();
                 (i, mutable.write_bulk(part), num_rows)
@@ -309,6 +320,9 @@ impl RegionWriteCtx {
             }
         }
 
+        let new_memory_usage = region.memory_usage();
+        let written_bytes = new_memory_usage.saturating_sub(prev_memory_usage);
+        self.write_bytes_per_sec.inc_by(written_bytes as u64);
         self.version_control
             .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
     }
