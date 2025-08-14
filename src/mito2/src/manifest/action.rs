@@ -62,11 +62,55 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
-/// Last data truncated in the region.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
     pub kind: TruncateKind,
+}
+
+impl<'de> Deserialize<'de> for RegionTruncate {
+    /// manual deserialization to support backward compatibility
+    /// first try deser to v2, failing that, try v1
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        pub struct RegionTruncateV1 {
+            pub region_id: RegionId,
+            /// Last WAL entry id of truncated data.
+            pub truncated_entry_id: EntryId,
+            // Last sequence number of truncated data.
+            pub truncated_sequence: SequenceNumber,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        pub struct RegionTruncateV2 {
+            pub region_id: RegionId,
+            pub kind: TruncateKind,
+        }
+
+        // had to first make it a cloneable value to be able to deserialize twice
+        let cloneable_value = serde_json::Value::deserialize(deserializer)?;
+
+        let res = RegionTruncateV2::deserialize(cloneable_value.clone());
+        if let Ok(v2) = res {
+            Ok(RegionTruncate {
+                region_id: v2.region_id,
+                kind: v2.kind,
+            })
+        } else {
+            let v1 = RegionTruncateV1::deserialize(cloneable_value.clone())
+                .map_err(serde::de::Error::custom)?;
+            Ok(RegionTruncate {
+                region_id: v1.region_id,
+                kind: TruncateKind::All {
+                    truncated_entry_id: v1.truncated_entry_id,
+                    truncated_sequence: v1.truncated_sequence,
+                },
+            })
+        }
+    }
 }
 
 /// The kind of truncate operation.
@@ -418,5 +462,46 @@ mod tests {
             serde_json::from_str(&serialized_manifest).unwrap();
         assert_eq!(manifest, deserialized_manifest);
         assert_ne!(serialized_manifest, region_manifest_json);
+    }
+
+    #[test]
+    fn test_region_truncate_compat() {
+        // Test deserializing RegionTruncate from old schema
+        let region_truncate_json = r#"{
+            "region_id": 4402341478400,
+            "truncated_entry_id": 10,
+            "truncated_sequence": 20
+        }"#;
+
+        let truncate_v1: RegionTruncate = serde_json::from_str(region_truncate_json).unwrap();
+        assert_eq!(truncate_v1.region_id, 4402341478400);
+        assert_eq!(
+            truncate_v1.kind,
+            TruncateKind::All {
+                truncated_entry_id: 10,
+                truncated_sequence: 20,
+            }
+        );
+
+        // Test deserializing RegionTruncate from new schema
+        let region_truncate_v2_json = r#"{
+            "region_id": 4402341478400,
+            "kind": {
+                "All": {
+                    "truncated_entry_id": 10,
+                    "truncated_sequence": 20
+                }
+            }
+        }"#;
+
+        let truncate_v2: RegionTruncate = serde_json::from_str(region_truncate_v2_json).unwrap();
+        assert_eq!(truncate_v2.region_id, 4402341478400);
+        assert_eq!(
+            truncate_v2.kind,
+            TruncateKind::All {
+                truncated_entry_id: 10,
+                truncated_sequence: 20,
+            }
+        );
     }
 }
