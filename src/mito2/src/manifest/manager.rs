@@ -61,6 +61,16 @@ pub struct RemoveFileOptions {
     pub keep_ttl: std::time::Duration,
 }
 
+#[cfg(any(test, feature = "test"))]
+impl Default for RemoveFileOptions {
+    fn default() -> Self {
+        Self {
+            keep_count: 256,
+            keep_ttl: std::time::Duration::from_secs(3600),
+        }
+    }
+}
+
 // rewrite note:
 // trait Checkpoint -> struct RegionCheckpoint
 // trait MetaAction -> struct RegionMetaActionList
