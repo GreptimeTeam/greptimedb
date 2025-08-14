@@ -763,10 +763,10 @@ async fn open_all_regions(
             );
         } else if open_regions.len() != num_regions {
             warn!(
-                    "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
-                    num_regions,
-                    open_regions.len()
-                );
+                "ignore nonexistent region, expected to open {} of follower regions, only {} of regions has opened",
+                num_regions,
+                open_regions.len()
+            );
         }
     }
 

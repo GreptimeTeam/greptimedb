@@ -35,7 +35,7 @@ use crate::service::mailbox::{Channel, MailboxRef};
 use crate::{define_ticker, metrics};
 
 /// The interval of the region flush ticker.
-const TICKER_INTERVAL: Duration = Duration::from_secs(30);
+const TICKER_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The duration of the recent period.
 const RECENT_DURATION: Duration = Duration::from_secs(300);
@@ -255,8 +255,8 @@ impl RegionFlushTrigger {
             debug!(
                 "Sent {} flush instructions to datanodes for topic: '{}' ({} inactive regions)",
                 regions_to_flush.len(),
+                topic,
                 inactive_regions_num,
-                topic
             );
         }
 
@@ -319,7 +319,7 @@ fn select_regions_to_flush<I: Iterator<Item = (RegionId, u64)>>(
     let mut regions_to_flush = Vec::new();
     for (region_id, prunable_entry_id) in regions {
         if prunable_entry_id < latest_entry_id {
-            let replay_size = (latest_entry_id - prunable_entry_id) * avg_record_size;
+            let replay_size = (latest_entry_id - prunable_entry_id).saturating_mul(avg_record_size);
             if replay_size > flush_trigger_size.as_bytes() {
                 debug!(
                     "Region {}: estimated replay size {} exceeds flush trigger size {}, prunable entry id: {}, topic latest entry id: {}, topic: '{}'",
