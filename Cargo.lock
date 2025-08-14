@@ -2840,18 +2840,18 @@ checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "convert_case"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
+checksum = "bb402b8d4c85569410425650ce3eddc7d698ed96d39a73f941b08fb63082f1e7"
 dependencies = [
  "unicode-segmentation",
 ]
 
 [[package]]
 name = "convert_case"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb402b8d4c85569410425650ce3eddc7d698ed96d39a73f941b08fb63082f1e7"
+checksum = "baaaa0ecca5b51987b9423ccdc971514dd8b0bb7b4060b983d3664dad3f1f89f"
 dependencies = [
  "unicode-segmentation",
 ]
@@ -8858,10 +8858,11 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 [[package]]
 name = "otel-arrow-rust"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=d0f576fd170be32649e02b94b356b2d407c9ea0d#d0f576fd170be32649e02b94b356b2d407c9ea0d"
+source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
 dependencies = [
  "arrow",
  "arrow-ipc",
+ "ciborium",
  "lazy_static",
  "num_enum 0.7.4",
  "otlp-derive",
@@ -8870,6 +8871,7 @@ dependencies = [
  "prost 0.13.5",
  "prost-build 0.13.5",
  "rand 0.9.1",
+ "replace_with",
  "serde",
  "snafu 0.8.6",
  "tokio",
@@ -8880,9 +8882,9 @@ dependencies = [
 [[package]]
 name = "otlp-derive"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=d0f576fd170be32649e02b94b356b2d407c9ea0d#d0f576fd170be32649e02b94b356b2d407c9ea0d"
+source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
 dependencies = [
- "convert_case 0.6.0",
+ "convert_case 0.8.0",
  "otlp-model",
  "proc-macro2",
  "quote",
@@ -8892,7 +8894,7 @@ dependencies = [
 [[package]]
 name = "otlp-model"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=d0f576fd170be32649e02b94b356b2d407c9ea0d#d0f576fd170be32649e02b94b356b2d407c9ea0d"
+source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
 dependencies = [
  "tonic-build 0.13.1",
 ]
@@ -10646,6 +10648,12 @@ checksum = "71fe3824f5629716b1589be05dacd749f6aa084c87e00e016714a8cdfccc997c"
 dependencies = [
  "bytecheck",
 ]
+
+[[package]]
+name = "replace_with"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51743d3e274e2b18df81c4dc6caf8a5b8e15dbe799e0dca05c7617380094e884"
 
 [[package]]
 name = "reqsign"
