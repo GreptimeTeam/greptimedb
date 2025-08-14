@@ -260,10 +260,10 @@ impl RegionFlushTrigger {
             );
         }
 
-        metrics::METRIC_META_TRIGGERED_REGION_FLUSHES
+        metrics::METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL
             .with_label_values(&[topic, "active"])
             .inc_by(active_regions_num as u64);
-        metrics::METRIC_META_TRIGGERED_REGION_FLUSHES
+        metrics::METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL
             .with_label_values(&[topic, "inactive"])
             .inc_by(inactive_regions_num as u64);
 

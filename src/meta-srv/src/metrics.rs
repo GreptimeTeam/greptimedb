@@ -80,7 +80,7 @@ lazy_static! {
         exponential_buckets(0.01, 10.0, 7).unwrap(),
     )
     .unwrap();
-    /// The triggered region flushes counter.
-    pub static ref METRIC_META_TRIGGERED_REGION_FLUSHES: IntCounterVec =
-        register_int_counter_vec!("greptime_meta_triggered_region_flushes", "meta triggered region flushes", &["topic_name", "region_type"]).unwrap();
+    /// The triggered region flush total counter.
+    pub static ref METRIC_META_TRIGGERED_REGION_FLUSH_TOTAL: IntCounterVec =
+        register_int_counter_vec!("meta_triggered_region_flushes_total", "meta triggered region flush total", &["topic_name", "region_type"]).unwrap();
 }
