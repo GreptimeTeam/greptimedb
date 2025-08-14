@@ -30,9 +30,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::define_ticker;
 use crate::error::{self, Result};
 use crate::service::mailbox::{Channel, MailboxRef};
+use crate::{define_ticker, metrics};
 
 /// The interval of the region flush ticker.
 const TICKER_INTERVAL: Duration = Duration::from_secs(30);
@@ -235,6 +235,7 @@ impl RegionFlushTrigger {
             self.flush_trigger_size,
         );
 
+        let active_regions_num = regions_to_flush.len();
         // Selects regions to flush from the set of inactive regions.
         // For inactive regions, we use a lower flush trigger size (half of the normal size)
         // to encourage more aggressive flushing to update the region's topic latest entry id.
@@ -245,7 +246,7 @@ impl RegionFlushTrigger {
             latest_entry_id,
             self.flush_trigger_size / 2,
         );
-        let inactive_regions_to_flush_num = inactive_regions_to_flush.len();
+        let inactive_regions_num = inactive_regions_to_flush.len();
         regions_to_flush.extend(inactive_regions_to_flush);
 
         // Sends flush instructions to datanodes.
@@ -254,10 +255,17 @@ impl RegionFlushTrigger {
             debug!(
                 "Sent {} flush instructions to datanodes for topic: '{}' ({} inactive regions)",
                 regions_to_flush.len(),
-                inactive_regions_to_flush_num,
+                inactive_regions_num,
                 topic
             );
         }
+
+        metrics::METRIC_META_TRIGGERED_REGION_FLUSHES
+            .with_label_values(&[topic, "active"])
+            .inc_by(active_regions_num as u64);
+        metrics::METRIC_META_TRIGGERED_REGION_FLUSHES
+            .with_label_values(&[topic, "inactive"])
+            .inc_by(inactive_regions_num as u64);
 
         Ok(())
     }
