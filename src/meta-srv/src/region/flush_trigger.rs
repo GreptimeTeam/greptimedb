@@ -140,7 +140,7 @@ impl RegionFlushTrigger {
             .context(error::TableMetadataManagerSnafu)?;
 
         for topic in &topics {
-            let Some((latest_entry_id, avg_record_size)) = self.retrive_topic_stat(topic) else {
+            let Some((latest_entry_id, avg_record_size)) = self.retrieve_topic_stat(topic) else {
                 continue;
             };
             if let Err(e) = self
@@ -162,7 +162,7 @@ impl RegionFlushTrigger {
     /// Retrieves the latest entry id and average record size of a topic.
     ///
     /// Returns `None` if the topic is not found or the latest entry id is not recent.
-    fn retrive_topic_stat(&self, topic: &str) -> Option<(u64, usize)> {
+    fn retrieve_topic_stat(&self, topic: &str) -> Option<(u64, usize)> {
         let Some((latest_entry_id, timestamp)) =
             self.topic_stats_registry.get_latest_entry_id(topic)
         else {
