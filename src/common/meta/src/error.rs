@@ -1027,6 +1027,31 @@ pub enum Error {
         actual_column_name: String,
         actual_column_id: u32,
     },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Too large duration"))]
+    TooLargeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Negative duration"))]
+    NegativeDuration {
+        #[snafu(source)]
+        error: prost_types::DurationError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[cfg(feature = "enterprise")]
+    #[snafu(display("Missing interval field"))]
+    MissingInterval {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -1116,8 +1141,13 @@ impl ErrorExt for Error {
             | InvalidTimeZone { .. }
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
+            | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. } => StatusCode::InvalidArguments,
-            InvalidFlowRequestBody { .. } => StatusCode::InvalidArguments,
+
+            #[cfg(feature = "enterprise")]
+            MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             FlowNotFound { .. } => StatusCode::FlowNotFound,
             FlowRouteNotFound { .. } => StatusCode::Unexpected,
