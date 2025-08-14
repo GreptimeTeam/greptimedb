@@ -386,10 +386,7 @@ impl FlatLastNonNull {
             return Ok((batch, contains_delete));
         }
 
-        let mut is_field = vec![false; batch.num_columns()];
-        // Iterates fields, skips internal columns.
-        is_field[field_column_start..batch.num_columns() - FIXED_POS_COLUMN_NUM].fill(true);
-
+        let field_column_end = batch.num_columns() - FIXED_POS_COLUMN_NUM;
         let take_options = Some(TakeOptions {
             check_bounds: false,
         });
@@ -400,7 +397,7 @@ impl FlatLastNonNull {
             .iter()
             .enumerate()
             .map(|(col_idx, column)| {
-                if is_field[col_idx] {
+                if col_idx >= field_column_start && col_idx < field_column_end {
                     let field_indices = Self::compute_field_indices(
                         &ranges,
                         column,
