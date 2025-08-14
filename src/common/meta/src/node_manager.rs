@@ -51,12 +51,23 @@ pub type FlownodeRef = Arc<dyn Flownode>;
 
 /// Datanode manager
 #[async_trait::async_trait]
-pub trait NodeManager: Send + Sync {
-    /// Retrieves a target `datanode`.
+pub trait DatanodeManager: Send + Sync {
     async fn datanode(&self, node: &Peer) -> DatanodeRef;
+}
 
-    /// Retrieves a target `flownode`.
+pub type DatanodeManagerRef = Arc<dyn DatanodeManager>;
+
+/// Flownode manager
+#[async_trait::async_trait]
+pub trait FlownodeManager: Send + Sync {
     async fn flownode(&self, node: &Peer) -> FlownodeRef;
 }
+
+pub type FlownodeManagerRef = Arc<dyn FlownodeManager>;
+
+/// Node manager
+pub trait NodeManager: DatanodeManager + FlownodeManager {}
+
+impl<T: DatanodeManager + FlownodeManager> NodeManager for T {}
 
 pub type NodeManagerRef = Arc<dyn NodeManager>;

@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::node_manager::{Datanode, DatanodeRef, FlownodeRef, NodeManager};
+use common_meta::node_manager::{
+    Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
+};
 use common_meta::peer::Peer;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
@@ -38,11 +40,14 @@ pub struct StandaloneDatanodeManager {
 }
 
 #[async_trait]
-impl NodeManager for StandaloneDatanodeManager {
+impl DatanodeManager for StandaloneDatanodeManager {
     async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
         RegionInvoker::arc(self.region_server.clone())
     }
+}
 
+#[async_trait]
+impl FlownodeManager for StandaloneDatanodeManager {
     async fn flownode(&self, _node: &Peer) -> FlownodeRef {
         self.flow_server.clone()
     }
