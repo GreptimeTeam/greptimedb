@@ -786,6 +786,7 @@ mod test {
                     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
                         files_to_add: vec![],
                         files_to_remove: vec![],
+                        timestamp_ms: None,
                         compaction_time_window: None,
                         flushed_entry_id: None,
                         flushed_sequence: None,

@@ -436,6 +436,8 @@ impl Compactor for DefaultCompactor {
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
             files_to_remove: merge_output.files_to_remove,
+            // Use current timestamp as the edit timestamp.
+            timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
             compaction_time_window: merge_output
                 .compaction_time_window
                 .map(|seconds| Duration::from_secs(seconds as u64)),

@@ -72,6 +72,7 @@ fn nop_action() -> RegionMetaActionList {
     RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
         files_to_add: vec![],
         files_to_remove: vec![],
+        timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
@@ -261,6 +262,7 @@ async fn checkpoint_with_different_compression_types() {
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,
@@ -323,6 +325,7 @@ fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>)
         let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
             files_to_add: vec![file_meta],
             files_to_remove: vec![],
+            timestamp_ms: None,
             compaction_time_window: None,
             flushed_entry_id: None,
             flushed_sequence: None,

@@ -34,9 +34,7 @@ use store_api::{MAX_VERSION, MIN_VERSION};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{
-    DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result, UnexpectedSnafu,
-};
+use crate::error::{DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{RegionManifestBuilder, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::ManifestContextRef;
@@ -50,15 +48,23 @@ pub struct FileGcOption {
     pub lingering_time: Duration,
     /// Lingering time before deleting unknown files(files with undetermine expel time).
     /// expel time is the time when the file is considered as removed, as in removed from the manifest.
+    /// This should only occur rarely, as manifest keep tracks in `removed_files` field
+    /// unless something goes wrong.
     #[serde(with = "humantime_serde")]
     pub unknown_file_lingering_time: Duration,
+    /// Number of removed files to keep in manifest's `removed_files` field before also
+    /// remove them from `removed_files`. Mostly for debugging purpose.
+    pub keep_removed_file_count: usize,
 }
 
 impl Default for FileGcOption {
     fn default() -> Self {
         Self {
-            lingering_time: Duration::from_secs(60 * 30), // 30 minutes
-            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 24), // 1 day
+            // 30 minutes, because usually long running queries are within 30 minutes
+            lingering_time: Duration::from_secs(60 * 30),
+            // don't when this file get removed from manifest, so keep it longer
+            unknown_file_lingering_time: Duration::from_secs(60 * 60 * 6), // 1 day
+            keep_removed_file_count: 256,
         }
     }
 }
@@ -143,58 +149,33 @@ impl LocalGcWorker {
 
         // search in delta manifests for removed files and their expel times
         // TODO(discord9): remove twice scan
-        let action_entries = store.scan(min_version, MAX_VERSION).await?;
         let delta_manifests = store.fetch_manifests(min_version, MAX_VERSION).await?;
         let delta_manifests = delta_manifests.into_iter().collect::<HashMap<_, _>>();
 
-        let mut ret = BTreeMap::new();
-
-        for (manifest_version, entry) in action_entries {
-            let last_modified_time = entry.metadata().last_modified();
-            let ts = last_modified_time.map(|t| Timestamp::new_millisecond(t.timestamp_millis()));
-            let action_list = RegionMetaActionList::decode(
-                delta_manifests
-                    .get(&manifest_version)
-                    .with_context(|| UnexpectedSnafu {
-                        reason: format!(
-                            "Failed to find manifest for version {} in all delta versions: {:?}",
-                            manifest_version,
-                            delta_manifests.keys()
-                        ),
-                    })?,
-            )?;
+        for (manifest_version, manifest_bytes) in delta_manifests {
+            let action_list = RegionMetaActionList::decode(&manifest_bytes)?;
             // try and collect all removed files& their expel times
             // set manifest size after last checkpoint
-            let mut removed_files = HashSet::new();
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
                         manifest_builder.apply_change(manifest_version, action);
                     }
                     RegionMetaAction::Edit(action) => {
-                        removed_files.extend(action.files_to_remove.clone());
                         manifest_builder.apply_edit(manifest_version, action);
                     }
                     RegionMetaAction::Remove(_) => {}
                     RegionMetaAction::Truncate(action) => {
-                        match &action.kind {
-                            crate::manifest::action::TruncateKind::All { .. } => {
-                                removed_files.extend(manifest_builder.files().values().cloned());
-                            }
-                            crate::manifest::action::TruncateKind::Partial { files_to_remove } => {
-                                removed_files.extend(files_to_remove.clone());
-                            }
-                        }
                         manifest_builder.apply_truncate(manifest_version, action);
                     }
                 }
             }
-            ret.entry(ts)
-                .or_insert_with(HashSet::new)
-                .extend(removed_files);
         }
 
-        Ok(ret)
+        let region_manifest = manifest_builder.try_build()?;
+        let removed_files = region_manifest.removed_files.clone();
+
+        todo!()
     }
 
     /// Concurrently list unused files in the region dir

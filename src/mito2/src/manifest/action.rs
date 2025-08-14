@@ -14,9 +14,10 @@
 
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -51,6 +52,9 @@ pub struct RegionChange {
 pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
+    /// event unix timestamp in milliseconds, help to determine file deletion time.
+    #[serde(default)]
+    pub timestamp_ms: Option<i64>,
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
     pub flushed_entry_id: Option<EntryId>,
@@ -62,11 +66,16 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
+/// Last data truncated in the region.
+///
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
     #[serde(flatten)]
     pub kind: TruncateKind,
+    /// event unix timestamp in milliseconds, help to determine file deletion time.
+    #[serde(default)]
+    pub timestamp_ms: Option<i64>,
 }
 
 /// The kind of truncate operation.
@@ -94,7 +103,8 @@ pub struct RegionManifest {
     /// Removed files, which are not in the current manifest but may still be kept for a while.
     /// The key is the manifest version when the file is removed from manifest, which is used to
     /// determine when the file can be safely deleted.
-    pub removed_files: BTreeMap<ManifestVersion, HashSet<FileMeta>>,
+    #[serde(default)]
+    pub removed_files: Vec<(HashSet<FileMeta>, i64)>,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
     /// Last sequence of flushed data.
@@ -112,7 +122,7 @@ pub struct RegionManifest {
 pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,
     files: HashMap<FileId, FileMeta>,
-    removed_files: BTreeMap<ManifestVersion, HashSet<FileMeta>>,
+    pub removed_files: Vec<(HashSet<FileMeta>, i64)>,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
@@ -149,10 +159,11 @@ impl RegionManifestBuilder {
         for file in edit.files_to_add {
             self.files.insert(file.file_id, file);
         }
-        self.removed_files
-            .entry(manifest_version)
-            .or_default()
-            .extend(edit.files_to_remove.iter().cloned());
+        self.removed_files.push((
+            edit.files_to_remove.iter().cloned().collect(),
+            edit.timestamp_ms
+                .unwrap_or_else(|| Utc::now().timestamp_millis()),
+        ));
         for file in edit.files_to_remove {
             self.files.remove(&file.file_id);
         }
@@ -178,16 +189,20 @@ impl RegionManifestBuilder {
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
                 self.files.clear();
-                self.removed_files
-                    .entry(manifest_version)
-                    .or_default()
-                    .extend(self.files.values().cloned());
+                self.removed_files.push((
+                    self.files.values().cloned().collect(),
+                    truncate
+                        .timestamp_ms
+                        .unwrap_or_else(|| Utc::now().timestamp_millis()),
+                ));
             }
             TruncateKind::Partial { files_to_remove } => {
-                self.removed_files
-                    .entry(manifest_version)
-                    .or_default()
-                    .extend(files_to_remove.iter().cloned());
+                self.removed_files.push((
+                    files_to_remove.iter().cloned().collect(),
+                    truncate
+                        .timestamp_ms
+                        .unwrap_or_else(|| Utc::now().timestamp_millis()),
+                ));
                 for file in files_to_remove {
                     self.files.remove(&file.file_id);
                 }
@@ -505,6 +520,189 @@ mod tests {
                     ..Default::default()
                 }]
             }
+        );
+
+    }
+    /// Test if old version can still be deserialized then serialized to the new version.
+    #[test]
+    fn test_old_region_manifest_compat() {
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        pub struct RegionManifestV1 {
+            /// Metadata of the region.
+            pub metadata: RegionMetadataRef,
+            /// SST files.
+            pub files: HashMap<FileId, FileMeta>,
+            /// Last WAL entry id of flushed data.
+            pub flushed_entry_id: EntryId,
+            /// Last sequence of flushed data.
+            pub flushed_sequence: SequenceNumber,
+            /// Current manifest version.
+            pub manifest_version: ManifestVersion,
+            /// Last WAL entry id of truncated data.
+            pub truncated_entry_id: Option<EntryId>,
+            /// Inferred compaction time window.
+            #[serde(with = "humantime_serde")]
+            pub compaction_time_window: Option<Duration>,
+        }
+
+        let region_metadata = r#"{
+                "column_metadatas": [
+                    {
+                        "column_schema": {
+                            "name": "a",
+                            "data_type": {"Int64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Tag",
+                        "column_id": 1
+                    },
+                    {
+                        "column_schema": {
+                            "name": "b",
+                            "data_type": {"Float64": {}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Field",
+                        "column_id": 2
+                    },
+                    {
+                        "column_schema": {
+                            "name": "c",
+                            "data_type": {"Timestamp": {"Millisecond": null}},
+                            "is_nullable": false,
+                            "is_time_index": false,
+                            "default_constraint": null,
+                            "metadata": {}
+                        },
+                        "semantic_type": "Timestamp",
+                        "column_id": 3
+                    }
+                ],
+                "primary_key": [1],
+                "region_id": 4402341478400,
+                "schema_version": 0
+            }"#;
+
+        let metadata: RegionMetadataRef =
+            serde_json::from_str(region_metadata).expect("Failed to parse region metadata");
+
+        // first test v1 empty to new
+        let v1 = RegionManifestV1 {
+            metadata: metadata.clone(),
+            files: HashMap::new(),
+            flushed_entry_id: 0,
+            flushed_sequence: 0,
+            manifest_version: 0,
+            truncated_entry_id: None,
+            compaction_time_window: None,
+        };
+        let json = serde_json::to_string(&v1).unwrap();
+        let new_from_old: RegionManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            new_from_old,
+            RegionManifest {
+                metadata: metadata.clone(),
+                files: HashMap::new(),
+                removed_files: Vec::new(),
+                flushed_entry_id: 0,
+                flushed_sequence: 0,
+                manifest_version: 0,
+                truncated_entry_id: None,
+                compaction_time_window: None,
+            }
+        );
+
+        let new_manifest = RegionManifest {
+            metadata: metadata.clone(),
+            files: HashMap::new(),
+            removed_files: vec![(HashSet::new(), 0)],
+            flushed_entry_id: 0,
+            flushed_sequence: 0,
+            manifest_version: 0,
+            truncated_entry_id: None,
+            compaction_time_window: None,
+        };
+        let json = serde_json::to_string(&new_manifest).unwrap();
+        let old_from_new: RegionManifestV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            old_from_new,
+            RegionManifestV1 {
+                metadata: metadata.clone(),
+                files: HashMap::new(),
+                flushed_entry_id: 0,
+                flushed_sequence: 0,
+                manifest_version: 0,
+                truncated_entry_id: None,
+                compaction_time_window: None,
+            }
+        );
+
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        pub struct RegionEditV1 {
+            pub files_to_add: Vec<FileMeta>,
+            pub files_to_remove: Vec<FileMeta>,
+            #[serde(with = "humantime_serde")]
+            pub compaction_time_window: Option<Duration>,
+            pub flushed_entry_id: Option<EntryId>,
+            pub flushed_sequence: Option<SequenceNumber>,
+        }
+
+        /// Last data truncated in the region.
+        #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+        pub struct RegionTruncateV1 {
+            pub region_id: RegionId,
+            pub kind: TruncateKind,
+        }
+
+        let json = serde_json::to_string(&RegionEditV1 {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        })
+        .unwrap();
+        let new_from_old: RegionEdit = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            RegionEdit {
+                files_to_add: vec![],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+            },
+            new_from_old
+        );
+
+        // test new version with timestamp_ms set can deserialize to old version
+        let new = RegionEdit {
+            files_to_add: vec![],
+            files_to_remove: vec![],
+            timestamp_ms: Some(42),
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        };
+
+        let new_json = serde_json::to_string(&new).unwrap();
+        println!("{new_json}");
+        let old_from_new: RegionEditV1 = serde_json::from_str(&new_json).unwrap();
+        assert_eq!(
+            RegionEditV1 {
+                files_to_add: vec![],
+                files_to_remove: vec![],
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+            },
+            old_from_new
         );
     }
 }
