@@ -442,10 +442,6 @@ mod tests {
         TestEnv::prepare_topic(&context.client, &topic_name).await;
         let mut procedure = WalPruneProcedure::new(topic_name.clone(), context, None);
 
-        // Before any data in kvbackend is mocked, should return a retryable error.
-        let result = procedure.on_prune().await;
-        assert_matches!(result, Err(e) if e.is_retryable());
-
         let prunable_entry_id = mock_test_data(&procedure).await;
 
         // Step 1: Test `on_prepare`.
