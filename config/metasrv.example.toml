@@ -176,50 +176,61 @@ tcp_nodelay = true
 # - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
 provider = "raft_engine"
 
-# Kafka wal config.
-
 ## The broker endpoints of the Kafka cluster.
+##
+## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
+## **It's only used when the provider is `kafka`**.
 auto_create_topics = true
 
 ## Interval of automatically WAL pruning.
 ## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
-auto_prune_interval = "0s"
+## **It's only used when the provider is `kafka`**.
+auto_prune_interval = "10m"
 
-## The threshold to trigger a flush operation of a region in automatically WAL pruning.
-## Metasrv will send a flush request to flush the region when:
-## `trigger_flush_threshold` + `prunable_entry_id` < `max_prunable_entry_id`
-## where:
-## - `prunable_entry_id` is the maximum entry id that can be pruned of the region.
-## - `max_prunable_entry_id` is the maximum prunable entry id among all regions in the same topic.
-## Set to `0` to disable the flush operation.
-trigger_flush_threshold = 0
+
+## Estimated size threshold to trigger a flush when using Kafka remote WAL.
+## Since multiple regions may share a Kafka topic, the estimated size is calculated as:
+##   (latest_entry_id - flushed_entry_id) * avg_record_size
+## MetaSrv triggers a flush for a region when this estimated size exceeds `flush_trigger_size`.
+## - `latest_entry_id`: The latest entry ID in the topic.
+## - `flushed_entry_id`: The last flushed entry ID for the region.
+## Set to "0" to let the system decide the flush trigger size.
+## **It's only used when the provider is `kafka`**.
+flush_trigger_size = "512MB"
 
 ## Concurrent task limit for automatically WAL pruning.
+## **It's only used when the provider is `kafka`**.
 auto_prune_parallelism = 10
 
-## Number of topics.
+## Number of topics used for remote WAL.
+## **It's only used when the provider is `kafka`**.
 num_topics = 64
 
 ## Topic selector type.
 ## Available selector types:
 ## - `round_robin` (default)
+## **It's only used when the provider is `kafka`**.
 selector_type = "round_robin"
+
 
 ## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
 ## Only accepts strings that match the following regular expression pattern:
 ## [a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*
 ## i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.
+## **It's only used when the provider is `kafka`**.
 topic_name_prefix = "greptimedb_wal_topic"
 
 ## Expected number of replicas of each partition.
+## **It's only used when the provider is `kafka`**.
 replication_factor = 1
 
-## Above which a topic creation operation will be cancelled.
+## The timeout for creating a Kafka topic.
+## **It's only used when the provider is `kafka`**.
 create_topic_timeout = "30s"
 
 # The Kafka SASL configuration.

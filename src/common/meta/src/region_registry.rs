@@ -132,6 +132,32 @@ impl LeaderRegionManifestInfo {
             }
         }
     }
+
+    /// A region is considered inactive if the flushed entry id is less than the topic's latest entry id.
+    ///
+    /// The `topic_latest_entry_id` of a region is updated only when its memtable is empty during a flush.
+    /// This means that within the range `[flushed_entry_id, topic_latest_entry_id]`,
+    /// there is no data written to the memtable.
+    /// Therefore, such a region can be considered inactive.
+    pub fn is_inactive(&self) -> bool {
+        match *self {
+            LeaderRegionManifestInfo::Mito {
+                flushed_entry_id,
+                topic_latest_entry_id,
+                ..
+            } => flushed_entry_id < topic_latest_entry_id,
+            LeaderRegionManifestInfo::Metric {
+                data_flushed_entry_id,
+                data_topic_latest_entry_id,
+                metadata_flushed_entry_id,
+                metadata_topic_latest_entry_id,
+                ..
+            } => {
+                data_flushed_entry_id < data_topic_latest_entry_id
+                    || metadata_flushed_entry_id < metadata_topic_latest_entry_id
+            }
+        }
+    }
 }
 
 pub type LeaderRegionRegistryRef = Arc<LeaderRegionRegistry>;
@@ -204,5 +230,99 @@ impl LeaderRegionRegistry {
     pub fn reset(&self) {
         let mut inner = self.inner.write().unwrap();
         inner.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mito_manifest_info(
+        flushed_entry_id: u64,
+        topic_latest_entry_id: u64,
+    ) -> LeaderRegionManifestInfo {
+        LeaderRegionManifestInfo::Mito {
+            flushed_entry_id,
+            topic_latest_entry_id,
+            manifest_version: 1,
+        }
+    }
+
+    fn metric_manifest_info(
+        data_flushed_entry_id: u64,
+        data_topic_latest_entry_id: u64,
+        metadata_flushed_entry_id: u64,
+        metadata_topic_latest_entry_id: u64,
+    ) -> LeaderRegionManifestInfo {
+        LeaderRegionManifestInfo::Metric {
+            data_flushed_entry_id,
+            data_topic_latest_entry_id,
+            metadata_flushed_entry_id,
+            metadata_topic_latest_entry_id,
+            data_manifest_version: 1,
+            metadata_manifest_version: 1,
+        }
+    }
+
+    #[test]
+    fn test_is_inactive_mito() {
+        // inactive: flushed_entry_id < topic_latest_entry_id
+        let info = mito_manifest_info(10, 20);
+        assert!(info.is_inactive());
+        // active: flushed_entry_id == topic_latest_entry_id
+        let info = mito_manifest_info(20, 20);
+        assert!(!info.is_inactive());
+        // active: flushed_entry_id > topic_latest_entry_id
+        let info = mito_manifest_info(30, 20);
+        assert!(!info.is_inactive());
+    }
+
+    #[test]
+    fn test_is_inactive_metric() {
+        // inactive: data_flushed_entry_id < data_topic_latest_entry_id
+        let info = metric_manifest_info(5, 10, 20, 20);
+        assert!(info.is_inactive());
+        // inactive: metadata_flushed_entry_id < metadata_topic_latest_entry_id
+        let info = metric_manifest_info(10, 10, 15, 20);
+        assert!(info.is_inactive());
+        // inactive: both are less
+        let info = metric_manifest_info(1, 2, 3, 4);
+        assert!(info.is_inactive());
+        // active: both are equal
+        let info = metric_manifest_info(10, 10, 20, 20);
+        assert!(!info.is_inactive());
+        // active: both are greater
+        let info = metric_manifest_info(30, 20, 40, 20);
+        assert!(!info.is_inactive());
+    }
+
+    #[test]
+    fn test_prunable_entry_id_mito() {
+        let info = mito_manifest_info(100, 120);
+        // max(100, 120) = 120
+        assert_eq!(info.prunable_entry_id(), 120);
+
+        let info = mito_manifest_info(150, 120);
+        // max(150, 120) = 150
+        assert_eq!(info.prunable_entry_id(), 150);
+
+        let info = mito_manifest_info(0, 0);
+        assert_eq!(info.prunable_entry_id(), 0);
+    }
+
+    #[test]
+    fn test_prunable_entry_id_metric() {
+        let info = metric_manifest_info(100, 120, 90, 110);
+        // data_prunable = max(100,120)=120
+        // metadata_prunable = max(90,110)=110
+        // min(120,110)=110
+        assert_eq!(info.prunable_entry_id(), 110);
+        let info = metric_manifest_info(200, 150, 180, 220);
+        // data_prunable = max(200,150)=200
+        // metadata_prunable = max(180,220)=220
+        // min(200,220)=200
+        assert_eq!(info.prunable_entry_id(), 200);
+        let info = metric_manifest_info(0, 0, 0, 0);
+        assert_eq!(info.prunable_entry_id(), 0);
     }
 }

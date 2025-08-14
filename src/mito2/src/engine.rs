@@ -483,13 +483,14 @@ impl EngineInner {
         topic: String,
         region_requests: Vec<(RegionId, RegionOpenRequest)>,
     ) -> Result<Vec<(RegionId, Result<AffectedRows>)>> {
+        let now = Instant::now();
         let region_ids = region_requests
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
         let provider = Provider::kafka_provider(topic);
         let (distributor, entry_receivers) = build_wal_entry_distributor_and_receivers(
-            provider,
+            provider.clone(),
             self.wal_raw_entry_reader.clone(),
             &region_ids,
             DEFAULT_ENTRY_RECEIVER_BUFFER_SIZE,
@@ -510,8 +511,17 @@ impl EngineInner {
             common_runtime::spawn_global(async move { distributor.distribute().await });
         // Waits for worker returns.
         let responses = join_all(responses).await;
-
         distribution.await.context(JoinSnafu)??;
+
+        let num_failure = responses.iter().filter(|r| r.is_err()).count();
+        info!(
+            "Opened {} regions for topic '{}', failures: {}, elapsed: {:?}",
+            region_ids.len() - num_failure,
+            // Safety: provider is kafka provider.
+            provider.as_kafka_provider().unwrap(),
+            num_failure,
+            now.elapsed(),
+        );
         Ok(region_ids.into_iter().zip(responses).collect())
     }
 

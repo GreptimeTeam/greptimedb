@@ -19,6 +19,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::kafka::common::{
+    DEFAULT_AUTO_PRUNE_INTERVAL, DEFAULT_AUTO_PRUNE_PARALLELISM, DEFAULT_FLUSH_TRIGGER_SIZE,
+};
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 use crate::config::raft_engine::RaftEngineConfig;
 
@@ -55,9 +58,12 @@ impl From<DatanodeWalConfig> for MetasrvWalConfig {
                 connection: config.connection,
                 kafka_topic: config.kafka_topic,
                 auto_create_topics: config.auto_create_topics,
-                auto_prune_interval: config.auto_prune_interval,
-                trigger_flush_threshold: config.trigger_flush_threshold,
-                auto_prune_parallelism: config.auto_prune_parallelism,
+                // This field won't be used in standalone mode
+                auto_prune_interval: DEFAULT_AUTO_PRUNE_INTERVAL,
+                // This field won't be used in standalone mode
+                auto_prune_parallelism: DEFAULT_AUTO_PRUNE_PARALLELISM,
+                // This field won't be used in standalone mode
+                flush_trigger_size: DEFAULT_FLUSH_TRIGGER_SIZE,
             }),
         }
     }
@@ -200,8 +206,8 @@ mod tests {
             },
             auto_create_topics: true,
             auto_prune_interval: Duration::from_secs(0),
-            trigger_flush_threshold: 0,
             auto_prune_parallelism: 10,
+            flush_trigger_size: ReadableSize::mb(512),
         };
         assert_eq!(metasrv_wal_config, MetasrvWalConfig::Kafka(expected));
 

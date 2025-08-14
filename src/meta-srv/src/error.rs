@@ -927,6 +927,15 @@ pub enum Error {
         offset: u64,
     },
 
+    #[snafu(display("Failed to get offset from Kafka, topic: {}", topic))]
+    GetOffset {
+        topic: String,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
     #[snafu(display("Failed to update the TopicNameValue in kvbackend, topic: {}", topic))]
     UpdateTopicNameValue {
         topic: String,
@@ -981,6 +990,7 @@ impl ErrorExt for Error {
             | Error::BuildKafkaClient { .. } => StatusCode::Internal,
 
             Error::DeleteRecords { .. }
+            | Error::GetOffset { .. }
             | Error::PeerUnavailable { .. }
             | Error::PusherNotFound { .. } => StatusCode::Unexpected,
             Error::MailboxTimeout { .. } | Error::ExceededDeadline { .. } => StatusCode::Cancelled,

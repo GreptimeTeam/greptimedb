@@ -291,7 +291,8 @@ impl TopicStatsStore {
 
         // Safety: The current topic stats is initialized in the previous step.
         let active_bucket = self.active_bucket.as_mut().unwrap();
-        debug_assert!(active_bucket.add_stat(datanode_id, stat, millis_ts));
+        let added = active_bucket.add_stat(datanode_id, stat, millis_ts);
+        debug_assert!(added);
     }
 
     /// Gets the calculated topic stat for a given topic.

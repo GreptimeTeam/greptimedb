@@ -18,6 +18,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
+use std::time::Instant;
 
 use common_telemetry::{debug, error, info, warn};
 use common_wal::options::WalOptions;
@@ -625,6 +626,7 @@ pub(crate) async fn replay_memtable<F>(
 where
     F: FnOnce(RegionId, EntryId, &Provider) -> BoxFuture<Result<()>> + Send,
 {
+    let now = Instant::now();
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
@@ -687,8 +689,8 @@ where
 
     let series_count = version_control.current().series_count();
     info!(
-        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}",
-        region_id, rows_replayed, last_entry_id, series_count
+        "Replay WAL for region: {}, rows recovered: {}, last entry id: {}, total timeseries replayed: {}, elapsed: {:?}",
+        region_id, rows_replayed, last_entry_id, series_count, now.elapsed()
     );
     Ok(last_entry_id)
 }

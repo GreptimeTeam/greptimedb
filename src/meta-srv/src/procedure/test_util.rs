@@ -192,9 +192,8 @@ pub async fn new_wal_prune_metadata(
     n_region: u32,
     n_table: u32,
     offsets: &[i64],
-    threshold: u64,
     topic: String,
-) -> (EntryId, Vec<RegionId>) {
+) -> EntryId {
     let datanode_id = 1;
     let from_peer = Peer::empty(datanode_id);
     let mut min_prunable_entry_id = u64::MAX;
@@ -251,17 +250,7 @@ pub async fn new_wal_prune_metadata(
             .unwrap();
     }
 
-    let regions_to_flush = region_entry_ids
-        .iter()
-        .filter_map(|(region_id, prunable_entry_id)| {
-            if max_prunable_entry_id - prunable_entry_id > threshold {
-                Some(*region_id)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    (min_prunable_entry_id, regions_to_flush)
+    min_prunable_entry_id
 }
 
 pub async fn update_in_memory_region_flushed_entry_id(

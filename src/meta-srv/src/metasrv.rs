@@ -72,6 +72,7 @@ use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
 use crate::pubsub::{PublisherRef, SubscriptionManagerRef};
+use crate::region::flush_trigger::RegionFlushTickerRef;
 use crate::region::supervisor::RegionSupervisorTickerRef;
 use crate::selector::{RegionStatAwareSelector, Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
@@ -462,6 +463,7 @@ pub struct Metasrv {
     leader_region_registry: LeaderRegionRegistryRef,
     topic_stats_registry: TopicStatsRegistryRef,
     wal_prune_ticker: Option<WalPruneTickerRef>,
+    region_flush_ticker: Option<RegionFlushTickerRef>,
     table_id_sequence: SequenceRef,
     reconciliation_manager: ReconciliationManagerRef,
 
@@ -520,6 +522,9 @@ impl Metasrv {
             }
             if let Some(wal_prune_ticker) = &self.wal_prune_ticker {
                 leadership_change_notifier.add_listener(wal_prune_ticker.clone() as _);
+            }
+            if let Some(region_flush_trigger) = &self.region_flush_ticker {
+                leadership_change_notifier.add_listener(region_flush_trigger.clone() as _);
             }
             if let Some(customizer) = self.plugins.get::<LeadershipChangeNotifierCustomizerRef>() {
                 customizer.customize(&mut leadership_change_notifier);
