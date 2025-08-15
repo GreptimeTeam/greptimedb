@@ -38,9 +38,9 @@ use crate::partition::PartitionBound;
 /// [Expr]: sqlparser::ast::Expr
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PartitionExpr {
-    pub(crate) lhs: Box<Operand>,
-    pub(crate) op: RestrictedOp,
-    pub(crate) rhs: Box<Operand>,
+    pub lhs: Box<Operand>,
+    pub op: RestrictedOp,
+    pub rhs: Box<Operand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

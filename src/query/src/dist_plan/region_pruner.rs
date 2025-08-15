@@ -15,13 +15,13 @@
 //! [`ConstraintPruner`] prunes partition info based on given expressions.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 use common_telemetry::debug;
-use datatypes::value::OrderedF64;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value::{OrderedF64, OrderedFloat, Value};
 use partition::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
-use partition::expr::PartitionExpr;
+use partition::expr::{Operand, PartitionExpr};
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
 use GluonOp::*;
@@ -37,14 +37,17 @@ impl ConstraintPruner {
     pub fn prune_regions(
         query_expressions: &[PartitionExpr],
         partitions: &[PartitionInfo],
+        column_datatypes: HashMap<String, ConcreteDataType>,
     ) -> Result<Vec<RegionId>> {
         if query_expressions.is_empty() || partitions.is_empty() {
             // No constraints, return all regions
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
+        debug!("query expressions: {query_expressions:?}");
+
         // Collect all partition expressions for unified normalization
-        let mut expression_to_partition = HashMap::new();
+        let mut expression_to_partition = HashMap::default();
         let mut all_partition_expressions = Vec::with_capacity(partitions.len());
         for partition in partitions {
             if let Some(expr) = &partition.partition_expr {
@@ -59,6 +62,9 @@ impl ConstraintPruner {
         // Create unified collider with both query and partition expressions for consistent normalization
         let mut all_expressions = query_expressions.to_vec();
         all_expressions.extend(all_partition_expressions.iter().cloned());
+        if !Self::normalize_datatype(&mut all_expressions, &column_datatypes) {
+            return Ok(partitions.iter().map(|p| p.id).collect());
+        }
 
         let collider = match Collider::new(&all_expressions) {
             Ok(collider) => collider,
@@ -111,6 +117,102 @@ impl ConstraintPruner {
         false
     }
 
+    fn normalize_datatype(
+        all_expressions: &mut Vec<PartitionExpr>,
+        column_datatypes: &HashMap<String, ConcreteDataType>,
+    ) -> bool {
+        for expr in all_expressions {
+            if !Self::normalize_expr_datatype(&mut expr.lhs, &mut expr.rhs, column_datatypes) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn normalize_expr_datatype(
+        lhs: &mut Operand,
+        rhs: &mut Operand,
+        column_datatypes: &HashMap<String, ConcreteDataType>,
+    ) -> bool {
+        match (lhs, rhs) {
+            (Operand::Expr(lhs_expr), Operand::Expr(rhs_expr)) => {
+                Self::normalize_expr_datatype(
+                    &mut lhs_expr.lhs,
+                    &mut lhs_expr.rhs,
+                    column_datatypes,
+                ) && Self::normalize_expr_datatype(
+                    &mut rhs_expr.lhs,
+                    &mut rhs_expr.rhs,
+                    column_datatypes,
+                )
+            }
+            (Operand::Column(col_name), Operand::Value(val))
+            | (Operand::Value(val), Operand::Column(col_name)) => {
+                let Some(datatype) = column_datatypes.get(col_name) else {
+                    debug!("Column {} not found from type set, skip pruning", col_name);
+                    return false;
+                };
+
+                match datatype {
+                    ConcreteDataType::Int8(_)
+                    | ConcreteDataType::Int16(_)
+                    | ConcreteDataType::Int32(_)
+                    | ConcreteDataType::Int64(_) => {
+                        let Some(new_lit) = val.as_i64() else {
+                            debug!("Value {:?} cannot be converted to i64", val);
+                            return false;
+                        };
+                        *val = Value::Int64(new_lit);
+                    }
+
+                    ConcreteDataType::UInt8(_)
+                    | ConcreteDataType::UInt16(_)
+                    | ConcreteDataType::UInt32(_)
+                    | ConcreteDataType::UInt64(_) => {
+                        let Some(new_lit) = val.as_u64() else {
+                            debug!("Value {:?} cannot be converted to u64", val);
+                            return false;
+                        };
+                        *val = Value::UInt64(new_lit);
+                    }
+
+                    ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
+                        let Some(new_lit) = val.as_f64_lossy() else {
+                            debug!("Value {:?} cannot be converted to f64", val);
+                            return false;
+                        };
+
+                        *val = Value::Float64(OrderedFloat(new_lit));
+                    }
+
+                    ConcreteDataType::String(_) | ConcreteDataType::Boolean(_) => {
+                        // no operation needed
+                    }
+
+                    ConcreteDataType::Decimal128(_)
+                    | ConcreteDataType::Binary(_)
+                    | ConcreteDataType::Date(_)
+                    | ConcreteDataType::Timestamp(_)
+                    | ConcreteDataType::Time(_)
+                    | ConcreteDataType::Duration(_)
+                    | ConcreteDataType::Interval(_)
+                    | ConcreteDataType::List(_)
+                    | ConcreteDataType::Dictionary(_)
+                    | ConcreteDataType::Struct(_)
+                    | ConcreteDataType::Json(_)
+                    | ConcreteDataType::Null(_)
+                    | ConcreteDataType::Vector(_) => {
+                        debug!("Unsupported data type {datatype}");
+                        return false;
+                    }
+                }
+
+                true
+            }
+            _ => return false,
+        }
+    }
+
     /// Check if a single atomic constraint can be satisfied
     fn atomic_constraint_satisfied(
         query_atomic: &AtomicExpr,
@@ -148,6 +250,8 @@ impl ConstraintPruner {
                     let partition_range = Self::nucleons_to_range(
                         &partition_atomic.nucleons[partition_index..partition_index_for_next_col],
                     );
+
+                    debug!("Comparing two ranges, {query_range:?} and {partition_range:?}");
 
                     query_index = query_index_for_next_col;
                     partition_index = partition_index_for_next_col;
@@ -256,9 +360,13 @@ impl ValueRange {
             // If either range is completely unconstrained, they always overlap
             (None, None, _, _) | (_, _, None, None) => true,
 
-            // If one range has only lower bounds and another only upper bounds, they overlap
-            (Some(_), None, _, _) | (_, _, Some(_), None) => true,
-            (None, Some(_), _, _) | (_, _, None, Some(_)) => true,
+            (Some(lower), None, None, Some(upper)) | (None, Some(upper), Some(lower), None) => {
+                if lower.0 == upper.0 {
+                    lower.1 && upper.1
+                } else {
+                    lower.0 < upper.0
+                }
+            }
 
             // Both ranges have specific bounds - check for actual overlap
             _ => {
@@ -347,7 +455,10 @@ mod tests {
 
         // Query: user_id = 150 (should only match Region 2)
         let query_exprs = vec![col("user_id").eq(Value::Int64(150))];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // Should include Region 2, and potentially others due to conservative approach
         assert!(pruned.contains(&RegionId::new(1, 2)));
@@ -396,7 +507,10 @@ mod tests {
             Operand::Expr(col("user_id").eq(Value::Int64(250))),
         )];
 
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // Should include regions that can satisfy any of the values
         assert!(!pruned.is_empty());
@@ -436,7 +550,10 @@ mod tests {
 
         // Query: user_id >= 150 (should include regions that can satisfy this constraint)
         let query_exprs = vec![col("user_id").gt_eq(Value::Int64(150))];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // With constraint-based approach:
         // Region 1: [0, 100) - user_id >= 150 is not satisfiable
@@ -456,7 +573,9 @@ mod tests {
         ];
 
         let constraints = vec![];
-        let pruned = ConstraintPruner::prune_regions(&constraints, &partitions).unwrap();
+        let column_datatypes = HashMap::default();
+        let pruned =
+            ConstraintPruner::prune_regions(&constraints, &partitions, column_datatypes).unwrap();
 
         // No constraints should return all regions
         assert_eq!(pruned.len(), 2);
@@ -496,7 +615,10 @@ mod tests {
 
         // Query: user_id = 150 (should only match Region 2 which contains values [100, 200))
         let query_exprs = vec![col("user_id").eq(Value::Int64(150))];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // user_id = 150 should match Region 2 ([100, 200)) and potentially others due to conservative approach
         assert!(pruned.contains(&RegionId::new(1, 2)));
@@ -550,7 +672,10 @@ mod tests {
         );
 
         let query_exprs = vec![or_expr];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // Should match all 3 regions: 50 matches Region 1, 150 matches Region 2, 250 matches Region 3
         assert_eq!(pruned.len(), 3);
@@ -584,7 +709,10 @@ mod tests {
 
         // Query: user_id = 300 (should match no regions)
         let query_exprs = vec![col("user_id").eq(Value::Int64(300))];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // Should match no regions since 300 is outside both partition ranges
         assert_eq!(pruned.len(), 0);
@@ -615,7 +743,10 @@ mod tests {
 
         // Query: user_id >= 50 (should match both regions partially)
         let query_exprs = vec![col("user_id").gt_eq(Value::Int64(50))];
-        let pruned = ConstraintPruner::prune_regions(&query_exprs, &partitions).unwrap();
+        let mut column_datatypes = HashMap::default();
+        column_datatypes.insert("user_id".to_string(), ConcreteDataType::int64_datatype());
+        let pruned =
+            ConstraintPruner::prune_regions(&query_exprs, &partitions, column_datatypes).unwrap();
 
         // Region 1: [0,100) intersects with [50,∞) -> includes [50,100)
         // Region 2: [100,200) is fully contained in [50,∞)

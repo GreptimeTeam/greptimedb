@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use ahash::HashMap;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -221,6 +222,20 @@ impl DistExtensionPlanner {
         if partition_columns.is_empty() {
             return Ok(all_regions);
         }
+        let partition_column_types = partition_columns
+            .iter()
+            .map(|col_name| {
+                let data_type = table_info
+                    .meta
+                    .schema
+                    .column_schema_by_name(col_name)
+                    // Safety: names are retrieved above from the same table
+                    .unwrap()
+                    .data_type
+                    .clone();
+                (col_name.clone(), data_type)
+            })
+            .collect::<HashMap<_, _>>();
 
         // Extract predicates from logical plan
         let partition_expressions = match PredicateExtractor::extract_partition_expressions(
@@ -262,18 +277,21 @@ impl DistExtensionPlanner {
         }
 
         // Apply region pruning based on partition rules
-        let pruned_regions =
-            match ConstraintPruner::prune_regions(&partition_expressions, &partitions) {
-                Ok(regions) => regions,
-                Err(err) => {
-                    common_telemetry::debug!(
-                        "Failed to prune regions for table {}: {}, using all regions",
-                        table_name,
-                        err
-                    );
-                    return Ok(all_regions);
-                }
-            };
+        let pruned_regions = match ConstraintPruner::prune_regions(
+            &partition_expressions,
+            &partitions,
+            partition_column_types,
+        ) {
+            Ok(regions) => regions,
+            Err(err) => {
+                common_telemetry::debug!(
+                    "Failed to prune regions for table {}: {}, using all regions",
+                    table_name,
+                    err
+                );
+                return Ok(all_regions);
+            }
+        };
 
         common_telemetry::debug!(
             "Region pruning for table {}: {} partition expressions applied, pruned from {} to {} regions",
