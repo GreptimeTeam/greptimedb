@@ -1309,24 +1309,40 @@ impl PromPlanner {
                 MatchOp::NotEqual => col.not_eq(lit),
                 MatchOp::Re(re) => {
                     // TODO(ruihang): a more programmatic way to handle this in datafusion
-                    if re.as_str() == ".*" {
+
+                    // This is a hack to handle `.+` and `.*`, and is not strictly correct
+                    // `.` doesn't match newline (`\n`). Given this is in PromQL context,
+                    // most of the time it's fine.
+                    if re.as_str() == "^(?:.*)$" {
                         continue;
                     }
-                    DfExpr::BinaryExpr(BinaryExpr {
-                        left: Box::new(col),
-                        op: Operator::RegexMatch,
-                        right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                            re.as_str().to_string(),
-                        )))),
-                    })
+                    if re.as_str() == "^(?:.+)$" {
+                        col.not_eq(DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexMatch,
+                            right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                                re.as_str().to_string(),
+                            )))),
+                        })
+                    }
                 }
-                MatchOp::NotRe(re) => DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col),
-                    op: Operator::RegexNotMatch,
-                    right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
-                        re.as_str().to_string(),
-                    )))),
-                }),
+                MatchOp::NotRe(re) => {
+                    if re.as_str() == "^(?:.*)$" {
+                        DfExpr::Literal(ScalarValue::Boolean(Some(false)))
+                    } else if re.as_str() == "^(?:.+)$" {
+                        col.eq(DfExpr::Literal(ScalarValue::Utf8(Some(String::new()))))
+                    } else {
+                        DfExpr::BinaryExpr(BinaryExpr {
+                            left: Box::new(col),
+                            op: Operator::RegexNotMatch,
+                            right: Box::new(DfExpr::Literal(ScalarValue::Utf8(Some(
+                                re.as_str().to_string(),
+                            )))),
+                        })
+                    }
+                }
             };
             exprs.push(expr);
         }
