@@ -155,7 +155,7 @@ impl DistPlannerAnalyzer {
             .collect::<DfResult<Vec<_>>>()?;
 
         // Some plans that are special treated (should not call `with_new_exprs` on them)
-        if !matches!(plan, LogicalPlan::Unnest(_) | LogicalPlan::Join(_)) {
+        if !matches!(plan, LogicalPlan::Unnest(_)) {
             let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
             Ok(Transformed::yes(plan.with_new_exprs(exprs, inputs)?))
         } else {
