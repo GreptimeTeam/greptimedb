@@ -40,7 +40,10 @@ use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 
 use crate::batching_mode::BatchingModeOptions;
-use crate::error::{ExternalSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu, UnexpectedSnafu};
+use crate::error::{
+    ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu, NoAvailableFrontendSnafu,
+    UnexpectedSnafu,
+};
 use crate::{Error, FlowAuthHeader};
 
 /// Just like [`GrpcQueryHandler`] but use BoxedError
@@ -114,20 +117,25 @@ impl FrontendClient {
         auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         common_telemetry::info!("Frontend client build with auth={:?}", auth);
-        Self::Distributed {
+        Ok(Self::Distributed {
             meta_client,
             chnl_mgr: {
                 let cfg = ChannelConfig::new()
                     .connect_timeout(batch_opts.grpc_conn_timeout)
                     .timeout(batch_opts.query_timeout);
-                ChannelManager::with_config(cfg)
+                if let Some(tls) = &batch_opts.frontend_tls {
+                    let cfg = cfg.client_tls_config(tls.clone());
+                    ChannelManager::with_tls_config(cfg).context(InvalidClientConfigSnafu)?
+                } else {
+                    ChannelManager::with_config(cfg)
+                }
             },
             auth,
             query,
             batch_opts,
-        }
+        })
     }
 
     pub fn from_grpc_handler(

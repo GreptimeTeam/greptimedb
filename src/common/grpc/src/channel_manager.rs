@@ -21,6 +21,7 @@ use common_telemetry::info;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
@@ -97,6 +98,7 @@ impl ChannelManager {
         }
     }
 
+    /// Read tls cert and key files and create a ChannelManager with TLS config.
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
         let mut inner = Inner::with_config(config.clone());
 
@@ -105,20 +107,35 @@ impl ChannelManager {
             msg: "no config input",
         })?;
 
-        let server_root_ca_cert = std::fs::read_to_string(path_config.server_ca_cert_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
-        let client_cert = std::fs::read_to_string(path_config.client_cert_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let client_key = std::fs::read_to_string(path_config.client_key_path)
-            .context(InvalidConfigFilePathSnafu)?;
-        let client_identity = Identity::from_pem(client_cert, client_key);
+        if !path_config.enabled {
+            // if TLS not enabled, just ignore other tls config
+            // and not set `client_tls_config` hence not use TLS
+            return Ok(Self {
+                inner: Arc::new(inner),
+            });
+        }
 
-        inner.client_tls_config = Some(
-            ClientTlsConfig::new()
-                .ca_certificate(server_root_ca_cert)
-                .identity(client_identity),
-        );
+        let mut tls_config = ClientTlsConfig::new();
+
+        if let Some(server_ca) = path_config.server_ca_cert_path {
+            let server_root_ca_cert =
+                std::fs::read_to_string(server_ca).context(InvalidConfigFilePathSnafu)?;
+            let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
+            tls_config = tls_config.ca_certificate(server_root_ca_cert);
+        }
+
+        if let (Some(client_cert_path), Some(client_key_path)) =
+            (&path_config.client_cert_path, &path_config.client_key_path)
+        {
+            let client_cert =
+                std::fs::read_to_string(client_cert_path).context(InvalidConfigFilePathSnafu)?;
+            let client_key =
+                std::fs::read_to_string(client_key_path).context(InvalidConfigFilePathSnafu)?;
+            let client_identity = Identity::from_pem(client_cert, client_key);
+            tls_config = tls_config.identity(client_identity);
+        }
+
+        inner.client_tls_config = Some(tls_config);
 
         Ok(Self {
             inner: Arc::new(inner),
@@ -270,11 +287,13 @@ impl ChannelManager {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTlsOption {
-    pub server_ca_cert_path: String,
-    pub client_cert_path: String,
-    pub client_key_path: String,
+    /// Whether to enable TLS for client.
+    pub enabled: bool,
+    pub server_ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -590,9 +609,10 @@ mod tests {
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(false)
             .client_tls_config(ClientTlsOption {
-                server_ca_cert_path: "some_server_path".to_string(),
-                client_cert_path: "some_cert_path".to_string(),
-                client_key_path: "some_key_path".to_string(),
+                enabled: true,
+                server_ca_cert_path: Some("some_server_path".to_string()),
+                client_cert_path: Some("some_cert_path".to_string()),
+                client_key_path: Some("some_key_path".to_string()),
             });
 
         assert_eq!(
@@ -610,9 +630,10 @@ mod tests {
                 tcp_keepalive: Some(Duration::from_secs(2)),
                 tcp_nodelay: false,
                 client_tls: Some(ClientTlsOption {
-                    server_ca_cert_path: "some_server_path".to_string(),
-                    client_cert_path: "some_cert_path".to_string(),
-                    client_key_path: "some_key_path".to_string(),
+                    enabled: true,
+                    server_ca_cert_path: Some("some_server_path".to_string()),
+                    client_cert_path: Some("some_cert_path".to_string()),
+                    client_key_path: Some("some_key_path".to_string()),
                 }),
                 max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
                 max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,

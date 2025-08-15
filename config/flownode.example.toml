@@ -32,6 +32,18 @@ node_id = 14
 #+experimental_time_window_merge_threshold=3
 ## Read preference of the Frontend client.
 #+read_preference="Leader"
+[flow.batching_mode.frontend_tls]
+## Whether to enable TLS for client.
+#+enabled=false
+## Server Certificate file path.
+## @toml2docs:none-default
+#+server_ca_cert_path=""
+## Client Certificate file path.
+## @toml2docs:none-default
+#+client_cert_path=""
+## Client Private key file path.
+## @toml2docs:none-default
+#+client_key_path=""
 
 ## The gRPC server options.
 [grpc]
