@@ -125,7 +125,7 @@ impl FrontendClient {
                 let cfg = ChannelConfig::new()
                     .connect_timeout(batch_opts.grpc_conn_timeout)
                     .timeout(batch_opts.query_timeout);
-                if let Some(tls) = &batch_opts.client_tls {
+                if let Some(tls) = &batch_opts.frontend_tls {
                     let cfg = cfg.client_tls_config(tls.clone());
                     ChannelManager::with_tls_config(cfg).context(InvalidClientConfigSnafu)?
                 } else {
