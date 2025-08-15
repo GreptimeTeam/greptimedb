@@ -19,7 +19,8 @@ use std::collections::HashMap;
 
 use ahash::HashSet;
 use common_telemetry::debug;
-use partition::collider::{AtomicExpr, Collider, GluonOp};
+use datatypes::value::OrderedF64;
+use partition::collider::{AtomicExpr, Collider, GluonOp, NucleonExpr};
 use partition::expr::PartitionExpr;
 use partition::manager::PartitionInfo;
 use store_api::storage::RegionId;
@@ -110,97 +111,189 @@ impl ConstraintPruner {
         false
     }
 
-    /// Check if a single atomic constraint (AND of nucleons) can be satisfied
+    /// Check if a single atomic constraint can be satisfied
     fn atomic_constraint_satisfied(
         query_atomic: &AtomicExpr,
         partition_atomic: &AtomicExpr,
     ) -> bool {
-        // Both atomic expressions represent AND conditions
-        // Query atomic: must ALL be satisfiable
-        // Partition atomic: defines what values are available in this partition
+        let mut query_index = 0;
+        let mut partition_index = 0;
 
-        // For each query nucleon, check if it's compatible with partition nucleons on the same column
-        for query_nucleon in &query_atomic.nucleons {
-            let column = query_nucleon.column();
+        while query_index < query_atomic.nucleons.len()
+            && partition_index < partition_atomic.nucleons.len()
+        {
+            let query_col = query_atomic.nucleons[query_index].column();
+            let partition_col = partition_atomic.nucleons[partition_index].column();
 
-            // Find partition nucleons for the same column
-            let partition_nucleons_for_column: Vec<_> = partition_atomic
-                .nucleons
-                .iter()
-                .filter(|p_nucleon| p_nucleon.column() == column)
-                .collect();
+            match query_col.cmp(partition_col) {
+                Ordering::Equal => {
+                    let mut query_index_for_next_col = query_index;
+                    let mut partition_index_for_next_col = partition_index;
 
-            if !partition_nucleons_for_column.is_empty() {
-                // Check if query nucleon is compatible with ALL partition nucleons for this column
-                // Since partition nucleons are ANDed together, ALL must be satisfied
-                let compatible = partition_nucleons_for_column
-                    .iter()
-                    .all(|p_nucleon| Self::nucleons_compatible(query_nucleon, p_nucleon));
+                    while query_index_for_next_col < query_atomic.nucleons.len()
+                        && query_atomic.nucleons[query_index_for_next_col].column() == query_col
+                    {
+                        query_index_for_next_col += 1;
+                    }
+                    while partition_index_for_next_col < partition_atomic.nucleons.len()
+                        && partition_atomic.nucleons[partition_index_for_next_col].column()
+                            == partition_col
+                    {
+                        partition_index_for_next_col += 1;
+                    }
 
-                if !compatible {
-                    return false;
+                    let query_range = Self::nucleons_to_range(
+                        &query_atomic.nucleons[query_index..query_index_for_next_col],
+                    );
+                    let partition_range = Self::nucleons_to_range(
+                        &partition_atomic.nucleons[partition_index..partition_index_for_next_col],
+                    );
+
+                    query_index = query_index_for_next_col;
+                    partition_index = partition_index_for_next_col;
+
+                    if !query_range.overlaps_with(&partition_range) {
+                        return false;
+                    }
+                }
+                Ordering::Less => {
+                    // Query column comes before partition column - skip query column
+                    while query_index < query_atomic.nucleons.len()
+                        && query_atomic.nucleons[query_index].column() == query_col
+                    {
+                        query_index += 1;
+                    }
+                }
+                Ordering::Greater => {
+                    // Partition column comes before query column - skip partition column
+                    while partition_index < partition_atomic.nucleons.len()
+                        && partition_atomic.nucleons[partition_index].column() == partition_col
+                    {
+                        partition_index += 1;
+                    }
                 }
             }
-            // If no partition nucleons for this column, assume compatible (no constraint on this column)
         }
 
         true
     }
 
-    /// Check if two nucleons are compatible (can be satisfied simultaneously)
-    fn nucleons_compatible(
-        query_nucleon: &partition::collider::NucleonExpr,
-        partition_nucleon: &partition::collider::NucleonExpr,
-    ) -> bool {
-        // Both nucleons operate on normalized values from separate colliders
-        // We need to compare the actual original values, not normalized ones
-        // For now, use the normalized values but fix the logic
-        let query_val = query_nucleon.value();
-        let partition_val = partition_nucleon.value();
+    /// Convert a slice of nucleons (all for the same column) into a ValueRange
+    fn nucleons_to_range(nucleons: &[NucleonExpr]) -> ValueRange {
+        let mut range = ValueRange::new();
 
-        match (query_nucleon.op(), partition_nucleon.op()) {
-            // Query equality with partition equality - must be exact match
-            (Eq, Eq) => query_val == partition_val,
-
-            // Query equality with partition bounds - check if equality value satisfies partition bound
-            (Eq, Lt) => query_val < partition_val,
-            (Eq, LtEq) => query_val <= partition_val,
-            (Eq, Gt) => query_val > partition_val,
-            (Eq, GtEq) => query_val >= partition_val,
-
-            // Query bounds with partition equality - check if partition value satisfies query bound
-            (Lt, Eq) => partition_val < query_val,
-            (LtEq, Eq) => partition_val <= query_val,
-            (Gt, Eq) => partition_val > query_val,
-            (GtEq, Eq) => partition_val >= query_val,
-
-            // Both bounds - check for range overlap
-            (Lt, Gt) | (LtEq, Gt) | (Lt, GtEq) | (LtEq, GtEq) => {
-                // Query: < query_val, Partition: > partition_val
-                // Compatible if there's overlap: partition_val < query_val
-                partition_val < query_val
+        for nucleon in nucleons {
+            let value = nucleon.value();
+            match nucleon.op() {
+                Eq => {
+                    // Equality constraint: both min and max are the same value
+                    range.min_value = Some((value, true));
+                    range.max_value = Some((value, true));
+                    break; // Equality is the most restrictive, no need to check others
+                }
+                Lt => {
+                    // Less than: update max_value if it's more restrictive
+                    let new_max = (value, false);
+                    if range.max_value.is_none() || range.max_value.as_ref().unwrap().0 > value {
+                        range.max_value = Some(new_max);
+                    }
+                }
+                LtEq => {
+                    // Less than or equal: update max_value if it's more restrictive
+                    let new_max = (value, true);
+                    if range.max_value.is_none() || range.max_value.as_ref().unwrap().0 > value {
+                        range.max_value = Some(new_max);
+                    }
+                }
+                Gt => {
+                    // Greater than: update min_value if it's more restrictive
+                    let new_min = (value, false);
+                    if range.min_value.is_none() || range.min_value.as_ref().unwrap().0 < value {
+                        range.min_value = Some(new_min);
+                    }
+                }
+                GtEq => {
+                    // Greater than or equal: update min_value if it's more restrictive
+                    let new_min = (value, true);
+                    if range.min_value.is_none() || range.min_value.as_ref().unwrap().0 < value {
+                        range.min_value = Some(new_min);
+                    }
+                }
+                NotEq => {
+                    // NotEq should be broke into two other AtomicExprs
+                    continue;
+                }
             }
-            (Gt, Lt) | (GtEq, Lt) | (Gt, LtEq) | (GtEq, LtEq) => {
-                // Query: > query_val, Partition: < partition_val
-                // Compatible if there's overlap: query_val < partition_val
-                query_val < partition_val
-            }
+        }
 
-            // Same direction bounds - check for overlap
-            (Lt, Lt) | (LtEq, Lt) | (Lt, LtEq) | (LtEq, LtEq) => {
-                // Both upper bounds - compatible (take the smaller bound)
-                true
-            }
-            (Gt, Gt) | (GtEq, Gt) | (Gt, GtEq) | (GtEq, GtEq) => {
-                // Both lower bounds - compatible (take the larger bound)
-                true
-            }
+        range
+    }
+}
 
-            // NotEq - for simplicity, assume compatible unless exact conflict
-            (NotEq, Eq) => query_val != partition_val,
-            (Eq, NotEq) => query_val != partition_val,
-            (NotEq, NotEq) => true,          // Both are NotEq, compatible
-            (NotEq, _) | (_, NotEq) => true, // NotEq with bounds, assume compatible
+/// Represents a value range derived from a group of nucleons for the same column
+#[derive(Debug, Clone)]
+struct ValueRange {
+    min_value: Option<(OrderedF64, bool)>, // (value, inclusive)
+    max_value: Option<(OrderedF64, bool)>, // (value, inclusive)
+}
+
+impl ValueRange {
+    fn new() -> Self {
+        Self {
+            min_value: None,
+            max_value: None,
+        }
+    }
+
+    /// Check if this range overlaps with another range
+    fn overlaps_with(&self, other: &ValueRange) -> bool {
+        match (
+            &self.min_value,
+            &self.max_value,
+            &other.min_value,
+            &other.max_value,
+        ) {
+            // If either range is completely unconstrained, they always overlap
+            (None, None, _, _) | (_, _, None, None) => true,
+
+            // If one range has only lower bounds and another only upper bounds, they overlap
+            (Some(_), None, _, _) | (_, _, Some(_), None) => true,
+            (None, Some(_), _, _) | (_, _, None, Some(_)) => true,
+
+            // Both ranges have specific bounds - check for actual overlap
+            _ => {
+                // Get effective bounds (use infinity when unspecified)
+                let self_min = self
+                    .min_value
+                    .unwrap_or((OrderedF64::from(-f64::INFINITY), true));
+                let self_max = self
+                    .max_value
+                    .unwrap_or((OrderedF64::from(f64::INFINITY), true));
+                let other_min = other
+                    .min_value
+                    .unwrap_or((OrderedF64::from(-f64::INFINITY), true));
+                let other_max = other
+                    .max_value
+                    .unwrap_or((OrderedF64::from(f64::INFINITY), true));
+
+                // Check if ranges overlap: self_min <= other_max && other_min <= self_max
+                let self_min_le_other_max = if self_min.0 < other_max.0 {
+                    true
+                } else if self_min.0 == other_max.0 {
+                    self_min.1 && other_max.1
+                } else {
+                    false
+                };
+                let other_min_le_self_max = if other_min.0 < self_max.0 {
+                    true
+                } else if other_min.0 == self_max.0 {
+                    other_min.1 && self_max.1
+                } else {
+                    false
+                };
+
+                self_min_le_other_max && other_min_le_self_max
+            }
         }
     }
 }
