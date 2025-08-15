@@ -33,9 +33,7 @@ futures.workspace = true
 lazy_static.workspace = true
 object-store.workspace = true
 object_store_opendal.workspace = true
-orc-rust = { git = "https://github.com/GreptimeTeam/orc-rust", rev = "6c85d4eddbd2ef7898e5335e7b05f3b585330bf9", default-features = false, features = [
-    "async",
-] }
+orc-rust = { version = "0.6.3", default-features = false, features = ["async"] }
 parquet.workspace = true
 paste.workspace = true
 regex = "1.7"

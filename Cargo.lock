@@ -2115,7 +2115,7 @@ dependencies = [
  "lazy_static",
  "object-store",
  "object_store_opendal",
- "orc-rust 0.6.1",
+ "orc-rust 0.6.3",
  "parquet",
  "paste",
  "regex",
@@ -8773,8 +8773,9 @@ dependencies = [
 
 [[package]]
 name = "orc-rust"
-version = "0.6.1"
-source = "git+https://github.com/GreptimeTeam/orc-rust?rev=6c85d4eddbd2ef7898e5335e7b05f3b585330bf9#6c85d4eddbd2ef7898e5335e7b05f3b585330bf9"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcd2b5295acfa0f64a14a1577a1f74c8a7dcc806396baaadcfa770509bed6a00"
 dependencies = [
  "arrow",
  "async-trait",
