@@ -92,6 +92,7 @@ async fn test_edit_region_schedule_compaction() {
             ..Default::default()
         }],
         files_to_remove: vec![],
+        timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
@@ -179,6 +180,7 @@ async fn test_edit_region_fill_cache() {
             ..Default::default()
         }],
         files_to_remove: vec![],
+        timestamp_ms: None,
         compaction_time_window: None,
         flushed_entry_id: None,
         flushed_sequence: None,
@@ -229,6 +231,7 @@ async fn test_edit_region_concurrently() {
                 let edit = RegionEdit {
                     files_to_add: vec![sst],
                     files_to_remove: vec![],
+                    timestamp_ms: None,
                     compaction_time_window: None,
                     flushed_entry_id: None,
                     flushed_sequence: None,
