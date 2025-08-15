@@ -344,20 +344,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Unsupported value type for region pruning: {}", value_type))]
-    UnsupportedValueType {
-        value_type: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Invalid partition expression: {}", msg))]
-    InvalidPartitionExpression {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
 }
 
 impl ErrorExt for Error {
@@ -382,9 +368,7 @@ impl ErrorExt for Error {
             | UnsupportedVariable { .. }
             | ColumnSchemaNoDefault { .. }
             | CteColumnSchemaMismatch { .. }
-            | ConvertValue { .. }
-            | UnsupportedValueType { .. }
-            | InvalidPartitionExpression { .. } => StatusCode::InvalidArguments,
+            | ConvertValue { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 
