@@ -36,7 +36,7 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::read::flat_projection::{plain_projected_columns, FlatProjectionMapper};
+use crate::read::flat_projection::{flat_projected_columns, FlatProjectionMapper};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
@@ -250,7 +250,7 @@ impl FlatCompatBatch {
         actual: &RegionMetadataRef,
         format_projection: &FormatProjection,
     ) -> Result<Option<Self>> {
-        let actual_schema = plain_projected_columns(actual, format_projection);
+        let actual_schema = flat_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema {
             return Ok(None);
