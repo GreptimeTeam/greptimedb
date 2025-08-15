@@ -17,11 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use common_telemetry::{error, info};
-use snafu::ResultExt;
 use store_api::storage::RegionId;
 use store_api::{ManifestVersion, MIN_VERSION};
 
-use crate::error::{DurationOutOfRangeSnafu, Result};
+use crate::error::Result;
 use crate::manifest::action::{RegionCheckpoint, RegionManifest};
 use crate::manifest::manager::RegionManifestOptions;
 use crate::manifest::storage::ManifestObjectStore;
@@ -127,29 +126,8 @@ impl Checkpointer {
         mut manifest: RegionManifest,
     ) -> Result<RegionManifest> {
         let opt = &self.manifest_options.remove_file_options;
-        // if total number of removed files is less than keep_count, do nothing
-        let total_removed_files: usize = manifest.removed_files.iter().map(|s| s.0.len()).sum();
-        if total_removed_files <= opt.keep_count {
-            return Ok(manifest);
-        }
 
-        let can_evict_until = chrono::Utc::now()
-            - chrono::Duration::from_std(opt.keep_ttl).context(DurationOutOfRangeSnafu {
-                input: opt.keep_ttl,
-            })?;
-
-        let updated = std::mem::take(&mut manifest.removed_files)
-            .into_iter()
-            .filter_map(|(files, ts)| {
-                if ts < can_evict_until.timestamp_millis() {
-                    // can evict all files
-                    // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
-                    None
-                } else {
-                    Some((files, ts))
-                }
-            });
-        manifest.removed_files = updated.collect();
+        manifest.removed_files.evict_old_removed_files(opt)?;
 
         Ok(manifest)
     }
