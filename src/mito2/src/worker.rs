@@ -82,6 +82,8 @@ pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 pub(crate) const CHECK_REGION_INTERVAL: Duration = Duration::from_secs(60);
 /// Max delay to check region periodical tasks.
 pub(crate) const MAX_INITIAL_CHECK_DELAY_SECS: u64 = 60 * 3;
+/// Interval to update the rate meter for regions.
+const RATE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// A fixed size group of [RegionWorkers](RegionWorker).
@@ -480,6 +482,15 @@ impl<S: LogStore> WorkerStarter<S> {
             worker_thread.run().await;
         });
 
+        let mut rate_updater = RateUpdater {
+            regions: regions.clone(),
+            running: running.clone(),
+            interval: RATE_UPDATE_INTERVAL,
+        };
+        common_runtime::spawn_global(async move {
+            rate_updater.run().await;
+        });
+
         RegionWorker {
             id: self.id,
             regions,
@@ -661,6 +672,27 @@ impl StalledRequests {
             .values()
             .map(|(_, reqs, bulk_reqs)| reqs.len() + bulk_reqs.len())
             .sum()
+    }
+}
+
+/// [`RateUpdater`] manages background tasks to periodically update [`RateMeter`](crate::meter::rate_meter::RateMeter) components of all regions.
+struct RateUpdater {
+    regions: RegionMapRef,
+    running: Arc<AtomicBool>,
+    interval: Duration,
+}
+
+impl RateUpdater {
+    /// Starts the rate updater.
+    async fn run(&mut self) {
+        info!("Rate updater started, interval: {:?}", self.interval);
+        while self.running.load(Ordering::Relaxed) {
+            tokio::time::sleep(self.interval).await;
+            self.regions.for_each_region(|region| {
+                region.write_bytes_per_sec.update_rate(self.interval);
+            });
+        }
+        info!("Rate updater stopped, interval: {:?}", self.interval);
     }
 }
 
