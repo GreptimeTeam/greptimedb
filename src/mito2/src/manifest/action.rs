@@ -25,7 +25,10 @@ use store_api::storage::{RegionId, SequenceNumber};
 use store_api::ManifestVersion;
 use strum::Display;
 
-use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
+use crate::error::{
+    DurationOutOfRangeSnafu, RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu,
+};
+use crate::manifest::manager::RemoveFileOptions;
 use crate::sst::file::{FileId, FileMeta};
 use crate::wal::EntryId;
 
@@ -111,7 +114,7 @@ pub struct RegionManifest {
     /// read/write path.
     ///
     #[serde(default)]
-    pub removed_files: Vec<(HashSet<FileMeta>, i64)>,
+    pub removed_files: RemovedFilesRecord,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
     /// Last sequence of flushed data.
@@ -129,7 +132,7 @@ pub struct RegionManifest {
 pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,
     files: HashMap<FileId, FileMeta>,
-    pub removed_files: Vec<(HashSet<FileMeta>, i64)>,
+    pub removed_files: RemovedFilesRecord,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
@@ -166,11 +169,14 @@ impl RegionManifestBuilder {
         for file in edit.files_to_add {
             self.files.insert(file.file_id, file);
         }
-        self.removed_files.push((
-            edit.files_to_remove.iter().cloned().collect(),
+        self.removed_files.add_removed_files(
+            edit.files_to_remove
+                .iter()
+                .map(|meta| meta.file_id)
+                .collect(),
             edit.timestamp_ms
                 .unwrap_or_else(|| Utc::now().timestamp_millis()),
-        ));
+        );
         for file in edit.files_to_remove {
             self.files.remove(&file.file_id);
         }
@@ -196,20 +202,20 @@ impl RegionManifestBuilder {
                 self.flushed_sequence = truncated_sequence;
                 self.truncated_entry_id = Some(truncated_entry_id);
                 self.files.clear();
-                self.removed_files.push((
-                    self.files.values().cloned().collect(),
+                self.removed_files.add_removed_files(
+                    self.files.values().map(|meta| meta.file_id).collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
-                ));
+                );
             }
             TruncateKind::Partial { files_to_remove } => {
-                self.removed_files.push((
-                    files_to_remove.iter().cloned().collect(),
+                self.removed_files.add_removed_files(
+                    files_to_remove.iter().map(|meta| meta.file_id).collect(),
                     truncate
                         .timestamp_ms
                         .unwrap_or_else(|| Utc::now().timestamp_millis()),
-                ));
+                );
                 for file in files_to_remove {
                     self.files.remove(&file.file_id);
                 }
@@ -238,6 +244,52 @@ impl RegionManifestBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window: self.compaction_time_window,
         })
+    }
+}
+
+/// A record of removed files in the region manifest.
+/// This is used to keep track of files that have been removed from the manifest but may still
+/// be kept for a while
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemovedFilesRecord {
+    /// a list of `(FileIds, timestamp)` pairs, where the timestamp is the time when
+    /// the files are removed from manifest. The timestamp is in milliseconds since unix epoch.
+    pub removed_files: Vec<(HashSet<FileId>, i64)>,
+}
+
+impl RemovedFilesRecord {
+    /// Add a record of removed files with the current timestamp.
+    pub fn add_removed_files(&mut self, file_ids: HashSet<FileId>, at: i64) {
+        self.removed_files.push((file_ids, at));
+    }
+
+    pub fn evict_old_removed_files(&mut self, opt: &RemoveFileOptions) -> Result<()> {
+        let total_removed_files: usize = self.removed_files.iter().map(|s| s.0.len()).sum();
+        if total_removed_files <= opt.keep_count {
+            return Ok(());
+        }
+
+        let can_evict_until = chrono::Utc::now()
+            - chrono::Duration::from_std(opt.keep_ttl).context(DurationOutOfRangeSnafu {
+                input: opt.keep_ttl,
+            })?;
+
+        self.removed_files.sort_by_key(|(_, ts)| *ts);
+        let updated = std::mem::take(&mut self.removed_files)
+            .into_iter()
+            .filter_map(|(files, ts)| {
+                if ts < can_evict_until.timestamp_millis() {
+                    // can evict all files
+                    // TODO(discord9): maybe only evict to below keep_count? Maybe not, or the update might be too frequent.
+                    None
+                } else {
+                    Some((files, ts))
+                }
+            })
+            .collect();
+        self.removed_files = updated;
+
+        Ok(())
     }
 }
 
@@ -616,7 +668,7 @@ mod tests {
             RegionManifest {
                 metadata: metadata.clone(),
                 files: HashMap::new(),
-                removed_files: Vec::new(),
+                removed_files: Default::default(),
                 flushed_entry_id: 0,
                 flushed_sequence: 0,
                 manifest_version: 0,
@@ -628,7 +680,7 @@ mod tests {
         let new_manifest = RegionManifest {
             metadata: metadata.clone(),
             files: HashMap::new(),
-            removed_files: vec![(HashSet::new(), 0)],
+            removed_files: Default::default(),
             flushed_entry_id: 0,
             flushed_sequence: 0,
             manifest_version: 0,
