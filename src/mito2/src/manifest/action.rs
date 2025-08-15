@@ -529,7 +529,6 @@ mod tests {
                 }]
             }
         );
-
     }
     /// Test if old version can still be deserialized then serialized to the new version.
     #[test]
