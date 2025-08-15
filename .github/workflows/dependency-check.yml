@@ -18,10 +18,6 @@ jobs:
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
 
-    - uses: webfactory/ssh-agent@v0.9.0
-      with:
-        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
     - name: Run cargo tree
       run: cargo tree --prefix none > dependencies.txt
 

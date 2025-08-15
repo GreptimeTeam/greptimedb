@@ -291,7 +291,7 @@ mito-codec = { path = "src/mito-codec" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }
-otel-arrow-rust = { git = "https://github.com/open-telemetry/otel-arrow", rev = "ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f", features = [
+otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "2d64b7c0fa95642028a8205b36fe9ea0b023ec59", features = [
     "server",
 ] }
 partition = { path = "src/partition" }

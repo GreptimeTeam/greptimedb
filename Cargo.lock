@@ -2115,7 +2115,7 @@ dependencies = [
  "lazy_static",
  "object-store",
  "object_store_opendal",
- "orc-rust",
+ "orc-rust 0.6.1",
  "parquet",
  "paste",
  "regex",
@@ -3721,7 +3721,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
- "orc-rust",
+ "orc-rust 0.6.0",
  "tokio",
 ]
 
@@ -5296,19 +5296,6 @@ name = "gimli"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
-
-[[package]]
-name = "git2"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2deb07a133b1520dc1a5690e9bd08950108873d7ed5de38dcc74d3b5ebffa110"
-dependencies = [
- "bitflags 2.9.1",
- "libc",
- "libgit2-sys",
- "log",
- "url",
-]
 
 [[package]]
 name = "glob"
@@ -6916,18 +6903,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libgit2-sys"
-version = "0.18.2+1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c42fe03df2bd3c53a3a9c7317ad91d80c81cd1fb0caec8d7cc4cd2bfa10c222"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "pkg-config",
-]
-
-[[package]]
 name = "libloading"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6980,7 +6955,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b70e7a7df205e92a1a4cd9aaae7898dac0aa555503cc0a649494d0d60e7651d"
 dependencies = [
  "cc",
- "libc",
  "pkg-config",
  "vcpkg",
 ]
@@ -8798,6 +8772,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "orc-rust"
+version = "0.6.1"
+source = "git+https://github.com/GreptimeTeam/orc-rust?rev=6c85d4eddbd2ef7898e5335e7b05f3b585330bf9#6c85d4eddbd2ef7898e5335e7b05f3b585330bf9"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytemuck",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "fallible-streaming-iterator",
+ "flate2",
+ "futures",
+ "futures-util",
+ "lz4_flex",
+ "lzokay-native",
+ "num",
+ "prost 0.13.5",
+ "snafu 0.8.6",
+ "snap",
+ "tokio",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "ordered-float"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8858,7 +8857,7 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 [[package]]
 name = "otel-arrow-rust"
 version = "0.1.0"
-source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=2d64b7c0fa95642028a8205b36fe9ea0b023ec59#2d64b7c0fa95642028a8205b36fe9ea0b023ec59"
 dependencies = [
  "arrow",
  "arrow-ipc",
@@ -8882,7 +8881,7 @@ dependencies = [
 [[package]]
 name = "otlp-derive"
 version = "0.1.0"
-source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=2d64b7c0fa95642028a8205b36fe9ea0b023ec59#2d64b7c0fa95642028a8205b36fe9ea0b023ec59"
 dependencies = [
  "convert_case 0.8.0",
  "otlp-model",
@@ -8894,7 +8893,7 @@ dependencies = [
 [[package]]
 name = "otlp-model"
 version = "0.1.0"
-source = "git+https://github.com/open-telemetry/otel-arrow?rev=ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f#ac5a7d7134b479e25c9bae643a70f15cc5d7fb7f"
+source = "git+https://github.com/GreptimeTeam/otel-arrow?rev=2d64b7c0fa95642028a8205b36fe9ea0b023ec59#2d64b7c0fa95642028a8205b36fe9ea0b023ec59"
 dependencies = [
  "tonic-build 0.13.1",
 ]
@@ -10913,7 +10912,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.6.0"
-source = "git+https://github.com/WenyXu/rskafka.git?rev=bc582e98918def613a882581a1b9331d186d9b2d#bc582e98918def613a882581a1b9331d186d9b2d"
+source = "git+https://github.com/influxdata/rskafka.git?rev=a62120b6c74d68953464b256f858dc1c41a903b4#a62120b6c74d68953464b256f858dc1c41a903b4"
 dependencies = [
  "bytes",
  "chrono",
@@ -11822,12 +11821,11 @@ dependencies = [
 
 [[package]]
 name = "shadow-rs"
-version = "1.2.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6fd27df794ced2ef39872879c93a9f87c012607318af8621cd56d2c3a8b3a2"
+checksum = "5f0b6af233ae5461c3c6b30db79190ec5fbbef048ebbd5f2cbb3043464168e00"
 dependencies = [
  "const_format",
- "git2",
  "is_debug",
  "time",
  "tzdb",

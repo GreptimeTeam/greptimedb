@@ -59,10 +59,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -105,10 +101,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - uses: arduino/setup-protoc@v3
         with:
@@ -168,10 +160,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -230,10 +218,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -288,10 +272,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - uses: arduino/setup-protoc@v3
         with:
@@ -354,10 +334,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
@@ -510,10 +486,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Setup Kind
         uses: ./.github/actions/setup-kind
@@ -701,10 +673,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -742,10 +710,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - uses: arduino/setup-protoc@v3
         with:
@@ -798,10 +762,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - uses: arduino/setup-protoc@v3
         with:
