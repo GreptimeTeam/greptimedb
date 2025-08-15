@@ -22,12 +22,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("No available frontend"))]
-    NoAvailableFrontend {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Mismatched schema, expected: {:?}, actual: {:?}", expected, actual))]
     MismatchedSchema {
         #[snafu(implicit)]
@@ -69,9 +63,7 @@ impl ErrorExt for Error {
             Error::MismatchedSchema { .. } | Error::SerializeEvent { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::NoAvailableFrontend { .. }
-            | Error::InsertEvents { .. }
-            | Error::KvBackend { .. } => StatusCode::Internal,
+            Error::InsertEvents { .. } | Error::KvBackend { .. } => StatusCode::Internal,
         }
     }
 

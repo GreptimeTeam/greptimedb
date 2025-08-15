@@ -196,7 +196,6 @@ impl FrontendBuilder {
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            inserter.clone(),
             statement_executor.clone(),
             self.options.slow_query.ttl,
             self.options.event_recorder.ttl,

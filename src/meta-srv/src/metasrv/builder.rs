@@ -77,6 +77,7 @@ use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
 use crate::state::State;
 use crate::table_meta_alloc::MetasrvPeerAllocator;
+use crate::utils::insert_forwarder::InsertForwarder;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {
@@ -195,10 +196,12 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
+        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
+        let insert_forwarder = Arc::new(InsertForwarder::new(peer_lookup_service.clone()));
         // Builds the event recorder to record important events and persist them as the system table.
         let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
-            meta_peer_client.clone(),
+            insert_forwarder,
             options.event_recorder.ttl,
         ))));
 
@@ -294,7 +297,6 @@ impl MetasrvBuilder {
                 server_addr: options.grpc.server_addr.clone(),
             },
         ));
-        let peer_lookup_service = Arc::new(MetaPeerLookupService::new(meta_peer_client.clone()));
 
         if !is_remote_wal && options.enable_region_failover {
             ensure!(

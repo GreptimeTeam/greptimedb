@@ -54,6 +54,19 @@ pub enum Error {
         peer_id: u64,
     },
 
+    #[snafu(display("Failed to lookup frontends"))]
+    LookupFrontends {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("No available frontend"))]
+    NoAvailableFrontend {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         #[snafu(implicit)]
@@ -1062,6 +1075,8 @@ impl ErrorExt for Error {
             | Error::UnexpectedLogicalRouteTable { source, .. }
             | Error::UpdateTopicNameValue { source, .. }
             | Error::ParseWalOptions { source, .. } => source.status_code(),
+            Error::LookupFrontends { source, .. } => source.status_code(),
+            Error::NoAvailableFrontend { .. } => StatusCode::IllegalState,
 
             Error::InitMetadata { source, .. }
             | Error::InitDdlManager { source, .. }
