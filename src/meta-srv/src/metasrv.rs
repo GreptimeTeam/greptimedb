@@ -111,8 +111,8 @@ pub struct MetasrvOptions {
     pub server_addr: String,
     /// The address of the store, e.g., etcd.
     pub store_addrs: Vec<String>,
-    /// TLS configuration for kv store backend (PostgreSQL/MySQL)
-    /// Only applicable when using PostgreSQL or MySQL as the metadata store
+    /// TLS configuration for kv store backend
+    /// Applicable when using etcd, PostgreSQL, or MySQL as the metadata store
     #[serde(default)]
     pub backend_tls: Option<TlsOption>,
     /// The type of selector.
