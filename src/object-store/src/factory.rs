@@ -81,16 +81,17 @@ pub async fn new_azblob_object_store(azblob_config: &AzblobConfig) -> Result<Obj
         .container(&azblob_config.container)
         .endpoint(&azblob_config.endpoint)
         .account_name(azblob_config.account_name.expose_secret())
-        .account_key(azblob_config.account_key.expose_secret())
-        .http_client(client);
+        .account_key(azblob_config.account_key.expose_secret());
 
     if let Some(token) = &azblob_config.sas_token {
         builder = builder.sas_token(token);
     };
 
-    Ok(ObjectStore::new(builder)
+    let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .finish())
+        .finish();
+    operator.update_http_client(|_| client);
+    Ok(operator)
 }
 
 pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore> {
@@ -100,7 +101,7 @@ pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore>
         gcs_config.bucket, &root
     );
 
-    let client = build_http_client(&gcs_config.http_client);
+    let client = build_http_client(&gcs_config.http_client)?;
 
     let builder = Gcs::default()
         .root(&root)
@@ -108,12 +109,13 @@ pub async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<ObjectStore>
         .scope(&gcs_config.scope)
         .credential_path(gcs_config.credential_path.expose_secret())
         .credential(gcs_config.credential.expose_secret())
-        .endpoint(&gcs_config.endpoint)
-        .http_client(client?);
+        .endpoint(&gcs_config.endpoint);
 
-    Ok(ObjectStore::new(builder)
+    let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .finish())
+        .finish();
+    operator.update_http_client(|_| client);
+    Ok(operator)
 }
 
 pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore> {
@@ -130,12 +132,13 @@ pub async fn new_oss_object_store(oss_config: &OssConfig) -> Result<ObjectStore>
         .bucket(&oss_config.bucket)
         .endpoint(&oss_config.endpoint)
         .access_key_id(oss_config.access_key_id.expose_secret())
-        .access_key_secret(oss_config.access_key_secret.expose_secret())
-        .http_client(client);
+        .access_key_secret(oss_config.access_key_secret.expose_secret());
 
-    Ok(ObjectStore::new(builder)
+    let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .finish())
+        .finish();
+    operator.update_http_client(|_| client);
+    Ok(operator)
 }
 
 pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
@@ -152,8 +155,7 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
         .root(&root)
         .bucket(&s3_config.bucket)
         .access_key_id(s3_config.access_key_id.expose_secret())
-        .secret_access_key(s3_config.secret_access_key.expose_secret())
-        .http_client(client);
+        .secret_access_key(s3_config.secret_access_key.expose_secret());
 
     if s3_config.endpoint.is_some() {
         builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
@@ -165,7 +167,9 @@ pub async fn new_s3_object_store(s3_config: &S3Config) -> Result<ObjectStore> {
         builder = builder.enable_virtual_host_style();
     }
 
-    Ok(ObjectStore::new(builder)
+    let operator = ObjectStore::new(builder)
         .context(error::InitBackendSnafu)?
-        .finish())
+        .finish();
+    operator.update_http_client(|_| client);
+    Ok(operator)
 }

@@ -28,9 +28,11 @@ EXPLAIN SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -62,10 +64,12 @@ EXPLAIN SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -108,8 +112,10 @@ order by t.i desc;
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: i@0 IS NOT NULL_|
 |_|_ProjectionExec: expr=[i@0 as i]_|
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_ProjectionExec: expr=[]_|
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -122,24 +128,24 @@ Affected Rows: 0
 -- different from normal queries. It also requires the table provider to implement the `insert_into()` method.
 EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM integers);
 
-+---------------------+-------------------------------------------------------------------+
-| plan_type           | plan                                                              |
-+---------------------+-------------------------------------------------------------------+
-| logical_plan        | Dml: op=[Insert Into] table=[other]                               |
-|                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
-|                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)        |
-|                     |       Projection: integers.i                                      |
-|                     |         MergeScan [is_placeholder=false, remote_input=[           |
-|                     | TableScan: integers                                               |
-|                     | ]]                                                                |
-|                     |       SubqueryAlias: __scalar_sq_1                                |
-|                     |         MergeScan [is_placeholder=false, remote_input=[           |
-|                     | Projection: max(integers.i)                                       |
-|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]               |
-|                     |     TableScan: integers                                           |
-|                     | ]]                                                                |
-| physical_plan_error | Error during planning: failed to resolve catalog: datafusion      |
-+---------------------+-------------------------------------------------------------------+
++---------------------+-----------------------------------------------------------------------------+
+| plan_type           | plan                                                                        |
++---------------------+-----------------------------------------------------------------------------+
+| logical_plan        | Dml: op=[Insert Into] table=[other]                                         |
+|                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j           |
+|                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)                  |
+|                     |       Projection: integers.i                                                |
+|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
+|                     | TableScan: integers                                                         |
+|                     | ]]                                                                          |
+|                     |       SubqueryAlias: __scalar_sq_1                                          |
+|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
+|                     | Projection: max(integers.i)                                                 |
+|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                         |
+|                     |     TableScan: integers                                                     |
+|                     | ]]                                                                          |
+| physical_plan_error | This feature is not implemented: Insert into not implemented for this table |
++---------------------+-----------------------------------------------------------------------------+
 
 drop table other;
 

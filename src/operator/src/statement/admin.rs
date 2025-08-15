@@ -69,7 +69,7 @@ impl StatementExecutor {
                     }
                     .fail();
                 };
-                Ok(value)
+                Ok(&value.value)
             })
             .collect::<Result<Vec<_>>>()?;
 

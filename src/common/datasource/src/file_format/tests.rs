@@ -19,35 +19,39 @@ use std::vec;
 
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
-use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::datasource::physical_plan::{
-    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener, ParquetExec,
+    CsvSource, FileScanConfig, FileSource, FileStream, JsonSource, ParquetSource,
 };
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+use datafusion_orc::OrcSource;
 use futures::StreamExt;
+use object_store::ObjectStore;
 
 use super::FORMAT_TYPE;
-use crate::file_format::orc::{OrcFormat, OrcOpener};
 use crate::file_format::parquet::DefaultParquetFileReaderFactory;
-use crate::file_format::{FileFormat, Format};
+use crate::file_format::{FileFormat, Format, OrcFormat};
 use crate::test_util::{scan_config, test_basic_schema, test_store};
 use crate::{error, test_util};
 
-struct Test<'a, T: FileOpener> {
+struct Test<'a> {
     config: FileScanConfig,
-    opener: T,
+    file_source: Arc<dyn FileSource>,
     expected: Vec<&'a str>,
 }
 
-impl<T: FileOpener> Test<'_, T> {
-    pub async fn run(self) {
+impl Test<'_> {
+    async fn run(self, store: &ObjectStore) {
+        let store = Arc::new(object_store_opendal::OpendalStore::new(store.clone()));
+        let file_opener = self.file_source.create_file_opener(store, &self.config, 0);
+
         let result = FileStream::new(
             &self.config,
             0,
-            self.opener,
+            file_opener,
             &ExecutionPlanMetricsSet::new(),
         )
         .unwrap()
@@ -62,26 +66,16 @@ impl<T: FileOpener> Test<'_, T> {
 #[tokio::test]
 async fn test_json_opener() {
     let store = test_store("/");
-    let store = Arc::new(object_store_opendal::OpendalStore::new(store));
-
     let schema = test_basic_schema();
-
-    let json_opener = || {
-        JsonOpener::new(
-            test_util::TEST_BATCH_SIZE,
-            schema.clone(),
-            FileCompressionType::UNCOMPRESSED,
-            store.clone(),
-        )
-    };
+    let file_source = Arc::new(JsonSource::new()).with_batch_size(test_util::TEST_BATCH_SIZE);
 
     let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
         .display()
         .to_string();
     let tests = [
         Test {
-            config: scan_config(schema.clone(), None, path),
-            opener: json_opener(),
+            config: scan_config(schema.clone(), None, path, file_source.clone()),
+            file_source: file_source.clone(),
             expected: vec![
                 "+-----+-------+",
                 "| num | str   |",
@@ -93,8 +87,8 @@ async fn test_json_opener() {
             ],
         },
         Test {
-            config: scan_config(schema.clone(), Some(1), path),
-            opener: json_opener(),
+            config: scan_config(schema, Some(1), path, file_source.clone()),
+            file_source,
             expected: vec![
                 "+-----+------+",
                 "| num | str  |",
@@ -106,37 +100,26 @@ async fn test_json_opener() {
     ];
 
     for test in tests {
-        test.run().await;
+        test.run(&store).await;
     }
 }
 
 #[tokio::test]
 async fn test_csv_opener() {
     let store = test_store("/");
-    let store = Arc::new(object_store_opendal::OpendalStore::new(store));
-
     let schema = test_basic_schema();
     let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
         .display()
         .to_string();
-    let csv_config = Arc::new(CsvConfig::new(
-        test_util::TEST_BATCH_SIZE,
-        schema.clone(),
-        None,
-        true,
-        b',',
-        b'"',
-        None,
-        store,
-        None,
-    ));
 
-    let csv_opener = || CsvOpener::new(csv_config.clone(), FileCompressionType::UNCOMPRESSED);
+    let file_source = CsvSource::new(true, b',', b'"')
+        .with_batch_size(test_util::TEST_BATCH_SIZE)
+        .with_schema(schema.clone());
 
     let tests = [
         Test {
-            config: scan_config(schema.clone(), None, path),
-            opener: csv_opener(),
+            config: scan_config(schema.clone(), None, path, file_source.clone()),
+            file_source: file_source.clone(),
             expected: vec![
                 "+-----+-------+",
                 "| num | str   |",
@@ -148,8 +131,8 @@ async fn test_csv_opener() {
             ],
         },
         Test {
-            config: scan_config(schema.clone(), Some(1), path),
-            opener: csv_opener(),
+            config: scan_config(schema, Some(1), path, file_source.clone()),
+            file_source,
             expected: vec![
                 "+-----+------+",
                 "| num | str  |",
@@ -161,7 +144,7 @@ async fn test_csv_opener() {
     ];
 
     for test in tests {
-        test.run().await;
+        test.run(&store).await;
     }
 }
 
@@ -174,12 +157,12 @@ async fn test_parquet_exec() {
     let path = &find_workspace_path("/src/common/datasource/tests/parquet/basic.parquet")
         .display()
         .to_string();
-    let base_config = scan_config(schema.clone(), None, path);
 
-    let exec = ParquetExec::builder(base_config)
-        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)))
-        .build();
+    let parquet_source = ParquetSource::default()
+        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)));
 
+    let config = scan_config(schema, None, path, Arc::new(parquet_source));
+    let exec = DataSourceExec::from_data_source(config);
     let ctx = SessionContext::new();
 
     let context = Arc::new(TaskContext::from(&ctx));
@@ -208,20 +191,18 @@ async fn test_parquet_exec() {
 
 #[tokio::test]
 async fn test_orc_opener() {
-    let root = find_workspace_path("/src/common/datasource/tests/orc")
+    let path = &find_workspace_path("/src/common/datasource/tests/orc/test.orc")
         .display()
         .to_string();
-    let store = test_store(&root);
-    let schema = OrcFormat.infer_schema(&store, "test.orc").await.unwrap();
-    let schema = Arc::new(schema);
 
-    let orc_opener = OrcOpener::new(store.clone(), schema.clone(), None);
-    let path = "test.orc";
+    let store = test_store("/");
+    let schema = Arc::new(OrcFormat.infer_schema(&store, path).await.unwrap());
+    let file_source = Arc::new(OrcSource::default());
 
     let tests = [
         Test {
-            config: scan_config(schema.clone(), None, path),
-            opener: orc_opener.clone(),
+            config: scan_config(schema.clone(), None, path, file_source.clone()),
+            file_source: file_source.clone(),
             expected: vec![
             "+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+",
             "| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |",
@@ -235,8 +216,8 @@ async fn test_orc_opener() {
             ],
         },
         Test {
-            config: scan_config(schema.clone(), Some(1), path),
-            opener: orc_opener.clone(),
+            config: scan_config(schema.clone(), Some(1), path, file_source.clone()),
+            file_source,
             expected: vec![
                 "+----------+-----+------+------------+---+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+-------------------------+-------------+",
                 "| double_a | a   | b    | str_direct | d | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple        | date_simple |",
@@ -248,7 +229,7 @@ async fn test_orc_opener() {
     ];
 
     for test in tests {
-        test.run().await;
+        test.run(&store).await;
     }
 }
 

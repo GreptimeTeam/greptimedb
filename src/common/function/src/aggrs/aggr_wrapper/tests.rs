@@ -35,7 +35,7 @@ use datafusion::prelude::SessionContext;
 use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::sqlparser::ast::NullTreatment;
-use datafusion_expr::{Aggregate, Expr, LogicalPlan, SortExpr, TableScan};
+use datafusion_expr::{lit, Aggregate, Expr, LogicalPlan, SortExpr, TableScan};
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
 use datatypes::arrow_array::StringArray;
@@ -234,7 +234,7 @@ async fn test_sum_udaf() {
             vec![Expr::Column(Column::new_unqualified("number"))],
             false,
             None,
-            None,
+            vec![],
             None,
         ))],
     )
@@ -250,7 +250,7 @@ async fn test_sum_udaf() {
                 vec![Expr::Column(Column::new_unqualified("number"))],
                 false,
                 None,
-                None,
+                vec![],
                 None,
             ))],
         )
@@ -290,7 +290,7 @@ async fn test_sum_udaf() {
                 vec![Expr::Column(Column::new_unqualified("__sum_state(number)"))],
                 false,
                 None,
-                None,
+                vec![],
                 None,
             ))
             .alias("sum(number)")],
@@ -378,7 +378,7 @@ async fn test_avg_udaf() {
             vec![Expr::Column(Column::new_unqualified("number"))],
             false,
             None,
-            None,
+            vec![],
             None,
         ))],
     )
@@ -395,7 +395,7 @@ async fn test_avg_udaf() {
                 vec![Expr::Column(Column::new_unqualified("number"))],
                 false,
                 None,
-                None,
+                vec![],
                 None,
             ))],
         )
@@ -449,7 +449,7 @@ async fn test_avg_udaf() {
                 vec![Expr::Column(Column::new_unqualified("__avg_state(number)"))],
                 false,
                 None,
-                None,
+                vec![],
                 None,
             ))
             .alias("avg(number)")],
@@ -551,7 +551,7 @@ async fn test_udaf_correct_eval_result() {
         expected_fn: Option<ExpectedFn>,
         distinct: bool,
         filter: Option<Box<Expr>>,
-        order_by: Option<Vec<SortExpr>>,
+        order_by: Vec<SortExpr>,
         null_treatment: Option<NullTreatment>,
     }
     type ExpectedFn = fn(ArrayRef) -> bool;
@@ -575,7 +575,7 @@ async fn test_udaf_correct_eval_result() {
             expected_fn: None,
             distinct: false,
             filter: None,
-            order_by: None,
+            order_by: vec![],
             null_treatment: None,
         },
         TestCase {
@@ -596,7 +596,7 @@ async fn test_udaf_correct_eval_result() {
             expected_fn: None,
             distinct: false,
             filter: None,
-            order_by: None,
+            order_by: vec![],
             null_treatment: None,
         },
         TestCase {
@@ -619,7 +619,7 @@ async fn test_udaf_correct_eval_result() {
             expected_fn: None,
             distinct: false,
             filter: None,
-            order_by: None,
+            order_by: vec![],
             null_treatment: None,
         },
         TestCase {
@@ -630,8 +630,8 @@ async fn test_udaf_correct_eval_result() {
                 true,
             )])),
             args: vec![
-                Expr::Literal(ScalarValue::Int64(Some(128))),
-                Expr::Literal(ScalarValue::Float64(Some(0.05))),
+                lit(128i64),
+                lit(0.05f64),
                 Expr::Column(Column::new_unqualified("number")),
             ],
             input: vec![Arc::new(Float64Array::from(vec![
@@ -659,7 +659,7 @@ async fn test_udaf_correct_eval_result() {
             }),
             distinct: false,
             filter: None,
-            order_by: None,
+            order_by: vec![],
             null_treatment: None,
         },
         TestCase {
@@ -690,7 +690,7 @@ async fn test_udaf_correct_eval_result() {
             }),
             distinct: false,
             filter: None,
-            order_by: None,
+            order_by: vec![],
             null_treatment: None,
         },
         // TODO(discord9): udd_merge/hll_merge/geo_path/quantile_aggr tests

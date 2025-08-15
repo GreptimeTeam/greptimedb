@@ -5,7 +5,7 @@ use api::v1::{
 };
 use session::context::QueryContextRef;
 use snafu::ensure;
-use sql::ast::ObjectName;
+use sql::ast::{ObjectName, ObjectNamePartExt};
 use sql::statements::create::trigger::{ChannelType, CreateTrigger};
 
 use crate::error::Result;
@@ -67,7 +67,7 @@ fn sanitize_trigger_name(mut trigger_name: ObjectName) -> Result<String> {
         }
     );
     // safety: we've checked trigger_name.0 has exactly one element.
-    Ok(trigger_name.0.swap_remove(0).value)
+    Ok(trigger_name.0.swap_remove(0).to_string_unquoted())
 }
 
 #[cfg(test)]
@@ -81,15 +81,15 @@ mod tests {
 
     #[test]
     fn test_sanitize_trigger_name() {
-        let name = ObjectName(vec![sql::ast::Ident::new("my_trigger")]);
+        let name = vec![sql::ast::Ident::new("my_trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "my_trigger");
 
-        let name = ObjectName(vec![sql::ast::Ident::with_quote('`', "my_trigger")]);
+        let name = vec![sql::ast::Ident::with_quote('`', "my_trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "my_trigger");
 
-        let name = ObjectName(vec![sql::ast::Ident::with_quote('\'', "trigger")]);
+        let name = vec![sql::ast::Ident::with_quote('\'', "trigger")].into();
         let sanitized = sanitize_trigger_name(name).unwrap();
         assert_eq!(sanitized, "trigger");
     }

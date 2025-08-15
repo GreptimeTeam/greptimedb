@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("foo")])],
+                vec![ObjectName::from(vec![Ident::new("foo")])],
                 false
             ))
         );
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("foo")])],
+                vec![ObjectName::from(vec![Ident::new("foo")])],
                 true
             ))
         );
@@ -205,7 +205,10 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")])],
+                vec![ObjectName::from(vec![
+                    Ident::new("my_schema"),
+                    Ident::new("foo")
+                ])],
                 false
             ))
         );
@@ -217,7 +220,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropTable(DropTable::new(
-                vec![ObjectName(vec![
+                vec![ObjectName::from(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
@@ -236,7 +239,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::new("public")]),
+                ObjectName::from(vec![Ident::new("public")]),
                 false
             ))
         );
@@ -248,7 +251,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::new("public")]),
+                ObjectName::from(vec![Ident::new("public")]),
                 true
             ))
         );
@@ -260,7 +263,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropDatabase(DropDatabase::new(
-                ObjectName(vec![Ident::with_quote('`', "fOo"),]),
+                ObjectName::from(vec![Ident::with_quote('`', "fOo"),]),
                 false
             ))
         );
@@ -274,7 +277,10 @@ mod tests {
         let mut stmts: Vec<Statement> = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropFlow(DropFlow::new(ObjectName(vec![Ident::new("foo")]), false))
+            Statement::DropFlow(DropFlow::new(
+                ObjectName::from(vec![Ident::new("foo")]),
+                false
+            ))
         );
 
         let sql = "DROP FLOW IF EXISTS foo";
@@ -283,7 +289,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropFlow(DropFlow::new(ObjectName(vec![Ident::new("foo")]), true))
+            Statement::DropFlow(DropFlow::new(
+                ObjectName::from(vec![Ident::new("foo")]),
+                true
+            ))
         );
 
         let sql = "DROP FLOW my_schema.foo";
@@ -293,7 +302,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropFlow(DropFlow::new(
-                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                ObjectName::from(vec![Ident::new("my_schema"), Ident::new("foo")]),
                 false
             ))
         );
@@ -305,7 +314,7 @@ mod tests {
         assert_eq!(
             stmts.pop().unwrap(),
             Statement::DropFlow(DropFlow::new(
-                ObjectName(vec![
+                ObjectName::from(vec![
                     Ident::new("my_catalog"),
                     Ident::new("my_schema"),
                     Ident::new("foo")
@@ -325,7 +334,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![Ident::new("foo")]),
+                view_name: ObjectName::from(vec![Ident::new("foo")]),
                 drop_if_exists: false,
             })
         );
@@ -339,7 +348,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![
+                view_name: ObjectName::from(vec![
                     Ident::new("greptime"),
                     Ident::new("public"),
                     Ident::new("foo")
@@ -357,7 +366,7 @@ mod tests {
         assert_eq!(
             stmt,
             Statement::DropView(DropView {
-                view_name: ObjectName(vec![Ident::new("foo")]),
+                view_name: ObjectName::from(vec![Ident::new("foo")]),
                 drop_if_exists: true,
             })
         );

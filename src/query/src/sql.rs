@@ -41,7 +41,6 @@ use common_time::timezone::get_timezone;
 use common_time::Timestamp;
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
-use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::{case, col, lit, Expr, SortExpr};
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
@@ -250,13 +249,6 @@ async fn query_from_information_schema_table(
 
     let DataFrame::DataFusion(dataframe) = query_engine.read_table(table)?;
 
-    // Apply select
-    let dataframe = if select.is_empty() {
-        dataframe
-    } else {
-        dataframe.select(select).context(error::PlanSqlSnafu)?
-    };
-
     // Apply filters
     let dataframe = filters.into_iter().try_fold(dataframe, |df, expr| {
         df.filter(expr).context(error::PlanSqlSnafu)
@@ -272,11 +264,26 @@ async fn query_from_information_schema_table(
     };
 
     // Apply sorting
-    let dataframe = dataframe
-        .sort(sort)
-        .context(error::PlanSqlSnafu)?
-        .select_columns(&projects.iter().map(|(c, _)| *c).collect::<Vec<_>>())
-        .context(error::PlanSqlSnafu)?;
+    let dataframe = if sort.is_empty() {
+        dataframe
+    } else {
+        dataframe.sort(sort).context(error::PlanSqlSnafu)?
+    };
+
+    // Apply select
+    let dataframe = if select.is_empty() {
+        if projects.is_empty() {
+            dataframe
+        } else {
+            let projection = projects
+                .iter()
+                .map(|x| col(x.0).alias(x.1))
+                .collect::<Vec<_>>();
+            dataframe.select(projection).context(error::PlanSqlSnafu)?
+        }
+    } else {
+        dataframe.select(select).context(error::PlanSqlSnafu)?
+    };
 
     // Apply projection
     let dataframe = projects
@@ -400,8 +407,12 @@ pub async fn show_index(
     };
 
     let select = vec![
+        col(key_column_usage::TABLE_NAME).alias(INDEX_TABLE_COLUMN),
         // 1 as `Non_unique`: contain duplicates
         lit(1).alias(INDEX_NONT_UNIQUE_COLUMN),
+        col(key_column_usage::CONSTRAINT_NAME).alias(INDEX_KEY_NAME_COLUMN),
+        col(key_column_usage::ORDINAL_POSITION).alias(INDEX_SEQ_IN_INDEX_COLUMN),
+        col(key_column_usage::COLUMN_NAME).alias(INDEX_COLUMN_NAME_COLUMN),
         // How the column is sorted in the index: A (ascending).
         lit("A").alias(COLUMN_COLLATION_COLUMN),
         null().alias(INDEX_CARDINALITY_COLUMN),
@@ -416,14 +427,11 @@ pub async fn show_index(
             .otherwise(lit(YES_STR))
             .context(error::PlanSqlSnafu)?
             .alias(COLUMN_NULLABLE_COLUMN),
+        col(key_column_usage::GREPTIME_INDEX_TYPE).alias(INDEX_INDEX_TYPE_COLUMN),
         lit("").alias(COLUMN_COMMENT_COLUMN),
         lit("").alias(INDEX_COMMENT_COLUMN),
         lit(YES_STR).alias(INDEX_VISIBLE_COLUMN),
         null().alias(INDEX_EXPRESSION_COLUMN),
-        Expr::Wildcard {
-            qualifier: None,
-            options: Box::new(WildcardOptions::default()),
-        },
     ];
 
     let projects = vec![
@@ -765,7 +773,7 @@ pub async fn show_search_path(_query_ctx: QueryContextRef) -> Result<Output> {
 
 pub fn show_create_database(database_name: &str, options: OptionMap) -> Result<Output> {
     let stmt = CreateDatabase {
-        name: ObjectName(vec![Ident::new(database_name)]),
+        name: ObjectName::from(vec![Ident::new(database_name)]),
         if_not_exists: true,
         options,
     };
@@ -1005,7 +1013,7 @@ pub fn show_create_flow(
 
     let stmt = CreateFlow {
         flow_name,
-        sink_table_name: ObjectName(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
+        sink_table_name: ObjectName::from(vec![Ident::new(&flow_val.sink_table_name().table_name)]),
         // notice we don't want `OR REPLACE` and `IF NOT EXISTS` in same sql since it's unclear what to do
         // so we set `or_replace` to false.
         or_replace: false,
@@ -1422,7 +1430,7 @@ mod test {
 
     fn exec_show_variable(variable: &str, tz: &str) -> Result<String> {
         let stmt = ShowVariables {
-            variable: ObjectName(vec![Ident::new(variable)]),
+            variable: ObjectName::from(vec![Ident::new(variable)]),
         };
         let ctx = Arc::new(
             QueryContextBuilder::default()

@@ -709,7 +709,7 @@ jobs:
       - name: Install toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-            cache: false
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:

@@ -1817,27 +1817,27 @@ fn convert_one_expr(
         // col, val
         (Expr::Identifier(ident), Expr::Value(value)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
+            let value = convert_value(&value.value, data_type, timezone, None)?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
         (Expr::Identifier(ident), Expr::UnaryOp { op: unary_op, expr })
             if let Expr::Value(v) = &**expr =>
         {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
+            let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Column(column_name), op, Operand::Value(value))
         }
         // val, col
         (Expr::Value(value), Expr::Identifier(ident)) => {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(value, data_type, timezone, None)?;
+            let value = convert_value(&value.value, data_type, timezone, None)?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::UnaryOp { op: unary_op, expr }, Expr::Identifier(ident))
             if let Expr::Value(v) = &**expr =>
         {
             let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
-            let value = convert_value(v, data_type, timezone, Some(*unary_op))?;
+            let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {

@@ -15,18 +15,17 @@
 use std::sync::Arc;
 
 use common_datasource::file_format::csv::CsvFormat;
-use common_datasource::file_format::json::JsonFormat;
-use common_datasource::file_format::orc::{OrcFormat, OrcOpener};
-use common_datasource::file_format::parquet::{DefaultParquetFileReaderFactory, ParquetFormat};
+use common_datasource::file_format::parquet::DefaultParquetFileReaderFactory;
 use common_datasource::file_format::Format;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
-use datafusion::common::{Constraints, Statistics, ToDFSchema};
+use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvConfig, CsvOpener, FileOpener, FileScanConfig, FileStream, JsonOpener, ParquetExec,
+    CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStream, JsonSource, ParquetSource,
 };
+use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_expr::execution_props::ExecutionProps;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -34,6 +33,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datafusion_expr::utils::conjunction;
+use datafusion_orc::OrcSource;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
@@ -43,86 +43,37 @@ use crate::error::{self, Result};
 
 const DEFAULT_BATCH_SIZE: usize = 8192;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CreateScanPlanContext {}
-
-fn build_csv_opener(
+fn build_record_batch_stream(
+    scan_plan_config: &ScanPlanConfig,
     file_schema: Arc<ArrowSchema>,
-    config: &ScanPlanConfig,
-    format: &CsvFormat,
-) -> CsvOpener {
-    let csv_config = Arc::new(CsvConfig::new(
-        DEFAULT_BATCH_SIZE,
-        file_schema,
-        config.projection.cloned(),
-        format.has_header,
-        format.delimiter,
-        b'"',
-        None,
-        Arc::new(object_store_opendal::OpendalStore::new(
-            config.store.clone(),
-        )),
-        None,
-    ));
-    CsvOpener::new(csv_config, format.compression_type.into())
-}
-
-fn build_json_opener(
-    file_schema: Arc<ArrowSchema>,
-    config: &ScanPlanConfig,
-    format: &JsonFormat,
-) -> Result<JsonOpener> {
-    let projected_schema = if let Some(projection) = config.projection {
-        Arc::new(
-            file_schema
-                .project(projection)
-                .context(error::ProjectArrowSchemaSnafu)?,
-        )
-    } else {
-        file_schema
-    };
-    let store = object_store_opendal::OpendalStore::new(config.store.clone());
-    Ok(JsonOpener::new(
-        DEFAULT_BATCH_SIZE,
-        projected_schema,
-        format.compression_type.into(),
-        Arc::new(store),
-    ))
-}
-
-fn build_orc_opener(output_schema: Arc<ArrowSchema>, config: &ScanPlanConfig) -> Result<OrcOpener> {
-    Ok(OrcOpener::new(
-        config.store.clone(),
-        output_schema,
-        config.projection.cloned(),
-    ))
-}
-
-fn build_record_batch_stream<T: FileOpener + Send + 'static>(
-    opener: T,
-    file_schema: Arc<ArrowSchema>,
-    files: &[String],
-    projection: Option<&Vec<usize>>,
     limit: Option<usize>,
+    file_source: Arc<dyn FileSource>,
 ) -> Result<SendableRecordBatchStream> {
-    let statistics = Statistics::new_unknown(file_schema.as_ref());
+    let files = scan_plan_config
+        .files
+        .iter()
+        .map(|filename| PartitionedFile::new(filename.to_string(), 0))
+        .collect::<Vec<_>>();
+
+    let config = FileScanConfigBuilder::new(
+        ObjectStoreUrl::local_filesystem(),
+        file_schema,
+        file_source.clone(),
+    )
+    .with_projection(scan_plan_config.projection.cloned())
+    .with_limit(limit)
+    .with_file_group(FileGroup::new(files))
+    .build();
+
+    let store = Arc::new(object_store_opendal::OpendalStore::new(
+        scan_plan_config.store.clone(),
+    ));
+
+    let file_opener = file_source.create_file_opener(store, &config, 0);
     let stream = FileStream::new(
-        &FileScanConfig {
-            object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-            file_schema,
-            file_groups: vec![files
-                .iter()
-                .map(|filename| PartitionedFile::new(filename.to_string(), 0))
-                .collect::<Vec<_>>()],
-            statistics,
-            projection: projection.cloned(),
-            limit,
-            table_partition_cols: vec![],
-            output_ordering: vec![],
-            constraints: Constraints::empty(),
-        },
+        &config,
         0, // partition: hard-code
-        opener,
+        file_opener,
         &ExecutionPlanMetricsSet::new(),
     )
     .context(error::BuildStreamSnafu)?;
@@ -132,34 +83,32 @@ fn build_record_batch_stream<T: FileOpener + Send + 'static>(
 }
 
 fn new_csv_stream(
-    _ctx: &CreateScanPlanContext,
     config: &ScanPlanConfig,
     format: &CsvFormat,
 ) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
-    let opener = build_csv_opener(file_schema.clone(), config, format);
+
     // push down limit only if there is no filter
     let limit = config.filters.is_empty().then_some(config.limit).flatten();
-    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
+
+    let csv_source = CsvSource::new(format.has_header, format.delimiter, b'"')
+        .with_schema(file_schema.clone())
+        .with_batch_size(DEFAULT_BATCH_SIZE);
+
+    build_record_batch_stream(config, file_schema, limit, csv_source)
 }
 
-fn new_json_stream(
-    _ctx: &CreateScanPlanContext,
-    config: &ScanPlanConfig,
-    format: &JsonFormat,
-) -> Result<SendableRecordBatchStream> {
+fn new_json_stream(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
-    let opener = build_json_opener(file_schema.clone(), config, format)?;
+
     // push down limit only if there is no filter
     let limit = config.filters.is_empty().then_some(config.limit).flatten();
-    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
+
+    let file_source = JsonSource::new().with_batch_size(DEFAULT_BATCH_SIZE);
+    build_record_batch_stream(config, file_schema, limit, file_source)
 }
 
-fn new_parquet_stream_with_exec_plan(
-    _ctx: &CreateScanPlanContext,
-    config: &ScanPlanConfig,
-    _format: &ParquetFormat,
-) -> Result<SendableRecordBatchStream> {
+fn new_parquet_stream_with_exec_plan(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
     let ScanPlanConfig {
         files,
@@ -170,25 +119,20 @@ fn new_parquet_stream_with_exec_plan(
         ..
     } = config;
 
-    // construct config for ParquetExec
-    let scan_config = FileScanConfig {
-        object_store_url: ObjectStoreUrl::parse("empty://").unwrap(), // won't be used
-        file_schema: file_schema.clone(),
-        file_groups: vec![files
+    let file_group = FileGroup::new(
+        files
             .iter()
             .map(|filename| PartitionedFile::new(filename.to_string(), 0))
-            .collect::<Vec<_>>()],
-        constraints: Constraints::empty(),
-        statistics: Statistics::new_unknown(file_schema.as_ref()),
-        projection: projection.cloned(),
-        limit: *limit,
-        table_partition_cols: vec![],
-        output_ordering: vec![],
-    };
+            .collect::<Vec<_>>(),
+    );
+
+    let mut parquet_source = ParquetSource::default().with_parquet_file_reader_factory(Arc::new(
+        DefaultParquetFileReaderFactory::new(store.clone()),
+    ));
 
     // build predicate filter
     let filters = filters.to_vec();
-    let filters = if let Some(expr) = conjunction(filters) {
+    if let Some(expr) = conjunction(filters) {
         let df_schema = file_schema
             .clone()
             .to_dfschema_ref()
@@ -196,22 +140,23 @@ fn new_parquet_stream_with_exec_plan(
 
         let filters = create_physical_expr(&expr, &df_schema, &ExecutionProps::new())
             .context(error::ParquetScanPlanSnafu)?;
-        Some(filters)
-    } else {
-        None
+        parquet_source = parquet_source.with_predicate(filters);
     };
+
+    let file_scan_config = FileScanConfigBuilder::new(
+        ObjectStoreUrl::local_filesystem(),
+        file_schema,
+        Arc::new(parquet_source),
+    )
+    .with_file_group(file_group)
+    .with_projection(projection.cloned())
+    .with_limit(*limit)
+    .build();
 
     // TODO(ruihang): get this from upper layer
     let task_ctx = SessionContext::default().task_ctx();
-    let mut builder = ParquetExec::builder(scan_config);
-    if let Some(filters) = filters {
-        builder = builder.with_predicate(filters);
-    }
-    let parquet_exec = builder
-        .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(
-            store.clone(),
-        )))
-        .build();
+
+    let parquet_exec = DataSourceExec::from_data_source(file_scan_config);
     let stream = parquet_exec
         .execute(0, task_ctx)
         .context(error::ParquetScanPlanSnafu)?;
@@ -221,16 +166,14 @@ fn new_parquet_stream_with_exec_plan(
     ))
 }
 
-fn new_orc_stream(
-    _ctx: &CreateScanPlanContext,
-    config: &ScanPlanConfig,
-    _format: &OrcFormat,
-) -> Result<SendableRecordBatchStream> {
+fn new_orc_stream(config: &ScanPlanConfig) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
-    let opener = build_orc_opener(file_schema.clone(), config)?;
+
     // push down limit only if there is no filter
     let limit = config.filters.is_empty().then_some(config.limit).flatten();
-    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
+
+    let file_source = OrcSource::default().with_batch_size(DEFAULT_BATCH_SIZE);
+    build_record_batch_stream(config, file_schema, limit, file_source)
 }
 
 #[derive(Debug, Clone)]
@@ -245,13 +188,12 @@ pub struct ScanPlanConfig<'a> {
 
 pub fn create_stream(
     format: &Format,
-    ctx: &CreateScanPlanContext,
     config: &ScanPlanConfig,
 ) -> Result<SendableRecordBatchStream> {
     match format {
-        Format::Csv(format) => new_csv_stream(ctx, config, format),
-        Format::Json(format) => new_json_stream(ctx, config, format),
-        Format::Parquet(format) => new_parquet_stream_with_exec_plan(ctx, config, format),
-        Format::Orc(format) => new_orc_stream(ctx, config, format),
+        Format::Csv(format) => new_csv_stream(config, format),
+        Format::Json(_) => new_json_stream(config),
+        Format::Parquet(_) => new_parquet_stream_with_exec_plan(config),
+        Format::Orc(_) => new_orc_stream(config),
     }
 }

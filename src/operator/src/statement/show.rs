@@ -20,6 +20,7 @@ use partition::manager::PartitionInfo;
 use session::context::QueryContextRef;
 use session::table_name::table_idents_to_full_name;
 use snafu::{OptionExt, ResultExt};
+use sql::ast::ObjectNamePartExt;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
     ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
@@ -245,8 +246,8 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let obj_name = &show.flow_name;
         let (catalog_name, flow_name) = match &obj_name.0[..] {
-            [table] => (query_ctx.current_catalog().to_string(), table.value.clone()),
-            [catalog, table] => (catalog.value.clone(), table.value.clone()),
+            [table] => (query_ctx.current_catalog().to_string(), table.to_string_unquoted()),
+            [catalog, table] => (catalog.to_string_unquoted(), table.to_string_unquoted()),
             _ => {
                 return InvalidSqlSnafu {
                     err_msg: format!(

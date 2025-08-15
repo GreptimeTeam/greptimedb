@@ -220,7 +220,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     /// Helper function to get a non-null literal.
     fn nonnull_lit(expr: &Expr) -> Option<&ScalarValue> {
         match expr {
-            Expr::Literal(lit) if !lit.is_null() => Some(lit),
+            Expr::Literal(lit, _) if !lit.is_null() => Some(lit),
             _ => None,
         }
     }
@@ -248,7 +248,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
 mod tests {
     use api::v1::SemanticType;
     use datafusion_common::Column;
-    use datafusion_expr::Between;
+    use datafusion_expr::{Between, Literal};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use index::inverted_index::search::predicate::{
@@ -313,11 +313,11 @@ mod tests {
     }
 
     pub(crate) fn string_lit(s: impl Into<String>) -> Expr {
-        Expr::Literal(ScalarValue::Utf8(Some(s.into())))
+        s.into().lit()
     }
 
     pub(crate) fn int64_lit(i: impl Into<i64>) -> Expr {
-        Expr::Literal(ScalarValue::Int64(Some(i.into())))
+        i.into().lit()
     }
 
     pub(crate) fn encoded_string(s: impl Into<String>) -> Vec<u8> {

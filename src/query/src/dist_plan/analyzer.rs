@@ -206,6 +206,7 @@ impl DistPlannerAnalyzer {
         Ok(Subquery {
             subquery: Arc::new(rewrote_subquery),
             outer_ref_columns: subquery.outer_ref_columns,
+            spans: Default::default(),
         })
     }
 }
