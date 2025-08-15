@@ -14,6 +14,10 @@
 
 //! [`ConstraintPruner`] prunes partition info based on given expressions.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
+
+use ahash::HashSet;
 use common_telemetry::debug;
 use partition::collider::{AtomicExpr, Collider, GluonOp};
 use partition::expr::PartitionExpr;
@@ -27,32 +31,27 @@ pub struct ConstraintPruner;
 
 impl ConstraintPruner {
     /// Prune regions using constraint satisfaction approach
+    ///
     /// Takes query expressions and partition info, returns matching region IDs
     pub fn prune_regions(
         query_expressions: &[PartitionExpr],
         partitions: &[PartitionInfo],
     ) -> Result<Vec<RegionId>> {
-        Self::prune_regions_impl(query_expressions, partitions)
-    }
-
-    /// Internal implementation for region pruning
-    fn prune_regions_impl(
-        query_expressions: &[PartitionExpr],
-        partitions: &[PartitionInfo],
-    ) -> Result<Vec<RegionId>> {
-        if query_expressions.is_empty() {
+        if query_expressions.is_empty() || partitions.is_empty() {
             // No constraints, return all regions
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
         // Collect all partition expressions for unified normalization
-        let all_partition_expressions: Vec<PartitionExpr> = partitions
-            .iter()
-            .filter_map(|p| p.partition_expr.clone())
-            .collect();
-
+        let mut expression_to_partition = HashMap::new();
+        let mut all_partition_expressions = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            if let Some(expr) = &partition.partition_expr {
+                expression_to_partition.insert(all_partition_expressions.len(), partition.id);
+                all_partition_expressions.push(expr.clone());
+            }
+        }
         if all_partition_expressions.is_empty() {
-            // No partition expressions to match against, return all regions conservatively
             return Ok(partitions.iter().map(|p| p.id).collect());
         }
 
@@ -78,40 +77,17 @@ impl ConstraintPruner {
             .filter(|atomic| atomic.source_expr_index < query_expressions.len())
             .collect();
 
-        let mut candidate_regions = Vec::new();
+        let mut candidate_regions = HashSet::default();
 
-        // Process each partition with direct region mapping
-        for partition in partitions {
-            if let Some(ref partition_expr) = partition.partition_expr {
-                // Find atomic expressions for this specific partition expression
-                let partition_expr_index = all_partition_expressions
-                    .iter()
-                    .position(|expr| expr == partition_expr);
-
-                if let Some(index) = partition_expr_index {
-                    let adjusted_index = query_expressions.len() + index;
-                    let partition_atomics: Vec<&AtomicExpr> = collider
-                        .atomic_exprs
-                        .iter()
-                        .filter(|atomic| atomic.source_expr_index == adjusted_index)
-                        .collect();
-
-                    // Check overlap between query and partition atomic expressions
-                    if Self::atomic_sets_overlap(&query_atomics, &partition_atomics) {
-                        candidate_regions.push(partition.id);
-                    }
-                } else {
-                    // Partition expression not found in unified list, include conservatively
-                    debug!("Partition expression not found in unified list for region {}, including conservatively", partition.id);
-                    candidate_regions.push(partition.id);
-                }
-            } else {
-                // No partition expression, include conservatively
-                debug!(
-                    "No partition expression for region {}, including conservatively",
-                    partition.id
-                );
-                candidate_regions.push(partition.id);
+        for region_atomics in collider
+            .atomic_exprs
+            .iter()
+            .filter(|atomic| atomic.source_expr_index >= query_expressions.len())
+        {
+            if Self::atomic_sets_overlap(&query_atomics, region_atomics) {
+                let partition_expr_index =
+                    region_atomics.source_expr_index - query_expressions.len();
+                candidate_regions.insert(expression_to_partition[&partition_expr_index]);
             }
         }
 
@@ -121,28 +97,16 @@ impl ConstraintPruner {
             candidate_regions.len()
         );
 
-        Ok(candidate_regions)
+        Ok(candidate_regions.into_iter().collect())
     }
 
-    /// Check if query atomic expressions overlap with partition atomic expressions
-    /// Each atomic expression represents a constraint that can satisfy the query/partition
-    fn atomic_sets_overlap(
-        query_atomics: &[&AtomicExpr],
-        partition_atomics: &[&AtomicExpr],
-    ) -> bool {
-        // Query represents OR of atomic expressions (any query atomic can be satisfied)
-        // Partition represents OR of atomic expressions (any partition atomic defines the partition)
-        // A partition satisfies a query if any query atomic can be satisfied by any partition atomic
-
+    fn atomic_sets_overlap(query_atomics: &[&AtomicExpr], partition_atomic: &AtomicExpr) -> bool {
         for query_atomic in query_atomics {
-            for partition_atomic in partition_atomics {
-                if Self::atomic_constraint_satisfied(query_atomic, partition_atomic) {
-                    return true;
-                }
+            if Self::atomic_constraint_satisfied(query_atomic, partition_atomic) {
+                return true;
             }
         }
 
-        // If no atomic expressions can be satisfied, partition cannot satisfy query
         false
     }
 
