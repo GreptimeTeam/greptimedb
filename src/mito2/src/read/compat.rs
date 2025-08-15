@@ -36,19 +36,21 @@ use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
     NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::flat_projection::{plain_projected_columns, FlatProjectionMapper};
 use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat, FIXED_POS_COLUMN_NUM};
+use crate::sst::parquet::format::{
+    FormatProjection, PrimaryKeyArray, ReadFormat, FIXED_POS_COLUMN_NUM,
+};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
     /// Underlying reader.
     reader: R,
     /// Helper to compat batches.
-    compat: CompatBatch,
+    compat: PrimaryKeyCompatBatch,
 }
 
 impl<R> CompatReader<R> {
@@ -63,7 +65,7 @@ impl<R> CompatReader<R> {
     ) -> Result<CompatReader<R>> {
         Ok(CompatReader {
             reader,
-            compat: CompatBatch::new(mapper, reader_meta)?,
+            compat: PrimaryKeyCompatBatch::new(mapper, reader_meta)?,
         })
     }
 }
@@ -81,8 +83,34 @@ impl<R: BatchReader> BatchReader for CompatReader<R> {
     }
 }
 
+/// Helper to adapt schema of the batch to an expected schema.
+pub(crate) enum CompatBatch {
+    /// Adapter for primary key format.
+    PrimaryKey(PrimaryKeyCompatBatch),
+    /// Adapter for flat format.
+    Flat(FlatCompatBatch),
+}
+
+impl CompatBatch {
+    /// Returns the inner primary key batch adapter if this is a PrimaryKey format.
+    pub(crate) fn as_primary_key(&self) -> Option<&PrimaryKeyCompatBatch> {
+        match self {
+            CompatBatch::PrimaryKey(batch) => Some(batch),
+            _ => None,
+        }
+    }
+
+    /// Returns the inner flat batch adapter if this is a Flat format.
+    pub(crate) fn as_flat(&self) -> Option<&FlatCompatBatch> {
+        match self {
+            CompatBatch::Flat(batch) => Some(batch),
+            _ => None,
+        }
+    }
+}
+
 /// A helper struct to adapt schema of the batch to an expected schema.
-pub(crate) struct CompatBatch {
+pub(crate) struct PrimaryKeyCompatBatch {
     /// Optional primary key adapter.
     rewrite_pk: Option<RewritePrimaryKey>,
     /// Optional primary key adapter.
@@ -91,7 +119,7 @@ pub(crate) struct CompatBatch {
     compat_fields: Option<CompatFields>,
 }
 
-impl CompatBatch {
+impl PrimaryKeyCompatBatch {
     /// Creates a new [CompatBatch].
     /// - `mapper` is built from the metadata users expect to see.
     /// - `reader_meta` is the metadata of the input reader.
@@ -216,12 +244,13 @@ impl FlatCompatBatch {
     /// Creates a [FlatCompatBatch] if needed.
     /// - `mapper` is built from the metadata users expect to see.
     /// - `actual` is the [RegionMetadata] of the input reader.
-    /// - `actual_schema` is the actual batch schema of the input reader.
+    /// - `format_projection` is the projection of the read format.
     pub(crate) fn may_new(
         mapper: &FlatProjectionMapper,
         actual: &RegionMetadataRef,
-        actual_schema: Vec<(ColumnId, ConcreteDataType)>,
+        format_projection: &FormatProjection,
     ) -> Result<Option<Self>> {
+        let actual_schema = plain_projected_columns(actual, format_projection);
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema {
             return Ok(None);

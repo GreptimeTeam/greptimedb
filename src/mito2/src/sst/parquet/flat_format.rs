@@ -128,11 +128,8 @@ pub struct FlatReadFormat {
     metadata: RegionMetadataRef,
     /// SST file schema.
     arrow_schema: SchemaRef,
-    /// Indices of columns to read from the SST. It contains all internal columns.
-    projection_indices: Vec<usize>,
-    /// Column id to their index in the projected schema (
-    /// the schema after projection).
-    column_id_to_projected_index: HashMap<ColumnId, usize>,
+    /// Projection.
+    format_projection: FormatProjection,
     /// Column id to index in SST.
     column_id_to_sst_index: HashMap<ColumnId, usize>,
     /// Sequence number to override the sequence read from the SST.
@@ -159,8 +156,7 @@ impl FlatReadFormat {
         FlatReadFormat {
             metadata,
             arrow_schema,
-            projection_indices: format_projection.projection_indices,
-            column_id_to_projected_index: format_projection.column_id_to_projected_index,
+            format_projection,
             column_id_to_sst_index: id_to_index,
             override_sequence: None,
         }
@@ -174,7 +170,10 @@ impl FlatReadFormat {
 
     /// Index of a column in the projected batch by its column id.
     pub fn projected_index_by_id(&self, column_id: ColumnId) -> Option<usize> {
-        self.column_id_to_projected_index.get(&column_id).copied()
+        self.format_projection
+            .column_id_to_projected_index
+            .get(&column_id)
+            .copied()
     }
 
     /// Returns min values of specific column in row groups.
@@ -225,7 +224,7 @@ impl FlatReadFormat {
 
     /// Gets sorted projection indices to read.
     pub(crate) fn projection_indices(&self) -> &[usize] {
-        &self.projection_indices
+        &self.format_projection.projection_indices
     }
 
     /// Creates a sequence array to override.
@@ -261,6 +260,11 @@ impl FlatReadFormat {
         columns[sequence_column_idx] = sequence_array;
 
         RecordBatch::try_new(record_batch.schema(), columns).context(NewRecordBatchSnafu)
+    }
+
+    /// Returns the format projection.
+    pub(crate) fn format_projection(&self) -> &FormatProjection {
+        &self.format_projection
     }
 
     fn get_stat_values(

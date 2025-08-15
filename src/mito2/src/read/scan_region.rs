@@ -45,7 +45,7 @@ use crate::error::Result;
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::MemtableRange;
 use crate::metrics::READ_SST_COUNT;
-use crate::read::compat::{self, CompatBatch};
+use crate::read::compat::{self, CompatBatch, FlatCompatBatch, PrimaryKeyCompatBatch};
 use crate::read::projection::ProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::seq_scan::SeqScan;
@@ -922,11 +922,22 @@ impl ScanInput {
         if need_compat {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
-            let compat = CompatBatch::new(
-                &self.mapper,
-                file_range_ctx.read_format().metadata().clone(),
-            )?;
-            file_range_ctx.set_compat_batch(Some(compat));
+            let compat = if let Some(flat_format) = file_range_ctx.read_format().as_flat() {
+                let mapper = self.mapper.as_flat().unwrap();
+                FlatCompatBatch::may_new(
+                    mapper,
+                    flat_format.metadata(),
+                    flat_format.format_projection(),
+                )?
+                .map(CompatBatch::Flat)
+            } else {
+                let compact_batch = PrimaryKeyCompatBatch::new(
+                    &self.mapper,
+                    file_range_ctx.read_format().metadata().clone(),
+                )?;
+                Some(CompatBatch::PrimaryKey(compact_batch))
+            };
+            file_range_ctx.set_compat_batch(compat);
         }
         Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
     }
