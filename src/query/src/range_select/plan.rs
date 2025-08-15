@@ -544,7 +544,7 @@ impl RangeSelect {
                 // At this time, aggregate plan has been replaced by a custom range plan,
                 // so `CountWildcardRule` has not been applied.
                 // We manually modify it when creating the physical plan.
-                #[allow(deprecated)]
+                #[expect(deprecated)]
                 Expr::Wildcard { .. } if is_count_aggr => create_physical_expr(
                     &lit(COUNT_STAR_EXPANSION),
                     df_schema.as_ref(),

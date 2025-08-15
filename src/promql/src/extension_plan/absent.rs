@@ -281,7 +281,7 @@ impl ExecutionPlan for AbsentExec {
     }
 
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
-        let requirement: LexRequirement = [PhysicalSortRequirement {
+        let requirement = LexRequirement::from([PhysicalSortRequirement {
             expr: Arc::new(
                 ColumnExpr::new_with_schema(&self.time_index_column, &self.input.schema()).unwrap(),
             ),
@@ -289,8 +289,7 @@ impl ExecutionPlan for AbsentExec {
                 descending: false,
                 nulls_first: false,
             }),
-        }]
-        .into();
+        }]);
         vec![Some(OrderingRequirements::new(requirement))]
     }
 
