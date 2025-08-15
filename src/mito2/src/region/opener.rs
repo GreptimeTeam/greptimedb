@@ -494,8 +494,8 @@ impl RegionOpener {
             compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
             remove_file_options: RemoveFileOptions {
-                keep_count: config.manifest_keep_removed_file_count,
-                keep_ttl: config.manifest_keep_removed_file_ttl,
+                keep_count: config.experimental_manifest_keep_removed_file_count,
+                keep_ttl: config.experimental_manifest_keep_removed_file_ttl,
             },
         })
     }
