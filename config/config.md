@@ -597,6 +597,7 @@
 | `flow.batching_mode.experimental_time_window_merge_threshold` | Integer | `3` | Time window merge distance |
 | `flow.batching_mode.read_preference` | String | `Leader` | Read preference of the Frontend client. |
 | `flow.batching_mode.client_tls` | -- | -- | -- |
+| `flow.batching_mode.client_tls.enabled` | Bool | `false` | Whether to enable TLS for client. |
 | `flow.batching_mode.client_tls.server_ca_cert_path` | String | Unset | Server Certificate file path. |
 | `flow.batching_mode.client_tls.client_cert_path` | String | Unset | Client Certificate file path. |
 | `flow.batching_mode.client_tls.client_key_path` | String | Unset | Client Private key file path. |
