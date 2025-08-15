@@ -32,6 +32,7 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_meta::ddl::create_flow::FLOW_EVAL_INTERVAL_KEY;
 use common_time::Timezone;
 use datafusion::sql::planner::object_name_to_table_reference;
 use datatypes::schema::{
@@ -796,6 +797,15 @@ pub fn to_create_flow_task_expr(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let eval_interval = create_flow
+        .eval_interval
+        .map(common_time::Duration::new_second);
+    let mut flow_options = HashMap::new();
+    if let Some(interval) = eval_interval {
+        let interval_ms = interval.to_std_duration().as_millis();
+        flow_options.insert(FLOW_EVAL_INTERVAL_KEY.to_string(), interval_ms.to_string());
+    }
+
     Ok(CreateFlowExpr {
         catalog_name: query_ctx.current_catalog().to_string(),
         flow_name: sanitize_flow_name(create_flow.flow_name)?,
@@ -806,7 +816,7 @@ pub fn to_create_flow_task_expr(
         expire_after: create_flow.expire_after.map(|value| ExpireAfter { value }),
         comment: create_flow.comment.unwrap_or_default(),
         sql: create_flow.query.to_string(),
-        flow_options: HashMap::new(),
+        flow_options,
     })
 }
 
@@ -840,6 +850,18 @@ mod tests {
 CREATE FLOW calc_reqs SINK TO cnt_reqs AS
 TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+
+        assert!(
+            stmt.is_err(),
+            "Expected error for invalid TQL EVAL parameters: {:#?}",
+            stmt
+        );
+
+        let sql = r#"
+CREATE FLOW calc_reqs SINK TO cnt_reqs AS
+TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests);"#;
+        let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
                 .pop()
@@ -860,7 +882,7 @@ TQL EVAL (0, 15, '5s') count_values("status_code", http_requests);"#;
         );
         assert!(expr.source_table_names.is_empty());
         assert_eq!(
-            r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+            r#"TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", http_requests)"#,
             expr.sql
         );
     }

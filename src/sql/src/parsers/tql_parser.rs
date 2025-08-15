@@ -44,7 +44,7 @@ use crate::parsers::error::{
 /// - `TQL EXPLAIN [VERBOSE] [FORMAT format] <query>`
 /// - `TQL ANALYZE [VERBOSE] [FORMAT format] <query>`
 impl ParserContext<'_> {
-    pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
+    pub(crate) fn parse_tql(&mut self, require_now_expr: bool) -> Result<Statement> {
         let _ = self.parser.next_token();
 
         match self.parser.peek_token().token {
@@ -56,7 +56,7 @@ impl ParserContext<'_> {
                         if (uppercase == EVAL || uppercase == EVALUATE)
                             && w.quote_style.is_none() =>
                     {
-                        self.parse_tql_params()
+                        self.parse_tql_params(require_now_expr)
                             .map(|params| Statement::Tql(Tql::Eval(TqlEval::from(params))))
                             .context(error::TQLSyntaxSnafu)
                     }
@@ -67,7 +67,7 @@ impl ParserContext<'_> {
                             let _consume_verbose_token = self.parser.next_token();
                         }
                         let format = self.parse_format_option();
-                        self.parse_tql_params()
+                        self.parse_tql_params(require_now_expr)
                             .map(|mut params| {
                                 params.is_verbose = is_verbose;
                                 params.format = format;
@@ -82,7 +82,7 @@ impl ParserContext<'_> {
                             let _consume_verbose_token = self.parser.next_token();
                         }
                         let format = self.parse_format_option();
-                        self.parse_tql_params()
+                        self.parse_tql_params(require_now_expr)
                             .map(|mut params| {
                                 params.is_verbose = is_verbose;
                                 params.format = format;
@@ -97,18 +97,35 @@ impl ParserContext<'_> {
         }
     }
 
-    fn parse_tql_params(&mut self) -> std::result::Result<TqlParameters, TQLError> {
+    /// `require_now_expr` indicates whether the start&end must contain a `now()` function.
+    fn parse_tql_params(
+        &mut self,
+        require_now_expr: bool,
+    ) -> std::result::Result<TqlParameters, TQLError> {
         let parser = &mut self.parser;
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
                 let _consume_lparen_token = parser.next_token();
-                let start = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
-                let end = Self::parse_string_or_number_or_word(parser, &[Token::Comma])?.0;
+                let start = Self::parse_string_or_number_or_word(
+                    parser,
+                    &[Token::Comma],
+                    require_now_expr,
+                )?
+                .0;
+                let end = Self::parse_string_or_number_or_word(
+                    parser,
+                    &[Token::Comma],
+                    require_now_expr,
+                )?
+                .0;
 
-                let (step, delimiter) =
-                    Self::parse_string_or_number_or_word(parser, &[Token::Comma, Token::RParen])?;
+                let (step, delimiter) = Self::parse_string_or_number_or_word(
+                    parser,
+                    &[Token::Comma, Token::RParen],
+                    false,
+                )?;
                 let lookback = if delimiter == Token::Comma {
-                    Self::parse_string_or_number_or_word(parser, &[Token::RParen])
+                    Self::parse_string_or_number_or_word(parser, &[Token::RParen], false)
                         .ok()
                         .map(|t| t.0)
                 } else {
@@ -168,6 +185,7 @@ impl ParserContext<'_> {
     fn parse_string_or_number_or_word(
         parser: &mut Parser,
         delimiter_tokens: &[Token],
+        require_now_expr: bool,
     ) -> std::result::Result<(String, Token), TQLError> {
         let mut tokens = vec![];
 
@@ -185,19 +203,30 @@ impl ParserContext<'_> {
             .context(ParserSnafu),
             1 => {
                 let value = match tokens[0].clone() {
-                    Token::Number(n, _) => n,
-                    Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
-                    Token::Word(_) => Self::parse_tokens_to_ts(tokens)?,
+                    Token::Number(n, _) if !require_now_expr => n,
+                    Token::DoubleQuotedString(s) | Token::SingleQuotedString(s)
+                        if !require_now_expr =>
+                    {
+                        s
+                    }
+                    Token::Word(_) => Self::parse_tokens_to_ts(tokens, require_now_expr)?,
                     unexpected => {
-                        return Err(ParserError::ParserError(format!(
-                            "Expected number, string or word, but have {unexpected:?}"
-                        )))
-                        .context(ParserSnafu);
+                        if !require_now_expr {
+                            return Err(ParserError::ParserError(format!(
+                                "Expected number, string or word, but have {unexpected:?}"
+                            )))
+                            .context(ParserSnafu);
+                        } else {
+                            return Err(ParserError::ParserError(format!(
+                                "Expected expression containing `now()`, but have {unexpected:?}"
+                            )))
+                            .context(ParserSnafu);
+                        }
                     }
                 };
                 Ok(value)
             }
-            _ => Self::parse_tokens_to_ts(tokens),
+            _ => Self::parse_tokens_to_ts(tokens, require_now_expr),
         };
         for token in delimiter_tokens {
             if parser.consume_token(token) {
@@ -211,9 +240,12 @@ impl ParserContext<'_> {
     }
 
     /// Parse the tokens to seconds and convert to string.
-    fn parse_tokens_to_ts(tokens: Vec<Token>) -> std::result::Result<String, TQLError> {
+    fn parse_tokens_to_ts(
+        tokens: Vec<Token>,
+        require_now_expr: bool,
+    ) -> std::result::Result<String, TQLError> {
         let parser_expr = Self::parse_to_expr(tokens)?;
-        let lit = utils::parser_expr_to_scalar_value_literal(parser_expr)
+        let lit = utils::parser_expr_to_scalar_value_literal(parser_expr, require_now_expr)
             .map_err(Box::new)
             .context(ConvertToLogicalExpressionSnafu)?;
 
@@ -279,6 +311,65 @@ mod tests {
                 .unwrap();
         assert_eq!(1, result.len());
         result.remove(0)
+    }
+
+    #[test]
+    fn test_require_now_expr() {
+        let sql = "TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
+        let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let statement = parser.parse_tql(true).unwrap();
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "10");
+                assert_eq!(eval.step, "1s");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        };
+
+        let sql = "TQL EVAL (0, 15, '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
+        let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let statement = parser.parse_tql(true);
+        assert!(
+            statement.is_err()
+                && format!("{:?}", statement)
+                    .contains("Expected expression containing `now()`, but have "),
+            "statement: {:?}",
+            statement
+        );
+
+        let sql = "TQL EVAL (now() - now(), now() -  (now() - '10 seconds'::interval), '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
+        let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let statement = parser.parse_tql(false).unwrap();
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "10");
+                assert_eq!(eval.step, "1s");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        };
+
+        let sql = "TQL EVAL (0, 15, '1s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+        let mut parser = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
+        let statement = parser.parse_tql(false).unwrap();
+        match statement {
+            Statement::Tql(Tql::Eval(eval)) => {
+                assert_eq!(eval.start, "0");
+                assert_eq!(eval.end, "15");
+                assert_eq!(eval.step, "1s");
+                assert_eq!(eval.lookback, None);
+                assert_eq!(eval.query, "http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m");
+            }
+            _ => unreachable!(),
+        };
     }
 
     #[test]

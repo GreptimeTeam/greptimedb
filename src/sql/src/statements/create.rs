@@ -383,6 +383,10 @@ pub struct CreateFlow {
     /// `EXPIRE AFTER`
     /// Duration in second as `i64`
     pub expire_after: Option<i64>,
+    /// Duration for flow evaluation interval
+    /// Duration in seconds as `i64`
+    /// If not set, flow will be evaluated based on time window size and other args.
+    pub eval_interval: Option<i64>,
     /// Comment string
     pub comment: Option<String>,
     /// SQL statement
@@ -436,7 +440,10 @@ impl Display for CreateFlow {
         writeln!(f, "{}", &self.flow_name)?;
         writeln!(f, "SINK TO {}", &self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
-            writeln!(f, "EXPIRE AFTER '{} s' ", expire_after)?;
+            writeln!(f, "EXPIRE AFTER '{} s'", expire_after)?;
+        }
+        if let Some(eval_interval) = &self.eval_interval {
+            writeln!(f, "EVAL INTERVAL '{} s'", eval_interval)?;
         }
         if let Some(comment) = &self.comment {
             writeln!(f, "COMMENT '{}'", comment)?;
