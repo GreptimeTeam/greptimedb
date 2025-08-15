@@ -62,15 +62,16 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
-/// Last data truncated in the region.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
+    #[serde(flatten)]
     pub kind: TruncateKind,
 }
 
 /// The kind of truncate operation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(untagged)]
 pub enum TruncateKind {
     /// Truncate all data in the region, marked by all data before the given entry id&sequence.
     All {
@@ -259,6 +260,8 @@ impl RegionMetaActionList {
 #[cfg(test)]
 mod tests {
 
+    use common_time::Timestamp;
+
     use super::*;
 
     // These tests are used to ensure backward compatibility of manifest files.
@@ -418,5 +421,67 @@ mod tests {
             serde_json::from_str(&serialized_manifest).unwrap();
         assert_eq!(manifest, deserialized_manifest);
         assert_ne!(serialized_manifest, region_manifest_json);
+    }
+
+    #[test]
+    fn test_region_truncate_compat() {
+        // Test deserializing RegionTruncate from old schema
+        let region_truncate_json = r#"{
+            "region_id": 4402341478400,
+            "truncated_entry_id": 10,
+            "truncated_sequence": 20
+        }"#;
+
+        let truncate_v1: RegionTruncate = serde_json::from_str(region_truncate_json).unwrap();
+        assert_eq!(truncate_v1.region_id, 4402341478400);
+        assert_eq!(
+            truncate_v1.kind,
+            TruncateKind::All {
+                truncated_entry_id: 10,
+                truncated_sequence: 20,
+            }
+        );
+
+        // Test deserializing RegionTruncate from new schema
+        let region_truncate_v2_json = r#"{
+    "region_id": 4402341478400,
+    "files_to_remove": [
+        {
+            "region_id": 4402341478400,
+            "file_id": "4b220a70-2b03-4641-9687-b65d94641208",
+            "time_range": [
+                {
+                    "value": 1451609210000,
+                    "unit": "Millisecond"
+                },
+                {
+                    "value": 1451609520000,
+                    "unit": "Millisecond"
+                }
+            ],
+            "level": 1,
+            "file_size": 100
+        }
+    ]
+}"#;
+
+        let truncate_v2: RegionTruncate = serde_json::from_str(region_truncate_v2_json).unwrap();
+        assert_eq!(truncate_v2.region_id, 4402341478400);
+        assert_eq!(
+            truncate_v2.kind,
+            TruncateKind::Partial {
+                files_to_remove: vec![FileMeta {
+                    region_id: RegionId::from_u64(4402341478400),
+                    file_id: FileId::parse_str("4b220a70-2b03-4641-9687-b65d94641208").unwrap(),
+                    time_range: (
+                        Timestamp::new_millisecond(1451609210000),
+                        Timestamp::new_millisecond(1451609520000)
+                    ),
+                    level: 1,
+                    file_size: 100,
+                    ..Default::default()
+                }]
+            }
+        );
     }
 }

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use common_meta::instruction::{FlushRegions, InstructionReply, SimpleReply};
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionFlushRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -27,26 +29,30 @@ impl HandlerContext {
         flush_regions: FlushRegions,
     ) -> BoxFuture<'static, Option<InstructionReply>> {
         Box::pin(async move {
-            for region_id in flush_regions.region_ids {
+            let start_time = Instant::now();
+            for region_id in &flush_regions.region_ids {
                 let request = RegionRequest::Flush(RegionFlushRequest {
                     row_group_size: None,
                 });
-                let result = self.region_server.handle_request(region_id, request).await;
-
+                let result = self.region_server.handle_request(*region_id, request).await;
                 match result {
                     Ok(_) => {}
                     Err(error::Error::RegionNotFound { .. }) => {
-                        warn!("Received a flush region instruction from meta, but target region: {region_id} is not found.");
+                        warn!(
+                            "Received a flush region instruction from meta, but target region: {} is not found.",
+                            region_id
+                        );
                     }
                     Err(err) => {
-                        warn!(
-                            "Failed to flush region: {region_id}, error: {err}",
-                            region_id = region_id,
-                            err = err,
-                        );
+                        warn!("Failed to flush region: {}, error: {}", region_id, err);
                     }
                 }
             }
+            let elapsed = start_time.elapsed();
+            debug!(
+                "Flush regions: {:?}, elapsed: {:?}",
+                flush_regions.region_ids, elapsed
+            );
             None
         })
     }

@@ -40,6 +40,7 @@ pub mod selector;
 pub mod service;
 pub mod state;
 pub mod table_meta_alloc;
+pub mod utils;
 
 pub use crate::error::Result;
 

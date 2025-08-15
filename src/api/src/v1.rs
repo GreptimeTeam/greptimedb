@@ -14,6 +14,8 @@
 
 pub mod column_def;
 
+pub mod helper;
+
 pub mod meta {
     pub use greptime_proto::v1::meta::*;
 }

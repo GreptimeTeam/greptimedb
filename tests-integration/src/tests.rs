@@ -15,6 +15,7 @@
 mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
+mod reconcile_table;
 pub(crate) mod test_util;
 
 use std::collections::HashMap;

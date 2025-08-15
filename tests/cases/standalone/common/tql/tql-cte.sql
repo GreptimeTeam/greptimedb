@@ -38,18 +38,17 @@ WITH
     filtered AS (SELECT * FROM tql_data WHERE val > 5)
 SELECT count(*) FROM filtered;
 
--- TODO(ruihang): The following tests are not supported yet, need to fix parser first.
 -- TQL CTE with complex PromQL expressions
--- WITH 
---     tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
---     filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
--- SELECT sum(val) FROM filtered;
+WITH 
+    tql_data (ts, val) AS (TQL EVAL (0, 40, '10s') rate(metric[20s])),
+    filtered (ts, val) AS (SELECT * FROM tql_data WHERE val > 0)
+SELECT sum(val) FROM filtered;
 
 -- TQL CTE with aggregation functions
--- WITH tql_agg AS (
---     TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
--- )
--- SELECT avg(val) as avg_sum FROM tql_agg;
+WITH tql_agg(ts, summary) AS (
+    TQL EVAL (0, 40, '10s') sum(labels{host=~"host.*"})
+)
+SELECT round(avg(summary)) as avg_sum FROM tql_agg;
 
 -- TQL CTE with label selectors
 WITH host_metrics AS (
@@ -118,6 +117,27 @@ WITH
         SELECT * FROM processed WHERE percent > 200
     )
 SELECT count(*) as high_values FROM final;
+
+-- TQL CTE with time-based functions
+WITH time_shifted AS (
+    TQL EVAL (0, 40, '10s') metric offset 50s
+)
+SELECT * FROM time_shifted;
+
+-- TQL CTE with JOIN between TQL and regular table
+-- SQLNESS SORT_RESULT 3 1
+WITH tql_summary(ts, host, cpu) AS (
+    TQL EVAL (0, 40, '10s') avg_over_time(labels[30s])
+)
+SELECT 
+    t.ts,
+    t.cpu as avg_value,
+    l.host
+FROM tql_summary t
+JOIN labels l ON DATE_TRUNC('second', t.ts) = DATE_TRUNC('second', l.ts)
+WHERE l.host = 'host1'
+ORDER BY t.ts, l.host, avg_value
+LIMIT 5;
 
 -- Error case - TQL ANALYZE should fail
 WITH tql_analyze AS (

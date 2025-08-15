@@ -119,6 +119,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
                 | Some((_, Instruction::DowngradeRegion { .. }))
                 | Some((_, Instruction::UpgradeRegion { .. }))
                 | Some((_, Instruction::FlushRegion { .. }))
+                | Some((_, Instruction::FlushRegions { .. }))
         )
     }
 

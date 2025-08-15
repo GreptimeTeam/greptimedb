@@ -51,6 +51,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             builder.push_column_metadata(column);
         }
         builder.primary_key(request.primary_key);
+        if let Some(expr_json) = request.partition_expr_json.as_ref() {
+            builder.partition_expr_json(Some(expr_json.clone()));
+        }
 
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(

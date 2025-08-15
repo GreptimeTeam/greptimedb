@@ -16,6 +16,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use rskafka::client::{Credentials, SaslConfig};
 use rskafka::BackoffConfig;
 use rustls::{ClientConfig, RootCertStore};
@@ -39,8 +40,8 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
 pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::ZERO;
 /// Default limit for concurrent auto pruning tasks.
 pub const DEFAULT_AUTO_PRUNE_PARALLELISM: usize = 10;
-/// Default interval for sending flush request to regions when pruning remote WAL.
-pub const DEFAULT_TRIGGER_FLUSH_THRESHOLD: u64 = 0;
+/// Default size of WAL to trigger flush.
+pub const DEFAULT_FLUSH_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(512);
 
 use crate::error::{self, Result};
 use crate::{TopicSelectorType, BROKER_ENDPOINT, TOPIC_NAME_PREFIX};

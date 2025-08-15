@@ -102,22 +102,22 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let version = region.version_control.current();
             let mut flushed_entry_id = version.last_entry_id;
 
-            let high_watermark = self
+            let latest_entry_id = self
                 .wal
                 .store()
-                .high_watermark(&region.provider)
+                .latest_entry_id(&region.provider)
                 .unwrap_or_default();
             warn!(
-                "Skips to replay memtable for region: {}, flushed entry id: {}, high watermark: {}",
-                region.region_id, flushed_entry_id, high_watermark
+                "Skips to replay memtable for region: {}, flushed entry id: {}, latest entry id: {}",
+                region.region_id, flushed_entry_id, latest_entry_id
             );
 
-            if high_watermark > flushed_entry_id {
+            if latest_entry_id > flushed_entry_id {
                 warn!(
-                    "Found high watermark is greater than flushed entry id, using high watermark as flushed entry id, region: {}, high watermark: {}, flushed entry id: {}",
-                    region_id, high_watermark, flushed_entry_id
+                    "Found latest entry id is greater than flushed entry id, using latest entry id as flushed entry id, region: {}, latest entry id: {}, flushed entry id: {}",
+                    region_id, latest_entry_id, flushed_entry_id
                 );
-                flushed_entry_id = high_watermark;
+                flushed_entry_id = latest_entry_id;
                 region.version_control.set_entry_id(flushed_entry_id);
             }
             let on_region_opened = self.wal.on_region_opened();

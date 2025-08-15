@@ -28,9 +28,11 @@ use common_catalog::consts::{
     trace_services_table_name, DEFAULT_PRIVATE_SCHEMA_NAME, TRACE_TABLE_NAME,
 };
 use common_error::status_code::StatusCode as ErrorCode;
+use common_frontend::slow_query_event::{
+    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use frontend::slow_query_recorder::{SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME};
 use log_query::{Context, Limit, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -545,6 +547,52 @@ pub async fn test_sql_api(store_type: StorageType) {
         .text()
         .await;
     assert!(res.contains("TIME_ZONE") && res.contains("UTC"));
+    guard.remove_all().await;
+}
+
+#[tokio::test]
+async fn test_sql_format_api() {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(StorageType::File, "sql_format_api").await;
+    let client = TestClient::new(app).await;
+
+    // missing sql
+    let res = client.get("/v1/sql/format").send().await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    let body = serde_json::from_str::<ErrorResponse>(&res.text().await).unwrap();
+    assert_eq!(body.code(), 1004);
+    assert_eq!(body.error(), "sql parameter is required.");
+
+    // with sql
+    let res = client
+        .get("/v1/sql/format?sql=select%201%20as%20x")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(formatted, "SELECT 1 AS x;");
+
+    // complex query
+    let complex_query = "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte";
+    let encoded_complex_query = encode(complex_query);
+
+    let query_params = format!("/v1/sql/format?sql={encoded_complex_query}");
+    let res = client.get(&query_params).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    let formatted = json
+        .get("formatted")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(formatted, "WITH RECURSIVE slow_cte AS (SELECT 1 AS n, md5(random()) AS hash UNION ALL SELECT n + 1, md5(concat(hash, n)) FROM slow_cte WHERE n < 4500) SELECT COUNT(*) FROM slow_cte;");
+
     guard.remove_all().await;
 }
 
@@ -1201,6 +1249,7 @@ enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 keep_alive = "0s"
+prepared_stmt_cache_size = 10000
 
 [mysql.tls]
 mode = "disable"
@@ -1269,6 +1318,7 @@ experimental_frontend_scan_timeout = "30s"
 experimental_frontend_activity_timeout = "1m"
 experimental_max_filter_num_per_query = 20
 experimental_time_window_merge_threshold = 3
+read_preference = "Leader"
 
 [logging]
 max_log_files = 720
@@ -1336,7 +1386,7 @@ enable = true
 record_type = "system_table"
 threshold = "1s"
 sample_ratio = 1.0
-ttl = "30d"
+ttl = "2months 29days 2h 52m 48s"
 
 [query]
 parallelism = 0
@@ -5009,7 +5059,7 @@ pub async fn test_log_query(store_type: StorageType) {
             fetch: Some(1),
         },
         columns: vec!["ts".to_string(), "message".to_string()],
-        filters: vec![],
+        filters: Default::default(),
         context: Context::None,
         exprs: vec![],
     };

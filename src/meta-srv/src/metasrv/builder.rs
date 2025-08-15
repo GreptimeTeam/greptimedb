@@ -27,7 +27,7 @@ use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
 use common_meta::ddl_manager::DdlManager;
-use common_meta::distributed_time_constants;
+use common_meta::distributed_time_constants::{self};
 use common_meta::key::flow::flow_state::FlowStateManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManagerRef};
@@ -40,6 +40,7 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
+use common_meta::stats::topic::TopicStatsRegistry;
 use common_meta::wal_options_allocator::{build_kafka_client, build_wal_options_allocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
@@ -65,6 +66,7 @@ use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::procedure::wal_prune::Context as WalPruneContext;
+use crate::region::flush_trigger::RegionFlushTrigger;
 use crate::region::supervisor::{
     HeartbeatAcceptor, RegionFailureDetectorControl, RegionSupervisor, RegionSupervisorSelector,
     RegionSupervisorTicker, DEFAULT_INITIALIZATION_RETRY_PERIOD, DEFAULT_TICK_INTERVAL,
@@ -195,10 +197,10 @@ impl MetasrvBuilder {
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
 
         // Builds the event recorder to record important events and persist them as the system table.
-        let event_recorder = Arc::new(EventRecorderImpl::new(
-            Box::new(EventHandlerImpl::new(meta_peer_client.clone())),
-            options.event_recorder.clone(),
-        ));
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            meta_peer_client.clone(),
+            options.event_recorder.ttl,
+        ))));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector::default()));
         let pushers = Pushers::default();
@@ -372,6 +374,7 @@ impl MetasrvBuilder {
         };
 
         let leader_region_registry = Arc::new(LeaderRegionRegistry::default());
+        let topic_stats_registry = Arc::new(TopicStatsRegistry::default());
 
         let ddl_context = DdlContext {
             node_manager: node_manager.clone(),
@@ -396,6 +399,23 @@ impl MetasrvBuilder {
         };
         let ddl_manager = Arc::new(ddl_manager);
 
+        let region_flush_ticker = if is_remote_wal {
+            let remote_wal_options = options.wal.remote_wal_options().unwrap();
+            let (region_flush_trigger, region_flush_ticker) = RegionFlushTrigger::new(
+                table_metadata_manager.clone(),
+                leader_region_registry.clone(),
+                topic_stats_registry.clone(),
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+                remote_wal_options.flush_trigger_size,
+            );
+            region_flush_trigger.try_start()?;
+
+            Some(Arc::new(region_flush_ticker))
+        } else {
+            None
+        };
+
         // remote WAL prune ticker and manager
         let wal_prune_ticker = if is_remote_wal && options.wal.enable_active_wal_pruning() {
             let (tx, rx) = WalPruneManager::channel();
@@ -408,8 +428,6 @@ impl MetasrvBuilder {
                 client: Arc::new(kafka_client),
                 table_metadata_manager: table_metadata_manager.clone(),
                 leader_region_registry: leader_region_registry.clone(),
-                server_addr: options.grpc.server_addr.clone(),
-                mailbox: mailbox.clone(),
             };
             let wal_prune_manager = WalPruneManager::new(
                 table_metadata_manager.clone(),
@@ -417,7 +435,6 @@ impl MetasrvBuilder {
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,
-                remote_wal_options.trigger_flush_threshold,
             );
             // Start manager in background. Ticker will be started in the main thread to send ticks.
             wal_prune_manager.try_start().await?;
@@ -505,8 +522,10 @@ impl MetasrvBuilder {
             cache_invalidator,
             leader_region_registry,
             wal_prune_ticker,
+            region_flush_ticker,
             table_id_sequence,
             reconciliation_manager,
+            topic_stats_registry,
         })
     }
 }

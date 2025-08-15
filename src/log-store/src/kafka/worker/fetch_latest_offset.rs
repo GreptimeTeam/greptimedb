@@ -17,14 +17,15 @@ use rskafka::client::partition::OffsetAt;
 use snafu::ResultExt;
 
 use crate::error;
+use crate::kafka::log_store::TopicStat;
 use crate::kafka::worker::BackgroundProducerWorker;
 
 impl BackgroundProducerWorker {
-    /// Updates the high watermark for the topic.
+    /// Fetches the latest offset for the topic.
     ///
-    /// This function retrieves the latest offset from Kafka and updates the high watermark
+    /// This function retrieves the topic's latest offset from Kafka and updates the latest offset
     /// in the shared map.
-    pub async fn update_high_watermark(&mut self) {
+    pub async fn fetch_latest_offset(&mut self) {
         match self
             .client
             .get_offset(OffsetAt::Latest)
@@ -32,27 +33,32 @@ impl BackgroundProducerWorker {
             .context(error::GetOffsetSnafu {
                 topic: &self.provider.topic,
             }) {
-            Ok(offset) => match self.high_watermark.entry(self.provider.clone()) {
+            Ok(offset) => match self.topic_stats.entry(self.provider.clone()) {
                 dashmap::Entry::Occupied(mut occupied_entry) => {
                     let offset = offset as u64;
-                    if *occupied_entry.get() != offset {
-                        occupied_entry.insert(offset);
+                    let stat = occupied_entry.get_mut();
+                    if stat.latest_offset < offset {
+                        stat.latest_offset = offset;
                         debug!(
-                            "Updated high watermark for topic {} to {}",
+                            "Updated latest offset for topic {} to {}",
                             self.provider.topic, offset
                         );
                     }
                 }
                 dashmap::Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(offset as u64);
+                    vacant_entry.insert(TopicStat {
+                        latest_offset: offset as u64,
+                        record_size: 0,
+                        record_num: 0,
+                    });
                     debug!(
-                        "Inserted high watermark for topic {} to {}",
+                        "Inserted latest offset for topic {} to {}",
                         self.provider.topic, offset
                     );
                 }
             },
             Err(err) => {
-                error!(err; "Failed to get offset for topic {}", self.provider.topic);
+                error!(err; "Failed to get latest offset for topic {}", self.provider.topic);
             }
         }
     }

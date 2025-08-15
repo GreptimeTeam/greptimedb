@@ -99,6 +99,11 @@ impl PredicateExtractor {
             Self::collect_filter_expressions(child, expressions)?;
         }
 
+        // TODO(ruihang): support plans involve multiple relations.
+        if plan.inputs().len() > 1 {
+            expressions.clear();
+        }
+
         Ok(())
     }
 }
@@ -151,16 +156,9 @@ impl ExpressionChecker {
                 }
             }
             _ => {
-                // For comparison operations (=, <, >, etc.), check if they involve partition columns
-                if Self::operand_involves_partition_columns(expr.lhs(), partition_columns)
-                    || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
-                {
-                    if Self::expr_only_involves_partition_columns(expr, partition_columns) {
-                        ExpressionCheckResult::UseAsIs(expr.clone())
-                    } else {
-                        // This shouldn't happen for simple comparisons, but handle defensively
-                        ExpressionCheckResult::Drop
-                    }
+                // For comparison operations (=, <, >, etc.), check if they only involve partition columns
+                if Self::expr_only_involves_partition_columns(expr, partition_columns) {
+                    ExpressionCheckResult::UseAsIs(expr.clone())
                 } else {
                     ExpressionCheckResult::Drop
                 }
@@ -180,7 +178,7 @@ impl ExpressionChecker {
             Self::extract_constraints_from_operand(expr.rhs(), partition_columns, result);
         } else {
             // Non-AND expression: check if it involves partition columns
-            if Self::expr_involves_partition_columns(expr, partition_columns) {
+            if Self::expr_only_involves_partition_columns(expr, partition_columns) {
                 result.push(expr.clone());
             }
         }
@@ -202,16 +200,7 @@ impl ExpressionChecker {
         }
     }
 
-    /// Check if an expression involves ANY partition columns (existing logic)
-    fn expr_involves_partition_columns(
-        expr: &PartitionExpr,
-        partition_columns: &HashSet<String>,
-    ) -> bool {
-        Self::operand_involves_partition_columns(expr.lhs(), partition_columns)
-            || Self::operand_involves_partition_columns(expr.rhs(), partition_columns)
-    }
-
-    /// Check if an expression involves ONLY partition columns (stricter check)
+    /// Check if an expression involves ONLY partition columns
     fn expr_only_involves_partition_columns(
         expr: &PartitionExpr,
         partition_columns: &HashSet<String>,
@@ -220,19 +209,7 @@ impl ExpressionChecker {
             && Self::operand_only_involves_partition_columns(expr.rhs(), partition_columns)
     }
 
-    /// Check if an operand involves any partition columns
-    fn operand_involves_partition_columns(
-        operand: &Operand,
-        partition_columns: &HashSet<String>,
-    ) -> bool {
-        match operand {
-            Operand::Column(col) => partition_columns.contains(col),
-            Operand::Value(_) => false,
-            Operand::Expr(expr) => Self::expr_involves_partition_columns(expr, partition_columns),
-        }
-    }
-
-    /// Check if an operand involves only partition columns or values
+    /// Check if an operand involves ONLY partition columns or values
     fn operand_only_involves_partition_columns(
         operand: &Operand,
         partition_columns: &HashSet<String>,

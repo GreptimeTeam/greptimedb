@@ -26,6 +26,7 @@ use crate::manifest::action::{
 };
 use crate::manifest::manager::RegionManifestManager;
 use crate::manifest::tests::utils::basic_region_metadata;
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::sst::file::{FileId, FileMeta};
 use crate::test_util::TestEnv;
 
@@ -83,7 +84,13 @@ async fn manager_without_checkpoint() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
     }
 
     // no checkpoint
@@ -126,7 +133,13 @@ async fn manager_with_checkpoint_distance_1() {
 
     // apply 10 actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -166,7 +179,7 @@ async fn manager_with_checkpoint_distance_1() {
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
     let expected_json =
-        "{\"size\":879,\"version\":10,\"checksum\":2245967096,\"extend_metadata\":{}}";
+        "{\"size\":901,\"version\":10,\"checksum\":2571452538,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
@@ -183,7 +196,13 @@ async fn test_corrupted_data_causing_checksum_error() {
 
     // Apply actions
     for _ in 0..10 {
-        manager.update(nop_action()).await.unwrap();
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Writable),
+            )
+            .await
+            .unwrap();
     }
 
     // Wait for the checkpoint to finish.
@@ -266,7 +285,10 @@ async fn generate_checkpoint_with_compression_types(
     let (_env, mut manager) = build_manager(1, compress_type).await;
 
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -316,7 +338,10 @@ async fn manifest_install_manifest_to() {
     let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
     }
 
     // Nothing to install
@@ -354,7 +379,10 @@ async fn manifest_install_manifest_to_with_checkpoint() {
     let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
     let (files, actions) = generate_action_lists(10);
     for action in actions {
-        manager.update(action).await.unwrap();
+        manager
+            .update(action, RegionRoleState::Leader(RegionLeaderState::Writable))
+            .await
+            .unwrap();
 
         while manager.checkpointer().is_doing_checkpoint() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -415,4 +443,56 @@ async fn manifest_install_manifest_to_with_checkpoint() {
         assert!(another_manager.manifest().files.contains_key(file_id));
     }
     assert!(another_manager.store().total_manifest_size() > 4000);
+}
+
+#[tokio::test]
+async fn test_checkpoint_bypass_in_staging_mode() {
+    common_telemetry::init_default_ut_logging();
+    let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // Apply actions in staging mode - checkpoint should be bypassed
+    for _ in 0..15 {
+        manager
+            .update(
+                nop_action(),
+                RegionRoleState::Leader(RegionLeaderState::Staging),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+
+    // Verify no checkpoint was created in staging mode
+    assert!(manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .is_none());
+
+    // Now switch to normal mode and apply one more action
+    manager
+        .update(
+            nop_action(),
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+        )
+        .await
+        .unwrap();
+
+    // Wait for potential checkpoint
+    while manager.checkpointer().is_doing_checkpoint() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Now checkpoint should exist because we switched to writable mode
+    let checkpoint_result = manager.store().load_last_checkpoint().await.unwrap();
+
+    assert!(
+        checkpoint_result.is_some(),
+        "Checkpoint should exist after switching to writable mode"
+    );
+    let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
+
+    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
+    assert_eq!(last_version, 16);
 }

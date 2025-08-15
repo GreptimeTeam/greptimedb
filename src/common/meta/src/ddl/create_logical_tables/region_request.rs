@@ -19,9 +19,12 @@ use api::v1::CreateTableExpr;
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
 use store_api::storage::{RegionId, TableId};
+use table::metadata::RawTableInfo;
 
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
-use crate::ddl::create_table_template::{build_template, CreateRequestBuilder};
+use crate::ddl::create_table_template::{
+    build_template, build_template_from_raw_table_info, CreateRequestBuilder,
+};
 use crate::ddl::utils::region_storage_path;
 use crate::error::Result;
 use crate::peer::Peer;
@@ -37,6 +40,10 @@ impl CreateLogicalTablesProcedure {
         let table_ids_already_exists = &self.data.table_ids_already_exists;
         let regions_on_this_peer = find_leader_regions(region_routes, peer);
         let mut requests = Vec::with_capacity(tasks.len() * regions_on_this_peer.len());
+        let partition_exprs = region_routes
+            .iter()
+            .map(|r| (r.region.id.region_number(), r.region.partition_expr()))
+            .collect();
         for (task, table_id_already_exists) in tasks.iter().zip(table_ids_already_exists) {
             if table_id_already_exists.is_some() {
                 continue;
@@ -47,13 +54,19 @@ impl CreateLogicalTablesProcedure {
             let logical_table_id = task.table_info.ident.table_id;
             let physical_table_id = self.data.physical_table_id;
             let storage_path = region_storage_path(catalog, schema);
-            let request_builder =
-                create_region_request_builder(&task.create_table, physical_table_id)?;
+            let request_builder = create_region_request_builder_from_raw_table_info(
+                &task.table_info,
+                physical_table_id,
+            )?;
 
             for region_number in &regions_on_this_peer {
                 let region_id = RegionId::new(logical_table_id, *region_number);
-                let one_region_request =
-                    request_builder.build_one(region_id, storage_path.clone(), &HashMap::new());
+                let one_region_request = request_builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    &HashMap::new(),
+                    &partition_exprs,
+                );
                 requests.push(one_region_request);
             }
         }
@@ -73,11 +86,22 @@ impl CreateLogicalTablesProcedure {
     }
 }
 
-/// Creates a region request builder.
+/// Creates a region request builder
 pub fn create_region_request_builder(
     create_table_expr: &CreateTableExpr,
     physical_table_id: TableId,
 ) -> Result<CreateRequestBuilder> {
     let template = build_template(create_table_expr)?;
+    Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
+}
+
+/// Builds a [CreateRequestBuilder] from a [RawTableInfo].
+///
+/// Note: **This method is only used for creating logical tables.**
+pub fn create_region_request_builder_from_raw_table_info(
+    raw_table_info: &RawTableInfo,
+    physical_table_id: TableId,
+) -> Result<CreateRequestBuilder> {
+    let template = build_template_from_raw_table_info(raw_table_info)?;
     Ok(CreateRequestBuilder::new(template, Some(physical_table_id)))
 }

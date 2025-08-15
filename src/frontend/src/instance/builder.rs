@@ -18,6 +18,7 @@ use cache::{TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::process_manager::ProcessManagerRef;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
+use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::key::flow::FlowMetadataManager;
@@ -40,11 +41,11 @@ use query::QueryEngineFactory;
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
+use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::instance::Instance;
 use crate::limiter::Limiter;
-use crate::slow_query_recorder::SlowQueryRecorder;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -195,16 +196,12 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
-        let slow_query_recorder = self.options.slow_query.and_then(|opts| {
-            opts.enable.then(|| {
-                SlowQueryRecorder::new(
-                    opts.clone(),
-                    inserter.clone(),
-                    statement_executor.clone(),
-                    self.catalog_manager.clone(),
-                )
-            })
-        });
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            inserter.clone(),
+            statement_executor.clone(),
+            self.options.slow_query.ttl,
+            self.options.event_recorder.ttl,
+        ))));
 
         // Create the limiter if the max_in_flight_write_bytes is set.
         let limiter = self
@@ -223,10 +220,11 @@ impl FrontendBuilder {
             inserter,
             deleter,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
-            slow_query_recorder,
+            event_recorder: Some(event_recorder),
             limiter,
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
+            slow_query_options: self.options.slow_query.clone(),
         })
     }
 }

@@ -29,6 +29,7 @@ use std::sync::Arc;
 use api::greptime_proto::v1;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
+use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
@@ -645,6 +646,7 @@ pub struct CreateRequestBuilder {
     ts_type: ConcreteDataType,
     /// kafka topic name
     kafka_topic: Option<String>,
+    partition_expr_json: Option<String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -659,6 +661,7 @@ impl Default for CreateRequestBuilder {
             engine: MITO_ENGINE_NAME.to_string(),
             ts_type: ConcreteDataType::timestamp_millisecond_datatype(),
             kafka_topic: None,
+            partition_expr_json: None,
         }
     }
 }
@@ -714,6 +717,12 @@ impl CreateRequestBuilder {
     #[must_use]
     pub fn kafka_topic(mut self, topic: Option<String>) -> Self {
         self.kafka_topic = topic;
+        self
+    }
+
+    #[must_use]
+    pub fn partition_expr_json(mut self, partition_expr_json: Option<String>) -> Self {
+        self.partition_expr_json = partition_expr_json;
         self
     }
 
@@ -774,6 +783,7 @@ impl CreateRequestBuilder {
             options,
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
+            partition_expr_json: self.partition_expr_json.clone(),
         }
     }
 }
@@ -940,18 +950,12 @@ pub fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api::v1::C
 /// `start`, `end` are in second resolution.
 pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(i.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(i.to_string()),
+                ValueData::F64Value(i as f64),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1025,18 +1029,12 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
 pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usize) -> Vec<Row> {
     (start..end)
         .enumerate()
-        .map(|(idx, ts)| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|(idx, ts)| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::F64Value((value_start + idx) as f64),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }
@@ -1044,15 +1042,11 @@ pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usiz
 /// Build rows to delete for specific `key`.
 pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row> {
     (start..end)
-        .map(|ts| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(key.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
-                },
-            ],
+        .map(|ts| {
+            row(vec![
+                ValueData::StringValue(key.to_string()),
+                ValueData::TimestampMillisecondValue(ts as i64 * 1000),
+            ])
         })
         .collect()
 }

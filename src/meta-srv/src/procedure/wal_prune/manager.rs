@@ -15,20 +15,17 @@
 use std::collections::hash_set::Entry;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
 
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::leadership_notifier::LeadershipChangeListener;
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
-use tokio::time::{interval_at, Instant, MissedTickBehavior};
 
+use crate::define_ticker;
 use crate::error::{self, Result};
 use crate::metrics::METRIC_META_REMOTE_WAL_PRUNE_EXECUTE;
 use crate::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedure};
@@ -97,81 +94,13 @@ impl Debug for Event {
     }
 }
 
-/// [WalPruneTicker] is a ticker that periodically sends [Event]s to the [WalPruneManager].
-/// It is used to trigger the [WalPruneManager] to submit [WalPruneProcedure]s.
-pub(crate) struct WalPruneTicker {
-    /// Handle of ticker thread.
-    pub(crate) tick_handle: Mutex<Option<JoinHandle<()>>>,
-    /// The interval of tick.
-    pub(crate) tick_interval: Duration,
-    /// Sends [Event]s.
-    pub(crate) sender: Sender<Event>,
-}
-
-#[async_trait::async_trait]
-impl LeadershipChangeListener for WalPruneTicker {
-    fn name(&self) -> &'static str {
-        "WalPruneTicker"
-    }
-
-    async fn on_leader_start(&self) -> common_meta::error::Result<()> {
-        self.start();
-        Ok(())
-    }
-
-    async fn on_leader_stop(&self) -> common_meta::error::Result<()> {
-        self.stop();
-        Ok(())
-    }
-}
-
-/// TODO(CookiePie): Similar to [RegionSupervisorTicker], maybe can refactor to a unified framework.
-impl WalPruneTicker {
-    pub(crate) fn new(tick_interval: Duration, sender: Sender<Event>) -> Self {
-        Self {
-            tick_handle: Mutex::new(None),
-            tick_interval,
-            sender,
-        }
-    }
-
-    /// Starts the ticker.
-    pub fn start(&self) {
-        let mut handle = self.tick_handle.lock().unwrap();
-        if handle.is_none() {
-            let sender = self.sender.clone();
-            let tick_interval = self.tick_interval;
-            let ticker_loop = tokio::spawn(async move {
-                let mut interval = interval_at(Instant::now() + tick_interval, tick_interval);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    if sender.send(Event::Tick).await.is_err() {
-                        info!("EventReceiver is dropped, tick loop is stopped");
-                        break;
-                    }
-                }
-            });
-            *handle = Some(ticker_loop);
-        }
-        info!("WalPruneTicker started.");
-    }
-
-    /// Stops the ticker.
-    pub fn stop(&self) {
-        let mut handle = self.tick_handle.lock().unwrap();
-        if let Some(handle) = handle.take() {
-            handle.abort();
-        }
-        info!("WalPruneTicker stopped.");
-    }
-}
-
-impl Drop for WalPruneTicker {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
+define_ticker!(
+    /// [WalPruneTicker] is a ticker that periodically sends [Event]s to the [WalPruneManager].
+    /// It is used to trigger the [WalPruneManager] to submit [WalPruneProcedure]s.
+    WalPruneTicker,
+    event_type = Event,
+    event_value = Event::Tick
+);
 
 /// [WalPruneManager] manages all remote WAL related tasks in metasrv.
 ///
@@ -193,9 +122,6 @@ pub(crate) struct WalPruneManager {
 
     /// Context for [WalPruneProcedure].
     wal_prune_context: WalPruneContext,
-    /// Trigger flush threshold for [WalPruneProcedure].
-    /// If `None`, never send flush requests.
-    trigger_flush_threshold: u64,
 }
 
 impl WalPruneManager {
@@ -206,7 +132,6 @@ impl WalPruneManager {
         receiver: Receiver<Event>,
         procedure_manager: ProcedureManagerRef,
         wal_prune_context: WalPruneContext,
-        trigger_flush_threshold: u64,
     ) -> Self {
         Self {
             table_metadata_manager,
@@ -217,7 +142,6 @@ impl WalPruneManager {
                 running_procedures: Arc::new(RwLock::new(HashSet::new())),
             },
             semaphore: Arc::new(Semaphore::new(limit)),
-            trigger_flush_threshold,
         }
     }
 
@@ -271,7 +195,6 @@ impl WalPruneManager {
         let procedure = WalPruneProcedure::new(
             topic_name.to_string(),
             self.wal_prune_context.clone(),
-            self.trigger_flush_threshold,
             Some(guard),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
@@ -332,9 +255,12 @@ impl WalPruneManager {
 #[cfg(test)]
 mod test {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
     use common_meta::key::topic_name::TopicNameKey;
-    use common_wal::test_util::run_test_with_kafka_wal;
+    use common_meta::leadership_notifier::LeadershipChangeListener;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use tokio::time::{sleep, timeout};
 
     use super::*;
@@ -342,6 +268,7 @@ mod test {
 
     #[tokio::test]
     async fn test_wal_prune_ticker() {
+        common_telemetry::init_default_ut_logging();
         let (tx, mut rx) = WalPruneManager::channel();
         let interval = Duration::from_millis(50);
         let ticker = WalPruneTicker::new(interval, tx);
@@ -393,7 +320,6 @@ mod test {
                 rx,
                 test_env.procedure_manager.clone(),
                 wal_prune_context,
-                0,
             ),
         )
     }
@@ -413,27 +339,24 @@ mod test {
 
     #[tokio::test]
     async fn test_wal_prune_manager() {
-        run_test_with_kafka_wal(|broker_endpoints| {
-            Box::pin(async {
-                let limit = 6;
-                let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
-                let topics = (0..limit * 2)
-                    .map(|_| uuid::Uuid::new_v4().to_string())
-                    .collect::<Vec<_>>();
-                mock_topics(&manager, &topics).await;
+        maybe_skip_kafka_integration_test!();
+        let broker_endpoints = get_kafka_endpoints();
+        let limit = 6;
+        let (tx, manager) = mock_wal_prune_manager(broker_endpoints, limit).await;
+        let topics = (0..limit * 2)
+            .map(|_| uuid::Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        mock_topics(&manager, &topics).await;
 
-                let tracker = manager.tracker.clone();
-                let handler =
-                    common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
-                handler.await.unwrap();
+        let tracker = manager.tracker.clone();
+        let handler =
+            common_runtime::spawn_global(async move { manager.try_start().await.unwrap() });
+        handler.await.unwrap();
 
-                tx.send(Event::Tick).await.unwrap();
-                // Wait for at least one procedure to be submitted.
-                timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
-                    .await
-                    .unwrap();
-            })
-        })
-        .await;
+        tx.send(Event::Tick).await.unwrap();
+        // Wait for at least one procedure to be submitted.
+        timeout(Duration::from_millis(100), async move { tracker.len() > 0 })
+            .await
+            .unwrap();
     }
 }

@@ -1666,6 +1666,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-event-recorder",
  "common-frontend",
  "common-macro",
  "common-meta",
@@ -2347,6 +2348,9 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "humantime",
+ "humantime-serde",
+ "itertools 0.14.0",
  "serde",
  "serde_json",
  "snafu 0.8.5",
@@ -2359,13 +2363,18 @@ dependencies = [
 name = "common-frontend"
 version = "0.17.0"
 dependencies = [
+ "api",
  "async-trait",
  "common-error",
+ "common-event-recorder",
  "common-grpc",
  "common-macro",
  "common-meta",
+ "common-time",
  "greptime-proto",
+ "humantime",
  "meta-client",
+ "serde",
  "session",
  "snafu 0.8.5",
  "tokio",
@@ -2747,6 +2756,7 @@ dependencies = [
 name = "common-session"
 version = "0.17.0"
 dependencies = [
+ "serde",
  "strum 0.27.1",
 ]
 
@@ -2774,6 +2784,7 @@ name = "common-telemetry"
 version = "0.17.0"
 dependencies = [
  "backtrace",
+ "common-base",
  "common-error",
  "common-version",
  "console-subscriber",
@@ -3870,7 +3881,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cache",
- "catalog",
  "client",
  "common-base",
  "common-config",
@@ -4877,6 +4887,7 @@ dependencies = [
  "common-config",
  "common-datasource",
  "common-error",
+ "common-event-recorder",
  "common-frontend",
  "common-function",
  "common-grpc",
@@ -4897,6 +4908,7 @@ dependencies = [
  "datanode",
  "datatypes",
  "futures",
+ "humantime",
  "humantime-serde",
  "lazy_static",
  "log-query",
@@ -5313,7 +5325,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=ccfd4da48bc0254ed865e479cd981a3581b02d84#ccfd4da48bc0254ed865e479cd981a3581b02d84"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9edc8c4d2a7e3c7d8e4982a6af94426da4057687#9edc8c4d2a7e3c7d8e4982a6af94426da4057687"
 dependencies = [
  "prost 0.13.5",
  "serde",
@@ -6132,6 +6144,7 @@ dependencies = [
  "prost 0.13.5",
  "puffin",
  "rand 0.9.0",
+ "rand_chacha 0.9.0",
  "regex",
  "regex-automata 0.4.8",
  "roaring",
@@ -9188,9 +9201,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.32.0"
+version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "017b8b74f9e8c7aff0087d4ef2b91676a5509e8928100d6a3510fd472210feb5"
+checksum = "ddf403a6ee31cf7f2217b2bd8447cb13dbb6c268d7e81501bc78a4d3daafd294"
 dependencies = [
  "async-trait",
  "bytes",
@@ -10857,7 +10870,7 @@ dependencies = [
 [[package]]
 name = "rskafka"
 version = "0.6.0"
-source = "git+https://github.com/influxdata/rskafka.git?rev=8dbd01ed809f5a791833a594e85b144e36e45820#8dbd01ed809f5a791833a594e85b144e36e45820"
+source = "git+https://github.com/influxdata/rskafka.git?rev=a62120b6c74d68953464b256f858dc1c41a903b4#a62120b6c74d68953464b256f858dc1c41a903b4"
 dependencies = [
  "bytes",
  "chrono",
@@ -12131,9 +12144,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4410e73b3c0d8442c5f99b425d7a435b5ee0ae4167b3196771dd3f7a01be745f"
+checksum = "1fefb893899429669dcdd979aff487bd78f4064e5e7907e4269081e0ef7d97dc"
 dependencies = [
  "sqlx-core",
  "sqlx-macros",
@@ -12144,10 +12157,11 @@ dependencies = [
 
 [[package]]
 name = "sqlx-core"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a007b6936676aa9ab40207cde35daab0a04b823be8ae004368c0793b96a61e0"
+checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "crc",
@@ -12166,7 +12180,6 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2",
@@ -12181,9 +12194,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx-macros"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3112e2ad78643fef903618d78cf0aec1cb3134b019730edb039b69eaf531f310"
+checksum = "a2d452988ccaacfbf5e0bdbc348fb91d7c8af5bee192173ac3636b5fb6e6715d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12194,9 +12207,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx-macros-core"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e9f90acc5ab146a99bf5061a7eb4976b573f560bc898ef3bf8435448dd5e7ad"
+checksum = "19a9c1841124ac5a61741f96e1d9e2ec77424bf323962dd894bdb93f37d5219b"
 dependencies = [
  "dotenvy",
  "either",
@@ -12213,16 +12226,15 @@ dependencies = [
  "sqlx-postgres",
  "sqlx-sqlite",
  "syn 2.0.100",
- "tempfile",
  "tokio",
  "url",
 ]
 
 [[package]]
 name = "sqlx-mysql"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4560278f0e00ce64938540546f59f590d60beee33fffbd3b9cd47851e5fff233"
+checksum = "aa003f0038df784eb8fecbbac13affe3da23b45194bd57dba231c8f48199c526"
 dependencies = [
  "atoi",
  "base64 0.22.1",
@@ -12263,9 +12275,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx-postgres"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b98a57f363ed6764d5b3a12bfedf62f07aa16e1856a7ddc2a0bb190a959613"
+checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
  "base64 0.22.1",
@@ -12301,9 +12313,9 @@ dependencies = [
 
 [[package]]
 name = "sqlx-sqlite"
-version = "0.8.3"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f85ca71d3a5b24e64e1d08dd8fe36c6c95c339a896cc33068148906784620540"
+checksum = "c2d12fe70b2c1b4401038055f90f151b78208de1f9f89a7dbfd41587a10c3eea"
 dependencies = [
  "atoi",
  "chrono",
@@ -12319,6 +12331,7 @@ dependencies = [
  "serde",
  "serde_urlencoded",
  "sqlx-core",
+ "thiserror 2.0.12",
  "tracing",
  "url",
 ]
@@ -12392,6 +12405,7 @@ dependencies = [
  "futures",
  "humantime",
  "lazy_static",
+ "num_enum 0.7.3",
  "prometheus",
  "prost 0.13.5",
  "serde",
@@ -13066,6 +13080,7 @@ dependencies = [
  "common-config",
  "common-error",
  "common-event-recorder",
+ "common-frontend",
  "common-grpc",
  "common-meta",
  "common-procedure",

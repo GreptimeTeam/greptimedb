@@ -24,6 +24,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{self, Result};
 use crate::kafka::index::IndexCollector;
+use crate::kafka::log_store::TopicStat;
 use crate::kafka::worker::{BackgroundProducerWorker, ProduceResultHandle, WorkerRequest};
 use crate::metrics::{
     METRIC_KAFKA_CLIENT_BYTES_TOTAL, METRIC_KAFKA_CLIENT_PRODUCE_ELAPSED,
@@ -57,7 +58,7 @@ impl OrderedBatchProducer {
         compression: Compression,
         max_batch_bytes: usize,
         index_collector: Box<dyn IndexCollector>,
-        high_watermark: Arc<DashMap<Arc<KafkaProvider>, u64>>,
+        topic_stats: Arc<DashMap<Arc<KafkaProvider>, TopicStat>>,
     ) -> Self {
         let mut worker = BackgroundProducerWorker {
             provider,
@@ -67,7 +68,7 @@ impl OrderedBatchProducer {
             request_batch_size: REQUEST_BATCH_SIZE,
             max_batch_bytes,
             index_collector,
-            high_watermark,
+            topic_stats,
         };
         tokio::spawn(async move { worker.run().await });
         Self { sender: tx }
@@ -94,12 +95,12 @@ impl OrderedBatchProducer {
         Ok(handle)
     }
 
-    /// Sends an [WorkerRequest::UpdateHighWatermark] request to the producer.
-    /// This is used to update the high watermark for the topic.
-    pub(crate) async fn update_high_watermark(&self) -> Result<()> {
+    /// Sends an [WorkerRequest::FetchLatestOffset] request to the producer.
+    /// This is used to fetch the latest offset for the topic.
+    pub(crate) async fn fetch_latest_offset(&self) -> Result<()> {
         if self
             .sender
-            .send(WorkerRequest::UpdateHighWatermark)
+            .send(WorkerRequest::FetchLatestOffset)
             .await
             .is_err()
         {
@@ -110,13 +111,18 @@ impl OrderedBatchProducer {
     }
 }
 
+pub struct ProduceResult {
+    pub offsets: Vec<i64>,
+    pub encoded_request_size: usize,
+}
+
 #[async_trait::async_trait]
 pub trait ProducerClient: std::fmt::Debug + Send + Sync {
     async fn produce(
         &self,
         records: Vec<Record>,
         compression: Compression,
-    ) -> rskafka::client::error::Result<Vec<i64>>;
+    ) -> rskafka::client::error::Result<ProduceResult>;
 
     async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64>;
 }
@@ -127,20 +133,25 @@ impl ProducerClient for PartitionClient {
         &self,
         records: Vec<Record>,
         compression: Compression,
-    ) -> rskafka::client::error::Result<Vec<i64>> {
-        let total_size = records.iter().map(|r| r.approximate_size()).sum::<usize>();
+    ) -> rskafka::client::error::Result<ProduceResult> {
         let partition = self.partition().to_string();
-        METRIC_KAFKA_CLIENT_BYTES_TOTAL
-            .with_label_values(&[self.topic(), &partition])
-            .inc_by(total_size as u64);
-        METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL
-            .with_label_values(&[self.topic(), &partition])
-            .inc();
         let _timer = METRIC_KAFKA_CLIENT_PRODUCE_ELAPSED
             .with_label_values(&[self.topic(), &partition])
             .start_timer();
 
-        self.produce(records, compression).await
+        let result = self.produce(records, compression).await?;
+
+        METRIC_KAFKA_CLIENT_BYTES_TOTAL
+            .with_label_values(&[self.topic(), &partition])
+            .inc_by(result.encoded_request_size as u64);
+        METRIC_KAFKA_CLIENT_TRAFFIC_TOTAL
+            .with_label_values(&[self.topic(), &partition])
+            .inc();
+
+        Ok(ProduceResult {
+            offsets: result.offsets,
+            encoded_request_size: result.encoded_request_size,
+        })
     }
 
     async fn get_offset(&self, at: OffsetAt) -> rskafka::client::error::Result<i64> {
@@ -182,7 +193,7 @@ mod tests {
             &self,
             records: Vec<Record>,
             _compression: Compression,
-        ) -> rskafka::client::error::Result<Vec<i64>> {
+        ) -> rskafka::client::error::Result<ProduceResult> {
             tokio::time::sleep(self.delay).await;
 
             if let Some(e) = self.error {
@@ -206,7 +217,10 @@ mod tests {
                 .collect();
             batch_sizes.push(records.len());
             debug!("Return offsets: {offsets:?}");
-            Ok(offsets)
+            Ok(ProduceResult {
+                offsets,
+                encoded_request_size: 0,
+            })
         }
 
         async fn get_offset(&self, _at: OffsetAt) -> rskafka::client::error::Result<i64> {

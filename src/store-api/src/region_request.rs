@@ -36,6 +36,7 @@ use common_recordbatch::DfRecordBatch;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use strum::{AsRefStr, IntoStaticStr};
@@ -56,7 +57,8 @@ use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 /// The type of path to generate.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive)]
+#[repr(u8)]
 pub enum PathType {
     /// A bare path - the original path of an engine.
     ///
@@ -227,6 +229,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
         .collect::<Result<Vec<_>>>()?;
     let region_id = RegionId::from(create.region_id);
     let table_dir = table_dir(&create.path, region_id.table_id());
+    let partition_expr_json = create.partition.as_ref().map(|p| p.expression.clone());
     Ok((
         region_id,
         RegionCreateRequest {
@@ -236,6 +239,7 @@ fn parse_region_create(create: CreateRequest) -> Result<(RegionId, RegionCreateR
             options: create.options,
             table_dir,
             path_type: PathType::Bare,
+            partition_expr_json,
         },
     ))
 }
@@ -424,6 +428,9 @@ pub struct RegionCreateRequest {
     pub table_dir: String,
     /// Path type for generating paths
     pub path_type: PathType,
+    /// Partition expression JSON from table metadata. Set to empty string for a region without partition.
+    /// `Option` to keep compatibility with old clients.
+    pub partition_expr_json: Option<String>,
 }
 
 impl RegionCreateRequest {
@@ -1851,6 +1858,7 @@ mod tests {
             options: HashMap::new(),
             table_dir: "path".to_string(),
             path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
         };
 
         assert!(create.validate().is_err());
@@ -1957,5 +1965,24 @@ mod tests {
             column_metadatas: column_metadatas_with_new_field_column,
         };
         kind.validate(&metadata).unwrap();
+    }
+
+    #[test]
+    fn test_cast_path_type_to_primitive() {
+        assert_eq!(PathType::Bare as u8, 0);
+        assert_eq!(PathType::Data as u8, 1);
+        assert_eq!(PathType::Metadata as u8, 2);
+        assert_eq!(
+            PathType::try_from(PathType::Bare as u8).unwrap(),
+            PathType::Bare
+        );
+        assert_eq!(
+            PathType::try_from(PathType::Data as u8).unwrap(),
+            PathType::Data
+        );
+        assert_eq!(
+            PathType::try_from(PathType::Metadata as u8).unwrap(),
+            PathType::Metadata
+        );
     }
 }

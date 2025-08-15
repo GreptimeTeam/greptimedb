@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::node_manager::{DatanodeRef, FlownodeRef, NodeManager};
+use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
 use common_meta::peer::Peer;
 use moka::future::{Cache, CacheBuilder};
 
@@ -45,7 +45,7 @@ impl Debug for NodeClients {
 }
 
 #[async_trait::async_trait]
-impl NodeManager for NodeClients {
+impl DatanodeManager for NodeClients {
     async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
         let client = self.get_client(datanode).await;
 
@@ -60,7 +60,10 @@ impl NodeManager for NodeClients {
             *accept_compression,
         ))
     }
+}
 
+#[async_trait::async_trait]
+impl FlownodeManager for NodeClients {
     async fn flownode(&self, flownode: &Peer) -> FlownodeRef {
         let client = self.get_client(flownode).await;
 

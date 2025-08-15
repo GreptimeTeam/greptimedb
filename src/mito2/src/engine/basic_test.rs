@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{Rows, SemanticType};
 use common_base::readable_size::ReadableSize;
@@ -231,24 +232,14 @@ async fn test_different_order() {
 
     // Now the schema is field_1, tag_1, ts, tag_0, field_0
     let rows = (0..3)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value((i + 10) as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(format!("b{i}"))),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::F64Value((i + 10) as f64),
+                ValueData::StringValue(format!("b{i}")),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+                ValueData::StringValue(format!("a{i}")),
+                ValueData::F64Value(i as f64),
+            ])
         })
         .collect();
     let rows = Rows {
@@ -293,24 +284,14 @@ async fn test_different_order_and_type() {
 
     // Now the schema is tag_0, tag_1, field_1, field_0, ts
     let rows = (0..3)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(format!("b{i}"))),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue((i + 10).to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::F64Value(i as f64)),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(format!("a{i}")),
+                ValueData::StringValue(format!("b{i}")),
+                ValueData::StringValue((i + 10).to_string()),
+                ValueData::F64Value(i as f64),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
         })
         .collect();
     let rows = Rows {
@@ -516,18 +497,12 @@ async fn test_absent_and_invalid_columns() {
     // Input tag_0, field_1 (invalid type string), ts
     column_schemas.remove(1);
     let rows = (0..3)
-        .map(|i| api::v1::Row {
-            values: vec![
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::StringValue(i.to_string())),
-                },
-                api::v1::Value {
-                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
-                },
-            ],
+        .map(|i| {
+            row(vec![
+                ValueData::StringValue(format!("a{i}")),
+                ValueData::StringValue(i.to_string()),
+                ValueData::TimestampMillisecondValue(i as i64 * 1000),
+            ])
         })
         .collect();
     let rows = Rows {
@@ -682,6 +657,7 @@ async fn test_cache_null_primary_key() {
         options: HashMap::new(),
         table_dir: "test".to_string(),
         path_type: PathType::Bare,
+        partition_expr_json: Some("".to_string()),
     };
 
     let column_schemas = rows_schema(&request);

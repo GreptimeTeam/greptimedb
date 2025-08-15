@@ -96,6 +96,7 @@ mod tests {
                     options: HashMap::new(),
                     table_dir: "test".to_string(),
                     path_type: PathType::Bare,
+                    partition_expr_json: Some("".to_string()),
                 },
             ),
             (
@@ -116,6 +117,7 @@ mod tests {
                     options: HashMap::new(),
                     table_dir: "test".to_string(),
                     path_type: PathType::Bare,
+                    partition_expr_json: Some("".to_string()),
                 },
             ),
         ];
@@ -157,6 +159,7 @@ mod tests {
                 options: HashMap::new(),
                 table_dir: "test".to_string(),
                 path_type: PathType::Bare,
+                partition_expr_json: Some("".to_string()),
             },
         )];
 

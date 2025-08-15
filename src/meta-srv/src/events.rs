@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database};
@@ -21,7 +22,9 @@ use common_error::ext::BoxedError;
 use common_event_recorder::error::{
     InsertEventsSnafu, KvBackendSnafu, NoAvailableFrontendSnafu, Result,
 };
-use common_event_recorder::{build_row_inserts_request, insert_hints, Event, EventHandler};
+use common_event_recorder::{
+    build_row_inserts_request, group_events_by_type, Event, EventHandler, EventHandlerOptions,
+};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerLookupServiceRef;
 use common_telemetry::debug;
@@ -36,13 +39,15 @@ pub mod region_migration_event;
 pub struct EventHandlerImpl {
     peer_lookup_service: PeerLookupServiceRef,
     channel_manager: ChannelManager,
+    ttl: Duration,
 }
 
 impl EventHandlerImpl {
-    pub fn new(meta_peer_client: MetaPeerClientRef) -> Self {
+    pub fn new(meta_peer_client: MetaPeerClientRef, ttl: Duration) -> Self {
         Self {
             peer_lookup_service: Arc::new(MetaPeerLookupService::new(meta_peer_client)),
             channel_manager: ChannelManager::new(),
+            ttl,
         }
     }
 }
@@ -50,14 +55,34 @@ impl EventHandlerImpl {
 #[async_trait]
 impl EventHandler for EventHandlerImpl {
     async fn handle(&self, events: &[Box<dyn Event>]) -> Result<()> {
-        self.build_database_client()
-            .await?
-            .row_inserts_with_hints(build_row_inserts_request(events)?, &insert_hints())
-            .await
-            .map_err(BoxedError::new)
-            .context(InsertEventsSnafu)?;
+        let event_groups = group_events_by_type(events);
+
+        for (event_type, events) in event_groups {
+            let opts = self.options(event_type);
+            let hints = opts.to_hints();
+
+            self.build_database_client()
+                .await?
+                .row_inserts_with_hints(
+                    build_row_inserts_request(&events)?,
+                    &hints
+                        .iter()
+                        .map(|(k, v)| (*k, v.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(InsertEventsSnafu)?;
+        }
 
         Ok(())
+    }
+
+    fn options(&self, _event_type: &str) -> EventHandlerOptions {
+        EventHandlerOptions {
+            ttl: self.ttl,
+            append_mode: true,
+        }
     }
 }
 

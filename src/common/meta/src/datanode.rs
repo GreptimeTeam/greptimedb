@@ -63,7 +63,10 @@ pub struct Stat {
     pub wcus: i64,
     /// How many regions on this node
     pub region_num: u64,
+    /// The region stats of the datanode.
     pub region_stats: Vec<RegionStat>,
+    /// The topic stats of the datanode.
+    pub topic_stats: Vec<TopicStat>,
     // The node epoch is used to check whether the node has restarted or redeployed.
     pub node_epoch: u64,
     /// The datanode workloads.
@@ -106,6 +109,24 @@ pub struct RegionStat {
     /// **Only used by remote WAL prune.**
     /// In mito engine, this is the same as `data_topic_latest_entry_id`.
     pub metadata_topic_latest_entry_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicStat {
+    /// The topic name.
+    pub topic: String,
+    /// The latest entry id of the topic.
+    pub latest_entry_id: u64,
+    /// The total size in bytes of records appended to the topic.
+    pub record_size: u64,
+    /// The total number of records appended to the topic.
+    pub record_num: u64,
+}
+
+/// Trait for reporting statistics about topics.
+pub trait TopicStatsReporter: Send + Sync {
+    /// Returns a list of topic statistics that can be reported.
+    fn reportable_topics(&mut self) -> Vec<TopicStat>;
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -203,6 +224,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
             region_stats,
             node_epoch,
             node_workloads,
+            topic_stats,
             ..
         } = value;
 
@@ -212,6 +234,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     .iter()
                     .map(RegionStat::from)
                     .collect::<Vec<_>>();
+                let topic_stats = topic_stats.iter().map(TopicStat::from).collect::<Vec<_>>();
 
                 let datanode_workloads = get_datanode_workloads(node_workloads.as_ref());
                 Ok(Self {
@@ -224,6 +247,7 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                     wcus: region_stats.iter().map(|s| s.wcus).sum(),
                     region_num: region_stats.len() as u64,
                     region_stats,
+                    topic_stats,
                     node_epoch: *node_epoch,
                     datanode_workloads,
                 })
@@ -282,6 +306,17 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             region_manifest: region_stat.manifest.into(),
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
+        }
+    }
+}
+
+impl From<&api::v1::meta::TopicStat> for TopicStat {
+    fn from(value: &api::v1::meta::TopicStat) -> Self {
+        Self {
+            topic: value.topic_name.clone(),
+            latest_entry_id: value.latest_entry_id,
+            record_size: value.record_size,
+            record_num: value.record_num,
         }
     }
 }
