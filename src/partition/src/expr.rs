@@ -252,20 +252,6 @@ impl PartitionExpr {
         Ok(expr)
     }
 
-    pub fn try_as_physical_expr(
-        &self,
-        schema: &arrow::datatypes::SchemaRef,
-    ) -> error::Result<Arc<dyn PhysicalExpr>> {
-        let df_schema = schema
-            .clone()
-            .to_dfschema_ref()
-            .context(error::ToDFSchemaSnafu)?;
-        let execution_props = &ExecutionProps::default();
-        let expr = self.try_as_logical_expr()?;
-        create_physical_expr(&expr, &df_schema, execution_props)
-            .context(error::CreatePhysicalExprSnafu)
-    }
-
     /// Get the left-hand side operand
     pub fn lhs(&self) -> &Operand {
         &self.lhs
@@ -279,6 +265,20 @@ impl PartitionExpr {
     /// Get the operation
     pub fn op(&self) -> &RestrictedOp {
         &self.op
+    }
+
+    pub fn try_as_physical_expr(
+        &self,
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> error::Result<Arc<dyn PhysicalExpr>> {
+        let df_schema = schema
+            .clone()
+            .to_dfschema_ref()
+            .context(error::ToDFSchemaSnafu)?;
+        let execution_props = &ExecutionProps::default();
+        let expr = self.try_as_logical_expr()?;
+        create_physical_expr(&expr, &df_schema, execution_props)
+            .context(error::CreatePhysicalExprSnafu)
     }
 
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
