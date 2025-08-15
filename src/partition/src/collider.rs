@@ -66,13 +66,6 @@ impl AtomicExpr {
             .unwrap();
         result
     }
-
-    pub fn new(nucleons: Vec<NucleonExpr>, source_expr_index: usize) -> Self {
-        Self {
-            nucleons,
-            source_expr_index,
-        }
-    }
 }
 
 impl PartialOrd for AtomicExpr {

@@ -210,21 +210,6 @@ impl PartitionExpr {
         }
     }
 
-    /// Get the left-hand side operand
-    pub fn lhs(&self) -> &Operand {
-        &self.lhs
-    }
-
-    /// Get the right-hand side operand
-    pub fn rhs(&self) -> &Operand {
-        &self.rhs
-    }
-
-    /// Get the operation
-    pub fn op(&self) -> &RestrictedOp {
-        &self.op
-    }
-
     /// Convert [Self] back to sqlparser's [Expr]
     ///
     /// [Expr]: ParserExpr
@@ -279,6 +264,21 @@ impl PartitionExpr {
         let expr = self.try_as_logical_expr()?;
         create_physical_expr(&expr, &df_schema, execution_props)
             .context(error::CreatePhysicalExprSnafu)
+    }
+
+    /// Get the left-hand side operand
+    pub fn lhs(&self) -> &Operand {
+        &self.lhs
+    }
+
+    /// Get the right-hand side operand
+    pub fn rhs(&self) -> &Operand {
+        &self.rhs
+    }
+
+    /// Get the operation
+    pub fn op(&self) -> &RestrictedOp {
+        &self.op
     }
 
     pub fn and(self, rhs: PartitionExpr) -> PartitionExpr {
