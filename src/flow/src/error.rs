@@ -290,6 +290,13 @@ pub enum Error {
         location: Location,
         source: operator::error::Error,
     },
+
+    #[snafu(display("Failed to create channel manager for gRPC client"))]
+    InvalidClientConfig {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_grpc::error::Error,
+    },
 }
 
 /// the outer message is the full error stack, and inner message in header is the last error message that can be show directly to user
@@ -343,7 +350,8 @@ impl ErrorExt for Error {
             Self::InvalidQuery { .. }
             | Self::InvalidRequest { .. }
             | Self::ParseAddr { .. }
-            | Self::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
+            | Self::IllegalAuthConfig { .. }
+            | Self::InvalidClientConfig { .. } => StatusCode::InvalidArguments,
 
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
 

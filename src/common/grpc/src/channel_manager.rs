@@ -21,6 +21,7 @@ use common_telemetry::info;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
@@ -97,6 +98,7 @@ impl ChannelManager {
         }
     }
 
+    /// Read tls cert and key files and create a ChannelManager with TLS config.
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
         let mut inner = Inner::with_config(config.clone());
 
@@ -270,7 +272,7 @@ impl ChannelManager {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTlsOption {
     pub server_ca_cert_path: String,
     pub client_cert_path: String,
