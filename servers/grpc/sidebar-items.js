@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_GRPC_ADDR_PORT","GRPC_SERVER"],"enum":["FlightCompression"],"mod":["authorize","builder","cancellation","database","flight","frontend_grpc_handler","greptime_handler","prom_query_gateway","region_server"],"struct":["GrpcOptions","GrpcServer","GrpcServerConfig","HealthCheckHandler"],"type":["TonicResult"]};

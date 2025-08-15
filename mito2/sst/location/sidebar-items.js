@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["index_file_path","region_dir_from_table_dir","sst_file_path"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Error"],"struct":["InsertEventsSnafu","KvBackendSnafu","MismatchedSchemaSnafu","NoAvailableFrontendSnafu","SerializeEventSnafu"],"type":["Result"]};

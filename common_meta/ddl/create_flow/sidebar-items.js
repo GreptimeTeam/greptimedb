@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CreateFlowState","FlowType"],"fn":["get_flow_type_from_options"],"mod":["metadata"],"struct":["CreateFlowData","CreateFlowProcedure"]};

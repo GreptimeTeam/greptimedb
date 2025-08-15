@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_wkt"],"static":["COORDINATE_TYPES"],"struct":["LatLngToPointWkt"]};

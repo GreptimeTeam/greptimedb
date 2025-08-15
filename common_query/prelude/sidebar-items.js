@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GREPTIME_COUNT","GREPTIME_PHYSICAL_TABLE","GREPTIME_TIMESTAMP","GREPTIME_VALUE"],"enum":["ScalarValue","TypeSignature","Volatility"],"struct":["Signature"]};

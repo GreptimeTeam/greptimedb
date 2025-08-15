@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OPT_KEY_TTL"],"fn":["schema_decoder"],"struct":["SchemaManager","SchemaName","SchemaNameKey","SchemaNameValue"],"type":["SchemaNameDecodeResult"]};

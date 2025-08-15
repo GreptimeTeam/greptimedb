@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RECENT_DURATION","TICKER_INTERVAL"],"enum":["Event"],"fn":["group_regions_by_leader","is_recent","select_regions_to_flush"],"struct":["RegionFlushTicker","RegionFlushTrigger"],"type":["RegionFlushTickerRef"]};
