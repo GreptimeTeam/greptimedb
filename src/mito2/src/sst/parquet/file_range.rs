@@ -231,6 +231,15 @@ impl FileRangeContext {
                 file_path: self.reader_builder.file_path(),
             })
     }
+
+    /// Returns the number of columns in the Parquet file.
+    pub fn parquet_columns_num(&self) -> usize {
+        self.reader_builder
+            .parquet_metadata()
+            .file_metadata()
+            .schema_descr()
+            .num_columns()
+    }
 }
 
 /// Common fields for a range to read and filter batches.

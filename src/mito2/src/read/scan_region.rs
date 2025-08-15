@@ -907,10 +907,19 @@ impl ScanInput {
                 }
             }
         };
-        if !compat::has_same_columns_and_pk_encoding(
-            self.mapper.metadata(),
-            file_range_ctx.read_format().metadata(),
-        ) {
+
+        // Check whether the batch needs to be converted to the flat schema.
+        // Sparse encoding under flat format also use this to flatten the encoded primary key.
+        let need_convert = compat::need_convert_to_flat(
+            file_range_ctx.parquet_columns_num(),
+            file_range_ctx.read_format(),
+        )?;
+        let need_compat = need_convert
+            || !compat::has_same_columns_and_pk_encoding(
+                self.mapper.metadata(),
+                file_range_ctx.read_format().metadata(),
+            );
+        if need_compat {
             // They have different schema. We need to adapt the batch first so the
             // mapper can convert it.
             let compat = CompatBatch::new(

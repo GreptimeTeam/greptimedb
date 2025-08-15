@@ -41,7 +41,7 @@ use crate::read::projection::{PrimaryKeyProjectionMapper, ProjectionMapper};
 use crate::read::{Batch, BatchColumn, BatchReader};
 use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::format::{PrimaryKeyArray, ReadFormat, FIXED_POS_COLUMN_NUM};
 
 /// Reader to adapt schema of underlying reader to expected schema.
 pub struct CompatReader<R> {
@@ -151,6 +151,53 @@ pub(crate) fn has_same_columns_and_pk_encoding(
     }
 
     true
+}
+
+/// Checks whether the batch from the parquet file needs to be converted to match the flat format.
+///
+/// * `num_columns` is the number of columns in the parquet file.
+/// * `read_format` is the `ReadFormat` of the parquet file.
+pub(crate) fn need_convert_to_flat(num_columns: usize, read_format: &ReadFormat) -> Result<bool> {
+    if let Some(flat_format) = read_format.as_flat() {
+        // For flat format, compute expected column number:
+        // all columns + internal columns (pk, sequence, op_type) - 1 (time index already counted)
+        let metadata = flat_format.metadata();
+        let expected_columns = metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM - 1;
+
+        if expected_columns == num_columns {
+            // Same number of columns, no conversion needed
+            Ok(false)
+        } else {
+            ensure!(
+                expected_columns >= num_columns,
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Expected columns {} should be >= actual columns {}",
+                        expected_columns, num_columns
+                    )
+                }
+            );
+
+            // Different number of columns, check if the difference matches primary key count
+            let column_diff = expected_columns - num_columns;
+
+            ensure!(
+                column_diff == metadata.primary_key.len(),
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Column number difference {} does not match primary key count {}",
+                        column_diff,
+                        metadata.primary_key.len()
+                    )
+                }
+            );
+
+            Ok(true)
+        }
+    } else {
+        // For primary key format, we don't need this check
+        Ok(false)
+    }
 }
 
 /// A helper struct to adapt schema of the batch to an expected schema.
