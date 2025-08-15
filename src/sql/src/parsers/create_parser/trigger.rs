@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::Query;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -10,7 +9,7 @@ use crate::error;
 use crate::error::Result;
 use crate::parser::ParserContext;
 use crate::statements::create::trigger::{
-    AlertManagerWebhook, ChannelType, CreateTrigger, NotifyChannel,
+    AlertManagerWebhook, ChannelType, CreateTrigger, NotifyChannel, TriggerOn,
 };
 use crate::statements::statement::Statement;
 use crate::statements::OptionMap;
@@ -52,8 +51,7 @@ impl<'a> ParserContext<'a> {
         let if_not_exists = self.parse_if_not_exist()?;
         let trigger_name = self.intern_parse_table_name()?;
 
-        let mut may_query = None;
-        let mut may_interval = None;
+        let mut may_trigger_on = None;
         let mut may_labels = None;
         let mut may_annotations = None;
         let mut notify_channels = vec![];
@@ -63,9 +61,8 @@ impl<'a> ParserContext<'a> {
             match next_token.token {
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ON) => {
                     self.parser.next_token();
-                    let (query, interval) = self.parse_trigger_on(true)?;
-                    may_query.replace(query);
-                    may_interval.replace(interval);
+                    let trigger_on = self.parse_trigger_on(true)?;
+                    may_trigger_on.replace(trigger_on);
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
@@ -92,8 +89,7 @@ impl<'a> ParserContext<'a> {
             }
         }
 
-        let query = may_query.context(error::MissingClauseSnafu { name: ON })?;
-        let interval = may_interval.context(error::MissingClauseSnafu { name: ON })?;
+        let trigger_on = may_trigger_on.context(error::MissingClauseSnafu { name: ON })?;
         let labels = may_labels.unwrap_or_default();
         let annotations = may_annotations.unwrap_or_default();
 
@@ -105,8 +101,7 @@ impl<'a> ParserContext<'a> {
         let create_trigger = CreateTrigger {
             trigger_name,
             if_not_exists,
-            query,
-            interval,
+            trigger_on,
             labels,
             annotations,
             channels: notify_channels,
@@ -125,10 +120,7 @@ impl<'a> ParserContext<'a> {
     ///
     /// - `is_first_keyword_matched`: indicates whether the first keyword `ON`
     ///     has been matched.
-    pub(crate) fn parse_trigger_on(
-        &mut self,
-        is_first_keyword_matched: bool,
-    ) -> Result<(Box<Query>, u64)> {
+    pub(crate) fn parse_trigger_on(&mut self, is_first_keyword_matched: bool) -> Result<TriggerOn> {
         if !is_first_keyword_matched {
             if let Token::Word(w) = self.parser.peek_token().token
                 && w.value.eq_ignore_ascii_case(ON)
@@ -149,12 +141,13 @@ impl<'a> ParserContext<'a> {
             return self.expected("`EVERY` keyword", self.parser.peek_token());
         }
 
-        let interval = self
-            .parse_interval()?
-            .try_into()
-            .context(error::NegativeIntervalSnafu)?;
+        let (interval, raw_interval_expr) = self.parse_interval_to_duration()?;
 
-        Ok((query, interval))
+        Ok(TriggerOn {
+            query,
+            interval,
+            raw_interval_expr,
+        })
     }
 
     /// The SQL format as follows:
@@ -380,6 +373,8 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::statements::create::trigger::ChannelType;
@@ -452,10 +447,20 @@ IF NOT EXISTS cpu_monitor
         assert!(create_trigger.if_not_exists);
         assert_eq!(create_trigger.trigger_name.to_string(), "cpu_monitor");
         assert_eq!(
-            create_trigger.query.to_string(),
+            create_trigger.trigger_on.query.to_string(),
             "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
         );
-        assert_eq!(create_trigger.interval, 300);
+        let TriggerOn {
+            query,
+            interval,
+            raw_interval_expr,
+        } = &create_trigger.trigger_on;
+        assert_eq!(
+            query.to_string(),
+            "(SELECT host AS host_label, cpu, memory FROM machine_monitor WHERE cpu > 1)"
+        );
+        assert_eq!(*interval, Duration::from_secs(300));
+        assert_eq!(raw_interval_expr.to_string(), "'5 minute'::INTERVAL");
         assert_eq!(create_trigger.labels.len(), 1);
         assert_eq!(
             create_trigger.labels.get("label_name").unwrap(),
@@ -487,9 +492,14 @@ IF NOT EXISTS cpu_monitor
         // Normal.
         let sql = "ON (SELECT * FROM cpu_usage) EVERY '5 minute'::INTERVAL";
         let mut ctx = ParserContext::new(&GreptimeDbDialect {}, sql).unwrap();
-        let (query, interval) = ctx.parse_trigger_on(false).unwrap();
+        let TriggerOn {
+            query,
+            interval,
+            raw_interval_expr: raw_interval,
+        } = ctx.parse_trigger_on(false).unwrap();
         assert_eq!(query.to_string(), "(SELECT * FROM cpu_usage)");
-        assert_eq!(interval, 300);
+        assert_eq!(interval, Duration::from_secs(300));
+        assert_eq!(raw_interval, "'5 minute'::INTERVAL");
 
         // Invalid, since missing `ON` keyword.
         let sql = "SELECT * FROM cpu_usage EVERY '5 minute'::INTERVAL";

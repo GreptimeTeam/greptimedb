@@ -55,8 +55,7 @@ impl<'a> ParserContext<'a> {
         let trigger_name = self.intern_parse_table_name()?;
 
         let mut new_trigger_name = None;
-        let mut new_query = None;
-        let mut new_interval = None;
+        let mut trigger_on = None;
         let mut label_ops = None;
         let mut annotation_ops = None;
         let mut notify_ops = None;
@@ -78,13 +77,9 @@ impl<'a> ParserContext<'a> {
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(ON) => {
                     self.parser.next_token();
-                    let (query, interval) = self.parse_trigger_on(true)?;
-                    ensure!(
-                        new_query.is_none() && new_interval.is_none(),
-                        DuplicateClauseSnafu { clause: ON }
-                    );
-                    new_query.replace(query);
-                    new_interval.replace(interval);
+                    let new_trigger_on = self.parse_trigger_on(true)?;
+                    ensure!(trigger_on.is_none(), DuplicateClauseSnafu { clause: ON });
+                    trigger_on.replace(new_trigger_on);
                 }
                 Token::Word(w) if w.value.eq_ignore_ascii_case(LABELS) => {
                     self.parser.next_token();
@@ -230,8 +225,7 @@ impl<'a> ParserContext<'a> {
         }
 
         if new_trigger_name.is_none()
-            && new_query.is_none()
-            && new_interval.is_none()
+            && trigger_on.is_none()
             && label_ops.is_none()
             && annotation_ops.is_none()
             && notify_ops.is_none()
@@ -241,8 +235,7 @@ impl<'a> ParserContext<'a> {
 
         let operation = AlterTriggerOperation {
             rename: new_trigger_name,
-            new_query,
-            new_interval,
+            trigger_on,
             label_operations: label_ops,
             annotation_operations: annotation_ops,
             notify_channel_operations: notify_ops,
@@ -544,10 +537,13 @@ fn apply_notify_change(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::parsers::alter_parser::trigger::{apply_label_change, apply_label_replacement};
     use crate::statements::alter::trigger::{LabelChange, LabelOperations};
+    use crate::statements::create::trigger::TriggerOn;
     use crate::statements::statement::Statement;
     use crate::statements::OptionMap;
 
@@ -571,9 +567,14 @@ mod tests {
         let Statement::AlterTrigger(alter) = stmt else {
             panic!("Expected AlterTrigger statement");
         };
-        assert!(alter.operation.new_query.is_some());
-        assert!(alter.operation.new_interval.is_some());
-        assert_eq!(alter.operation.new_interval.unwrap(), 300);
+        let TriggerOn {
+            query,
+            interval,
+            raw_interval_expr,
+        } = alter.operation.trigger_on.unwrap();
+        assert_eq!(query.to_string(), "(SELECT * FROM test_table)");
+        assert_eq!(raw_interval_expr, "'5 minute'::INTERVAL");
+        assert_eq!(interval, Duration::from_secs(300));
         assert!(alter.operation.rename.is_none());
         assert!(alter.operation.label_operations.is_none());
         assert!(alter.operation.annotation_operations.is_none());

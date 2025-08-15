@@ -328,7 +328,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
             DdlTask::CreateView(task) => Task::CreateViewTask(task.try_into()?),
             DdlTask::DropView(task) => Task::DropViewTask(task.into()),
             #[cfg(feature = "enterprise")]
-            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.into()),
+            DdlTask::CreateTrigger(task) => Task::CreateTriggerTask(task.try_into()?),
             #[cfg(feature = "enterprise")]
             DdlTask::DropTrigger(task) => Task::DropTriggerTask(task.into()),
         };
