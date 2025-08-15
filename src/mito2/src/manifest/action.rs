@@ -98,7 +98,7 @@ pub enum TruncateKind {
 
 /// The region manifest data.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
+#[cfg_attr(test, derive(Eq))]
 pub struct RegionManifest {
     /// Metadata of the region.
     pub metadata: RegionMetadataRef,
@@ -126,6 +126,19 @@ pub struct RegionManifest {
     /// Inferred compaction time window.
     #[serde(with = "humantime_serde")]
     pub compaction_time_window: Option<Duration>,
+}
+
+#[cfg(test)]
+impl PartialEq for RegionManifest {
+    fn eq(&self, other: &Self) -> bool {
+        self.metadata == other.metadata
+            && self.files == other.files
+            && self.flushed_entry_id == other.flushed_entry_id
+            && self.flushed_sequence == other.flushed_sequence
+            && self.manifest_version == other.manifest_version
+            && self.truncated_entry_id == other.truncated_entry_id
+            && self.compaction_time_window == other.compaction_time_window
+    }
 }
 
 #[derive(Debug, Default)]
