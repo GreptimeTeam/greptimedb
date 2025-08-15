@@ -45,3 +45,6 @@ tracing.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 mito2 = { workspace = true, features = ["test"] }
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

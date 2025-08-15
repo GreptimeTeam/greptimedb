@@ -114,3 +114,6 @@ required-features = ["test"]
 name = "simple_bulk_memtable"
 harness = false
 required-features = ["test"]
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

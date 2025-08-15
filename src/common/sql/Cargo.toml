@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 common-base.workspace = true
-common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

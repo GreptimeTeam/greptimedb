@@ -89,7 +89,6 @@ paste.workspace = true
 pretty_assertions.workspace = true
 rand.workspace = true
 session = { workspace = true, features = ["testing"] }
-statrs = "0.16"
 store-api.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio-stream.workspace = true
