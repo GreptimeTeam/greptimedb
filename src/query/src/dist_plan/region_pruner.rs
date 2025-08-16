@@ -209,7 +209,7 @@ impl ConstraintPruner {
 
                 true
             }
-            _ => return false,
+            _ => false,
         }
     }
 
