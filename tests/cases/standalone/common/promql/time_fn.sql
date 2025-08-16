@@ -14,6 +14,10 @@ tql eval (0, 0, '1s') time() + 1;
 
 tql eval (0, 0, '1s') 1 + time();
 
+tql eval (10000, 10000, '1s') time() * time();
+
+tql eval (10000, 10000, '1s') time() / time();
+
 -- expect error: parse error: comparisons between scalars must use BOOL modifier
 tql eval (0, 0, '1s') time() < 1;
 
