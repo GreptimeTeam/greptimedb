@@ -137,6 +137,7 @@ async fn test_query_validate() -> Result<()> {
         None,
         None,
         None,
+        None,
         false,
         plugins,
         QueryOptionsNew::default(),

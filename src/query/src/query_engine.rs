@@ -31,6 +31,7 @@ use common_query::Output;
 use datafusion_expr::{AggregateUDF, LogicalPlan};
 use datatypes::schema::Schema;
 pub use default_serializer::{DefaultPlanDecoder, DefaultSerializer};
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use table::TableRef;
 
@@ -110,6 +111,7 @@ impl QueryEngineFactory {
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
+            None,
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,
@@ -123,6 +125,7 @@ impl QueryEngineFactory {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
@@ -133,6 +136,7 @@ impl QueryEngineFactory {
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
+            partition_rule_manager,
             region_query_handler,
             table_mutation_handler,
             procedure_service_handler,

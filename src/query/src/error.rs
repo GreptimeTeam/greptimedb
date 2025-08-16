@@ -337,6 +337,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Failed to convert value for region pruning"))]
+    ConvertValue {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -360,7 +367,8 @@ impl ErrorExt for Error {
             | ColumnSchemaIncompatible { .. }
             | UnsupportedVariable { .. }
             | ColumnSchemaNoDefault { .. }
-            | CteColumnSchemaMismatch { .. } => StatusCode::InvalidArguments,
+            | CteColumnSchemaMismatch { .. }
+            | ConvertValue { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
 
