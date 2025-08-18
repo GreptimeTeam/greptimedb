@@ -15,6 +15,7 @@
 //! [`ConstraintPruner`] prunes partition info based on given expressions.
 
 use std::cmp::Ordering;
+use std::ops::Bound;
 
 use ahash::{HashMap, HashSet};
 use common_telemetry::debug;
@@ -292,41 +293,25 @@ impl ConstraintPruner {
             let value = nucleon.value();
             match nucleon.op() {
                 Eq => {
-                    // Equality constraint: both min and max are the same value
-                    range.min_value = Some((value, true));
-                    range.max_value = Some((value, true));
-                    break; // Equality is the most restrictive, no need to check others
+                    range.lower = Bound::Included(value);
+                    range.upper = Bound::Included(value);
+                    break; // exact value, most restrictive
                 }
                 Lt => {
-                    // Less than: update max_value if it's more restrictive
-                    let new_max = (value, false);
-                    if range.max_value.is_none() || range.max_value.as_ref().unwrap().0 > value {
-                        range.max_value = Some(new_max);
-                    }
+                    // upper < value
+                    range.update_upper(Bound::Excluded(value));
                 }
                 LtEq => {
-                    // Less than or equal: update max_value if it's more restrictive
-                    let new_max = (value, true);
-                    if range.max_value.is_none() || range.max_value.as_ref().unwrap().0 > value {
-                        range.max_value = Some(new_max);
-                    }
+                    range.update_upper(Bound::Included(value));
                 }
                 Gt => {
-                    // Greater than: update min_value if it's more restrictive
-                    let new_min = (value, false);
-                    if range.min_value.is_none() || range.min_value.as_ref().unwrap().0 < value {
-                        range.min_value = Some(new_min);
-                    }
+                    range.update_lower(Bound::Excluded(value));
                 }
                 GtEq => {
-                    // Greater than or equal: update min_value if it's more restrictive
-                    let new_min = (value, true);
-                    if range.min_value.is_none() || range.min_value.as_ref().unwrap().0 < value {
-                        range.min_value = Some(new_min);
-                    }
+                    range.update_lower(Bound::Included(value));
                 }
                 NotEq => {
-                    // NotEq should be broke into two other AtomicExprs
+                    // handled as two separate atomic exprs elsewhere
                     continue;
                 }
             }
@@ -339,72 +324,84 @@ impl ConstraintPruner {
 /// Represents a value range derived from a group of nucleons for the same column
 #[derive(Debug, Clone)]
 struct ValueRange {
-    min_value: Option<(OrderedF64, bool)>, // (value, inclusive)
-    max_value: Option<(OrderedF64, bool)>, // (value, inclusive)
+    // lower and upper bounds using standard library Bound semantics
+    lower: Bound<OrderedF64>,
+    upper: Bound<OrderedF64>,
 }
 
 impl ValueRange {
     fn new() -> Self {
         Self {
-            min_value: None,
-            max_value: None,
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+        }
+    }
+
+    // Update lower bound choosing the more restrictive one
+    fn update_lower(&mut self, new_lower: Bound<OrderedF64>) {
+        match (&self.lower, &new_lower) {
+            (Bound::Unbounded, _) => self.lower = new_lower,
+            (_, Bound::Unbounded) => { /* keep existing */ }
+            (Bound::Included(cur), Bound::Included(new))
+            | (Bound::Excluded(cur), Bound::Included(new))
+            | (Bound::Included(cur), Bound::Excluded(new))
+            | (Bound::Excluded(cur), Bound::Excluded(new)) => {
+                if new > cur {
+                    self.lower = new_lower;
+                } else if new == cur {
+                    // prefer Excluded over Included for the same value (more restrictive)
+                    if matches!(new_lower, Bound::Excluded(_))
+                        && matches!(self.lower, Bound::Included(_))
+                    {
+                        self.lower = new_lower;
+                    }
+                }
+            }
+        }
+    }
+
+    // Update upper bound choosing the more restrictive one
+    fn update_upper(&mut self, new_upper: Bound<OrderedF64>) {
+        match (&self.upper, &new_upper) {
+            (Bound::Unbounded, _) => self.upper = new_upper,
+            (_, Bound::Unbounded) => { /* keep existing */ }
+            (Bound::Included(cur), Bound::Included(new))
+            | (Bound::Excluded(cur), Bound::Included(new))
+            | (Bound::Included(cur), Bound::Excluded(new))
+            | (Bound::Excluded(cur), Bound::Excluded(new)) => {
+                if new < cur {
+                    self.upper = new_upper;
+                } else if new == cur {
+                    // prefer Excluded over Included for the same value (more restrictive)
+                    self.upper = new_upper;
+                    if matches!(new_upper, Bound::Excluded(_))
+                        && matches!(self.upper, Bound::Included(_))
+                    {}
+                }
+            }
         }
     }
 
     /// Check if this range overlaps with another range
     fn overlaps_with(&self, other: &ValueRange) -> bool {
-        match (
-            &self.min_value,
-            &self.max_value,
-            &other.min_value,
-            &other.max_value,
-        ) {
-            // If either range is completely unconstrained, they always overlap
-            (None, None, _, _) | (_, _, None, None) => true,
-
-            (Some(lower), None, None, Some(upper)) | (None, Some(upper), Some(lower), None) => {
-                if lower.0 == upper.0 {
-                    lower.1 && upper.1
-                } else {
-                    lower.0 < upper.0
-                }
-            }
-
-            // Both ranges have specific bounds - check for actual overlap
-            _ => {
-                // Get effective bounds (use infinity when unspecified)
-                let self_min = self
-                    .min_value
-                    .unwrap_or((OrderedF64::from(-f64::INFINITY), true));
-                let self_max = self
-                    .max_value
-                    .unwrap_or((OrderedF64::from(f64::INFINITY), true));
-                let other_min = other
-                    .min_value
-                    .unwrap_or((OrderedF64::from(-f64::INFINITY), true));
-                let other_max = other
-                    .max_value
-                    .unwrap_or((OrderedF64::from(f64::INFINITY), true));
-
-                // Check if ranges overlap: self_min <= other_max && other_min <= self_max
-                let self_min_le_other_max = if self_min.0 < other_max.0 {
-                    true
-                } else if self_min.0 == other_max.0 {
-                    self_min.1 && other_max.1
-                } else {
-                    false
-                };
-                let other_min_le_self_max = if other_min.0 < self_max.0 {
-                    true
-                } else if other_min.0 == self_max.0 {
-                    other_min.1 && self_max.1
-                } else {
-                    false
-                };
-
-                self_min_le_other_max && other_min_le_self_max
+        fn no_overlap(upper: &Bound<OrderedF64>, lower: &Bound<OrderedF64>) -> bool {
+            match (upper, lower) {
+                (Bound::Unbounded, _) | (_, Bound::Unbounded) => false,
+                // u], [l
+                (Bound::Included(u), Bound::Included(l)) => u < l,
+                // u], (l
+                (Bound::Included(u), Bound::Excluded(l))
+                // u), [l
+                | (Bound::Excluded(u), Bound::Included(l))
+                // u), (l
+                | (Bound::Excluded(u), Bound::Excluded(l)) => u <= l,
             }
         }
+
+        if no_overlap(&self.upper, &other.lower) || no_overlap(&other.upper, &self.lower) {
+            return false;
+        }
+        true
     }
 }
 
