@@ -100,10 +100,10 @@ impl KeyDictBuilder {
 
         // Since we store the key twice so the bytes usage doubled.
         metrics.key_bytes += full_primary_key.len() * 2 + sparse_key_len;
-        self.key_bytes_in_index += full_primary_key.len();
+        self.key_bytes_in_index += full_primary_key.len() + sparse_key_len;
 
         // Adds key size of index to the metrics.
-        MEMTABLE_DICT_BYTES.add((full_primary_key.len() + sparse_key_len) as i64);
+        MEMTABLE_DICT_BYTES.add(self.key_bytes_in_index as i64);
 
         pk_index
     }
