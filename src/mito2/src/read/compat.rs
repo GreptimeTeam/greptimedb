@@ -230,8 +230,8 @@ pub(crate) fn need_convert_to_flat(num_columns: usize, read_format: &ReadFormat)
 
 /// A helper struct to adapt schema of the batch to an expected schema.
 pub(crate) struct FlatCompatBatch {
-    /// Column Ids and DataTypes the reader actually returns.
-    actual_schema: Vec<(ColumnId, ConcreteDataType)>,
+    // /// Column Ids and DataTypes the reader actually returns.
+    // actual_schema: Vec<(ColumnId, ConcreteDataType)>,
     /// Indices to convert actual fields to expect fields.
     index_or_defaults: Vec<IndexOrDefault>,
     /// Expected arrow schema.
@@ -309,7 +309,7 @@ impl FlatCompatBatch {
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
         Ok(Some(Self {
-            actual_schema,
+            // actual_schema,
             index_or_defaults,
             arrow_schema: Arc::new(Schema::new(fields)),
             compat_pk,
@@ -762,6 +762,7 @@ impl FlatRewritePrimaryKey {
                         .context(EncodeSnafu)?;
                 }
             }
+            builder.append_value(&buffer);
         }
         let new_pk_values_array = Arc::new(builder.finish());
         let new_pk_dict_array =
@@ -911,6 +912,12 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{OpType, SemanticType};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, Int64Array, StringArray,
+        TimestampMillisecondArray, UInt64Array, UInt8Array,
+    };
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
+    use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use datatypes::value::ValueRef;
@@ -923,6 +930,8 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::test_util::{check_reader_result, VecBatchReader};
 
     /// Creates a new [RegionMetadata].
@@ -1396,5 +1405,235 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    /// Creates a flat format RecordBatch for testing.
+    fn new_flat_record_batch(
+        primary_keys: &[&[u8]],
+        timestamps: &[i64],
+        sequences: &[u64],
+        op_types: &[OpType],
+        tag_values: &[Option<&str>],
+        field_values: &[Option<i64>],
+    ) -> RecordBatch {
+        let num_rows = timestamps.len();
+        debug_assert_eq!(sequences.len(), num_rows);
+        debug_assert_eq!(op_types.len(), num_rows);
+        debug_assert_eq!(primary_keys.len(), num_rows);
+        debug_assert_eq!(tag_values.len(), num_rows);
+        debug_assert_eq!(field_values.len(), num_rows);
+
+        let columns: Vec<ArrayRef> = vec![
+            // tag_1 column (string)
+            Arc::new(StringArray::from_iter(tag_values.iter().map(|v| *v))),
+            // field_2 column (int64)
+            Arc::new(Int64Array::from_iter(field_values.iter().map(|v| *v))),
+            // ts column (time index)
+            Arc::new(TimestampMillisecondArray::from_iter_values(
+                timestamps.iter().copied(),
+            )),
+            // __primary_key column
+            build_flat_test_pk_array(primary_keys),
+            // __sequence column
+            Arc::new(UInt64Array::from_iter_values(sequences.iter().copied())),
+            // __op_type column
+            Arc::new(UInt8Array::from_iter_values(
+                op_types.iter().map(|v| *v as u8),
+            )),
+        ];
+
+        RecordBatch::try_new(build_flat_test_schema(), columns).unwrap()
+    }
+
+    /// Creates a primary key array for flat format testing.
+    fn build_flat_test_pk_array(primary_keys: &[&[u8]]) -> ArrayRef {
+        let mut builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for &pk in primary_keys {
+            builder.append(pk).unwrap();
+        }
+        Arc::new(builder.finish())
+    }
+
+    /// Builds the arrow schema for flat format testing.
+    fn build_flat_test_schema() -> Arc<Schema> {
+        let fields = vec![
+            Field::new("tag_1", DataType::Utf8, true),
+            Field::new("field_2", DataType::Int64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "__primary_key",
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                false,
+            ),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ];
+        Arc::new(Schema::new(fields))
+    }
+
+    #[test]
+    fn test_flat_compat_batch_may_new_same_schema() {
+        let metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mapper = FlatProjectionMapper::all(&metadata).unwrap();
+        let read_format = FlatReadFormat::new(metadata.clone(), [0, 1, 2, 3].into_iter());
+        let format_projection = read_format.format_projection();
+
+        let result = FlatCompatBatch::may_new(&mapper, &metadata, &format_projection).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_flat_compat_batch_with_missing_columns() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let expected_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
+        let format_projection = read_format.format_projection();
+
+        let compat_batch = FlatCompatBatch::may_new(&mapper, &actual_metadata, format_projection)
+            .unwrap()
+            .unwrap();
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_batch = new_flat_record_batch(
+            &[&k1, &k1],
+            &[1000, 2000],
+            &[1, 2],
+            &[OpType::Put, OpType::Put],
+            &[Some("tag1"), Some("tag1")],
+            &[Some(100), Some(200)],
+        );
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.num_columns(), 7);
+
+        let tag_column = result.column(0);
+        let field_column = result.column(2);
+
+        let tag_array = tag_column.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(tag_array.value(0), "tag1");
+        assert_eq!(tag_array.value(1), "tag1");
+
+        let field_array = field_column.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(field_array.is_null(0));
+        assert!(field_array.is_null(1));
+    }
+
+    #[test]
+    fn test_flat_compat_batch_with_different_pk_encoding() {
+        let mut actual_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
+        let actual_metadata = Arc::new(actual_metadata);
+
+        let mut expected_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Tag, ConcreteDataType::string_datatype()),
+            ],
+            &[1, 3],
+        );
+        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let expected_metadata = Arc::new(expected_metadata);
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(actual_metadata.clone(), [0, 1, 2, 3].into_iter());
+        let format_projection = read_format.format_projection();
+
+        let compat_batch = FlatCompatBatch::may_new(&mapper, &actual_metadata, &format_projection)
+            .unwrap()
+            .unwrap();
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_batch = new_flat_record_batch(
+            &[&k1, &k1],
+            &[1000, 2000],
+            &[1, 2],
+            &[OpType::Put, OpType::Put],
+            &[Some("tag1"), Some("tag1")],
+            &[Some(100), Some(200)],
+        );
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.num_columns(), 7);
+
+        let pk_column = result.column(4);
+        let pk_dict_array = pk_column
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+
+        let pk_values_array = pk_dict_array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        assert_eq!(pk_values_array.len(), 1);
+
+        let pk_value = pk_values_array.value(0);
+        let sparse_k1 = encode_sparse_key(&[(1, Some("tag1")), (3, None)]);
+        assert_eq!(pk_value, sparse_k1);
     }
 }
