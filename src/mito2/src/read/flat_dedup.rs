@@ -17,6 +17,7 @@
 use std::ops::Range;
 
 use api::v1::OpType;
+use async_stream::try_stream;
 use datatypes::arrow::array::{
     make_comparator, Array, ArrayRef, BinaryArray, BooleanArray, BooleanBufferBuilder, UInt64Array,
     UInt8Array,
@@ -30,6 +31,7 @@ use datatypes::arrow::compute::{
 };
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
+use futures::{Stream, TryStreamExt};
 use snafu::ResultExt;
 
 use crate::error::{ComputeArrowSnafu, NewRecordBatchSnafu, Result};
@@ -78,6 +80,46 @@ impl<I: Iterator<Item = Result<RecordBatch>>, S: RecordBatchDedupStrategy> Itera
 
     fn next(&mut self) -> Option<Self::Item> {
         self.fetch_next_batch().transpose()
+    }
+}
+
+/// An async reader to dedup sorted record batches from a stream based on the dedup strategy.
+pub struct DedupReader<I, S> {
+    stream: I,
+    strategy: S,
+    metrics: DedupMetrics,
+}
+
+impl<I, S> DedupReader<I, S> {
+    /// Creates a new dedup iterator.
+    pub fn new(stream: I, strategy: S) -> Self {
+        Self {
+            stream,
+            strategy,
+            metrics: DedupMetrics::default(),
+        }
+    }
+}
+
+impl<I: Stream<Item = Result<RecordBatch>> + Unpin, S: RecordBatchDedupStrategy> DedupReader<I, S> {
+    /// Returns the next deduplicated batch.
+    async fn fetch_next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        while let Some(batch) = self.stream.try_next().await? {
+            if let Some(batch) = self.strategy.push_batch(batch, &mut self.metrics)? {
+                return Ok(Some(batch));
+            }
+        }
+
+        self.strategy.finish(&mut self.metrics)
+    }
+
+    /// Converts the reader into a stream.
+    pub fn into_stream(mut self) -> impl Stream<Item = Result<RecordBatch>> {
+        try_stream! {
+            while let Some(batch) = self.fetch_next_batch().await? {
+                yield batch;
+            }
+        }
     }
 }
 
