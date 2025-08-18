@@ -927,7 +927,11 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::value::{Value, ValueRef};
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+    use mito_codec::row_converter::{
+        DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField, SparsePrimaryKeyCodec,
+    };
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -1061,6 +1065,71 @@ mod tests {
         }
         let keys = UInt32Array::from(keys);
         Arc::new(DictionaryArray::new(keys, values))
+    }
+
+    fn build_test_encoded_pk_array(
+        pk_values_per_row: &[&[Option<i64>]],
+        use_sparse: bool,
+    ) -> Arc<PrimaryKeyArray> {
+        let mut builder = PrimaryKeyArrayBuilder::with_capacity(pk_values_per_row.len(), 1024, 0);
+
+        if use_sparse {
+            // Create sparse codec for encoding primary keys with 2 i64 fields (tag0, tag1)
+            let fields = vec![
+                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
+                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
+            ];
+            let codec = SparsePrimaryKeyCodec::with_fields(fields);
+
+            for pk_values_row in pk_values_per_row {
+                let values: Vec<(ColumnId, Value)> = pk_values_row
+                    .iter()
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        let column_id = if i == 0 { 1 } else { 3 }; // tag0 = 1, tag1 = 3
+                        let value = match opt {
+                            Some(val) => Value::Int64(*val),
+                            None => Value::Null,
+                        };
+                        (column_id, value)
+                    })
+                    .collect();
+
+                let mut buffer = Vec::new();
+                codec
+                    .encode_value_refs(
+                        &values
+                            .iter()
+                            .map(|(id, val)| (*id, val.as_value_ref()))
+                            .collect::<Vec<_>>(),
+                        &mut buffer,
+                    )
+                    .unwrap();
+                builder.append_value(&buffer);
+            }
+        } else {
+            // Create dense codec for encoding primary keys with 2 i64 fields (tag0, tag1)
+            let fields = vec![
+                (1, SortField::new(ConcreteDataType::int64_datatype())), // tag0
+                (3, SortField::new(ConcreteDataType::int64_datatype())), // tag1
+            ];
+            let codec = DensePrimaryKeyCodec::with_fields(fields);
+
+            for pk_values_row in pk_values_per_row {
+                let values: Vec<ValueRef> = pk_values_row
+                    .iter()
+                    .map(|opt| match opt {
+                        Some(val) => ValueRef::Int64(*val),
+                        None => ValueRef::Null,
+                    })
+                    .collect();
+
+                let encoded = codec.encode(values.into_iter()).unwrap();
+                builder.append_value(&encoded);
+            }
+        }
+
+        Arc::new(builder.finish())
     }
 
     #[test]
