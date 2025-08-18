@@ -27,6 +27,7 @@ use mito2::memtable::bulk::part_reader::BulkPartRecordBatchIter;
 use mito2::memtable::partition_tree::{PartitionTreeConfig, PartitionTreeMemtable};
 use mito2::memtable::time_series::TimeSeriesMemtable;
 use mito2::memtable::{KeyValues, Memtable};
+use mito2::read::flat_merge::FlatMergeIterator;
 use mito2::region::options::MergeMode;
 use mito2::sst::{to_flat_sst_arrow_schema, FlatSchemaOptions};
 use mito2::test_util::memtable_util::{self, region_metadata_to_row_schema};
@@ -423,6 +424,70 @@ fn bulk_part_converter(c: &mut Criterion) {
     }
 }
 
+fn flat_merge_iterator_bench(c: &mut Criterion) {
+    let metadata = Arc::new(cpu_metadata());
+    let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let start_sec = 1710043200;
+
+    let mut group = c.benchmark_group("flat_merge_iterator");
+    group.sample_size(10);
+
+    for &num_parts in &[8, 16, 32, 64, 128, 256, 512] {
+        // Pre-create BulkParts with different timestamps but same hosts (1024)
+        let mut bulk_parts = Vec::with_capacity(num_parts);
+        let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+
+        for part_idx in 0..num_parts {
+            let generator = CpuDataGenerator::new(
+                metadata.clone(),
+                1024,                             // 1024 hosts per part
+                start_sec + part_idx as i64 * 10, // Different timestamps for each part
+                start_sec + part_idx as i64 * 10 + 1,
+            );
+
+            let mut converter =
+                BulkPartConverter::new(&metadata, schema.clone(), 1024, codec.clone(), true);
+            if let Some(kvs) = generator.iter().next() {
+                converter.append_key_values(&kvs).unwrap();
+            }
+            let bulk_part = converter.convert().unwrap();
+            bulk_parts.push(bulk_part);
+        }
+
+        // Pre-create BulkIterContext
+        let context = Arc::new(BulkIterContext::new(
+            metadata.clone(),
+            &None, // No projection
+            None,  // No predicate
+        ));
+
+        group.bench_with_input(
+            format!("{}_parts_1024_hosts", num_parts),
+            &num_parts,
+            |b, _| {
+                b.iter(|| {
+                    // Create iterators from BulkParts
+                    let mut iters = Vec::with_capacity(num_parts);
+                    for bulk_part in &bulk_parts {
+                        let iter = BulkPartRecordBatchIter::new(
+                            bulk_part.batch.clone(),
+                            context.clone(),
+                            None, // No sequence filter
+                        );
+                        iters.push(Box::new(iter) as _);
+                    }
+
+                    // Create and consume FlatMergeIterator
+                    let merge_iter = FlatMergeIterator::new(schema.clone(), iters, 1024).unwrap();
+                    for batch_result in merge_iter {
+                        let _batch = batch_result.unwrap();
+                    }
+                });
+            },
+        );
+    }
+}
+
 fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
@@ -498,6 +563,7 @@ criterion_group!(
     full_scan,
     filter_1_host,
     bulk_part_converter,
-    bulk_part_record_batch_iter_filter
+    bulk_part_record_batch_iter_filter,
+    flat_merge_iterator_bench
 );
 criterion_main!(benches);
