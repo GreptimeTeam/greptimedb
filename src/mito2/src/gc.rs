@@ -34,12 +34,20 @@ use store_api::{MAX_VERSION, MIN_VERSION};
 use tokio_stream::StreamExt;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{DurationOutOfRangeSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
-use crate::manifest::action::{RegionManifestBuilder, RegionMetaAction, RegionMetaActionList};
-use crate::manifest::manager::RegionManifestManager;
+use crate::config::MitoConfig;
+use crate::error::{
+    DurationOutOfRangeSnafu, EmptyRegionDirSnafu, JoinSnafu, OpenDalSnafu, RegionNotFoundSnafu,
+    Result,
+};
+use crate::manifest::action::{
+    RegionManifest, RegionManifestBuilder, RegionMetaAction, RegionMetaActionList,
+};
+use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions, RemoveFileOptions};
+use crate::manifest::storage::manifest_compress_type;
+use crate::region::opener::new_manifest_dir;
 use crate::region::ManifestContextRef;
 use crate::sst::file::FileId;
-use crate::sst::location;
+use crate::sst::location::{self, region_dir_from_table_dir};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileGcOption {
@@ -74,9 +82,35 @@ impl Default for FileGcOption {
 }
 pub struct LocalGcWorker {
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) manifest_ctxs: HashMap<RegionId, ManifestContextRef>,
+    pub(crate) manifest_mgrs: HashMap<RegionId, RegionManifestManager>,
     /// Lingering time before deleting files.
     pub(crate) opt: FileGcOption,
+    pub(crate) mito_config: MitoConfig,
+}
+
+impl LocalGcWorker {
+    /// Create a new LocalGcWorker, with `regions_to_gc` regions to GC.
+    /// The regions are specified by their `RegionId` and should all belong to the same table.
+    ///
+    pub async fn try_new(
+        access_layer: AccessLayerRef,
+        regions_to_gc: Vec<RegionId>,
+        opt: FileGcOption,
+        mito_config: MitoConfig,
+    ) -> Result<Self> {
+        let mut zelf = Self {
+            access_layer,
+            manifest_mgrs: HashMap::new(),
+            opt,
+            mito_config,
+        };
+        for region_id in regions_to_gc {
+            let mgr = zelf.open_mgr_for(region_id).await?;
+            zelf.manifest_mgrs.insert(region_id, mgr);
+        }
+
+        Ok(zelf)
+    }
 }
 
 impl LocalGcWorker {
@@ -95,11 +129,10 @@ impl LocalGcWorker {
     pub async fn do_region_gc(&self, region_id: RegionId) -> Result<()> {
         // TODO(discord9): impl gc worker
         let manifest = self
-            .manifest_ctxs
+            .manifest_mgrs
             .get(&region_id)
             .context(RegionNotFoundSnafu { region_id })?
-            .manifest()
-            .await;
+            .manifest();
         let region_id = manifest.metadata.region_id;
         let current_files = &manifest.files;
 
@@ -119,9 +152,40 @@ impl LocalGcWorker {
 
         self.access_layer
             .object_store()
-            .delete_iter(unused_files.iter().map(|e| e.name()))
+            .delete_iter(unused_files.iter().map(|e| e.path()))
             .await
             .context(OpenDalSnafu)
+    }
+
+    /// Get the manifest manager for the region.
+    async fn open_mgr_for(&self, region_id: RegionId) -> Result<RegionManifestManager> {
+        let table_dir = self.access_layer.table_dir();
+        let path_type = self.access_layer.path_type();
+        let mito_config = &self.mito_config;
+
+        let region_manifest_options = RegionManifestOptions {
+            manifest_dir: new_manifest_dir(&region_dir_from_table_dir(
+                &table_dir, region_id, path_type,
+            )),
+            object_store: self.access_layer.object_store().clone(),
+            compress_type: manifest_compress_type(mito_config.compress_manifest),
+            checkpoint_distance: mito_config.manifest_checkpoint_distance,
+            remove_file_options: RemoveFileOptions {
+                keep_count: mito_config.experimental_manifest_keep_removed_file_count,
+                keep_ttl: mito_config.experimental_manifest_keep_removed_file_ttl,
+            },
+        };
+
+        RegionManifestManager::open(
+            region_manifest_options,
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+        .context(EmptyRegionDirSnafu {
+            region_id: region_id,
+            region_dir: &region_dir_from_table_dir(&table_dir, region_id, path_type),
+        })
     }
 
     /// Get all the removed files in delta manifest files and their expel times.
@@ -132,59 +196,17 @@ impl LocalGcWorker {
         &self,
         region_id: RegionId,
     ) -> Result<BTreeMap<Timestamp, HashSet<FileId>>> {
-        let mut store = self
-            .manifest_ctxs
+        let region_manifest = self
+            .manifest_mgrs
             .get(&region_id)
             .context(RegionNotFoundSnafu { region_id })?
-            .manifest_manager
-            .read()
-            .await
-            .store();
-        let last_checkpoint = RegionManifestManager::last_checkpoint(&mut store).await?;
-        let min_version = if let Some((checkpoint, _)) = &last_checkpoint {
-            checkpoint.last_version() + 1
-        } else {
-            MIN_VERSION
-        };
-
-        let mut manifest_builder = if let Some((checkpoint, _)) = last_checkpoint {
-            RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
-        } else {
-            RegionManifestBuilder::default()
-        };
-
-        // search in delta manifests for removed files and their expel times
-        // TODO(discord9): remove twice scan
-        let delta_manifests = store.fetch_manifests(min_version, MAX_VERSION).await?;
-        let delta_manifests = delta_manifests.into_iter().collect::<HashMap<_, _>>();
-
-        for (manifest_version, manifest_bytes) in delta_manifests {
-            let action_list = RegionMetaActionList::decode(&manifest_bytes)?;
-            // try and collect all removed files& their expel times
-            // set manifest size after last checkpoint
-            for action in action_list.actions {
-                match action {
-                    RegionMetaAction::Change(action) => {
-                        manifest_builder.apply_change(manifest_version, action);
-                    }
-                    RegionMetaAction::Edit(action) => {
-                        manifest_builder.apply_edit(manifest_version, action);
-                    }
-                    RegionMetaAction::Remove(_) => {}
-                    RegionMetaAction::Truncate(action) => {
-                        manifest_builder.apply_truncate(manifest_version, action);
-                    }
-                }
-            }
-        }
-
-        let region_manifest = manifest_builder.try_build()?;
+            .manifest();
 
         let mut ret = BTreeMap::new();
-        for (files, expel_time) in &region_manifest.removed_files.removed_files {
-            let expel_time = Timestamp::new_millisecond(*expel_time);
+        for files in &region_manifest.removed_files.removed_files {
+            let expel_time = Timestamp::new_millisecond(files.at);
             let set = ret.entry(expel_time).or_insert_with(HashSet::new);
-            set.extend(files.iter().cloned());
+            set.extend(files.file_ids.iter().cloned());
         }
 
         Ok(ret)
